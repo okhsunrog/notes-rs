@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
+import { toast } from "sonner";
 import {
   createBlock,
   deleteBlock,
@@ -173,6 +174,60 @@ export function BlockNode({ block, parent, depth }: Props) {
   const onBlur = () => {
     closeAutocomplete();
     void flush();
+  };
+
+  const onPaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const text = e.clipboardData.getData("text/plain");
+    if (!text) return;
+    const paragraphs = text
+      .split(/\n[ \t]*(?:\n[ \t]*)+/)
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+    if (paragraphs.length < 2) return; // single paragraph → default paste
+    e.preventDefault();
+    closeAutocomplete();
+
+    // Splice paragraph 0 into the current block at the caret.
+    const el = e.currentTarget;
+    const selStart = el.selectionStart;
+    const selEnd = el.selectionEnd;
+    editRef.current?.replaceRange(selStart, selEnd, paragraphs[0]);
+
+    // Create one sibling block per remaining paragraph, in order.
+    let prevId = block.id;
+    for (let i = 1; i < paragraphs.length; i++) {
+      const siblings = store.getChildren(parent.id) ?? [];
+      const pos = positionAfter(siblings, prevId);
+      try {
+        const created = await createBlock({
+          parentId: parent.id,
+          position: pos,
+          content: paragraphs[i],
+          contentJson: null,
+        });
+        store.insertAfter(parent.id, prevId, created);
+        // Emit refs for the newly-created block since it never flows through
+        // `flush()` (its content is set at creation time).
+        const { wikilinks, blockRefs } = parseRefs(paragraphs[i]);
+        if (wikilinks.length > 0 || blockRefs.length > 0) {
+          replaceBlockRefs({
+            blockId: created.id,
+            wikilinkTitles: wikilinks,
+            blockUuids: blockRefs,
+          }).catch((err) => console.error("ref replace (paste) failed", err));
+        }
+        prevId = created.id;
+      } catch (err) {
+        console.error("paste split: create failed", err);
+        break;
+      }
+    }
+    if (prevId !== block.id) store.setEditing(prevId);
+
+    if (!localStorage.getItem("outliner.paste-split.notified")) {
+      toast.info("Each paragraph became a separate block.", { duration: 4000 });
+      localStorage.setItem("outliner.paste-split.notified", "1");
+    }
   };
 
   const onEnter = async () => {
@@ -353,6 +408,7 @@ export function BlockNode({ block, parent, depth }: Props) {
                 onChange={onDraftChange}
                 onBlur={onBlur}
                 onKeyDown={onKeyDown}
+                onPaste={onPaste}
                 autoFocus
               />
               {trigger && (

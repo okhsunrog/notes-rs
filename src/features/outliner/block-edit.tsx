@@ -15,11 +15,12 @@ type Props = {
   onChange: (value: string, caret: number) => void;
   onBlur: () => void;
   onKeyDown?: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
+  onPaste?: (e: React.ClipboardEvent<HTMLTextAreaElement>) => void;
   autoFocus?: boolean;
 };
 
 export const BlockEdit = forwardRef<BlockEditHandle, Props>(function BlockEdit(
-  { initial, onChange, onBlur, onKeyDown, autoFocus },
+  { initial, onChange, onBlur, onKeyDown, onPaste, autoFocus },
   ref,
 ) {
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -89,6 +90,7 @@ export const BlockEdit = forwardRef<BlockEditHandle, Props>(function BlockEdit(
       }}
       onBlur={onBlur}
       onKeyDown={onKeyDown}
+      onPaste={onPaste}
       rows={1}
       className="min-h-[1.5rem] w-full resize-none border-0 bg-transparent p-0 text-sm leading-relaxed text-foreground outline-none focus-visible:ring-0"
     />
