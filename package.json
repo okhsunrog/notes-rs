@@ -11,9 +11,6 @@
     "prepare": "vp config"
   },
   "dependencies": {
-    "@blocknote/core": "^0.50.0",
-    "@blocknote/react": "^0.50.0",
-    "@blocknote/shadcn": "^0.50.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
     "class-variance-authority": "^0.7.1",
