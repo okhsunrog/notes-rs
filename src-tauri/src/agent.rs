@@ -21,10 +21,15 @@ The user's notes are stored as nodes (blocks, pages, entities, tags) connected b
 You answer questions by retrieving from the graph using tools — never invent facts.
 
 Workflow:
-1. Use `search_agentic` first: hybrid retrieval (BM25 + multilingual embeddings + BGE reranker). Pick a query in the user's language.
-2. If results look promising, optionally call `neighbors` to expand around a relevant node.
-3. Cite node IDs (e.g. "see node #42") in your final answer.
-4. If nothing relevant found, say so plainly. Do not fabricate.
+1. Use `search_and_expand` for most questions: it does hybrid retrieval, then
+   walks the graph one hop from each seed and reranks the merged set. This is
+   the default because the graph almost always adds useful context.
+2. Use `search_agentic` only when you want plain text-relevance with no graph
+   expansion (e.g. you're looking for exact wording).
+3. Use `neighbors` or `get_node` to drill into specific nodes after you've
+   identified them by id.
+4. Cite node IDs (e.g. "see node #42") in your final answer.
+5. If nothing relevant found, say so plainly. Do not fabricate.
 
 You may create new nodes (`create_node`) and link them (`link_nodes`) when the user explicitly asks
 to record something. Never modify existing nodes without asking.
@@ -133,6 +138,101 @@ impl Tool for SearchAgentic {
 
 const RERANK_POOL_MIN: u32 = 32;
 const RELEVANCE_FLOOR: f64 = 0.30;
+/// Cap on the merged seeds+neighbors pool before reranking. The reranker is
+/// the per-query cost bottleneck; ~64 docs is fine, ~512 is sluggish.
+const EXPAND_POOL_MAX: usize = 64;
+
+// ───────────────────────── search_and_expand ─────────────────────────
+
+/// Hybrid search + 1-hop graph expansion + rerank. The default retrieval
+/// tool: starts from the same hybrid candidates as `search_agentic`, then
+/// pulls each seed's immediate neighbors (refs, mentions, relations) into
+/// the candidate set before reranking. This is what makes the typed-edge
+/// graph actually do work for the model instead of being decoration.
+#[derive(Clone)]
+pub struct SearchAndExpand {
+    pub conn: Connection,
+    pub embedder: Arc<dyn EmbedderBackend>,
+    pub reranker: Arc<Reranker>,
+}
+
+impl Tool for SearchAndExpand {
+    const NAME: &'static str = "search_and_expand";
+    type Error = ToolError;
+    type Args = SearchArgs;
+    type Output = Vec<SearchHit>;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.into(),
+            description: "Hybrid search then walk one graph hop from each seed (refs/mentions/relations) and rerank the merged pool. Prefer this over `search_agentic` for most questions — the extra context usually helps.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Search query in the user's language" },
+                    "limit": { "type": "integer", "description": "Max results to return (default 8)", "default": 8 }
+                },
+                "required": ["query"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let emb = self
+            .embedder
+            .embed_query(args.query.clone())
+            .await
+            .map_err(into_tool_err)?;
+        let seed_pool = (args.limit * 4).max(RERANK_POOL_MIN);
+        let seeds = db::search_hybrid(&self.conn, args.query.clone(), emb, seed_pool)
+            .await
+            .map_err(into_tool_err)?;
+        if seeds.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Walk one hop from each seed; dedup by id, cap the merged pool.
+        use std::collections::HashMap;
+        let mut pool: HashMap<i64, Node> = HashMap::new();
+        for s in &seeds {
+            pool.entry(s.node.id).or_insert_with(|| s.node.clone());
+        }
+        for s in &seeds {
+            if pool.len() >= EXPAND_POOL_MAX {
+                break;
+            }
+            let neigh = db::neighbors(&self.conn, s.node.id, 1)
+                .await
+                .map_err(into_tool_err)?;
+            for n in neigh {
+                if pool.len() >= EXPAND_POOL_MAX {
+                    break;
+                }
+                pool.entry(n.id).or_insert(n);
+            }
+        }
+        let candidates: Vec<Node> = pool.into_values().collect();
+        let docs: Vec<String> = candidates
+            .iter()
+            .map(|n| {
+                format!("{}\n{}", n.title.as_deref().unwrap_or(""), n.content)
+            })
+            .collect();
+        let scored = self
+            .reranker
+            .rerank(args.query, docs)
+            .await
+            .map_err(into_tool_err)?;
+        Ok(scored
+            .into_iter()
+            .filter(|(_, s)| *s as f64 >= RELEVANCE_FLOOR)
+            .take(args.limit as usize)
+            .map(|(idx, score)| SearchHit {
+                node: candidates[idx].clone(),
+                score: score as f64,
+            })
+            .collect())
+    }
+}
 
 // ───────────────────────── neighbors ─────────────────────────
 
@@ -328,6 +428,11 @@ fn build_agent(
         .agent(MODEL)
         .preamble(SYSTEM_PROMPT)
         .max_tokens(2048)
+        .tool(SearchAndExpand {
+            conn: conn.clone(),
+            embedder: embedder.clone(),
+            reranker: reranker.clone(),
+        })
         .tool(SearchAgentic {
             conn: conn.clone(),
             embedder,

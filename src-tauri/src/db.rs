@@ -830,6 +830,19 @@ pub async fn search_hybrid(
         *s += 1.0 / (60.0 + rank as f64 + 1.0);
         nodes.entry(h.node.id).or_insert(h.node);
     }
+    // Backlink boost: blocks/pages that are linked to from elsewhere in the
+    // graph are usually more central. Add a tiny term proportional to
+    // log(1 + incoming_edges) so well-connected nodes break ties in their
+    // favor without overwhelming relevance.
+    if !scores.is_empty() {
+        let ids: Vec<i64> = scores.keys().copied().collect();
+        let counts = incoming_link_counts(conn, &ids).await?;
+        for (id, c) in counts {
+            if let Some(s) = scores.get_mut(&id) {
+                *s += BACKLINK_BOOST * (1.0 + c as f64).ln();
+            }
+        }
+    }
     let mut out: Vec<SearchHit> = scores
         .into_iter()
         .map(|(id, score)| SearchHit {
@@ -840,6 +853,42 @@ pub async fn search_hybrid(
     out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
     out.truncate(limit as usize);
     Ok(out)
+}
+
+/// Small enough that a top-RRF item with zero backlinks still beats a poorly-
+/// ranked item with many. At BOOST=0.002 a node with 100 incoming edges gains
+/// ~0.009 — roughly equivalent to moving up 30 ranks.
+const BACKLINK_BOOST: f64 = 0.002;
+
+async fn incoming_link_counts(
+    conn: &Connection,
+    ids: &[i64],
+) -> Result<Vec<(i64, i64)>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids = ids.to_vec();
+    let rows = conn
+        .call(move |c| -> rusqlite::Result<Vec<(i64, i64)>> {
+            let placeholders = std::iter::repeat("?")
+                .take(ids.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT dst, COUNT(*) FROM edges
+                 WHERE kind IN ('refs', 'mentions') AND dst IN ({placeholders})
+                 GROUP BY dst"
+            );
+            let mut stmt = c.prepare(&sql)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(ids.iter()), |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await?;
+    Ok(rows)
 }
 
 pub async fn list_block_children(conn: &Connection, parent_id: i64) -> Result<Vec<Node>> {
