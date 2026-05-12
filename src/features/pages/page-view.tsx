@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeft, Check, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { NoteEditor, type NoteEditorHandle } from "@/components/note-editor";
+import { Outliner } from "@/features/outliner/outliner";
 import { updateNode, type Node } from "@/lib/api";
 
 type Props = {
@@ -20,38 +20,34 @@ export function PageView({ node, onSaved, onStatus, onClose }: Props) {
   const [title, setTitle] = useState(node.title ?? "");
   const [saveState, setSaveState] = useState<SaveState>("idle");
 
-  // Refs so the flush function never depends on changing values — avoids
-  // stale-closure races when the user types fast or switches nodes mid-save.
-  const editorRef = useRef<NoteEditorHandle>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const nodeRef = useRef(node);
   const titleRef = useRef(title);
   const onSavedRef = useRef(onSaved);
   const onStatusRef = useRef(onStatus);
 
-  // Keep refs in sync with latest props/state (no deps needed at flush time).
   titleRef.current = title;
   onSavedRef.current = onSaved;
   onStatusRef.current = onStatus;
 
   const flush = useCallback(async () => {
-    if (!editorRef.current) return;
     const current = nodeRef.current;
-    const { markdown, json } = await editorRef.current.serialize();
     const nextTitle = titleRef.current.trim() || null;
+    if (nextTitle === (current.title ?? null)) {
+      setSaveState("idle");
+      return;
+    }
     setSaveState("saving");
     try {
       await updateNode({
         id: current.id,
         title: nextTitle,
-        content: markdown.trim(),
-        contentJson: json,
+        content: current.content,
+        contentJson: current.content_json,
       });
       const updated: Node = {
         ...current,
         title: nextTitle,
-        content: markdown.trim(),
-        content_json: json,
         updated_at: Math.floor(Date.now() / 1000),
       };
       nodeRef.current = updated;
@@ -72,9 +68,6 @@ export function PageView({ node, onSaved, onStatus, onClose }: Props) {
     }, AUTOSAVE_MS);
   }, [flush]);
 
-  // When the active node changes: drop any pending save (the editor is about
-  // to remount with new content via `key={node.id}`, so calling flush here
-  // would serialize the NEW editor into the OLD row).
   useEffect(() => {
     if (timer.current) {
       clearTimeout(timer.current);
@@ -85,7 +78,6 @@ export function PageView({ node, onSaved, onStatus, onClose }: Props) {
     setSaveState("idle");
   }, [node]);
 
-  // Flush on unmount (editor is still mounted at this point).
   useEffect(() => {
     return () => {
       if (timer.current) {
@@ -118,14 +110,7 @@ export function PageView({ node, onSaved, onStatus, onClose }: Props) {
         Node #{node.id} · {node.kind} · updated {new Date(node.updated_at * 1000).toLocaleString()}
       </div>
 
-      <NoteEditor
-        key={node.id}
-        ref={editorRef}
-        initialJson={node.content_json}
-        initialPlain={node.content}
-        placeholder="start writing…"
-        onChange={scheduleSave}
-      />
+      <Outliner key={node.id} page={node} />
     </div>
   );
 }

@@ -131,11 +131,16 @@ pub async fn move_block(
     state: State<'_, AppState>,
     id: i64,
     new_parent_id: Option<i64>,
-    new_position: f64,
-) -> Result<(), String> {
+    new_position: Option<f64>,
+) -> Result<Node, String> {
     db::move_block(&state.conn, id, new_parent_id, new_position)
         .await
         .map_err(err)
+}
+
+#[tauri::command]
+pub async fn delete_block(state: State<'_, AppState>, id: i64) -> Result<bool, String> {
+    db::delete_block(&state.conn, id).await.map_err(err)
 }
 
 #[tauri::command]

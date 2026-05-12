@@ -691,22 +691,64 @@ pub async fn create_block(
     Ok(node)
 }
 
+/// Move a block under a new parent. If `new_position` is `None`, appends to
+/// the end of the new parent's children (MAX(position) + 1.0). Returns the
+/// updated node so the frontend can maintain its ordering without a re-fetch.
 pub async fn move_block(
     conn: &Connection,
     id: i64,
     new_parent_id: Option<i64>,
-    new_position: f64,
-) -> Result<()> {
+    new_position: Option<f64>,
+) -> Result<Node> {
     let now = chrono::Utc::now().timestamp();
-    conn.call(move |c| -> rusqlite::Result<()> {
-        c.execute(
-            "UPDATE nodes SET parent_id = ?2, position = ?3, updated_at = ?4 WHERE id = ?1",
-            rusqlite::params![id, new_parent_id, new_position, now],
-        )?;
-        Ok(())
-    })
-    .await?;
-    Ok(())
+    let node = conn
+        .call(move |c| -> rusqlite::Result<Node> {
+            let pos: f64 = match new_position {
+                Some(p) => p,
+                None => match new_parent_id {
+                    Some(pid) => c.query_row(
+                        "SELECT COALESCE(MAX(position), 0.0) + 1.0 FROM nodes WHERE parent_id = ?1",
+                        [pid],
+                        |r| r.get::<_, f64>(0),
+                    )?,
+                    None => 1.0,
+                },
+            };
+            c.execute(
+                "UPDATE nodes SET parent_id = ?2, position = ?3, updated_at = ?4 WHERE id = ?1",
+                rusqlite::params![id, new_parent_id, pos, now],
+            )?;
+            let sql = format!("SELECT {NODE_COLUMNS} FROM nodes WHERE id = ?1");
+            let mut stmt = c.prepare(&sql)?;
+            let mut rows = stmt.query([id])?;
+            let row = rows
+                .next()?
+                .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)?;
+            row_to_node(row)
+        })
+        .await?;
+    Ok(node)
+}
+
+/// Delete a block. Refuses (returns `false`) if the block has children, so
+/// callers can show feedback instead of silently cascading. Returns `true` on
+/// successful delete.
+pub async fn delete_block(conn: &Connection, id: i64) -> Result<bool> {
+    let deleted = conn
+        .call(move |c| -> rusqlite::Result<bool> {
+            let kids: i64 = c.query_row(
+                "SELECT COUNT(*) FROM nodes WHERE parent_id = ?1",
+                [id],
+                |r| r.get(0),
+            )?;
+            if kids > 0 {
+                return Ok(false);
+            }
+            c.execute("DELETE FROM nodes WHERE id = ?1", [id])?;
+            Ok(true)
+        })
+        .await?;
+    Ok(deleted)
 }
 
 /// Find a page by case-insensitive title or create one. Used to eagerly

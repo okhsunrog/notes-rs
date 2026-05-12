@@ -95,8 +95,16 @@ export function createBlock(args: {
   return invoke<Node>("create_block", args);
 }
 
-export function moveBlock(args: { id: number; newParentId: number | null; newPosition: number }) {
-  return invoke<void>("move_block", args);
+export function moveBlock(args: {
+  id: number;
+  newParentId: number | null;
+  newPosition: number | null;
+}) {
+  return invoke<Node>("move_block", args);
+}
+
+export function deleteBlock(id: number) {
+  return invoke<boolean>("delete_block", { id });
 }
 
 export function getOrCreatePageByTitle(title: string) {
