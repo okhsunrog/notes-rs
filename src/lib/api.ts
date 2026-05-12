@@ -7,6 +7,8 @@ export type Node = {
   title: string | null;
   content: string;
   content_json: string | null;
+  parent_id: number | null;
+  position: number | null;
   created_at: number;
   updated_at: number;
 };
@@ -74,6 +76,27 @@ export function createPage(title: string) {
 
 export function getNode(id: number) {
   return invoke<Node | null>("get_node", { id });
+}
+
+export function listBlockChildren(parentId: number) {
+  return invoke<Node[]>("list_block_children", { parentId });
+}
+
+export function createBlock(args: {
+  parentId: number | null;
+  position: number | null;
+  content: string;
+  contentJson: string | null;
+}) {
+  return invoke<Node>("create_block", args);
+}
+
+export function moveBlock(args: { id: number; newParentId: number | null; newPosition: number }) {
+  return invoke<void>("move_block", args);
+}
+
+export function getOrCreatePageByTitle(title: string) {
+  return invoke<Node>("get_or_create_page_by_title", { title });
 }
 
 export function search(mode: Mode, query: string, limit = 20) {

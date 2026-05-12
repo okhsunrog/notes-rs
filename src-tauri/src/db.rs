@@ -37,6 +37,8 @@ pub async fn open(
     Ok(conn)
 }
 
+const CURRENT_SCHEMA_VERSION: i64 = 2;
+
 async fn migrate(conn: &Connection, ndims: usize) -> Result<()> {
     let schema = SCHEMA_V1.replace("{NDIMS}", &ndims.to_string());
     conn.call(move |c| -> rusqlite::Result<()> {
@@ -55,6 +57,21 @@ async fn migrate(conn: &Connection, ndims: usize) -> Result<()> {
             c.execute_batch(
                 "ALTER TABLE nodes ADD COLUMN body_stemmed TEXT NOT NULL DEFAULT '';",
             )?;
+        }
+        let has_parent_id: bool = c
+            .prepare("SELECT 1 FROM pragma_table_info('nodes') WHERE name = 'parent_id'")?
+            .exists([])?;
+        if !has_parent_id {
+            c.execute_batch(
+                "ALTER TABLE nodes ADD COLUMN parent_id INTEGER REFERENCES nodes(id) ON DELETE CASCADE;
+                 CREATE INDEX IF NOT EXISTS idx_nodes_parent ON nodes(parent_id, position);",
+            )?;
+        }
+        let has_position: bool = c
+            .prepare("SELECT 1 FROM pragma_table_info('nodes') WHERE name = 'position'")?
+            .exists([])?;
+        if !has_position {
+            c.execute_batch("ALTER TABLE nodes ADD COLUMN position REAL;")?;
         }
         // Detect old FTS schema (had `title, content` cols instead of just `body_stemmed`).
         let fts_old: bool = c
@@ -90,6 +107,20 @@ async fn migrate(conn: &Connection, ndims: usize) -> Result<()> {
     .await
     .context("running migrations")?;
     backfill_stemmed(conn).await?;
+    set_schema_version(conn, CURRENT_SCHEMA_VERSION).await?;
+    Ok(())
+}
+
+async fn set_schema_version(conn: &Connection, version: i64) -> Result<()> {
+    conn.call(move |c| -> rusqlite::Result<()> {
+        c.execute("DELETE FROM schema_version", [])?;
+        c.execute(
+            "INSERT INTO schema_version(version) VALUES (?1)",
+            [version],
+        )?;
+        Ok(())
+    })
+    .await?;
     Ok(())
 }
 
@@ -187,10 +218,13 @@ CREATE TABLE IF NOT EXISTS nodes (
   content TEXT NOT NULL DEFAULT '',
   content_json TEXT,
   body_stemmed TEXT NOT NULL DEFAULT '',
+  parent_id INTEGER REFERENCES nodes(id) ON DELETE CASCADE,
+  position REAL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind);
+CREATE INDEX IF NOT EXISTS idx_nodes_parent ON nodes(parent_id, position);
 
 CREATE TABLE IF NOT EXISTS edges (
   id INTEGER PRIMARY KEY,
@@ -268,6 +302,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_title
   ON nodes(kind, lower(title))
   WHERE kind = 'entity' AND title IS NOT NULL;
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_page_title
+  ON nodes(kind, lower(title))
+  WHERE kind = 'page' AND title IS NOT NULL;
+
 CREATE TRIGGER IF NOT EXISTS nodes_ai_embed AFTER INSERT ON nodes BEGIN
   INSERT OR REPLACE INTO embed_queue(node_id, enqueued_at) VALUES(new.id, unixepoch());
 END;
@@ -286,8 +324,28 @@ pub struct Node {
     pub title: Option<String>,
     pub content: String,
     pub content_json: Option<String>,
+    pub parent_id: Option<i64>,
+    pub position: Option<f64>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+const NODE_COLUMNS: &str =
+    "id, uuid, kind, title, content, content_json, parent_id, position, created_at, updated_at";
+
+fn row_to_node(r: &rusqlite::Row<'_>) -> rusqlite::Result<Node> {
+    Ok(Node {
+        id: r.get(0)?,
+        uuid: r.get(1)?,
+        kind: r.get(2)?,
+        title: r.get(3)?,
+        content: r.get(4)?,
+        content_json: r.get(5)?,
+        parent_id: r.get(6)?,
+        position: r.get(7)?,
+        created_at: r.get(8)?,
+        updated_at: r.get(9)?,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -324,6 +382,8 @@ pub async fn create_node(
                 title,
                 content,
                 content_json,
+                parent_id: None,
+                position: None,
                 created_at: now,
                 updated_at: now,
             })
@@ -380,22 +440,11 @@ pub async fn link_nodes(
 pub async fn get_node(conn: &Connection, id: i64) -> Result<Option<Node>> {
     let node = conn
         .call(move |c| -> rusqlite::Result<Option<Node>> {
-            let mut stmt = c.prepare(
-                "SELECT id, uuid, kind, title, content, content_json, created_at, updated_at
-                 FROM nodes WHERE id = ?1",
-            )?;
+            let sql = format!("SELECT {NODE_COLUMNS} FROM nodes WHERE id = ?1");
+            let mut stmt = c.prepare(&sql)?;
             let mut rows = stmt.query([id])?;
             if let Some(r) = rows.next()? {
-                Ok(Some(Node {
-                    id: r.get(0)?,
-                    uuid: r.get(1)?,
-                    kind: r.get(2)?,
-                    title: r.get(3)?,
-                    content: r.get(4)?,
-                    content_json: r.get(5)?,
-                    created_at: r.get(6)?,
-                    updated_at: r.get(7)?,
-                }))
+                Ok(Some(row_to_node(r)?))
             } else {
                 Ok(None)
             }
@@ -423,23 +472,12 @@ pub async fn neighbors(
                      JOIN reachable r ON e.dst = r.id
                      WHERE r.d < ?2
                  )
-                 SELECT n.id, n.uuid, n.kind, n.title, n.content, n.content_json, n.created_at, n.updated_at
+                 SELECT n.id, n.uuid, n.kind, n.title, n.content, n.content_json, n.parent_id, n.position, n.created_at, n.updated_at
                  FROM nodes n JOIN reachable r ON n.id = r.id
                  WHERE n.id != ?1",
             )?;
             let rows = stmt
-                .query_map(rusqlite::params![node_id, depth as i64], |r| {
-                    Ok(Node {
-                        id: r.get(0)?,
-                        uuid: r.get(1)?,
-                        kind: r.get(2)?,
-                        title: r.get(3)?,
-                        content: r.get(4)?,
-                        content_json: r.get(5)?,
-                        created_at: r.get(6)?,
-                        updated_at: r.get(7)?,
-                    })
-                })?
+                .query_map(rusqlite::params![node_id, depth as i64], row_to_node)?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
         })
@@ -451,7 +489,7 @@ pub async fn list_entities(conn: &Connection, limit: u32) -> Result<Vec<Node>> {
     let rows = conn
         .call(move |c| -> rusqlite::Result<Vec<Node>> {
             let mut stmt = c.prepare(
-                "SELECT n.id, n.uuid, n.kind, n.title, n.content, n.content_json, n.created_at, n.updated_at,
+                "SELECT n.id, n.uuid, n.kind, n.title, n.content, n.content_json, n.parent_id, n.position, n.created_at, n.updated_at,
                         (SELECT COUNT(*) FROM edges e WHERE e.dst = n.id AND e.kind = 'mentions') AS mc
                  FROM nodes n
                  WHERE n.kind = 'entity'
@@ -459,18 +497,7 @@ pub async fn list_entities(conn: &Connection, limit: u32) -> Result<Vec<Node>> {
                  LIMIT ?1",
             )?;
             let rows = stmt
-                .query_map([limit as i64], |r| {
-                    Ok(Node {
-                        id: r.get(0)?,
-                        uuid: r.get(1)?,
-                        kind: r.get(2)?,
-                        title: r.get(3)?,
-                        content: r.get(4)?,
-                        content_json: r.get(5)?,
-                        created_at: r.get(6)?,
-                        updated_at: r.get(7)?,
-                    })
-                })?
+                .query_map([limit as i64], row_to_node)?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
         })
@@ -481,26 +508,15 @@ pub async fn list_entities(conn: &Connection, limit: u32) -> Result<Vec<Node>> {
 pub async fn list_pages(conn: &Connection, limit: u32) -> Result<Vec<Node>> {
     let rows = conn
         .call(move |c| -> rusqlite::Result<Vec<Node>> {
-            let mut stmt = c.prepare(
-                "SELECT id, uuid, kind, title, content, content_json, created_at, updated_at
-                 FROM nodes
+            let sql = format!(
+                "SELECT {NODE_COLUMNS} FROM nodes
                  WHERE kind = 'page'
                  ORDER BY updated_at DESC
-                 LIMIT ?1",
-            )?;
+                 LIMIT ?1"
+            );
+            let mut stmt = c.prepare(&sql)?;
             let rows = stmt
-                .query_map([limit as i64], |r| {
-                    Ok(Node {
-                        id: r.get(0)?,
-                        uuid: r.get(1)?,
-                        kind: r.get(2)?,
-                        title: r.get(3)?,
-                        content: r.get(4)?,
-                        content_json: r.get(5)?,
-                        created_at: r.get(6)?,
-                        updated_at: r.get(7)?,
-                    })
-                })?
+                .query_map([limit as i64], row_to_node)?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
         })
@@ -514,7 +530,7 @@ pub async fn search_fts(conn: &Connection, query: String, limit: u32) -> Result<
     let hits = conn
         .call(move |c| -> rusqlite::Result<Vec<SearchHit>> {
             let mut stmt = c.prepare(
-                "SELECT n.id, n.uuid, n.kind, n.title, n.content, n.content_json, n.created_at, n.updated_at,
+                "SELECT n.id, n.uuid, n.kind, n.title, n.content, n.content_json, n.parent_id, n.position, n.created_at, n.updated_at,
                         bm25(nodes_fts) AS score
                  FROM nodes_fts
                  JOIN nodes n ON n.id = nodes_fts.rowid
@@ -525,17 +541,8 @@ pub async fn search_fts(conn: &Connection, query: String, limit: u32) -> Result<
             let rows = stmt
                 .query_map(rusqlite::params![&stemmed_query, limit as i64], |r| {
                     Ok(SearchHit {
-                        node: Node {
-                            id: r.get(0)?,
-                            uuid: r.get(1)?,
-                            kind: r.get(2)?,
-                            title: r.get(3)?,
-                            content: r.get(4)?,
-                            content_json: r.get(5)?,
-                            created_at: r.get(6)?,
-                            updated_at: r.get(7)?,
-                        },
-                        score: r.get::<_, f64>(8)?,
+                        node: row_to_node(r)?,
+                        score: r.get::<_, f64>(10)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -554,7 +561,7 @@ pub async fn search_vec(
     let hits = conn
         .call(move |c| -> rusqlite::Result<Vec<SearchHit>> {
             let mut stmt = c.prepare(
-                "SELECT n.id, n.uuid, n.kind, n.title, n.content, n.content_json, n.created_at, n.updated_at,
+                "SELECT n.id, n.uuid, n.kind, n.title, n.content, n.content_json, n.parent_id, n.position, n.created_at, n.updated_at,
                         v.distance
                  FROM vec_nodes v
                  JOIN nodes n ON n.id = v.rowid
@@ -564,17 +571,8 @@ pub async fn search_vec(
             let rows = stmt
                 .query_map(rusqlite::params![&blob, limit as i64], |r| {
                     Ok(SearchHit {
-                        node: Node {
-                            id: r.get(0)?,
-                            uuid: r.get(1)?,
-                            kind: r.get(2)?,
-                            title: r.get(3)?,
-                            content: r.get(4)?,
-                            content_json: r.get(5)?,
-                            created_at: r.get(6)?,
-                            updated_at: r.get(7)?,
-                        },
-                        score: r.get::<_, f64>(8)?,
+                        node: row_to_node(r)?,
+                        score: r.get::<_, f64>(10)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -616,6 +614,125 @@ pub async fn search_hybrid(
     out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
     out.truncate(limit as usize);
     Ok(out)
+}
+
+pub async fn list_block_children(conn: &Connection, parent_id: i64) -> Result<Vec<Node>> {
+    let rows = conn
+        .call(move |c| -> rusqlite::Result<Vec<Node>> {
+            let sql = format!(
+                "SELECT {NODE_COLUMNS} FROM nodes
+                 WHERE parent_id = ?1
+                 ORDER BY position ASC, id ASC"
+            );
+            let mut stmt = c.prepare(&sql)?;
+            let rows = stmt
+                .query_map([parent_id], row_to_node)?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await?;
+    Ok(rows)
+}
+
+/// Create a block. If `position` is `None`, append at end of parent's children
+/// (MAX(position) + 1.0). `parent_id = None` creates an orphan root block —
+/// rare; usually a block has a parent page.
+pub async fn create_block(
+    conn: &Connection,
+    parent_id: Option<i64>,
+    position: Option<f64>,
+    content: String,
+    content_json: Option<String>,
+) -> Result<Node> {
+    let uuid = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().timestamp();
+    let body_stemmed = crate::stem::stem(&content);
+    let node = conn
+        .call(move |c| -> rusqlite::Result<Node> {
+            let pos: f64 = match position {
+                Some(p) => p,
+                None => match parent_id {
+                    Some(pid) => c.query_row(
+                        "SELECT COALESCE(MAX(position), 0.0) + 1.0 FROM nodes WHERE parent_id = ?1",
+                        [pid],
+                        |r| r.get::<_, f64>(0),
+                    )?,
+                    None => 1.0,
+                },
+            };
+            c.execute(
+                "INSERT INTO nodes (uuid, kind, title, content, content_json, body_stemmed,
+                                    parent_id, position, created_at, updated_at)
+                 VALUES (?1, 'block', NULL, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                rusqlite::params![&uuid, &content, &content_json, &body_stemmed, parent_id, pos, now],
+            )?;
+            let id = c.last_insert_rowid();
+            Ok(Node {
+                id,
+                uuid,
+                kind: "block".into(),
+                title: None,
+                content,
+                content_json,
+                parent_id,
+                position: Some(pos),
+                created_at: now,
+                updated_at: now,
+            })
+        })
+        .await?;
+    Ok(node)
+}
+
+pub async fn move_block(
+    conn: &Connection,
+    id: i64,
+    new_parent_id: Option<i64>,
+    new_position: f64,
+) -> Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    conn.call(move |c| -> rusqlite::Result<()> {
+        c.execute(
+            "UPDATE nodes SET parent_id = ?2, position = ?3, updated_at = ?4 WHERE id = ?1",
+            rusqlite::params![id, new_parent_id, new_position, now],
+        )?;
+        Ok(())
+    })
+    .await?;
+    Ok(())
+}
+
+/// Find a page by case-insensitive title or create one. Used to eagerly
+/// materialize `[[Wikilink]]` targets so backlinks work the moment the link
+/// is typed.
+pub async fn get_or_create_page_by_title(conn: &Connection, title: String) -> Result<Node> {
+    let trimmed = title.trim().to_string();
+    if trimmed.is_empty() {
+        anyhow::bail!("page title is empty");
+    }
+    let found = conn
+        .call({
+            let t = trimmed.clone();
+            move |c| -> rusqlite::Result<Option<Node>> {
+                let sql = format!(
+                    "SELECT {NODE_COLUMNS} FROM nodes
+                     WHERE kind = 'page' AND lower(title) = lower(?1)
+                     LIMIT 1"
+                );
+                let mut stmt = c.prepare(&sql)?;
+                let mut rows = stmt.query([&t])?;
+                if let Some(r) = rows.next()? {
+                    Ok(Some(row_to_node(r)?))
+                } else {
+                    Ok(None)
+                }
+            }
+        })
+        .await?;
+    if let Some(n) = found {
+        return Ok(n);
+    }
+    create_node(conn, "page".into(), Some(trimmed), String::new(), None).await
 }
 
 pub async fn take_pending_embeddings(

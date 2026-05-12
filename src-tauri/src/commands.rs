@@ -90,6 +90,51 @@ pub async fn list_pages(
 }
 
 #[tauri::command]
+pub async fn list_block_children(
+    state: State<'_, AppState>,
+    parent_id: i64,
+) -> Result<Vec<Node>, String> {
+    db::list_block_children(&state.conn, parent_id)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn create_block(
+    state: State<'_, AppState>,
+    parent_id: Option<i64>,
+    position: Option<f64>,
+    content: String,
+    content_json: Option<String>,
+) -> Result<Node, String> {
+    db::create_block(&state.conn, parent_id, position, content, content_json)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn move_block(
+    state: State<'_, AppState>,
+    id: i64,
+    new_parent_id: Option<i64>,
+    new_position: f64,
+) -> Result<(), String> {
+    db::move_block(&state.conn, id, new_parent_id, new_position)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn get_or_create_page_by_title(
+    state: State<'_, AppState>,
+    title: String,
+) -> Result<Node, String> {
+    db::get_or_create_page_by_title(&state.conn, title)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
 pub async fn create_page(state: State<'_, AppState>, title: String) -> Result<Node, String> {
     let title = title.trim().to_string();
     if title.is_empty() {
