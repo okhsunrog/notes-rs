@@ -193,6 +193,28 @@ pub async fn create_page(state: State<'_, AppState>, title: String) -> Result<No
 }
 
 #[tauri::command]
+pub async fn search_pages_by_title(
+    state: State<'_, AppState>,
+    query: String,
+    limit: u32,
+) -> Result<Vec<Node>, String> {
+    db::search_pages_by_title(&state.conn, query, limit)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn search_blocks_fts(
+    state: State<'_, AppState>,
+    query: String,
+    limit: u32,
+) -> Result<Vec<Node>, String> {
+    db::search_blocks_fts(&state.conn, query, limit)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
 pub async fn search_fts(
     state: State<'_, AppState>,
     query: String,

@@ -1,19 +1,23 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import {
   createBlock,
   deleteBlock,
   moveBlock,
   replaceBlockRefs,
+  searchBlocksFts,
+  searchPagesByTitle,
   updateNode,
   type Node,
 } from "@/lib/api";
 import { BlockChildren } from "./block-tree";
-import { BlockEdit } from "./block-edit";
+import { BlockEdit, type BlockEditHandle } from "./block-edit";
 import { useOutliner } from "./outliner-store";
 import { nextSibling, positionAfter, prevSibling } from "./keyboard";
 import { parseRefs } from "./parse-refs";
 import { renderMarkdown } from "./render-markdown";
+import { detectTrigger, type Trigger } from "./autocomplete";
+import { AutocompleteMenu, nodeToItem, type AutocompleteItem } from "./autocomplete-menu";
 
 type Props = {
   block: Node;
@@ -24,6 +28,7 @@ type Props = {
 type SaveState = "idle" | "dirty" | "saving" | "error";
 
 const AUTOSAVE_MS = 400;
+const AC_DEBOUNCE_MS = 120;
 
 export function BlockNode({ block, parent, depth }: Props) {
   const store = useOutliner();
@@ -35,11 +40,31 @@ export function BlockNode({ block, parent, depth }: Props) {
   const blockRef = useRef(block);
   blockRef.current = block;
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const editRef = useRef<BlockEditHandle>(null);
+
+  // Autocomplete state — only relevant in edit mode.
+  const [trigger, setTrigger] = useState<Trigger | null>(null);
+  const [acItems, setAcItems] = useState<AutocompleteItem[]>([]);
+  const [acIdx, setAcIdx] = useState(0);
+  const [acLoading, setAcLoading] = useState(false);
+  const acReqId = useRef(0);
+  const acDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearTimer = () => {
     if (timer.current) {
       clearTimeout(timer.current);
       timer.current = null;
+    }
+  };
+
+  const closeAutocomplete = () => {
+    setTrigger(null);
+    setAcItems([]);
+    setAcIdx(0);
+    setAcLoading(false);
+    if (acDebounce.current) {
+      clearTimeout(acDebounce.current);
+      acDebounce.current = null;
     }
   };
 
@@ -67,9 +92,6 @@ export function BlockNode({ block, parent, depth }: Props) {
       };
       store.replaceBlock(updated);
       setSaveState("idle");
-      // Refs are a write-time side effect: re-emit on every save so we
-      // never drift from the user's intent. Failure here doesn't fail the
-      // save — surfaces only in the console for now.
       const { wikilinks, blockRefs } = parseRefs(next);
       replaceBlockRefs({
         blockId: current.id,
@@ -82,7 +104,41 @@ export function BlockNode({ block, parent, depth }: Props) {
     }
   }, [store]);
 
-  const onDraftChange = (value: string) => {
+  // Re-fetch results whenever the trigger query changes.
+  useEffect(() => {
+    if (!trigger) return;
+    if (acDebounce.current) clearTimeout(acDebounce.current);
+    const reqId = ++acReqId.current;
+    setAcLoading(true);
+    acDebounce.current = setTimeout(async () => {
+      try {
+        if (trigger.kind === "[[") {
+          const nodes = await searchPagesByTitle(trigger.query, 8);
+          if (reqId !== acReqId.current) return;
+          setAcItems(nodes.map((n) => nodeToItem(n, "[[")));
+        } else {
+          const ftsQuery = buildFtsPrefix(trigger.query);
+          const nodes = ftsQuery ? await searchBlocksFts(ftsQuery, 8) : [];
+          if (reqId !== acReqId.current) return;
+          setAcItems(nodes.map((n) => nodeToItem(n, "((")));
+        }
+        if (reqId === acReqId.current) {
+          setAcIdx(0);
+          setAcLoading(false);
+        }
+      } catch (e) {
+        if (reqId !== acReqId.current) return;
+        console.error("autocomplete fetch failed", e);
+        setAcItems([]);
+        setAcLoading(false);
+      }
+    }, AC_DEBOUNCE_MS);
+    return () => {
+      if (acDebounce.current) clearTimeout(acDebounce.current);
+    };
+  }, [trigger]);
+
+  const onDraftChange = (value: string, caret: number) => {
     draftRef.current = value;
     setSaveState("dirty");
     clearTimer();
@@ -90,12 +146,32 @@ export function BlockNode({ block, parent, depth }: Props) {
       timer.current = null;
       void flush();
     }, AUTOSAVE_MS);
+    const t = detectTrigger(value, caret);
+    if (!t) {
+      if (trigger) closeAutocomplete();
+      return;
+    }
+    if (
+      !trigger ||
+      trigger.kind !== t.kind ||
+      trigger.start !== t.start ||
+      trigger.query !== t.query
+    ) {
+      setTrigger(t);
+    }
+  };
+
+  const acceptAutocomplete = (idx: number) => {
+    if (!trigger || !editRef.current) return;
+    const item = acItems[idx];
+    if (!item) return;
+    const replacement = trigger.kind === "[[" ? `[[${item.label}]]` : `((${item.label}))`;
+    editRef.current.replaceRange(trigger.start, trigger.end, replacement);
+    closeAutocomplete();
   };
 
   const onBlur = () => {
-    // Blur saves but does NOT exit edit mode unconditionally — if focus moved
-    // to another block via keyboard, the store's editingId already changed and
-    // that block will mount in edit mode. Just flush here.
+    closeAutocomplete();
     void flush();
   };
 
@@ -123,7 +199,7 @@ export function BlockNode({ block, parent, depth }: Props) {
     const prev = prevSibling(siblings, block.id);
     try {
       const ok = await deleteBlock(block.id);
-      if (!ok) return false; // has children — refuse silently
+      if (!ok) return false;
       store.removeBlock(parent.id, block.id);
       if (prev) store.setEditing(prev.id);
       else store.setEditing(null);
@@ -138,16 +214,14 @@ export function BlockNode({ block, parent, depth }: Props) {
     await flush();
     const siblings = store.getChildren(parent.id) ?? [];
     const prev = prevSibling(siblings, block.id);
-    if (!prev) return; // no-op: nothing to indent under
+    if (!prev) return;
     try {
       const moved = await moveBlock({
         id: block.id,
         newParentId: prev.id,
-        newPosition: null, // append to new parent's end
+        newPosition: null,
       });
       store.moveLocal(moved, parent.id);
-      // Stay in edit mode on the moved block; BlockNode will remount under the
-      // new parent thanks to the store update.
       store.setEditing(moved.id);
     } catch (e) {
       console.error("tab indent failed", e);
@@ -155,11 +229,10 @@ export function BlockNode({ block, parent, depth }: Props) {
   };
 
   const onShiftTab = async () => {
-    if (parent.kind === "page") return; // already at top level
+    if (parent.kind === "page") return;
     const grandparentId = parent.parent_id;
     if (grandparentId === null) return;
     await flush();
-    // Place just after the old parent in the grandparent's children.
     const newPos = (parent.position ?? 0) + 0.5;
     try {
       const moved = await moveBlock({
@@ -181,26 +254,55 @@ export function BlockNode({ block, parent, depth }: Props) {
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // Enter (no shift) → new sibling below
+    // While the autocomplete menu is open, it captures navigation keys.
+    if (trigger) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setAcIdx((i) => (acItems.length ? (i + 1) % acItems.length : 0));
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setAcIdx((i) => (acItems.length ? (i - 1 + acItems.length) % acItems.length : 0));
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        if (acItems.length > 0) {
+          e.preventDefault();
+          acceptAutocomplete(acIdx);
+          return;
+        }
+        // Empty results: close and let the key do its normal thing for Enter.
+        closeAutocomplete();
+        if (e.key === "Tab") {
+          e.preventDefault();
+          return;
+        }
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeAutocomplete();
+        return;
+      }
+      // Any other key falls through (so typing continues to update the query).
+    }
+
     if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
       e.preventDefault();
       void onEnter();
       return;
     }
-    // Backspace on empty → delete
     if (e.key === "Backspace" && draftRef.current.length === 0) {
       e.preventDefault();
       void onBackspaceEmpty();
       return;
     }
-    // Tab / Shift+Tab → indent / outdent
     if (e.key === "Tab") {
       e.preventDefault();
       if (e.shiftKey) void onShiftTab();
       else void onTab();
       return;
     }
-    // Arrow up/down at caret start/end → move focus to prev/next sibling
     if (e.key === "ArrowUp" && e.currentTarget.selectionStart === 0) {
       e.preventDefault();
       onUpDown("up");
@@ -211,7 +313,6 @@ export function BlockNode({ block, parent, depth }: Props) {
       onUpDown("down");
       return;
     }
-    // Escape → exit edit mode without saving content beyond what's flushed.
     if (e.key === "Escape") {
       e.preventDefault();
       void flush();
@@ -236,7 +337,7 @@ export function BlockNode({ block, parent, depth }: Props) {
         </button>
         <BlockBullet state={saveState} />
         <div
-          className="min-w-0 flex-1"
+          className="relative min-w-0 flex-1"
           onClick={() => {
             if (!editing) {
               draftRef.current = block.content;
@@ -245,13 +346,30 @@ export function BlockNode({ block, parent, depth }: Props) {
           }}
         >
           {editing ? (
-            <BlockEdit
-              initial={block.content}
-              onChange={onDraftChange}
-              onBlur={onBlur}
-              onKeyDown={onKeyDown}
-              autoFocus
-            />
+            <>
+              <BlockEdit
+                ref={editRef}
+                initial={block.content}
+                onChange={onDraftChange}
+                onBlur={onBlur}
+                onKeyDown={onKeyDown}
+                autoFocus
+              />
+              {trigger && (
+                <AutocompleteMenu
+                  items={acItems}
+                  selectedIdx={acIdx}
+                  loading={acLoading}
+                  query={trigger.query}
+                  emptyLabel={
+                    trigger.kind === "[["
+                      ? `no pages match — press Enter to skip`
+                      : `no blocks match`
+                  }
+                  onPick={acceptAutocomplete}
+                />
+              )}
+            </>
           ) : (
             <div className="cursor-text whitespace-pre-wrap break-words text-sm leading-relaxed">
               {block.content ? (
@@ -270,6 +388,18 @@ export function BlockNode({ block, parent, depth }: Props) {
       )}
     </li>
   );
+}
+
+/** Convert "auto comp" → "auto* comp*" for FTS5 prefix matching. Strips
+ * characters that would break the FTS5 expression (operators are bare words,
+ * so we keep alphanumerics + Cyrillic). */
+function buildFtsPrefix(q: string): string {
+  return q
+    .split(/\s+/)
+    .map((t) => t.replace(/[^\p{L}\p{N}]+/gu, ""))
+    .filter((t) => t.length > 0)
+    .map((t) => `${t}*`)
+    .join(" ");
 }
 
 function BlockBullet({ state }: { state: SaveState }) {

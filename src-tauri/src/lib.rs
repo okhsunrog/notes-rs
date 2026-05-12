@@ -90,6 +90,8 @@ pub fn run() {
             commands::get_or_create_page_by_title,
             commands::get_page_by_title,
             commands::get_node_by_uuid,
+            commands::search_pages_by_title,
+            commands::search_blocks_fts,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

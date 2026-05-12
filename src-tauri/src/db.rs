@@ -626,6 +626,69 @@ pub async fn list_pages(conn: &Connection, limit: u32) -> Result<Vec<Node>> {
     Ok(rows)
 }
 
+/// Case-insensitive substring match on page titles, shortest-first so exact
+/// matches surface above the long ones. Used by the `[[` autocomplete.
+pub async fn search_pages_by_title(
+    conn: &Connection,
+    query: String,
+    limit: u32,
+) -> Result<Vec<Node>> {
+    let trimmed = query.trim().to_string();
+    if trimmed.is_empty() {
+        return list_pages(conn, limit).await;
+    }
+    let pattern = format!("%{trimmed}%");
+    conn.call(move |c| -> rusqlite::Result<Vec<Node>> {
+        let sql = format!(
+            "SELECT {NODE_COLUMNS} FROM nodes
+             WHERE kind = 'page' AND title IS NOT NULL AND lower(title) LIKE lower(?1)
+             ORDER BY length(title) ASC, lower(title) ASC
+             LIMIT ?2"
+        );
+        let mut stmt = c.prepare(&sql)?;
+        let rows = stmt
+            .query_map(rusqlite::params![pattern, limit as i64], row_to_node)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })
+    .await
+    .map_err(Into::into)
+}
+
+/// FTS5 over blocks only. Used by the `((` autocomplete — no rerank for
+/// keystroke-time speed. Empty query returns nothing.
+pub async fn search_blocks_fts(
+    conn: &Connection,
+    query: String,
+    limit: u32,
+) -> Result<Vec<Node>> {
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let stemmed_query = crate::stem::stem_query(&query);
+    conn.call(move |c| -> rusqlite::Result<Vec<Node>> {
+        let sql = format!(
+            "SELECT {} FROM nodes_fts
+             JOIN nodes n ON n.id = nodes_fts.rowid
+             WHERE nodes_fts MATCH ?1 AND n.kind = 'block'
+             ORDER BY bm25(nodes_fts)
+             LIMIT ?2",
+            NODE_COLUMNS
+                .split(',')
+                .map(|s| format!("n.{}", s.trim()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let mut stmt = c.prepare(&sql)?;
+        let rows = stmt
+            .query_map(rusqlite::params![stemmed_query, limit as i64], row_to_node)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })
+    .await
+    .map_err(Into::into)
+}
+
 pub async fn search_fts(conn: &Connection, query: String, limit: u32) -> Result<Vec<SearchHit>> {
     // Stem each term; preserve FTS5 operators (AND/OR/NOT/NEAR) and metacharacters.
     let stemmed_query = crate::stem::stem_query(&query);

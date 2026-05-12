@@ -129,6 +129,14 @@ export function getNodeByUuid(uuid: string) {
   return invoke<Node | null>("get_node_by_uuid", { uuid });
 }
 
+export function searchPagesByTitle(query: string, limit = 8) {
+  return invoke<Node[]>("search_pages_by_title", { query, limit });
+}
+
+export function searchBlocksFts(query: string, limit = 8) {
+  return invoke<Node[]>("search_blocks_fts", { query, limit });
+}
+
 export function search(mode: Mode, query: string, limit = 20) {
   return invoke<SearchHit[]>(SEARCH_CMD[mode], { query, limit });
 }
