@@ -40,4 +40,5 @@ async-trait = "0.1.89"
 reqwest = { version = "0.13.3", default-features = false }
 schemars = "1"
 rust-stemmers = "1.2.0"
+dotenvy = "0.15.7"
 

@@ -75,6 +75,51 @@ fn push_stemmed(out: &mut String, token: &str) {
     out.push_str(&stemmed);
 }
 
+/// Stem an FTS5 *query* string. Same per-token stemming as [`stem`], but
+/// preserves FTS5 operator keywords (AND, OR, NOT, NEAR) verbatim so the
+/// resulting string remains a valid FTS5 expression. Punctuation, quotes,
+/// parens, `*`, `^`, `+`, `-`, and `:` pass through (they're non-alphabetic
+/// so the tokenizer already preserves them).
+///
+/// Quoted phrases like `"block ref"` are stemmed token-by-token inside the
+/// quotes — since the index stores stemmed forms, the phrase match needs
+/// stemmed tokens too.
+pub fn stem_query(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut buf = String::new();
+    for c in text.chars() {
+        if c.is_alphabetic() {
+            buf.push(c);
+        } else {
+            if !buf.is_empty() {
+                push_query_token(&mut out, &buf);
+                buf.clear();
+            }
+            out.push(c);
+        }
+    }
+    if !buf.is_empty() {
+        push_query_token(&mut out, &buf);
+    }
+    out
+}
+
+fn push_query_token(out: &mut String, token: &str) {
+    // FTS5 operator keywords must stay uppercase to function as operators.
+    let upper = token.to_uppercase();
+    if matches!(upper.as_str(), "AND" | "OR" | "NOT" | "NEAR") {
+        out.push_str(&upper);
+        return;
+    }
+    let lower = token.to_lowercase();
+    let stemmed = match classify_script(&lower) {
+        Script::Cyrillic => russian().stem(&lower).into_owned(),
+        Script::Latin => english().stem(&lower).into_owned(),
+        Script::Other => lower,
+    };
+    out.push_str(&stemmed);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +137,19 @@ mod tests {
     fn english_stem() {
         assert_eq!(stem("running runs"), stem("run run"));
     }
+    #[test]
+    fn query_preserves_operators() {
+        assert_eq!(stem_query("running AND fast"), "run AND fast");
+        assert_eq!(stem_query("foo OR bar NOT baz"), "foo OR bar NOT baz");
+    }
+
+    #[test]
+    fn query_preserves_metacharacters() {
+        let s = stem_query("\"running fast\"");
+        assert!(s.starts_with('"') && s.ends_with('"'), "got {s:?}");
+        assert_eq!(stem_query("running*"), "run*");
+    }
+
     #[test]
     fn mixed() {
         let a = stem("Programming в Москве");

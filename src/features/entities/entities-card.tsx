@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { listEntities, type Node } from "@/lib/api";
@@ -20,8 +21,12 @@ export function EntitiesCard({ variant = "card" }: Props = {}) {
 
   useEffect(() => {
     refresh();
-    const t = setInterval(refresh, 5000);
-    return () => clearInterval(t);
+    const unlistenPromise = listen("entities:changed", () => {
+      void refresh();
+    });
+    return () => {
+      void unlistenPromise.then((un) => un());
+    };
   }, [refresh]);
 
   if (variant === "compact") {

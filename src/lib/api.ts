@@ -62,6 +62,10 @@ export function updateNode(args: {
   return invoke<void>("update_node", args);
 }
 
+export function isReady() {
+  return invoke<boolean>("is_ready");
+}
+
 export function listEntities(limit = 30) {
   return invoke<Node[]>("list_entities", { limit });
 }

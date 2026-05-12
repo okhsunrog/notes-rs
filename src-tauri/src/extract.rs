@@ -5,6 +5,7 @@ use rig::providers::openrouter;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tauri::{AppHandle, Emitter};
 use tokio::sync::OnceCell;
 use tokio::time::{Duration, sleep};
 use tokio_rusqlite::Connection;
@@ -85,10 +86,10 @@ impl EntityExtractor {
     }
 }
 
-pub fn spawn_worker(conn: Connection, extractor: Arc<EntityExtractor>) {
+pub fn spawn_worker(conn: Connection, extractor: Arc<EntityExtractor>, app: AppHandle) {
     tokio::spawn(async move {
         loop {
-            if let Err(e) = tick(&conn, &extractor).await {
+            if let Err(e) = tick(&conn, &extractor, &app).await {
                 tracing::warn!(error = ?e, "extract worker tick failed");
             }
             sleep(Duration::from_secs(2)).await;
@@ -96,26 +97,32 @@ pub fn spawn_worker(conn: Connection, extractor: Arc<EntityExtractor>) {
     });
 }
 
-async fn tick(conn: &Connection, extractor: &EntityExtractor) -> Result<()> {
+async fn tick(conn: &Connection, extractor: &EntityExtractor, app: &AppHandle) -> Result<()> {
     let batch = crate::db::take_pending_extractions(conn, 1).await?;
     for (node_id, title, content) in batch {
-        let text = format!(
-            "{}\n{content}",
-            title.as_deref().unwrap_or("")
-        );
+        let text = format!("{}\n{content}", title.as_deref().unwrap_or(""));
         match extractor.extract(text).await {
             Ok(result) => {
-                if let Err(e) = apply(conn, node_id, result).await {
-                    tracing::warn!(node_id, error = ?e, "applying extraction failed");
+                let had_entities = !result.entities.is_empty();
+                match apply(conn, node_id, result).await {
+                    Ok(()) => {
+                        crate::db::finish_extraction(conn, node_id).await?;
+                        if had_entities {
+                            // Wake the UI so the entities sidebar refreshes without polling.
+                            let _ = app.emit("entities:changed", ());
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(node_id, error = ?e, "applying extraction failed");
+                        crate::db::record_extraction_failure(conn, node_id).await?;
+                    }
                 }
             }
             Err(e) => {
-                tracing::warn!(node_id, error = ?e, "extraction failed");
+                tracing::warn!(node_id, error = ?e, "extraction failed; will retry with backoff");
+                crate::db::record_extraction_failure(conn, node_id).await?;
             }
         }
-        // Always remove from queue even on failure to avoid infinite retry loops.
-        // Re-enqueue happens on next content update.
-        crate::db::finish_extraction(conn, node_id).await?;
     }
     Ok(())
 }

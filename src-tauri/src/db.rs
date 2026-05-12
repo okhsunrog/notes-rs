@@ -73,6 +73,18 @@ async fn migrate(conn: &Connection, ndims: usize) -> Result<()> {
         if !has_position {
             c.execute_batch("ALTER TABLE nodes ADD COLUMN position REAL;")?;
         }
+        // Drop dead node_properties (never written to). Reintroduce when we
+        // have a real properties write path.
+        c.execute_batch("DROP TABLE IF EXISTS node_properties;")?;
+        let has_retry_count: bool = c
+            .prepare("SELECT 1 FROM pragma_table_info('extract_queue') WHERE name = 'retry_count'")?
+            .exists([])?;
+        if !has_retry_count {
+            c.execute_batch(
+                "ALTER TABLE extract_queue ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE extract_queue ADD COLUMN last_attempt INTEGER;",
+            )?;
+        }
         // Detect old FTS schema (had `title, content` cols instead of just `body_stemmed`).
         let fts_old: bool = c
             .prepare(
@@ -238,13 +250,6 @@ CREATE TABLE IF NOT EXISTS edges (
 CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src, kind);
 CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst, kind);
 
-CREATE TABLE IF NOT EXISTS node_properties (
-  node_id INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
-  key TEXT NOT NULL,
-  value TEXT NOT NULL,
-  PRIMARY KEY(node_id, key)
-);
-
 CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
   body_stemmed,
   content='nodes', content_rowid='id',
@@ -279,7 +284,9 @@ CREATE TABLE IF NOT EXISTS embed_queue (
 
 CREATE TABLE IF NOT EXISTS extract_queue (
   node_id INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
-  enqueued_at INTEGER NOT NULL
+  enqueued_at INTEGER NOT NULL,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  last_attempt INTEGER
 );
 
 CREATE TRIGGER IF NOT EXISTS nodes_ai_extract
@@ -525,8 +532,8 @@ pub async fn list_pages(conn: &Connection, limit: u32) -> Result<Vec<Node>> {
 }
 
 pub async fn search_fts(conn: &Connection, query: String, limit: u32) -> Result<Vec<SearchHit>> {
-    // Stem each token; preserve quoted phrases and FTS5 operators as-is.
-    let stemmed_query = crate::stem::stem(&query);
+    // Stem each term; preserve FTS5 operators (AND/OR/NOT/NEAR) and metacharacters.
+    let stemmed_query = crate::stem::stem_query(&query);
     let hits = conn
         .call(move |c| -> rusqlite::Result<Vec<SearchHit>> {
             let mut stmt = c.prepare(
@@ -758,26 +765,45 @@ pub async fn take_pending_embeddings(
     Ok(rows)
 }
 
+/// Max extraction attempts before a node is left in the queue and skipped.
+/// A subsequent content edit re-enqueues it with retry_count reset by the
+/// `INSERT OR REPLACE` trigger.
+pub const EXTRACT_MAX_ATTEMPTS: i64 = 5;
+/// Base seconds for exponential backoff: wait = BASE * 2^retry_count.
+/// At retry_count=0 we wait 0s (haven't tried), then 30s, 60s, 120s, 240s.
+pub const EXTRACT_BACKOFF_BASE_SECS: i64 = 30;
+
 pub async fn take_pending_extractions(
     conn: &Connection,
     batch: u32,
 ) -> Result<Vec<(i64, Option<String>, String)>> {
     let rows = conn
         .call(move |c| -> rusqlite::Result<Vec<(i64, Option<String>, String)>> {
+            // Eligible: under retry cap AND (never attempted OR backoff elapsed).
             let mut stmt = c.prepare(
                 "SELECT n.id, n.title, n.content
                  FROM extract_queue q JOIN nodes n ON n.id = q.node_id
+                 WHERE q.retry_count < ?2
+                   AND (q.last_attempt IS NULL
+                        OR unixepoch() - q.last_attempt >= ?3 * (1 << q.retry_count))
                  ORDER BY q.enqueued_at ASC
                  LIMIT ?1",
             )?;
             let rows = stmt
-                .query_map([batch as i64], |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, Option<String>>(1)?,
-                        r.get::<_, String>(2)?,
-                    ))
-                })?
+                .query_map(
+                    rusqlite::params![
+                        batch as i64,
+                        EXTRACT_MAX_ATTEMPTS,
+                        EXTRACT_BACKOFF_BASE_SECS,
+                    ],
+                    |r| {
+                        Ok((
+                            r.get::<_, i64>(0)?,
+                            r.get::<_, Option<String>>(1)?,
+                            r.get::<_, String>(2)?,
+                        ))
+                    },
+                )?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
         })
@@ -788,6 +814,22 @@ pub async fn take_pending_extractions(
 pub async fn finish_extraction(conn: &Connection, node_id: i64) -> Result<()> {
     conn.call(move |c| -> rusqlite::Result<()> {
         c.execute("DELETE FROM extract_queue WHERE node_id = ?1", [node_id])?;
+        Ok(())
+    })
+    .await?;
+    Ok(())
+}
+
+/// Mark an extraction attempt as failed: bump retry_count and stamp
+/// last_attempt. The row stays in the queue; backoff governs the next try.
+pub async fn record_extraction_failure(conn: &Connection, node_id: i64) -> Result<()> {
+    conn.call(move |c| -> rusqlite::Result<()> {
+        c.execute(
+            "UPDATE extract_queue
+             SET retry_count = retry_count + 1, last_attempt = unixepoch()
+             WHERE node_id = ?1",
+            [node_id],
+        )?;
         Ok(())
     })
     .await?;

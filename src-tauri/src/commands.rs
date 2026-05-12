@@ -2,6 +2,7 @@ use crate::agent::{ChatEvent, ChatTurn};
 use crate::db::{self, Node, SearchHit};
 use crate::embed::{EmbedderBackend, Reranker};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::State;
 use tauri::ipc::Channel;
 use tokio_rusqlite::Connection;
@@ -12,8 +13,21 @@ pub struct AppState {
     pub reranker: Arc<Reranker>,
 }
 
+/// Registered immediately in setup so the frontend can ask whether the heavy
+/// initialization (embedder download, db open) has finished. Without this,
+/// commands invoked during the ~minutes-long first-run model fetch fail with
+/// an opaque "state not managed" error.
+pub struct Startup {
+    pub ready: Arc<AtomicBool>,
+}
+
 fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
+}
+
+#[tauri::command]
+pub fn is_ready(state: State<'_, Startup>) -> bool {
+    state.ready.load(Ordering::Acquire)
 }
 
 #[tauri::command]
