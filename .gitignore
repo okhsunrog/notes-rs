@@ -12,6 +12,14 @@ dist
 dist-ssr
 *.local
 
+# fastembed downloads ONNX models here on first run
+.fastembed_cache/
+
+# local databases
+notes.db
+notes.db-shm
+notes.db-wal
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
