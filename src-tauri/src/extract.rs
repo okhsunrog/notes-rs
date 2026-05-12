@@ -4,11 +4,29 @@ use rig::extractor::Extractor;
 use rig::providers::openrouter;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use sha1::{Digest, Sha1};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::OnceCell;
 use tokio::time::{Duration, sleep};
 use tokio_rusqlite::Connection;
+
+/// Stable change-detection hash of (title, content). Sha1 is fine here —
+/// we're not protecting against adversarial collisions, just detecting
+/// "is this the same text the LLM already saw?".
+fn content_hash(title: Option<&str>, content: &str) -> String {
+    let mut h = Sha1::new();
+    h.update(title.unwrap_or("").as_bytes());
+    h.update([0x1f]); // delimiter so "ab|c" and "a|bc" don't collide
+    h.update(content.as_bytes());
+    let bytes = h.finalize();
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes.as_ref() as &[u8] {
+        use std::fmt::Write;
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
 
 /// Lighter, cheaper model is fine for structured extraction.
 const EXTRACT_MODEL: &str = "deepseek/deepseek-v4-flash";
@@ -100,12 +118,22 @@ pub fn spawn_worker(conn: Connection, extractor: Arc<EntityExtractor>, app: AppH
 async fn tick(conn: &Connection, extractor: &EntityExtractor, app: &AppHandle) -> Result<()> {
     let batch = crate::db::take_pending_extractions(conn, 1).await?;
     for (node_id, title, content) in batch {
+        let new_hash = content_hash(title.as_deref(), &content);
+        // Skip the LLM call if (title, content) is identical to the last
+        // successful extraction — typo-fix cycles re-fire the update trigger
+        // but produce no semantic change worth extracting again.
+        let prev_hash = crate::db::get_last_extracted_hash(conn, node_id).await?;
+        if prev_hash.as_deref() == Some(new_hash.as_str()) {
+            crate::db::finish_extraction(conn, node_id).await?;
+            continue;
+        }
         let text = format!("{}\n{content}", title.as_deref().unwrap_or(""));
         match extractor.extract(text).await {
             Ok(result) => {
                 let had_entities = !result.entities.is_empty();
                 match apply(conn, node_id, result).await {
                     Ok(()) => {
+                        crate::db::set_last_extracted_hash(conn, node_id, new_hash).await?;
                         crate::db::finish_extraction(conn, node_id).await?;
                         if had_entities {
                             // Wake the UI so the entities sidebar refreshes without polling.

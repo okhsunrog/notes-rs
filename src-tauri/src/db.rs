@@ -85,6 +85,14 @@ async fn migrate(conn: &Connection, ndims: usize) -> Result<()> {
                  ALTER TABLE extract_queue ADD COLUMN last_attempt INTEGER;",
             )?;
         }
+        let has_last_extracted_hash: bool = c
+            .prepare(
+                "SELECT 1 FROM pragma_table_info('nodes') WHERE name = 'last_extracted_hash'",
+            )?
+            .exists([])?;
+        if !has_last_extracted_hash {
+            c.execute_batch("ALTER TABLE nodes ADD COLUMN last_extracted_hash TEXT;")?;
+        }
         // Detect old FTS schema (had `title, content` cols instead of just `body_stemmed`).
         let fts_old: bool = c
             .prepare(
@@ -232,6 +240,10 @@ CREATE TABLE IF NOT EXISTS nodes (
   body_stemmed TEXT NOT NULL DEFAULT '',
   parent_id INTEGER REFERENCES nodes(id) ON DELETE CASCADE,
   position REAL,
+  -- Hash of the (title, content) at the last *successful* extraction. The
+  -- worker compares the current hash against this before invoking the LLM,
+  -- so cosmetic re-saves (typo fixes, indent changes) don't burn credits.
+  last_extracted_hash TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -1058,6 +1070,43 @@ pub async fn take_pending_extractions(
 pub async fn finish_extraction(conn: &Connection, node_id: i64) -> Result<()> {
     conn.call(move |c| -> rusqlite::Result<()> {
         c.execute("DELETE FROM extract_queue WHERE node_id = ?1", [node_id])?;
+        Ok(())
+    })
+    .await?;
+    Ok(())
+}
+
+/// Read the hash recorded at the node's last successful extraction. `None`
+/// when the node has never been extracted or the row is missing.
+pub async fn get_last_extracted_hash(
+    conn: &Connection,
+    node_id: i64,
+) -> Result<Option<String>> {
+    let h = conn
+        .call(move |c| -> rusqlite::Result<Option<String>> {
+            c.query_row(
+                "SELECT last_extracted_hash FROM nodes WHERE id = ?1",
+                [node_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .map_err(Into::into)
+        })
+        .await?;
+    Ok(h)
+}
+
+/// Stamp the hash that was just successfully extracted, so future queue ticks
+/// can skip identical content.
+pub async fn set_last_extracted_hash(
+    conn: &Connection,
+    node_id: i64,
+    hash: String,
+) -> Result<()> {
+    conn.call(move |c| -> rusqlite::Result<()> {
+        c.execute(
+            "UPDATE nodes SET last_extracted_hash = ?2 WHERE id = ?1",
+            rusqlite::params![node_id, hash],
+        )?;
         Ok(())
     })
     .await?;

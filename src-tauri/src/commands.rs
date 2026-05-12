@@ -261,7 +261,11 @@ pub async fn search_agentic(
         .embed_query(query.clone())
         .await
         .map_err(err)?;
-    let candidates = db::search_hybrid(&state.conn, query.clone(), emb, limit * 4)
+    // See SearchAgentic for rationale; widening the rerank pool matters even
+    // more here because the UI can ask for `limit = 3` and starve the
+    // reranker otherwise.
+    let pool = (limit * 4).max(32);
+    let candidates = db::search_hybrid(&state.conn, query.clone(), emb, pool)
         .await
         .map_err(err)?;
     if candidates.is_empty() {

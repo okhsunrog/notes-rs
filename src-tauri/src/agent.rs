@@ -90,10 +90,13 @@ impl Tool for SearchAgentic {
             .embed_query(args.query.clone())
             .await
             .map_err(into_tool_err)?;
-        let candidates =
-            db::search_hybrid(&self.conn, args.query.clone(), emb, args.limit * 4)
-                .await
-                .map_err(into_tool_err)?;
+        // Pool floor: at low `limit` (e.g. 3) the default `limit*4 = 12` is
+        // too narrow when BM25 and vector channels disagree. Widen the rerank
+        // input so we don't starve the reranker of plausible candidates.
+        let pool = (args.limit * 4).max(RERANK_POOL_MIN);
+        let candidates = db::search_hybrid(&self.conn, args.query.clone(), emb, pool)
+            .await
+            .map_err(into_tool_err)?;
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
@@ -112,8 +115,13 @@ impl Tool for SearchAgentic {
             .rerank(args.query, docs)
             .await
             .map_err(into_tool_err)?;
+        // Score floor: BGE-reranker scores below ~RELEVANCE_FLOOR are
+        // effectively irrelevant — passing them to the agent invites
+        // hallucinate-by-citation. Returning empty when nothing clears the
+        // bar gives the model a clean "nothing found" signal.
         Ok(scored
             .into_iter()
+            .filter(|(_, s)| *s as f64 >= RELEVANCE_FLOOR)
             .take(args.limit as usize)
             .map(|(idx, score)| SearchHit {
                 node: candidates[idx].node.clone(),
@@ -122,6 +130,9 @@ impl Tool for SearchAgentic {
             .collect())
     }
 }
+
+const RERANK_POOL_MIN: u32 = 32;
+const RELEVANCE_FLOOR: f64 = 0.30;
 
 // ───────────────────────── neighbors ─────────────────────────
 
