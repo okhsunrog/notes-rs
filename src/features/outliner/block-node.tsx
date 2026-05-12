@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { ChevronDown, ChevronRight, Info } from "lucide-react";
 import { toast } from "sonner";
 import {
   createBlock,
@@ -30,6 +30,7 @@ type SaveState = "idle" | "dirty" | "saving" | "error";
 
 const AUTOSAVE_MS = 400;
 const AC_DEBOUNCE_MS = 120;
+const LONG_BLOCK_CHARS = 600;
 
 export function BlockNode({ block, parent, depth }: Props) {
   const store = useOutliner();
@@ -42,6 +43,8 @@ export function BlockNode({ block, parent, depth }: Props) {
   blockRef.current = block;
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const editRef = useRef<BlockEditHandle>(null);
+  const [draftLen, setDraftLen] = useState(block.content.length);
+  const longBlock = (editing ? draftLen : block.content.length) >= LONG_BLOCK_CHARS;
 
   // Autocomplete state — only relevant in edit mode.
   const [trigger, setTrigger] = useState<Trigger | null>(null);
@@ -141,6 +144,7 @@ export function BlockNode({ block, parent, depth }: Props) {
 
   const onDraftChange = (value: string, caret: number) => {
     draftRef.current = value;
+    setDraftLen(value.length);
     setSaveState("dirty");
     clearTimer();
     timer.current = setTimeout(() => {
@@ -228,6 +232,88 @@ export function BlockNode({ block, parent, depth }: Props) {
       toast.info("Each paragraph became a separate block.", { duration: 4000 });
       localStorage.setItem("outliner.paste-split.notified", "1");
     }
+  };
+
+  /** Split this block's full content on blank-line paragraph breaks. Used by
+   * the long-block info-icon nudge. If the content has no blank-line breaks,
+   * we surface guidance instead of silently doing nothing. */
+  const onSplitCurrent = async () => {
+    const source = editing ? draftRef.current : block.content;
+    const paragraphs = source
+      .split(/\n[ \t]*(?:\n[ \t]*)+/)
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+    if (paragraphs.length < 2) {
+      toast.info("No paragraph breaks found — add blank lines between paragraphs first.");
+      return;
+    }
+    // Update current block content → paragraphs[0].
+    try {
+      await updateNode({
+        id: block.id,
+        title: block.title,
+        content: paragraphs[0],
+        contentJson: null,
+      });
+      const updated: Node = {
+        ...block,
+        content: paragraphs[0],
+        content_json: null,
+        updated_at: Math.floor(Date.now() / 1000),
+      };
+      store.replaceBlock(updated);
+      draftRef.current = paragraphs[0];
+      setDraftLen(paragraphs[0].length);
+      if (editing && editRef.current) {
+        editRef.current.replaceRange(0, source.length, paragraphs[0]);
+      }
+      const { wikilinks, blockRefs } = parseRefs(paragraphs[0]);
+      replaceBlockRefs({
+        blockId: block.id,
+        wikilinkTitles: wikilinks,
+        blockUuids: blockRefs,
+      }).catch((err) => console.error("ref replace failed", err));
+    } catch (err) {
+      console.error("split: update current failed", err);
+      return;
+    }
+    // Create siblings for paragraphs 1..N.
+    let prevId = block.id;
+    for (let i = 1; i < paragraphs.length; i++) {
+      const siblings = store.getChildren(parent.id) ?? [];
+      const pos = positionAfter(siblings, prevId);
+      try {
+        const created = await createBlock({
+          parentId: parent.id,
+          position: pos,
+          content: paragraphs[i],
+          contentJson: null,
+        });
+        store.insertAfter(parent.id, prevId, created);
+        const { wikilinks, blockRefs } = parseRefs(paragraphs[i]);
+        if (wikilinks.length > 0 || blockRefs.length > 0) {
+          replaceBlockRefs({
+            blockId: created.id,
+            wikilinkTitles: wikilinks,
+            blockUuids: blockRefs,
+          }).catch((err) => console.error("ref replace failed", err));
+        }
+        prevId = created.id;
+      } catch (err) {
+        console.error("split: create failed", err);
+        break;
+      }
+    }
+  };
+
+  const onLongBlockNudge = () => {
+    toast("Split this block into paragraphs?", {
+      duration: 8000,
+      action: {
+        label: "Split",
+        onClick: () => void onSplitCurrent(),
+      },
+    });
   };
 
   const onEnter = async () => {
@@ -391,6 +477,19 @@ export function BlockNode({ block, parent, depth }: Props) {
           )}
         </button>
         <BlockBullet state={saveState} />
+        {longBlock && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onLongBlockNudge();
+            }}
+            title="This block is getting long — click to split into paragraphs"
+            className="mt-1.5 flex size-4 shrink-0 items-center justify-center text-amber-500 hover:text-amber-600"
+          >
+            <Info className="size-3" />
+          </button>
+        )}
         <div
           className="relative min-w-0 flex-1"
           onClick={() => {
