@@ -5,6 +5,7 @@ import { BlockChildren } from "./block-tree";
 import { BlockEdit } from "./block-edit";
 import { useOutliner } from "./outliner-store";
 import { nextSibling, positionAfter, prevSibling } from "./keyboard";
+import { renderMarkdown } from "./render-markdown";
 
 type Props = {
   block: Node;
@@ -236,7 +237,11 @@ export function BlockNode({ block, parent, depth }: Props) {
             />
           ) : (
             <div className="cursor-text whitespace-pre-wrap break-words text-sm leading-relaxed">
-              {block.content || <span className="text-muted-foreground/40">empty</span>}
+              {block.content ? (
+                renderMarkdown(block.content)
+              ) : (
+                <span className="text-muted-foreground/40">empty</span>
+              )}
             </div>
           )}
         </div>
