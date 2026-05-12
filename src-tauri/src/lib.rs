@@ -56,6 +56,8 @@ pub fn run() {
             commands::chat,
             commands::chat_stream,
             commands::list_entities,
+            commands::list_pages,
+            commands::create_page,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

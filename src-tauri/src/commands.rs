@@ -80,6 +80,27 @@ pub async fn list_entities(
 }
 
 #[tauri::command]
+pub async fn list_pages(
+    state: State<'_, AppState>,
+    limit: Option<u32>,
+) -> Result<Vec<Node>, String> {
+    db::list_pages(&state.conn, limit.unwrap_or(200))
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn create_page(state: State<'_, AppState>, title: String) -> Result<Node, String> {
+    let title = title.trim().to_string();
+    if title.is_empty() {
+        return Err("title is required".into());
+    }
+    db::create_node(&state.conn, "page".into(), Some(title), String::new(), None)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
 pub async fn search_fts(
     state: State<'_, AppState>,
     query: String,

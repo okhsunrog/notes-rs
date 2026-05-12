@@ -478,6 +478,36 @@ pub async fn list_entities(conn: &Connection, limit: u32) -> Result<Vec<Node>> {
     Ok(rows)
 }
 
+pub async fn list_pages(conn: &Connection, limit: u32) -> Result<Vec<Node>> {
+    let rows = conn
+        .call(move |c| -> rusqlite::Result<Vec<Node>> {
+            let mut stmt = c.prepare(
+                "SELECT id, uuid, kind, title, content, content_json, created_at, updated_at
+                 FROM nodes
+                 WHERE kind = 'page'
+                 ORDER BY updated_at DESC
+                 LIMIT ?1",
+            )?;
+            let rows = stmt
+                .query_map([limit as i64], |r| {
+                    Ok(Node {
+                        id: r.get(0)?,
+                        uuid: r.get(1)?,
+                        kind: r.get(2)?,
+                        title: r.get(3)?,
+                        content: r.get(4)?,
+                        content_json: r.get(5)?,
+                        created_at: r.get(6)?,
+                        updated_at: r.get(7)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await?;
+    Ok(rows)
+}
+
 pub async fn search_fts(conn: &Connection, query: String, limit: u32) -> Result<Vec<SearchHit>> {
     // Stem each token; preserve quoted phrases and FTS5 operators as-is.
     let stemmed_query = crate::stem::stem(&query);
