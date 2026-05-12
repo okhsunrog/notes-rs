@@ -846,6 +846,50 @@ pub async fn delete_block(conn: &Connection, id: i64) -> Result<bool> {
     Ok(deleted)
 }
 
+/// Find a page by case-insensitive title without creating one. Used by hover
+/// previews / autocomplete so we don't spawn stubs on every hover.
+pub async fn get_page_by_title(conn: &Connection, title: String) -> Result<Option<Node>> {
+    let trimmed = title.trim().to_string();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    conn.call(move |c| -> rusqlite::Result<Option<Node>> {
+        let sql = format!(
+            "SELECT {NODE_COLUMNS} FROM nodes
+             WHERE kind = 'page' AND lower(title) = lower(?1)
+             LIMIT 1"
+        );
+        let mut stmt = c.prepare(&sql)?;
+        let mut rows = stmt.query([&trimmed])?;
+        if let Some(r) = rows.next()? {
+            Ok(Some(row_to_node(r)?))
+        } else {
+            Ok(None)
+        }
+    })
+    .await
+    .map_err(Into::into)
+}
+
+pub async fn get_node_by_uuid(conn: &Connection, uuid: String) -> Result<Option<Node>> {
+    let trimmed = uuid.trim().to_string();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    conn.call(move |c| -> rusqlite::Result<Option<Node>> {
+        let sql = format!("SELECT {NODE_COLUMNS} FROM nodes WHERE uuid = ?1 LIMIT 1");
+        let mut stmt = c.prepare(&sql)?;
+        let mut rows = stmt.query([&trimmed])?;
+        if let Some(r) = rows.next()? {
+            Ok(Some(row_to_node(r)?))
+        } else {
+            Ok(None)
+        }
+    })
+    .await
+    .map_err(Into::into)
+}
+
 /// Find a page by case-insensitive title or create one. Used to eagerly
 /// materialize `[[Wikilink]]` targets so backlinks work the moment the link
 /// is typed.

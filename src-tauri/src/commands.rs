@@ -156,6 +156,22 @@ pub async fn replace_block_refs(
 }
 
 #[tauri::command]
+pub async fn get_page_by_title(
+    state: State<'_, AppState>,
+    title: String,
+) -> Result<Option<Node>, String> {
+    db::get_page_by_title(&state.conn, title).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn get_node_by_uuid(
+    state: State<'_, AppState>,
+    uuid: String,
+) -> Result<Option<Node>, String> {
+    db::get_node_by_uuid(&state.conn, uuid).await.map_err(err)
+}
+
+#[tauri::command]
 pub async fn get_or_create_page_by_title(
     state: State<'_, AppState>,
     title: String,

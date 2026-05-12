@@ -88,6 +88,8 @@ pub fn run() {
             commands::delete_block,
             commands::replace_block_refs,
             commands::get_or_create_page_by_title,
+            commands::get_page_by_title,
+            commands::get_node_by_uuid,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

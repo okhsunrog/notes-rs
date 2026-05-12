@@ -121,6 +121,14 @@ export function getOrCreatePageByTitle(title: string) {
   return invoke<Node>("get_or_create_page_by_title", { title });
 }
 
+export function getPageByTitle(title: string) {
+  return invoke<Node | null>("get_page_by_title", { title });
+}
+
+export function getNodeByUuid(uuid: string) {
+  return invoke<Node | null>("get_node_by_uuid", { uuid });
+}
+
 export function search(mode: Mode, query: string, limit = 20) {
   return invoke<SearchHit[]>(SEARCH_CMD[mode], { query, limit });
 }

@@ -1,4 +1,5 @@
 import { Fragment, type ReactNode } from "react";
+import { BlockRef, WikiLink } from "./ref-preview";
 
 /**
  * Lightweight markdown-ish renderer for block view mode. Recognizes inline
@@ -40,25 +41,9 @@ export function renderMarkdown(text: string): ReactNode[] {
         </code>,
       );
     } else if (wiki) {
-      out.push(
-        <span
-          key={key++}
-          className="cursor-pointer rounded text-sky-600 hover:underline dark:text-sky-400"
-          data-wikilink={wiki.slice(2, -2)}
-        >
-          {wiki.slice(2, -2)}
-        </span>,
-      );
+      out.push(<WikiLink key={key++} title={wiki.slice(2, -2)} />);
     } else if (ref) {
-      out.push(
-        <span
-          key={key++}
-          className="cursor-pointer rounded bg-muted/60 px-1 font-mono text-[0.85em] text-muted-foreground hover:text-foreground"
-          data-blockref={ref.slice(2, -2)}
-        >
-          (({ref.slice(2, -2)}))
-        </span>,
-      );
+      out.push(<BlockRef key={key++} uuid={ref.slice(2, -2)} />);
     } else if (bold) {
       out.push(
         <strong key={key++} className="font-semibold">
