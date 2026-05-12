@@ -3,7 +3,7 @@ import "@blocknote/shadcn/style.css";
 import { useCreateBlockNote } from "@blocknote/react";
 import { BlockNoteView } from "@blocknote/shadcn";
 import type { PartialBlock } from "@blocknote/core";
-import { useCallback, useImperativeHandle, forwardRef } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle } from "react";
 
 export type NoteEditorHandle = {
   serialize: () => Promise<{ markdown: string; json: string }>;
@@ -16,6 +16,8 @@ type Props = {
   /** Plain text fallback when no structured form exists. */
   initialPlain?: string | null;
   placeholder?: string;
+  /** Fires after every edit. Debounce on the caller side for autosave. */
+  onChange?: () => void;
 };
 
 function paragraphsFromPlain(text: string): PartialBlock[] {
@@ -25,7 +27,7 @@ function paragraphsFromPlain(text: string): PartialBlock[] {
 }
 
 export const NoteEditor = forwardRef<NoteEditorHandle, Props>(
-  ({ initialJson, initialPlain, placeholder }, ref) => {
+  ({ initialJson, initialPlain, placeholder, onChange }, ref) => {
     let initialContent: PartialBlock[] | undefined;
     if (initialJson) {
       try {
@@ -51,6 +53,11 @@ export const NoteEditor = forwardRef<NoteEditorHandle, Props>(
     }, [editor]);
 
     useImperativeHandle(ref, () => ({ serialize, reset }), [serialize, reset]);
+
+    useEffect(() => {
+      if (!onChange) return;
+      return editor.onChange(() => onChange());
+    }, [editor, onChange]);
 
     return (
       <div className="rounded-md border bg-card">
