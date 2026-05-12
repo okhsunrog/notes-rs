@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Track this project's CLAUDE.md (globally ignored elsewhere)
+!CLAUDE.md
