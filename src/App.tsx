@@ -48,7 +48,7 @@ function App() {
         <p className="text-sm text-muted-foreground">
           starting notes-rs…
           <br />
-          first launch downloads the embedder (~500 MB)
+          first launch downloads the embedder (~2.3 GB)
         </p>
       </div>
     );

@@ -37,7 +37,7 @@ pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
         .and_then(|s| s.parse::<usize>().ok());
 
     match provider.as_str() {
-        "local" | "fastembed" => Ok(Arc::new(LocalE5::new()?)),
+        "local" | "fastembed" => Ok(Arc::new(LocalBgeM3::new()?)),
         "openai" => {
             use rig::providers::openai;
             let model = model_env.unwrap_or_else(|| "text-embedding-3-small".into());
@@ -110,18 +110,21 @@ pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
     }
 }
 
-// ───────────────────────── local fastembed (E5) ─────────────────────────
+// ───────────────────────── local fastembed (BGE-M3) ─────────────────────────
 
-pub struct LocalE5 {
+/// 1024-dim dense embeddings, multilingual (100+ languages including Russian
+/// and English). BGE-M3 doesn't use the `passage:`/`query:` prefix the E5
+/// family needs — texts go in raw on both sides.
+pub struct LocalBgeM3 {
     inner: Mutex<TextEmbedding>,
 }
 
-impl LocalE5 {
+impl LocalBgeM3 {
     pub fn new() -> Result<Self> {
         let model = TextEmbedding::try_new(
-            InitOptions::new(FeModel::MultilingualE5Small).with_show_download_progress(true),
+            InitOptions::new(FeModel::BGEM3).with_show_download_progress(true),
         )
-        .context("loading multilingual-e5-small model")?;
+        .context("loading bge-m3 model")?;
         Ok(Self {
             inner: Mutex::new(model),
         })
@@ -129,22 +132,20 @@ impl LocalE5 {
 }
 
 #[async_trait]
-impl EmbedderBackend for LocalE5 {
+impl EmbedderBackend for LocalBgeM3 {
     fn ndims(&self) -> usize {
-        384
+        1024
     }
     fn id(&self) -> String {
-        "local:multilingual-e5-small".into()
+        "local:bge-m3".into()
     }
     async fn embed_passages(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
         let mut model = self.inner.lock().await;
-        let prefixed: Vec<String> =
-            texts.into_iter().map(|t| format!("passage: {t}")).collect();
-        Ok(model.embed(prefixed, None)?)
+        Ok(model.embed(texts, None)?)
     }
     async fn embed_query(&self, text: String) -> Result<Vec<f32>> {
         let mut model = self.inner.lock().await;
-        let mut out = model.embed(vec![format!("query: {text}")], None)?;
+        let mut out = model.embed(vec![text], None)?;
         Ok(out.pop().expect("one embedding"))
     }
 }

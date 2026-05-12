@@ -93,6 +93,16 @@ async fn migrate(conn: &Connection, ndims: usize) -> Result<()> {
         if !has_last_extracted_hash {
             c.execute_batch("ALTER TABLE nodes ADD COLUMN last_extracted_hash TEXT;")?;
         }
+        // Ancestor-aware embedding requires re-embed on parent move; install
+        // the trigger on existing DBs that predated it.
+        c.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS nodes_au_embed_parent
+               AFTER UPDATE OF parent_id ON nodes
+             BEGIN
+               INSERT OR REPLACE INTO embed_queue(node_id, enqueued_at)
+                 VALUES(new.id, unixepoch());
+             END;",
+        )?;
         // Detect old FTS schema (had `title, content` cols instead of just `body_stemmed`).
         let fts_old: bool = c
             .prepare(
@@ -219,10 +229,40 @@ async fn check_embedder_compat(conn: &Connection, embedder_id: &str, ndims: usiz
             Ok(())
         }
         Some((p, n)) if p == id && n as usize == ndims => Ok(()),
-        Some((p, n)) => Err(anyhow::anyhow!(
-            "embedder mismatch: db was created with {p} ({n} dims), current backend is {id} ({ndims} dims). \
-             Delete the db or switch back to match."
-        )),
+        Some((p, n)) => {
+            tracing::warn!(
+                old_provider = %p,
+                old_ndims = n,
+                new_provider = %id,
+                new_ndims = ndims,
+                "embedder changed — rebuilding vec_nodes and re-enqueueing all embeddings",
+            );
+            let id2 = id.clone();
+            let ndims_u = ndims;
+            conn.call(move |c| -> rusqlite::Result<()> {
+                let tx = c.transaction()?;
+                tx.execute_batch("DROP TABLE IF EXISTS vec_nodes;")?;
+                tx.execute_batch(&format!(
+                    "CREATE VIRTUAL TABLE vec_nodes USING vec0(embedding float[{ndims_u}]);"
+                ))?;
+                tx.execute("DELETE FROM embed_queue", [])?;
+                tx.execute(
+                    "INSERT INTO embed_queue(node_id, enqueued_at)
+                     SELECT id, unixepoch() FROM nodes
+                     WHERE kind IN ('block', 'page')
+                       AND (content != '' OR title IS NOT NULL)",
+                    [],
+                )?;
+                tx.execute(
+                    "UPDATE embed_meta SET provider = ?1, ndims = ?2 WHERE id = 1",
+                    rusqlite::params![id2, ndims_u as i64],
+                )?;
+                tx.commit()?;
+                Ok(())
+            })
+            .await?;
+            Ok(())
+        }
     }
 }
 
@@ -330,6 +370,15 @@ CREATE TRIGGER IF NOT EXISTS nodes_ai_embed AFTER INSERT ON nodes BEGIN
 END;
 CREATE TRIGGER IF NOT EXISTS nodes_au_embed
   AFTER UPDATE OF content, title ON nodes
+BEGIN
+  INSERT OR REPLACE INTO embed_queue(node_id, enqueued_at) VALUES(new.id, unixepoch());
+END;
+-- Re-embed when a block's parent changes. The embedding text now includes
+-- the ancestor chain, so a move invalidates it even when content didn't
+-- change. Descendants of the moved block keep their stale chain until they
+-- get edited (acceptable tradeoff in v1).
+CREATE TRIGGER IF NOT EXISTS nodes_au_embed_parent
+  AFTER UPDATE OF parent_id ON nodes
 BEGIN
   INSERT OR REPLACE INTO embed_queue(node_id, enqueued_at) VALUES(new.id, unixepoch());
 END;
@@ -998,27 +1047,115 @@ pub async fn get_or_create_page_by_title(conn: &Connection, title: String) -> Re
     create_node(conn, "page".into(), Some(trimmed), String::new(), None).await
 }
 
+/// Pull the next batch from the embed queue, packaging each row with its
+/// ancestor-chain context. A block embedded in isolation often loses meaning
+/// ("yeah, that fits") — bundling the breadcrumb of ancestor titles plus the
+/// direct parent's content gives the embedder enough signal to disambiguate.
 pub async fn take_pending_embeddings(
     conn: &Connection,
     batch: u32,
 ) -> Result<Vec<(i64, String)>> {
     let rows = conn
-        .call(move |c| -> rusqlite::Result<Vec<(i64, String)>> {
+        .call(move |c| -> rusqlite::Result<Vec<(i64, i32, Option<String>, String)>> {
             let mut stmt = c.prepare(
-                "SELECT n.id, COALESCE(n.title, '') || char(10) || n.content
-                 FROM embed_queue q JOIN nodes n ON n.id = q.node_id
-                 ORDER BY q.enqueued_at ASC
-                 LIMIT ?1",
+                "WITH batch(node_id) AS (
+                   SELECT node_id FROM embed_queue
+                   ORDER BY enqueued_at ASC LIMIT ?1
+                 ),
+                 chain(qid, id, parent_id, title, content, depth) AS (
+                   SELECT b.node_id, n.id, n.parent_id, n.title, n.content, 0
+                     FROM batch b JOIN nodes n ON n.id = b.node_id
+                   UNION ALL
+                   SELECT c.qid, p.id, p.parent_id, p.title, p.content, c.depth + 1
+                     FROM chain c JOIN nodes p ON p.id = c.parent_id
+                 )
+                 SELECT qid, depth, title, content FROM chain
+                 ORDER BY qid, depth",
             )?;
             let rows = stmt
                 .query_map([batch as i64], |r| {
-                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i32>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
         })
         .await?;
-    Ok(rows)
+
+    // Group by qid, then compose each block's embedding text.
+    let mut out: Vec<(i64, String)> = Vec::new();
+    let mut current_qid: Option<i64> = None;
+    let mut chain: Vec<(i32, Option<String>, String)> = Vec::new();
+    for (qid, depth, title, content) in rows {
+        if Some(qid) != current_qid {
+            if let Some(prev) = current_qid {
+                out.push((prev, compose_embed_text(&chain)));
+                chain.clear();
+            }
+            current_qid = Some(qid);
+        }
+        chain.push((depth, title, content));
+    }
+    if let Some(qid) = current_qid {
+        out.push((qid, compose_embed_text(&chain)));
+    }
+    Ok(out)
+}
+
+/// Compose ancestor-aware embedding text. `chain` is ordered depth-ascending
+/// (depth=0 is the node itself). Layout:
+///
+/// ```text
+/// {ancestor titles joined by " > " — outermost first}
+/// {direct parent's content, truncated}
+/// {self title}
+/// {self content}
+/// ```
+///
+/// Empty sections are dropped. Pages (no ancestors) collapse to just title +
+/// content, matching the previous behavior.
+fn compose_embed_text(chain: &[(i32, Option<String>, String)]) -> String {
+    const PARENT_EXCERPT_MAX: usize = 200;
+    let mut parts: Vec<String> = Vec::new();
+    // Ancestor titles — depth descending (root first) so the breadcrumb reads
+    // top-down like the user sees the outline.
+    let mut titles: Vec<(i32, &str)> = chain
+        .iter()
+        .filter(|(d, t, _)| *d > 0 && t.as_deref().is_some_and(|s| !s.trim().is_empty()))
+        .map(|(d, t, _)| (*d, t.as_deref().unwrap()))
+        .collect();
+    titles.sort_by(|a, b| b.0.cmp(&a.0));
+    if !titles.is_empty() {
+        let joined: Vec<&str> = titles.iter().map(|(_, t)| *t).collect();
+        parts.push(joined.join(" > "));
+    }
+    // Direct parent's content (depth = 1), truncated, newlines flattened.
+    if let Some((_, _, parent_content)) = chain.iter().find(|(d, _, _)| *d == 1) {
+        let trimmed = parent_content.trim();
+        if !trimmed.is_empty() {
+            let flat: String = trimmed.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
+            let cut = flat.char_indices().nth(PARENT_EXCERPT_MAX).map(|(i, _)| i);
+            let excerpt = match cut {
+                Some(i) => format!("{}…", &flat[..i]),
+                None => flat,
+            };
+            parts.push(excerpt);
+        }
+    }
+    // Self.
+    if let Some((_, title, content)) = chain.iter().find(|(d, _, _)| *d == 0) {
+        if let Some(t) = title.as_deref().filter(|s| !s.trim().is_empty()) {
+            parts.push(t.to_string());
+        }
+        if !content.trim().is_empty() {
+            parts.push(content.clone());
+        }
+    }
+    parts.join("\n")
 }
 
 /// Max extraction attempts before a node is left in the queue and skipped.
