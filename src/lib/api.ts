@@ -107,6 +107,16 @@ export function deleteBlock(id: number) {
   return invoke<boolean>("delete_block", { id });
 }
 
+/** Replace all outgoing ref edges from `blockId`. Returns count of broken
+ * `((uuid))` refs that pointed at non-existent blocks. */
+export function replaceBlockRefs(args: {
+  blockId: number;
+  wikilinkTitles: string[];
+  blockUuids: string[];
+}) {
+  return invoke<number>("replace_block_refs", args);
+}
+
 export function getOrCreatePageByTitle(title: string) {
   return invoke<Node>("get_or_create_page_by_title", { title });
 }

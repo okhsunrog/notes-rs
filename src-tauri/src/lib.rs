@@ -86,6 +86,7 @@ pub fn run() {
             commands::create_block,
             commands::move_block,
             commands::delete_block,
+            commands::replace_block_refs,
             commands::get_or_create_page_by_title,
         ])
         .run(tauri::generate_context!())

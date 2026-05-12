@@ -144,6 +144,18 @@ pub async fn delete_block(state: State<'_, AppState>, id: i64) -> Result<bool, S
 }
 
 #[tauri::command]
+pub async fn replace_block_refs(
+    state: State<'_, AppState>,
+    block_id: i64,
+    wikilink_titles: Vec<String>,
+    block_uuids: Vec<String>,
+) -> Result<u32, String> {
+    db::replace_block_refs(&state.conn, block_id, wikilink_titles, block_uuids)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
 pub async fn get_or_create_page_by_title(
     state: State<'_, AppState>,
     title: String,

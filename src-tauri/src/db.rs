@@ -444,6 +444,101 @@ pub async fn link_nodes(
     Ok(())
 }
 
+/// Replace all outgoing reference edges for `block_id` in one transaction.
+///
+/// Strategy: delete every edge `(src=block_id, kind='refs')`, then re-insert
+/// one edge per wikilink target (eagerly materializing missing pages) and one
+/// per block-ref target (silently skipping broken `((uuid))` refs).
+///
+/// This is the "re-emit and cleanup on every save" approach from the plan —
+/// inefficient but correct. Returns the number of broken block-ref UUIDs so
+/// the frontend can surface them later if desired.
+pub async fn replace_block_refs(
+    conn: &Connection,
+    block_id: i64,
+    wikilink_titles: Vec<String>,
+    block_uuids: Vec<String>,
+) -> Result<u32> {
+    let broken = conn
+        .call(move |c| -> rusqlite::Result<u32> {
+            let tx = c.transaction()?;
+            tx.execute(
+                "DELETE FROM edges WHERE src = ?1 AND kind = 'refs'",
+                [block_id],
+            )?;
+            let now = chrono::Utc::now().timestamp();
+
+            // Wikilinks: get-or-create page row, then link.
+            for raw_title in &wikilink_titles {
+                let title = raw_title.trim();
+                if title.is_empty() {
+                    continue;
+                }
+                let existing: Option<i64> = tx
+                    .query_row(
+                        "SELECT id FROM nodes
+                         WHERE kind = 'page' AND lower(title) = lower(?1)
+                         LIMIT 1",
+                        [title],
+                        |r| r.get(0),
+                    )
+                    .ok();
+                let page_id = match existing {
+                    Some(id) => id,
+                    None => {
+                        let uuid = uuid::Uuid::new_v4().to_string();
+                        let body_stemmed = crate::stem::stem("");
+                        tx.execute(
+                            "INSERT INTO nodes (uuid, kind, title, content, content_json,
+                                                body_stemmed, parent_id, position,
+                                                created_at, updated_at)
+                             VALUES (?1, 'page', ?2, '', NULL, ?3, NULL, NULL, ?4, ?4)",
+                            rusqlite::params![&uuid, title, &body_stemmed, now],
+                        )?;
+                        tx.last_insert_rowid()
+                    }
+                };
+                if page_id != block_id {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO edges (src, dst, kind, weight, created_at)
+                         VALUES (?1, ?2, 'refs', 1.0, ?3)",
+                        rusqlite::params![block_id, page_id, now],
+                    )?;
+                }
+            }
+
+            // Block refs: look up target by uuid; skip broken silently.
+            let mut broken: u32 = 0;
+            for raw_uuid in &block_uuids {
+                let uuid = raw_uuid.trim();
+                if uuid.is_empty() {
+                    continue;
+                }
+                let target: Option<i64> = tx
+                    .query_row("SELECT id FROM nodes WHERE uuid = ?1", [uuid], |r| {
+                        r.get(0)
+                    })
+                    .ok();
+                match target {
+                    Some(target_id) if target_id != block_id => {
+                        tx.execute(
+                            "INSERT OR IGNORE INTO edges (src, dst, kind, weight, created_at)
+                             VALUES (?1, ?2, 'refs', 1.0, ?3)",
+                            rusqlite::params![block_id, target_id, now],
+                        )?;
+                    }
+                    Some(_) => {}
+                    None => broken += 1,
+                }
+            }
+
+            tx.commit()?;
+            Ok(broken)
+        })
+        .await?;
+    Ok(broken)
+}
+
 pub async fn get_node(conn: &Connection, id: i64) -> Result<Option<Node>> {
     let node = conn
         .call(move |c| -> rusqlite::Result<Option<Node>> {

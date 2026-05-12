@@ -1,10 +1,18 @@
 import { useCallback, useRef, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
-import { createBlock, deleteBlock, moveBlock, updateNode, type Node } from "@/lib/api";
+import {
+  createBlock,
+  deleteBlock,
+  moveBlock,
+  replaceBlockRefs,
+  updateNode,
+  type Node,
+} from "@/lib/api";
 import { BlockChildren } from "./block-tree";
 import { BlockEdit } from "./block-edit";
 import { useOutliner } from "./outliner-store";
 import { nextSibling, positionAfter, prevSibling } from "./keyboard";
+import { parseRefs } from "./parse-refs";
 import { renderMarkdown } from "./render-markdown";
 
 type Props = {
@@ -59,6 +67,15 @@ export function BlockNode({ block, parent, depth }: Props) {
       };
       store.replaceBlock(updated);
       setSaveState("idle");
+      // Refs are a write-time side effect: re-emit on every save so we
+      // never drift from the user's intent. Failure here doesn't fail the
+      // save — surfaces only in the console for now.
+      const { wikilinks, blockRefs } = parseRefs(next);
+      replaceBlockRefs({
+        blockId: current.id,
+        wikilinkTitles: wikilinks,
+        blockUuids: blockRefs,
+      }).catch((e) => console.error("ref replace failed", e));
     } catch (err) {
       console.error("block save failed", err);
       setSaveState("error");
