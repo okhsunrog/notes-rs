@@ -1,43 +1,62 @@
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
+#[cfg(feature = "local-models")]
 use fastembed::{
     EmbeddingModel as FeModel, InitOptions, RerankInitOptions, RerankerModel, TextEmbedding,
     TextRerank,
 };
 use rig::client::{EmbeddingsClient, ProviderClient};
 use rig::embeddings::EmbeddingModel;
+use serde::Deserialize;
 use std::sync::Arc;
+#[cfg(feature = "local-models")]
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
 use tokio_rusqlite::Connection;
 
-// ───────────────────────── trait + factory ─────────────────────────
+// ───────────────────────── embedder: trait + factory ─────────────────────────
 
 #[async_trait]
 pub trait EmbedderBackend: Send + Sync {
     fn ndims(&self) -> usize;
-    /// Display name like "local:multilingual-e5-small". Used to detect provider drift.
+    /// Display id like "openrouter:qwen/qwen3-embedding-8b" or
+    /// "local:bge-m3". Used to detect provider drift and re-embed.
     fn id(&self) -> String;
     async fn embed_passages(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>>;
     async fn embed_query(&self, text: String) -> Result<Vec<f32>>;
 }
 
-/// Reads env vars and constructs the configured backend.
+/// Reads env vars and constructs the configured embedder.
 ///
-/// `EMBED_PROVIDER` — one of: `local` (default), `openai`, `openrouter`, `cohere`,
-///                   `voyageai`, `gemini`. Embedding-only providers run independently of
-///                   the chat provider.
-/// `EMBED_MODEL`    — provider-specific model id; falls back to a sensible default.
-/// `EMBED_NDIMS`    — ndims override; required for some providers (e.g. OpenAI Matryoshka).
+/// `EMBED_PROVIDER` — one of: `openrouter` (default), `local`, `openai`,
+///                   `cohere`, `voyageai`, `gemini`. `local` requires building
+///                   with `--features local-models`.
+/// `EMBED_MODEL`    — provider-specific model id; falls back to a sensible
+///                   default per provider.
+/// `EMBED_NDIMS`    — ndims override; required for some providers, has model-
+///                   specific defaults for the known ones (OpenAI / Qwen).
 pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
-    let provider = std::env::var("EMBED_PROVIDER").unwrap_or_else(|_| "local".into());
+    let provider = std::env::var("EMBED_PROVIDER").unwrap_or_else(|_| "openrouter".into());
     let model_env = std::env::var("EMBED_MODEL").ok();
     let ndims_env = std::env::var("EMBED_NDIMS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok());
 
     match provider.as_str() {
-        "local" | "fastembed" => Ok(Arc::new(LocalBgeM3::new()?)),
+        "local" | "fastembed" => {
+            #[cfg(feature = "local-models")]
+            {
+                Ok(Arc::new(LocalBgeM3::new()?))
+            }
+            #[cfg(not(feature = "local-models"))]
+            {
+                bail!(
+                    "EMBED_PROVIDER=local requested but this binary was built without the \
+                     'local-models' feature. Rebuild with `cargo build --features local-models`, \
+                     or pick a cloud provider (set EMBED_PROVIDER to openrouter/openai/gemini/etc)."
+                );
+            }
+        }
         "openai" => {
             use rig::providers::openai;
             let model = model_env.unwrap_or_else(|| "text-embedding-3-small".into());
@@ -50,13 +69,17 @@ pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
         }
         "openrouter" => {
             use rig::providers::openrouter;
-            let model = model_env
-                .unwrap_or_else(|| "openai/text-embedding-3-small".into());
-            let ndims = ndims_env.context(
-                "EMBED_NDIMS required for openrouter (e.g. 1536 for text-embedding-3-small)",
-            )?;
-            let client = openrouter::Client::from_env()
-                .context("OPENROUTER_API_KEY not set")?;
+            let model = model_env.unwrap_or_else(|| "qwen/qwen3-embedding-8b".into());
+            let ndims = ndims_env
+                .or_else(|| default_ndims_for_model(&model))
+                .with_context(|| {
+                    format!(
+                        "EMBED_NDIMS required for openrouter model {model}; \
+                         set it explicitly (e.g. 4096 for qwen/qwen3-embedding-8b)"
+                    )
+                })?;
+            let client =
+                openrouter::Client::from_env().context("OPENROUTER_API_KEY not set")?;
             let m = <openrouter::EmbeddingModel as EmbeddingModel>::make(
                 &client,
                 model.clone(),
@@ -71,7 +94,6 @@ pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
             use rig::providers::cohere;
             let model = model_env.unwrap_or_else(|| "embed-multilingual-v3.0".into());
             let client = cohere::Client::from_env().context("COHERE_API_KEY not set")?;
-            // Cohere requires input_type per call; we use "search_document" for passages.
             let m = client.embedding_model(&model, "search_document");
             Ok(Arc::new(RigEmbedder {
                 model: m,
@@ -110,15 +132,30 @@ pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
     }
 }
 
+/// Built-in ndims for well-known embedding models so users don't need to
+/// guess them. Unknown models still require `EMBED_NDIMS`.
+fn default_ndims_for_model(model: &str) -> Option<usize> {
+    match model {
+        "qwen/qwen3-embedding-8b" => Some(4096),
+        "qwen/qwen3-embedding-4b" => Some(2560),
+        "qwen/qwen3-embedding-0.6b" => Some(1024),
+        "openai/text-embedding-3-small" => Some(1536),
+        "openai/text-embedding-3-large" => Some(3072),
+        "openai/text-embedding-ada-002" => Some(1536),
+        _ => None,
+    }
+}
+
 // ───────────────────────── local fastembed (BGE-M3) ─────────────────────────
 
-/// 1024-dim dense embeddings, multilingual (100+ languages including Russian
-/// and English). BGE-M3 doesn't use the `passage:`/`query:` prefix the E5
-/// family needs — texts go in raw on both sides.
+/// 1024-dim dense embeddings, multilingual. Gated behind `local-models`
+/// because it pulls fastembed + ort + a ~2.3 GB model download.
+#[cfg(feature = "local-models")]
 pub struct LocalBgeM3 {
     inner: Mutex<TextEmbedding>,
 }
 
+#[cfg(feature = "local-models")]
 impl LocalBgeM3 {
     pub fn new() -> Result<Self> {
         let model = TextEmbedding::try_new(
@@ -131,6 +168,7 @@ impl LocalBgeM3 {
     }
 }
 
+#[cfg(feature = "local-models")]
 #[async_trait]
 impl EmbedderBackend for LocalBgeM3 {
     fn ndims(&self) -> usize {
@@ -185,13 +223,49 @@ where
     }
 }
 
-// ───────────────────────── reranker (unchanged) ─────────────────────────
+// ───────────────────────── reranker: trait + factory ─────────────────────────
 
-pub struct Reranker {
+#[async_trait]
+pub trait RerankBackend: Send + Sync {
+    /// Returns `(original_index, score)` pairs sorted by score descending.
+    async fn rerank(&self, query: String, docs: Vec<String>) -> Result<Vec<(usize, f32)>>;
+}
+
+pub fn make_reranker() -> Result<Arc<dyn RerankBackend>> {
+    let provider = std::env::var("RERANK_PROVIDER").unwrap_or_else(|_| "openrouter".into());
+    let model_env = std::env::var("RERANK_MODEL").ok();
+
+    match provider.as_str() {
+        "local" | "fastembed" => {
+            #[cfg(feature = "local-models")]
+            {
+                Ok(Arc::new(LocalReranker::new()?))
+            }
+            #[cfg(not(feature = "local-models"))]
+            {
+                bail!(
+                    "RERANK_PROVIDER=local requires the 'local-models' Cargo feature; \
+                     rebuild with `--features local-models` or use a cloud provider."
+                );
+            }
+        }
+        "openrouter" => {
+            let model = model_env.unwrap_or_else(|| "cohere/rerank-v3.5".into());
+            Ok(Arc::new(OpenRouterReranker::new(model)?))
+        }
+        other => bail!("unknown RERANK_PROVIDER: {other}"),
+    }
+}
+
+// ───────────────────────── local reranker (fastembed BGE-Reranker-v2-m3) ─────────────────────────
+
+#[cfg(feature = "local-models")]
+pub struct LocalReranker {
     inner: Mutex<TextRerank>,
 }
 
-impl Reranker {
+#[cfg(feature = "local-models")]
+impl LocalReranker {
     pub fn new() -> Result<Self> {
         let model = TextRerank::try_new(
             RerankInitOptions::new(RerankerModel::BGERerankerV2M3)
@@ -202,14 +276,93 @@ impl Reranker {
             inner: Mutex::new(model),
         })
     }
+}
 
-    pub async fn rerank(&self, query: String, docs: Vec<String>) -> Result<Vec<(usize, f32)>> {
+#[cfg(feature = "local-models")]
+#[async_trait]
+impl RerankBackend for LocalReranker {
+    async fn rerank(&self, query: String, docs: Vec<String>) -> Result<Vec<(usize, f32)>> {
         if docs.is_empty() {
             return Ok(Vec::new());
         }
         let mut model = self.inner.lock().await;
         let out = model.rerank(query, &docs, false, None)?;
         let mut scored: Vec<(usize, f32)> = out.into_iter().map(|r| (r.index, r.score)).collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        Ok(scored)
+    }
+}
+
+// ───────────────────────── OpenRouter reranker ─────────────────────────
+
+/// Calls OpenRouter's `/v1/rerank` endpoint directly via reqwest. rig doesn't
+/// expose a rerank trait, and OpenRouter proxies Cohere's rerank API shape,
+/// so this is a thin HTTP client wrapping that contract.
+pub struct OpenRouterReranker {
+    client: reqwest::Client,
+    api_key: String,
+    model: String,
+    url: String,
+}
+
+impl OpenRouterReranker {
+    pub fn new(model: String) -> Result<Self> {
+        let api_key =
+            std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set")?;
+        let base = std::env::var("OPENROUTER_BASE_URL")
+            .unwrap_or_else(|_| "https://openrouter.ai/api/v1".into());
+        Ok(Self {
+            client: reqwest::Client::new(),
+            api_key,
+            model,
+            url: format!("{base}/rerank"),
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct CohereRerankResult {
+    index: usize,
+    relevance_score: f32,
+}
+
+#[derive(Deserialize)]
+struct CohereRerankResponse {
+    results: Vec<CohereRerankResult>,
+}
+
+#[async_trait]
+impl RerankBackend for OpenRouterReranker {
+    async fn rerank(&self, query: String, docs: Vec<String>) -> Result<Vec<(usize, f32)>> {
+        if docs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let body = serde_json::json!({
+            "model": self.model,
+            "query": query,
+            "documents": docs,
+        });
+        let resp = self
+            .client
+            .post(&self.url)
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .context("openrouter rerank request failed")?
+            .error_for_status()
+            .context("openrouter rerank returned non-2xx")?;
+        let parsed: CohereRerankResponse = resp
+            .json()
+            .await
+            .context("decoding openrouter rerank response")?;
+        let mut scored: Vec<(usize, f32)> = parsed
+            .results
+            .into_iter()
+            .map(|r| (r.index, r.relevance_score))
+            .collect();
+        // OpenRouter/Cohere returns sorted by relevance_score desc; resort
+        // defensively in case a provider variant ever differs.
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         Ok(scored)
     }

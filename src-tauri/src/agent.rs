@@ -1,5 +1,5 @@
 use crate::db::{self, Node, SearchHit};
-use crate::embed::{EmbedderBackend, Reranker};
+use crate::embed::{EmbedderBackend, RerankBackend};
 use anyhow::Context;
 use futures::StreamExt;
 use rig::agent::MultiTurnStreamItem;
@@ -172,7 +172,7 @@ fn looks_contextual(q: &str) -> bool {
 pub struct SearchAgentic {
     pub conn: Connection,
     pub embedder: Arc<dyn EmbedderBackend>,
-    pub reranker: Arc<Reranker>,
+    pub reranker: Arc<dyn RerankBackend>,
     pub rewriter: QueryRewriter,
 }
 
@@ -272,7 +272,7 @@ const EXPAND_POOL_MAX: usize = 64;
 pub struct SearchAndExpand {
     pub conn: Connection,
     pub embedder: Arc<dyn EmbedderBackend>,
-    pub reranker: Arc<Reranker>,
+    pub reranker: Arc<dyn RerankBackend>,
     pub rewriter: QueryRewriter,
 }
 
@@ -702,7 +702,7 @@ impl Tool for LinkNodes {
 fn build_agent(
     conn: Connection,
     embedder: Arc<dyn EmbedderBackend>,
-    reranker: Arc<Reranker>,
+    reranker: Arc<dyn RerankBackend>,
     rewriter: QueryRewriter,
 ) -> Result<rig::agent::Agent<openrouter::CompletionModel>, AgentError> {
     let client = openrouter::Client::from_env()
@@ -738,7 +738,7 @@ fn build_agent(
 pub async fn run_chat(
     conn: Connection,
     embedder: Arc<dyn EmbedderBackend>,
-    reranker: Arc<Reranker>,
+    reranker: Arc<dyn RerankBackend>,
     message: String,
 ) -> Result<String, AgentError> {
     // Single-shot chat — no prior turns to resolve references against.
@@ -780,7 +780,7 @@ pub enum ChatEvent {
 pub async fn run_chat_stream(
     conn: Connection,
     embedder: Arc<dyn EmbedderBackend>,
-    reranker: Arc<Reranker>,
+    reranker: Arc<dyn RerankBackend>,
     history: Vec<ChatTurn>,
     message: String,
     emit: impl Fn(ChatEvent) + Send + Sync + 'static,

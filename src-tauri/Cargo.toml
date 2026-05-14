@@ -26,7 +26,7 @@ rusqlite = { version = "0.37", features = ["bundled", "load_extension"] }
 tokio-rusqlite = "0.7"
 sqlite-vec = "0.1.9"
 tokio = { version = "1.52.3", features = ["full"] }
-fastembed = "5.13.4"
+fastembed = { version = "5.13.4", optional = true }
 anyhow = "1.0.102"
 thiserror = "2.0.18"
 tracing = "0.1.44"
@@ -42,4 +42,12 @@ schemars = "1"
 rust-stemmers = "1.2.0"
 dotenvy = "0.15.7"
 sha1 = "0.11.0"
+
+[features]
+default = []
+# Compile in the fastembed-based local embedder + reranker. Adds ~300 MB of
+# transitive deps (ort, hf-hub, tokenizers). Off by default — cloud providers
+# (OpenRouter, OpenAI, etc.) are the supported path. Enable with
+# `--features local-models` if you want offline-capable embedding/rerank.
+local-models = ["dep:fastembed"]
 

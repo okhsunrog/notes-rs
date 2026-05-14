@@ -45,11 +45,7 @@ function App() {
     return (
       <div className="flex h-screen flex-col items-center justify-center gap-3 bg-background text-foreground">
         <Loader2 className="size-6 animate-spin text-muted-foreground" />
-        <p className="text-sm text-muted-foreground">
-          starting notes-rs…
-          <br />
-          first launch downloads the embedder (~2.3 GB)
-        </p>
+        <p className="text-sm text-muted-foreground">starting notes-rs…</p>
       </div>
     );
   }

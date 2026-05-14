@@ -1,6 +1,6 @@
 use crate::agent::{ChatEvent, ChatTurn};
 use crate::db::{self, Node, SearchHit};
-use crate::embed::{EmbedderBackend, Reranker};
+use crate::embed::{EmbedderBackend, RerankBackend};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::State;
@@ -10,7 +10,7 @@ use tokio_rusqlite::Connection;
 pub struct AppState {
     pub conn: Connection,
     pub embedder: Arc<dyn EmbedderBackend>,
-    pub reranker: Arc<Reranker>,
+    pub reranker: Arc<dyn RerankBackend>,
 }
 
 /// Registered immediately in setup so the frontend can ask whether the heavy

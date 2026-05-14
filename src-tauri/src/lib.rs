@@ -49,7 +49,7 @@ pub fn run() {
                 let ndims = embedder.ndims();
                 tracing::info!(embedder = %id, ndims, "embedder loaded");
                 let conn = db::open(&db_path, &id, ndims).await.expect("opening db");
-                let reranker = Arc::new(embed::Reranker::new().expect("loading reranker"));
+                let reranker = embed::make_reranker().expect("loading reranker");
                 embed::spawn_worker(conn.clone(), embedder.clone());
                 let extractor = Arc::new(extract::EntityExtractor::new());
                 extract::spawn_worker(conn.clone(), extractor, handle.clone());
