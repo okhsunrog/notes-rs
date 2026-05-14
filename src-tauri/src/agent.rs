@@ -38,6 +38,10 @@ Workflow:
 
 You may create new nodes (`create_node`) and link them (`link_nodes`) when the user explicitly asks
 to record something. Never modify existing nodes without asking.
+
+When calling a search tool, always write a fully self-contained query that resolves any references
+from the chat so far ("that one", "the second", "те", etc.) — the search index does not see the
+conversation history, only your query string. Prefer concrete nouns over pronouns.
 "#;
 
 #[derive(Debug, thiserror::Error)]
@@ -54,6 +58,114 @@ fn into_tool_err(e: anyhow::Error) -> ToolError {
     ToolError::ToolCallError(format!("{e:#}").into())
 }
 
+// ───────────────────────── query rewriter ─────────────────────────
+
+/// Resolves conversational references in a tool-issued search query.
+///
+/// The agent already sees the chat history when it picks tool args, but
+/// cheaper models sometimes echo the user's literal phrasing ("and the
+/// second one?") as the search query. This is a safety net: when a query
+/// looks contextual we issue one extra LLM call to rewrite it into a
+/// standalone form. When history is empty or the query already looks
+/// self-contained we pass through.
+#[derive(Clone)]
+pub struct QueryRewriter {
+    /// Pre-formatted history block, ready to drop into a prompt.
+    history_text: Arc<String>,
+}
+
+impl QueryRewriter {
+    pub fn new(history: &[ChatTurn]) -> Self {
+        use std::fmt::Write;
+        let mut s = String::new();
+        for t in history {
+            match t {
+                ChatTurn::User { text } => {
+                    let _ = writeln!(s, "[user]: {text}");
+                }
+                ChatTurn::Assistant { text } => {
+                    let _ = writeln!(s, "[assistant]: {text}");
+                }
+            }
+        }
+        Self {
+            history_text: Arc::new(s),
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            history_text: Arc::new(String::new()),
+        }
+    }
+
+    pub async fn rewrite(&self, query: &str) -> String {
+        if self.history_text.is_empty() || !looks_contextual(query) {
+            return query.to_string();
+        }
+        match self.try_rewrite(query).await {
+            Ok(s) if !s.is_empty() => s,
+            Ok(_) => query.to_string(),
+            Err(e) => {
+                tracing::warn!(error = ?e, query, "query rewrite failed; using original");
+                query.to_string()
+            }
+        }
+    }
+
+    async fn try_rewrite(&self, query: &str) -> anyhow::Result<String> {
+        let client = openrouter::Client::from_env()
+            .context("OPENROUTER_API_KEY not set")?;
+        let prompt = format!(
+            "Conversation history:\n{history}\nSearch query: {query}\n\n\
+             Rewrite the query into a fully standalone form that resolves \
+             any conversational references (pronouns, 'the second one', \
+             'this', 'that one', 'те', 'этот', 'предыдущий', etc.) using \
+             the history above. Keep it concise. If the query already \
+             stands alone, return it unchanged. Reply with ONLY the \
+             rewritten query — no quotes, no explanation, no labels.",
+            history = self.history_text,
+            query = query,
+        );
+        let agent = client
+            .agent(MODEL)
+            .preamble("You rewrite search queries to be self-contained.")
+            .max_tokens(120)
+            .build();
+        let raw: String = agent.prompt(prompt).await?;
+        Ok(raw
+            .trim()
+            .trim_start_matches("Rewritten query:")
+            .trim_matches('"')
+            .trim_matches('`')
+            .trim()
+            .to_string())
+    }
+}
+
+/// Heuristic gate: only call the rewriter when the query has tells of a
+/// conversational reference. Avoids the extra LLM call on the vast majority
+/// of obviously-standalone queries.
+fn looks_contextual(q: &str) -> bool {
+    if q.trim().is_empty() {
+        return false;
+    }
+    if q.split_whitespace().count() <= 3 {
+        return true;
+    }
+    let lower = q.to_lowercase();
+    // English + Russian demonstratives/pronouns commonly used to refer back.
+    const CUES: &[&str] = &[
+        " this", " that", " it ", " these", " those", " same",
+        " above", " previous", " former", " latter",
+        " second", " first", " third",
+        "тот", "то ", "эт", "ту ", "те ",
+        "предыдущ", "выше", "ранее",
+    ];
+    let padded = format!(" {lower} ");
+    CUES.iter().any(|c| padded.contains(c))
+}
+
 // ───────────────────────── search_agentic ─────────────────────────
 
 #[derive(Clone)]
@@ -61,6 +173,7 @@ pub struct SearchAgentic {
     pub conn: Connection,
     pub embedder: Arc<dyn EmbedderBackend>,
     pub reranker: Arc<Reranker>,
+    pub rewriter: QueryRewriter,
 }
 
 #[derive(Deserialize)]
@@ -95,16 +208,17 @@ impl Tool for SearchAgentic {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let query = self.rewriter.rewrite(&args.query).await;
         let emb = self
             .embedder
-            .embed_query(args.query.clone())
+            .embed_query(query.clone())
             .await
             .map_err(into_tool_err)?;
         // Pool floor: at low `limit` (e.g. 3) the default `limit*4 = 12` is
         // too narrow when BM25 and vector channels disagree. Widen the rerank
         // input so we don't starve the reranker of plausible candidates.
         let pool = (args.limit * 4).max(RERANK_POOL_MIN);
-        let candidates = db::search_hybrid(&self.conn, args.query.clone(), emb, pool)
+        let candidates = db::search_hybrid(&self.conn, query.clone(), emb, pool)
             .await
             .map_err(into_tool_err)?;
         if candidates.is_empty() {
@@ -122,7 +236,7 @@ impl Tool for SearchAgentic {
             .collect();
         let scored = self
             .reranker
-            .rerank(args.query, docs)
+            .rerank(query, docs)
             .await
             .map_err(into_tool_err)?;
         // Score floor: BGE-reranker scores below ~RELEVANCE_FLOOR are
@@ -159,6 +273,7 @@ pub struct SearchAndExpand {
     pub conn: Connection,
     pub embedder: Arc<dyn EmbedderBackend>,
     pub reranker: Arc<Reranker>,
+    pub rewriter: QueryRewriter,
 }
 
 impl Tool for SearchAndExpand {
@@ -183,13 +298,14 @@ impl Tool for SearchAndExpand {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let query = self.rewriter.rewrite(&args.query).await;
         let emb = self
             .embedder
-            .embed_query(args.query.clone())
+            .embed_query(query.clone())
             .await
             .map_err(into_tool_err)?;
         let seed_pool = (args.limit * 4).max(RERANK_POOL_MIN);
-        let seeds = db::search_hybrid(&self.conn, args.query.clone(), emb, seed_pool)
+        let seeds = db::search_hybrid(&self.conn, query.clone(), emb, seed_pool)
             .await
             .map_err(into_tool_err)?;
         if seeds.is_empty() {
@@ -224,7 +340,7 @@ impl Tool for SearchAndExpand {
             .collect();
         let scored = self
             .reranker
-            .rerank(args.query, docs)
+            .rerank(query, docs)
             .await
             .map_err(into_tool_err)?;
         Ok(scored
@@ -587,6 +703,7 @@ fn build_agent(
     conn: Connection,
     embedder: Arc<dyn EmbedderBackend>,
     reranker: Arc<Reranker>,
+    rewriter: QueryRewriter,
 ) -> Result<rig::agent::Agent<openrouter::CompletionModel>, AgentError> {
     let client = openrouter::Client::from_env()
         .context("OPENROUTER_API_KEY not set")
@@ -599,11 +716,13 @@ fn build_agent(
             conn: conn.clone(),
             embedder: embedder.clone(),
             reranker: reranker.clone(),
+            rewriter: rewriter.clone(),
         })
         .tool(SearchAgentic {
             conn: conn.clone(),
             embedder,
             reranker,
+            rewriter,
         })
         .tool(Neighbors { conn: conn.clone() })
         .tool(FindBacklinks { conn: conn.clone() })
@@ -622,7 +741,8 @@ pub async fn run_chat(
     reranker: Arc<Reranker>,
     message: String,
 ) -> Result<String, AgentError> {
-    let agent = build_agent(conn, embedder, reranker)?;
+    // Single-shot chat — no prior turns to resolve references against.
+    let agent = build_agent(conn, embedder, reranker, QueryRewriter::empty())?;
     agent
         .prompt(message)
         .max_turns(8)
@@ -665,7 +785,8 @@ pub async fn run_chat_stream(
     message: String,
     emit: impl Fn(ChatEvent) + Send + Sync + 'static,
 ) -> Result<String, AgentError> {
-    let agent = build_agent(conn, embedder, reranker)?;
+    let rewriter = QueryRewriter::new(&history);
+    let agent = build_agent(conn, embedder, reranker, rewriter)?;
     let history: Vec<Message> = history.into_iter().map(Into::into).collect();
 
     let mut stream = agent
