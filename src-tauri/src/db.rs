@@ -648,6 +648,144 @@ pub async fn neighbors(
     Ok(nodes)
 }
 
+/// Nodes that link *to* `node_id` via an outgoing edge. Unlike `neighbors`
+/// (which is undirected), this is one-directional: it answers "who points
+/// at me?". Optional `kind` filter narrows to e.g. only `refs` for explicit
+/// wikilinks/block-refs, or `mentions` for entity links.
+pub async fn find_backlinks(
+    conn: &Connection,
+    node_id: i64,
+    kind: Option<String>,
+) -> Result<Vec<Node>> {
+    let rows = conn
+        .call(move |c| -> rusqlite::Result<Vec<Node>> {
+            let sql = if kind.is_some() {
+                format!(
+                    "SELECT {NODE_COLUMNS} FROM nodes n
+                     JOIN edges e ON e.src = n.id
+                     WHERE e.dst = ?1 AND e.kind = ?2
+                     ORDER BY n.updated_at DESC"
+                )
+            } else {
+                format!(
+                    "SELECT {NODE_COLUMNS} FROM nodes n
+                     JOIN edges e ON e.src = n.id
+                     WHERE e.dst = ?1
+                     ORDER BY n.updated_at DESC"
+                )
+            };
+            let mut stmt = c.prepare(&sql)?;
+            let rows = match kind {
+                Some(k) => stmt
+                    .query_map(rusqlite::params![node_id, k], row_to_node)?
+                    .collect::<Result<Vec<_>, _>>()?,
+                None => stmt
+                    .query_map([node_id], row_to_node)?
+                    .collect::<Result<Vec<_>, _>>()?,
+            };
+            Ok(rows)
+        })
+        .await?;
+    Ok(rows)
+}
+
+/// Walk the parent chain from `node_id` up to the root. Returns root-first so
+/// the LLM reads it like a breadcrumb. The starting node itself is included
+/// as the last element.
+pub async fn read_ancestors(conn: &Connection, node_id: i64) -> Result<Vec<Node>> {
+    let rows = conn
+        .call(move |c| -> rusqlite::Result<Vec<Node>> {
+            let sql = format!(
+                "WITH RECURSIVE up(id, parent_id, depth) AS (
+                   SELECT id, parent_id, 0 FROM nodes WHERE id = ?1
+                   UNION ALL
+                   SELECT n.id, n.parent_id, u.depth + 1
+                     FROM up u JOIN nodes n ON n.id = u.parent_id
+                 )
+                 SELECT {NODE_COLUMNS} FROM up u
+                 JOIN nodes n ON n.id = u.id
+                 ORDER BY u.depth DESC"
+            );
+            let mut stmt = c.prepare(&sql)?;
+            let rows = stmt
+                .query_map([node_id], row_to_node)?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await?;
+    Ok(rows)
+}
+
+/// All descendants of `node_id` up to `depth` levels. Returned in pre-order
+/// DFS via a lexicographic sort path so the result reads like an outline:
+/// each block immediately followed by its own children. Excludes `node_id`
+/// itself.
+pub async fn read_subtree(
+    conn: &Connection,
+    node_id: i64,
+    depth: u32,
+) -> Result<Vec<Node>> {
+    let rows = conn
+        .call(move |c| -> rusqlite::Result<Vec<Node>> {
+            // sort_path is zero-padded floats joined by '/', so lexicographic
+            // sort matches the outline order. We assume non-negative
+            // positions, which holds for blocks created via create_block /
+            // move_block.
+            let sql = format!(
+                "WITH RECURSIVE down(id, sort_path, depth) AS (
+                   SELECT id, '', 0 FROM nodes WHERE id = ?1
+                   UNION ALL
+                   SELECT n.id,
+                          d.sort_path || '/' ||
+                            printf('%015.6f', COALESCE(n.position, 0.0)),
+                          d.depth + 1
+                     FROM down d JOIN nodes n ON n.parent_id = d.id
+                     WHERE d.depth < ?2
+                 )
+                 SELECT {NODE_COLUMNS} FROM down d
+                 JOIN nodes n ON n.id = d.id
+                 WHERE n.id != ?1
+                 ORDER BY d.sort_path"
+            );
+            let mut stmt = c.prepare(&sql)?;
+            let rows = stmt
+                .query_map(rusqlite::params![node_id, depth as i64], row_to_node)?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await?;
+    Ok(rows)
+}
+
+/// Nodes that reference the given tag/entity by its (case-insensitive) title.
+/// Matches both `kind='tag'` and `kind='entity'` since the extractor emits
+/// entities, while user-typed `#tags` would become tag rows when that path
+/// is added.
+pub async fn find_tagged(conn: &Connection, title: String) -> Result<Vec<Node>> {
+    let rows = conn
+        .call(move |c| -> rusqlite::Result<Vec<Node>> {
+            let sql = format!(
+                "SELECT {NODE_COLUMNS} FROM nodes n
+                 WHERE EXISTS (
+                   SELECT 1 FROM edges e
+                   JOIN nodes t ON t.id = e.dst
+                   WHERE e.src = n.id
+                     AND e.kind IN ('mentions', 'refs')
+                     AND t.kind IN ('tag', 'entity')
+                     AND lower(t.title) = lower(?1)
+                 )
+                 ORDER BY n.updated_at DESC"
+            );
+            let mut stmt = c.prepare(&sql)?;
+            let rows = stmt
+                .query_map([title], row_to_node)?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await?;
+    Ok(rows)
+}
+
 pub async fn list_entities(conn: &Connection, limit: u32) -> Result<Vec<Node>> {
     let rows = conn
         .call(move |c| -> rusqlite::Result<Vec<Node>> {

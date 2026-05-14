@@ -26,8 +26,13 @@ Workflow:
    the default because the graph almost always adds useful context.
 2. Use `search_agentic` only when you want plain text-relevance with no graph
    expansion (e.g. you're looking for exact wording).
-3. Use `neighbors` or `get_node` to drill into specific nodes after you've
-   identified them by id.
+3. Drill into specific nodes once you have ids:
+   - `read_ancestors` for the outline breadcrumb above a block,
+   - `read_subtree` to read everything under a page or section,
+   - `find_backlinks` for "who points at this?",
+   - `find_tagged` for "what mentions entity/tag X?",
+   - `neighbors` for undirected graph walks,
+   - `get_node` for a single row.
 4. Cite node IDs (e.g. "see node #42") in your final answer.
 5. If nothing relevant found, say so plainly. Do not fabricate.
 
@@ -279,6 +284,168 @@ impl Tool for Neighbors {
     }
 }
 
+// ───────────────────────── find_backlinks ─────────────────────────
+
+#[derive(Clone)]
+pub struct FindBacklinks {
+    pub conn: Connection,
+}
+
+#[derive(Deserialize)]
+pub struct FindBacklinksArgs {
+    pub id: i64,
+    /// Optional edge-kind filter, e.g. "refs" or "mentions".
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+impl Tool for FindBacklinks {
+    const NAME: &'static str = "find_backlinks";
+    type Error = ToolError;
+    type Args = FindBacklinksArgs;
+    type Output = Vec<Node>;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.into(),
+            description: "Find nodes that link TO the given node (incoming edges only — different from `neighbors`, which is undirected). Optional `kind` filter: 'refs' for wikilinks/block-refs, 'mentions' for entity mentions.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer", "description": "Target node id" },
+                    "kind": { "type": ["string", "null"], "description": "Optional edge-kind filter" }
+                },
+                "required": ["id"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        db::find_backlinks(&self.conn, args.id, args.kind)
+            .await
+            .map_err(into_tool_err)
+    }
+}
+
+// ───────────────────────── read_ancestors ─────────────────────────
+
+#[derive(Clone)]
+pub struct ReadAncestors {
+    pub conn: Connection,
+}
+
+#[derive(Deserialize)]
+pub struct ReadAncestorsArgs {
+    pub id: i64,
+}
+
+impl Tool for ReadAncestors {
+    const NAME: &'static str = "read_ancestors";
+    type Error = ToolError;
+    type Args = ReadAncestorsArgs;
+    type Output = Vec<Node>;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.into(),
+            description: "Walk the parent chain from this node up to the page root. Returned root-first; the node itself is the last element. Useful for getting an outline breadcrumb / surrounding context for a block.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": { "id": { "type": "integer" } },
+                "required": ["id"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        db::read_ancestors(&self.conn, args.id)
+            .await
+            .map_err(into_tool_err)
+    }
+}
+
+// ───────────────────────── read_subtree ─────────────────────────
+
+#[derive(Clone)]
+pub struct ReadSubtree {
+    pub conn: Connection,
+}
+
+#[derive(Deserialize)]
+pub struct ReadSubtreeArgs {
+    pub id: i64,
+    #[serde(default = "default_subtree_depth")]
+    pub depth: u32,
+}
+fn default_subtree_depth() -> u32 {
+    4
+}
+
+impl Tool for ReadSubtree {
+    const NAME: &'static str = "read_subtree";
+    type Error = ToolError;
+    type Args = ReadSubtreeArgs;
+    type Output = Vec<Node>;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.into(),
+            description: "Return all descendants of `id` up to `depth` levels, in outline (DFS pre-order) order. Use this to read the entire subtree below a page or section.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "depth": { "type": "integer", "description": "Max levels to descend (default 4)", "default": 4 }
+                },
+                "required": ["id"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        db::read_subtree(&self.conn, args.id, args.depth)
+            .await
+            .map_err(into_tool_err)
+    }
+}
+
+// ───────────────────────── find_tagged ─────────────────────────
+
+#[derive(Clone)]
+pub struct FindTagged {
+    pub conn: Connection,
+}
+
+#[derive(Deserialize)]
+pub struct FindTaggedArgs {
+    pub title: String,
+}
+
+impl Tool for FindTagged {
+    const NAME: &'static str = "find_tagged";
+    type Error = ToolError;
+    type Args = FindTaggedArgs;
+    type Output = Vec<Node>;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.into(),
+            description: "Find blocks/pages that mention an entity or tag with the given title (case-insensitive). Use this when the user asks about a specific person/project/concept and you want everything connected to it.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": { "title": { "type": "string" } },
+                "required": ["title"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        db::find_tagged(&self.conn, args.title)
+            .await
+            .map_err(into_tool_err)
+    }
+}
+
 // ───────────────────────── get_node ─────────────────────────
 
 #[derive(Clone)]
@@ -439,6 +606,10 @@ fn build_agent(
             reranker,
         })
         .tool(Neighbors { conn: conn.clone() })
+        .tool(FindBacklinks { conn: conn.clone() })
+        .tool(ReadAncestors { conn: conn.clone() })
+        .tool(ReadSubtree { conn: conn.clone() })
+        .tool(FindTagged { conn: conn.clone() })
         .tool(GetNode { conn: conn.clone() })
         .tool(CreateNode { conn: conn.clone() })
         .tool(LinkNodes { conn })
