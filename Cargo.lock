@@ -5529,6 +5529,7 @@ dependencies = [
  "rustc_version",
  "serde_json",
  "specta-macros",
+ "uuid",
 ]
 
 [[package]]
