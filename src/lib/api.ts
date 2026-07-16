@@ -212,6 +212,18 @@ export function deleteAttachment(id: number) {
   return invoke<boolean>("delete_attachment", { id });
 }
 
+export function getHistoryStatus() {
+  return invoke<[number, number]>("history_status");
+}
+
+export function undo() {
+  return invoke<boolean>("undo");
+}
+
+export function redo() {
+  return invoke<boolean>("redo");
+}
+
 export function getNode(id: number) {
   return invoke<Node | null>("get_node", { id });
 }

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTheme } from "next-themes";
 import {
   ArrowLeft,
   Check,
@@ -55,6 +56,7 @@ export function SettingsPage({
   dataAvailable,
   onDataChanged,
 }: Props) {
+  const { theme, setTheme } = useTheme();
   const [settings, setSettings] = useState<SettingsSnapshot | null>(null);
   const [secrets, setSecrets] = useState<Record<string, string>>({});
   const [clearKeys, setClearKeys] = useState<string[]>([]);
@@ -246,6 +248,23 @@ export function SettingsPage({
       </header>
 
       <form onSubmit={submit} className="mx-auto max-w-3xl space-y-8 p-6">
+        <SettingsSection
+          title="Appearance"
+          description="Follow the desktop color scheme or keep a fixed light or dark palette."
+        >
+          <Field label="Color theme">
+            <select
+              value={theme ?? "system"}
+              onChange={(event) => setTheme(event.currentTarget.value)}
+              className="h-9 w-full rounded-md border bg-background px-3 text-sm"
+            >
+              <option value="system">System</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
+          </Field>
+        </SettingsSection>
+
         <SettingsSection
           title="Window"
           description="Choose the native GTK frame, a borderless notes-rs frame, or KWin's server-side decoration on native Wayland."

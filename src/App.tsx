@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { Loader2, Settings } from "lucide-react";
+import { Loader2, Redo2, Settings, Undo2 } from "lucide-react";
 import { AppLayout } from "@/app/layout";
 import { WindowControls } from "@/app/window-controls";
 import { Toaster } from "@/components/ui/sonner";
@@ -13,9 +13,12 @@ import { SettingsPage } from "@/features/settings/settings-page";
 import { Button } from "@/components/ui/button";
 import {
   getContainingPage,
+  getHistoryStatus,
   getStartupStatus,
   loadSettings,
   deletePage,
+  redo,
+  undo,
   type Node,
   type SearchHit,
 } from "@/lib/api";
@@ -30,12 +33,56 @@ function App() {
   const [windowDecorationMode, setWindowDecorationMode] = useState<"native" | "borderless" | "kde">(
     "native",
   );
+  const [history, setHistory] = useState<[number, number]>([0, 0]);
+
+  const moveHistory = useCallback(async (direction: "undo" | "redo") => {
+    try {
+      const changed = direction === "undo" ? await undo() : await redo();
+      if (changed) {
+        setActiveNode(null);
+        setHits([]);
+        setStatus(direction === "undo" ? "Undid structural change." : "Redid structural change.");
+        setHistory(await getHistoryStatus());
+      }
+    } catch (error) {
+      setStatus(`${direction} error: ${String(error)}`);
+    }
+  }, []);
 
   useEffect(() => {
     loadSettings()
       .then((settings) => setWindowDecorationMode(settings.windowDecorationMode))
       .catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    if (!ready) return;
+    let active = true;
+    const refresh = () =>
+      getHistoryStatus()
+        .then((value) => active && setHistory(value))
+        .catch(() => undefined);
+    void refresh();
+    const timer = window.setInterval(refresh, 1000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [ready]);
+
+  useEffect(() => {
+    if (!ready) return;
+    const keydown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.matches("input, textarea, [contenteditable=true]")) return;
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        void moveHistory(event.shiftKey ? "redo" : "undo");
+      }
+    };
+    window.addEventListener("keydown", keydown);
+    return () => window.removeEventListener("keydown", keydown);
+  }, [ready, moveHistory]);
 
   useEffect(() => {
     let cancelled = false;
@@ -157,6 +204,24 @@ function App() {
         status={status}
         headerActions={
           <>
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-label="Undo structural change"
+              disabled={history[0] === 0}
+              onClick={() => void moveHistory("undo")}
+            >
+              <Undo2 className="size-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-label="Redo structural change"
+              disabled={history[1] === 0}
+              onClick={() => void moveHistory("redo")}
+            >
+              <Redo2 className="size-4" />
+            </Button>
             <Button
               variant="ghost"
               size="sm"

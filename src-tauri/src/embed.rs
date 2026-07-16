@@ -391,6 +391,10 @@ async fn tick(conn: &Connection, embedder: &dyn EmbedderBackend) -> Result<()> {
     if batch.is_empty() {
         return Ok(());
     }
+    let original_inputs = batch
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashMap<_, _>>();
     let (ids, texts): (Vec<i64>, Vec<String>) = batch.into_iter().unzip();
     let embs = match embedder.embed_passages(texts).await {
         Ok(embeddings) => embeddings,
@@ -412,7 +416,18 @@ async fn tick(conn: &Connection, embedder: &dyn EmbedderBackend) -> Result<()> {
             embedder.ndims()
         );
     }
-    let items: Vec<(i64, Vec<f32>)> = ids.into_iter().zip(embs).collect();
+    // A structural Undo/import can replace nodes while a network request is
+    // in flight. Only commit vectors whose current composed input is exactly
+    // the text sent to the provider.
+    let current_inputs = crate::db::take_pending_embeddings(conn, ids.len().max(16) as u32)
+        .await?
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>();
+    let items: Vec<(i64, Vec<f32>)> = ids
+        .into_iter()
+        .zip(embs)
+        .filter(|(id, _)| current_inputs.get(id) == original_inputs.get(id))
+        .collect();
     crate::db::write_embeddings(conn, items).await?;
     Ok(())
 }

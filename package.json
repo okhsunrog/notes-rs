@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "desktop:dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
     "tauri": "tauri",
     "prepare": "vp config"
   },

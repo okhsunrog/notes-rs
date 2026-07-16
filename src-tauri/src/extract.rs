@@ -138,7 +138,7 @@ async fn tick(conn: &Connection, extractor: &EntityExtractor, app: &AppHandle) -
         let text = format!("{}\n{content}", title.as_deref().unwrap_or(""));
         match extractor.extract(text).await {
             Ok(result) => {
-                match apply(conn, node_id, result).await {
+                match apply(conn, node_id, title.clone(), content.clone(), result).await {
                     Ok(()) => {
                         crate::db::set_last_extracted_hash(conn, node_id, new_hash).await?;
                         crate::db::finish_extraction(conn, node_id).await?;
@@ -161,7 +161,13 @@ async fn tick(conn: &Connection, extractor: &EntityExtractor, app: &AppHandle) -
     Ok(())
 }
 
-async fn apply(conn: &Connection, source_id: i64, result: ExtractionResult) -> Result<()> {
+async fn apply(
+    conn: &Connection,
+    source_id: i64,
+    expected_title: Option<String>,
+    expected_content: String,
+    result: ExtractionResult,
+) -> Result<()> {
     let entities = result
         .entities
         .into_iter()
@@ -172,5 +178,13 @@ async fn apply(conn: &Connection, source_id: i64, result: ExtractionResult) -> R
         .into_iter()
         .map(|relation| (relation.src, relation.dst, relation.kind))
         .collect();
-    crate::db::replace_extracted_edges(conn, source_id, entities, relations).await
+    crate::db::replace_extracted_edges(
+        conn,
+        source_id,
+        expected_title,
+        expected_content,
+        entities,
+        relations,
+    )
+    .await
 }

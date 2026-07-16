@@ -36,13 +36,13 @@ Durable plan for the per-block outliner that replaces BlockNote. Written before 
 | `Shift+Tab`                | Outdent: `move_block(id, parent.parent_id, parent.position + ε)` (place just after old parent)                       |
 | `Backspace` on empty block | Delete block; focus prev visible block (DFS predecessor) at end of its content                                       |
 | `Ctrl+↑` / `Ctrl+↓`        | Reorder among current parent's siblings                                                                              |
-| `Ctrl+Enter`               | Toggle fold (collapse children — UI state only, not persisted in v1)                                                 |
+| `Ctrl+Enter`               | Toggle fold (persisted locally per block UUID)                                                                       |
 | `[[`                       | Open inline page-link autocomplete (page titles via `list_pages` or new `search_pages_by_title`)                     |
 | `((`                       | Open inline block-ref autocomplete (FTS over block content)                                                          |
 
 ### Paste, selection, length
 
-- **Multi-paragraph paste:** split on blank lines into N sibling blocks. First paste shows a non-blocking toast: "Each paragraph became a block. You can undo with Ctrl+Z." Subsequent pastes silent.
+- **Multi-paragraph paste:** split on blank lines into N sibling blocks in one database transaction. First paste shows a non-blocking toast; structural Undo restores the previous outline.
 - **Selection:** single-block selection only in v1. Native browser select-across-divs is broken; we accept this.
 - **Long-block soft nudge:** at ≥ 600 chars in a block, show an info icon next to it (not modal, not blocking). Click → "Split this block into paragraphs?" → applies the same paste-split logic. _Never_ auto-dismissed; user explicitly chooses.
 

@@ -370,6 +370,19 @@ CREATE TABLE IF NOT EXISTS extracted_edge_sources (
   PRIMARY KEY(source_node_id, edge_id)
 );
 
+CREATE TABLE IF NOT EXISTS history_undo (
+  id INTEGER PRIMARY KEY,
+  action TEXT NOT NULL,
+  archive_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS history_redo (
+  id INTEGER PRIMARY KEY,
+  action TEXT NOT NULL,
+  archive_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
   body_stemmed,
   content='nodes', content_rowid='id',
@@ -735,11 +748,29 @@ pub async fn link_nodes(
 pub async fn replace_extracted_edges(
     conn: &Connection,
     source_id: i64,
+    expected_title: Option<String>,
+    expected_content: String,
     entities: Vec<(String, Option<String>)>,
     relations: Vec<(String, String, String)>,
 ) -> Result<()> {
     conn.call(move |c| -> rusqlite::Result<()> {
         let tx = c.transaction()?;
+
+        let source_unchanged = tx
+            .query_row(
+                "SELECT 1 FROM nodes
+                 WHERE id = ?1 AND kind IN ('page', 'block')
+                   AND title IS ?2 AND content = ?3",
+                rusqlite::params![source_id, expected_title, expected_content],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !source_unchanged {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "extraction source changed while the request was running".into(),
+            ));
+        }
 
         let old_edges = {
             let mut statement =
@@ -1674,6 +1705,90 @@ pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<(
     .await
 }
 
+pub async fn checkpoint_history(conn: &Connection, action: &str) -> Result<()> {
+    let archive = export_archive(conn).await?;
+    let json = serde_json::to_string(&archive)?;
+    let action = action.to_string();
+    conn.call(move |database| -> rusqlite::Result<()> {
+        let transaction = database.transaction()?;
+        transaction.execute(
+            "INSERT INTO history_undo(action, archive_json, created_at)
+             VALUES (?1, ?2, unixepoch())",
+            rusqlite::params![action, json],
+        )?;
+        transaction.execute("DELETE FROM history_redo", [])?;
+        transaction.execute(
+            "DELETE FROM history_undo WHERE id NOT IN (
+               SELECT id FROM history_undo ORDER BY id DESC LIMIT 50
+             )",
+            [],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    })
+    .await
+}
+
+pub async fn history_status(conn: &Connection) -> Result<(i64, i64)> {
+    conn.call(|database| {
+        database.query_row(
+            "SELECT
+               (SELECT COUNT(*) FROM history_undo),
+               (SELECT COUNT(*) FROM history_redo)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+    })
+    .await
+}
+
+pub async fn undo_history(conn: &Connection) -> Result<bool> {
+    move_history(conn, true).await
+}
+
+pub async fn redo_history(conn: &Connection) -> Result<bool> {
+    move_history(conn, false).await
+}
+
+async fn move_history(conn: &Connection, undo: bool) -> Result<bool> {
+    let source = if undo { "history_undo" } else { "history_redo" };
+    let target = if undo { "history_redo" } else { "history_undo" };
+    let entry = conn
+        .call(
+            move |database| -> rusqlite::Result<Option<(i64, String, String)>> {
+                let sql = format!(
+                    "SELECT id, action, archive_json FROM {source} ORDER BY id DESC LIMIT 1"
+                );
+                database
+                    .query_row(&sql, [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                    .optional()
+            },
+        )
+        .await?;
+    let Some((entry_id, action, json)) = entry else {
+        return Ok(false);
+    };
+    let destination_archive = export_archive(conn).await?;
+    let destination_json = serde_json::to_string(&destination_archive)?;
+    let archive: DataArchive = serde_json::from_str(&json)?;
+    import_archive(conn, archive).await?;
+    conn.call(move |database| -> rusqlite::Result<()> {
+        let transaction = database.transaction()?;
+        transaction.execute(&format!("DELETE FROM {source} WHERE id = ?1"), [entry_id])?;
+        transaction.execute(
+            &format!(
+                "INSERT INTO {target}(action, archive_json, created_at)
+                 VALUES (?1, ?2, unixepoch())"
+            ),
+            rusqlite::params![action, destination_json],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    })
+    .await?;
+    Ok(true)
+}
+
 /// Create a block. If `position` is `None`, append at end of parent's children
 /// (MAX(position) + 1.0). `parent_id = None` creates an orphan root block —
 /// rare; usually a block has a parent page.
@@ -2267,6 +2382,18 @@ pub async fn write_embeddings(conn: &Connection, items: Vec<(i64, Vec<f32>)>) ->
     conn.call(move |c| -> rusqlite::Result<()> {
         let tx = c.transaction()?;
         for (id, emb) in &items {
+            let still_pending = tx
+                .query_row(
+                    "SELECT 1 FROM embed_queue q JOIN nodes n ON n.id = q.node_id
+                     WHERE q.node_id = ?1",
+                    [id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if !still_pending {
+                continue;
+            }
             let blob: Vec<u8> = emb.iter().flat_map(|f| f.to_le_bytes()).collect();
             tx.execute("DELETE FROM vec_nodes WHERE rowid = ?1", [id])?;
             tx.execute(
@@ -2377,6 +2504,8 @@ mod tests {
         replace_extracted_edges(
             &connection,
             source.id,
+            source.title.clone(),
+            source.content.clone(),
             vec![
                 ("Rust".into(), Some("language".into())),
                 ("Tauri".into(), Some("framework".into())),
@@ -2386,9 +2515,16 @@ mod tests {
         .await
         .expect("apply extraction");
 
-        replace_extracted_edges(&connection, source.id, Vec::new(), Vec::new())
-            .await
-            .expect("clear extraction");
+        replace_extracted_edges(
+            &connection,
+            source.id,
+            source.title.clone(),
+            source.content.clone(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .await
+        .expect("clear extraction");
         let generated_edges: i64 = connection
             .call(|database| {
                 database.query_row(
@@ -2401,6 +2537,58 @@ mod tests {
             .await
             .expect("count generated edges");
         assert_eq!(generated_edges, 0);
+    }
+
+    #[tokio::test]
+    async fn stale_extraction_cannot_attach_entities_to_a_changed_source() {
+        let (_database, connection) = temporary_database().await;
+        let source = create_node(
+            &connection,
+            "page".into(),
+            Some("Before".into()),
+            "old content".into(),
+            None,
+        )
+        .await
+        .expect("create source");
+        update_node(
+            &connection,
+            source.id,
+            Some("After".into()),
+            "new content".into(),
+            None,
+        )
+        .await
+        .expect("change source");
+
+        let error = replace_extracted_edges(
+            &connection,
+            source.id,
+            source.title,
+            source.content,
+            vec![("Stale entity".into(), None)],
+            Vec::new(),
+        )
+        .await
+        .expect_err("stale result must be rejected");
+        assert!(error.to_string().contains("source changed"));
+        assert!(
+            get_page_by_title(&connection, "Stale entity".into())
+                .await
+                .expect("query stale entity")
+                .is_none()
+        );
+        let entity_count: i64 = connection
+            .call(|database| {
+                database.query_row(
+                    "SELECT COUNT(*) FROM nodes WHERE kind = 'entity'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .expect("count entities");
+        assert_eq!(entity_count, 0);
     }
 
     #[tokio::test]
@@ -2616,6 +2804,62 @@ mod tests {
                 .await
                 .expect("read cleared queues"),
             (0, 0, 0, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn structural_history_undoes_and_redoes_database_changes() {
+        let (_database, connection) = temporary_database().await;
+        let first = create_node(
+            &connection,
+            "page".into(),
+            Some("First".into()),
+            String::new(),
+            None,
+        )
+        .await
+        .expect("create first page");
+        checkpoint_history(&connection, "create second")
+            .await
+            .expect("checkpoint");
+        let second = create_node(
+            &connection,
+            "page".into(),
+            Some("Second".into()),
+            String::new(),
+            None,
+        )
+        .await
+        .expect("create second page");
+
+        assert!(undo_history(&connection).await.expect("undo"));
+        assert!(
+            get_node(&connection, first.id)
+                .await
+                .expect("first query")
+                .is_some()
+        );
+        assert!(
+            get_node(&connection, second.id)
+                .await
+                .expect("second query")
+                .is_none()
+        );
+        assert_eq!(
+            history_status(&connection).await.expect("undo status"),
+            (0, 1)
+        );
+
+        assert!(redo_history(&connection).await.expect("redo"));
+        assert!(
+            get_node(&connection, second.id)
+                .await
+                .expect("second query")
+                .is_some()
+        );
+        assert_eq!(
+            history_status(&connection).await.expect("redo status"),
+            (1, 0)
         );
     }
 }

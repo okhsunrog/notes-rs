@@ -24,20 +24,18 @@ pub fn run() {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    let mut builder = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init());
 
     // Development-only bridge for MCP-powered UI inspection and automation.
     // Restrict it to localhost; release builds do not register the plugin.
     #[cfg(debug_assertions)]
-    {
-        builder = builder.plugin(
-            tauri_plugin_mcp_bridge::Builder::new()
-                .bind_address("127.0.0.1")
-                .build(),
-        );
-    }
+    let builder = builder.plugin(
+        tauri_plugin_mcp_bridge::Builder::new()
+            .bind_address("127.0.0.1")
+            .build(),
+    );
 
     builder
         .setup(|app| {
@@ -132,6 +130,9 @@ pub fn run() {
             commands::set_background_paused,
             commands::retry_background_jobs,
             commands::clear_background_jobs,
+            commands::history_status,
+            commands::undo,
+            commands::redo,
             commands::create_node,
             commands::update_node,
             commands::update_block_with_refs,

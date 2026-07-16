@@ -161,6 +161,9 @@ pub async fn split_block(
     id: i64,
     parts: Vec<db::BlockContent>,
 ) -> Result<Vec<Node>, String> {
+    db::checkpoint_history(&state.conn, "split block")
+        .await
+        .map_err(err)?;
     let nodes = db::split_block(&state.conn, id, parts).await.map_err(err)?;
     let _ = app.emit("pages:changed", ());
     Ok(nodes)
@@ -219,17 +222,16 @@ pub async fn delete_page(
     state: State<'_, AppState>,
     id: i64,
 ) -> Result<bool, String> {
+    db::checkpoint_history(&state.conn, "delete page")
+        .await
+        .map_err(err)?;
     write_backup(&app, &state.conn, "before-delete")
         .await
         .map_err(err)?;
     let attachments = db::delete_page(&state.conn, id).await.map_err(err)?;
-    if let Some(attachments) = &attachments {
-        for attachment in attachments {
-            let path = safe_app_data_path(&app, &attachment.content).map_err(err)?;
-            if path.exists() {
-                std::fs::remove_file(path).map_err(err)?;
-            }
-        }
+    if attachments.is_some() {
+        // Retain attachment payloads so structural Undo can restore their
+        // database nodes. Explicit attachment deletion removes the file.
         let _ = app.emit("pages:changed", ());
         let _ = app.emit("entities:changed", ());
     }
@@ -573,6 +575,9 @@ pub async fn create_block(
     content: String,
     content_json: Option<String>,
 ) -> Result<Node, String> {
+    db::checkpoint_history(&state.conn, "create block")
+        .await
+        .map_err(err)?;
     db::create_block(&state.conn, parent_id, position, content, content_json)
         .await
         .map_err(err)
@@ -585,6 +590,9 @@ pub async fn move_block(
     new_parent_id: Option<i64>,
     new_position: Option<f64>,
 ) -> Result<Node, String> {
+    db::checkpoint_history(&state.conn, "move block")
+        .await
+        .map_err(err)?;
     db::move_block(&state.conn, id, new_parent_id, new_position)
         .await
         .map_err(err)
@@ -596,6 +604,9 @@ pub async fn reorder_block(
     id: i64,
     direction: String,
 ) -> Result<Node, String> {
+    db::checkpoint_history(&state.conn, "reorder block")
+        .await
+        .map_err(err)?;
     db::reorder_block(&state.conn, id, direction)
         .await
         .map_err(err)
@@ -603,6 +614,9 @@ pub async fn reorder_block(
 
 #[tauri::command]
 pub async fn delete_block(state: State<'_, AppState>, id: i64) -> Result<bool, String> {
+    db::checkpoint_history(&state.conn, "delete block")
+        .await
+        .map_err(err)?;
     db::delete_block(&state.conn, id).await.map_err(err)
 }
 
@@ -660,11 +674,41 @@ pub async fn create_page(
     if title.is_empty() {
         return Err("title is required".into());
     }
+    db::checkpoint_history(&state.conn, "create page")
+        .await
+        .map_err(err)?;
     let page = db::create_node(&state.conn, "page".into(), Some(title), String::new(), None)
         .await
         .map_err(err)?;
     let _ = app.emit("pages:changed", ());
     Ok(page)
+}
+
+#[tauri::command]
+pub async fn history_status(state: State<'_, AppState>) -> Result<(i64, i64), String> {
+    db::history_status(&state.conn).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn undo(app: AppHandle, state: State<'_, AppState>) -> Result<bool, String> {
+    let changed = db::undo_history(&state.conn).await.map_err(err)?;
+    if changed {
+        let _ = app.emit("pages:changed", ());
+        let _ = app.emit("entities:changed", ());
+        let _ = app.emit("history:changed", ());
+    }
+    Ok(changed)
+}
+
+#[tauri::command]
+pub async fn redo(app: AppHandle, state: State<'_, AppState>) -> Result<bool, String> {
+    let changed = db::redo_history(&state.conn).await.map_err(err)?;
+    if changed {
+        let _ = app.emit("pages:changed", ());
+        let _ = app.emit("entities:changed", ());
+        let _ = app.emit("history:changed", ());
+    }
+    Ok(changed)
 }
 
 #[tauri::command]
