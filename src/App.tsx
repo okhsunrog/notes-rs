@@ -118,8 +118,9 @@ function App() {
   useEffect(() => {
     if (!ready) return;
     const keydown = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (target?.matches("input, textarea, [contenteditable=true]")) return;
+      const target = event.target;
+      if (target instanceof Element && target.matches("input, textarea, [contenteditable=true]"))
+        return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
         event.preventDefault();
         void moveHistory(event.shiftKey ? "redo" : "undo");
