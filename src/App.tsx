@@ -1,14 +1,23 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { Loader2 } from "lucide-react";
+import { Loader2, Settings } from "lucide-react";
 import { AppLayout } from "@/app/layout";
+import { WindowControls } from "@/app/window-controls";
 import { Toaster } from "@/components/ui/sonner";
 import { SearchCard } from "@/features/search/search-card";
 import { EntitiesCard } from "@/features/entities/entities-card";
 import { ChatCard } from "@/features/chat/chat-card";
 import { PagesList } from "@/features/pages/pages-list";
 import { PageView } from "@/features/pages/page-view";
-import { getContainingPage, getStartupStatus, type Node, type SearchHit } from "@/lib/api";
+import { SettingsPage } from "@/features/settings/settings-page";
+import { Button } from "@/components/ui/button";
+import {
+  getContainingPage,
+  getStartupStatus,
+  loadSettings,
+  type Node,
+  type SearchHit,
+} from "@/lib/api";
 
 function App() {
   const [ready, setReady] = useState(false);
@@ -16,6 +25,16 @@ function App() {
   const [status, setStatus] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [activeNode, setActiveNode] = useState<Node | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [windowDecorationMode, setWindowDecorationMode] = useState<"native" | "borderless" | "kde">(
+    "native",
+  );
+
+  useEffect(() => {
+    loadSettings()
+      .then((settings) => setWindowDecorationMode(settings.windowDecorationMode))
+      .catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -64,16 +83,37 @@ function App() {
     }
   }
 
+  if (settingsOpen) {
+    return (
+      <SettingsPage
+        onBack={() => setSettingsOpen(false)}
+        onDecorationModeChanged={setWindowDecorationMode}
+      />
+    );
+  }
+
   if (!ready) {
     return (
       <div className="flex h-screen flex-col items-center justify-center gap-3 bg-background text-foreground">
+        {windowDecorationMode === "borderless" && (
+          <div
+            data-tauri-drag-region
+            className="fixed inset-x-0 top-0 flex h-10 justify-end border-b bg-background"
+          >
+            <WindowControls />
+          </div>
+        )}
         {startupError ? (
           <div className="max-w-lg rounded-md border border-destructive/40 bg-destructive/5 p-5">
             <h1 className="font-semibold text-destructive">notes-rs could not start</h1>
             <p className="mt-2 text-sm break-words text-muted-foreground">{startupError}</p>
             <p className="mt-3 text-xs text-muted-foreground">
-              Update the provider configuration in the app data .env file, then restart the app.
+              Update the provider configuration, then restart the app.
             </p>
+            <Button className="mt-4" onClick={() => setSettingsOpen(true)}>
+              <Settings className="size-4" />
+              Open settings
+            </Button>
           </div>
         ) : (
           <>
@@ -89,6 +129,19 @@ function App() {
     <>
       <AppLayout
         status={status}
+        headerActions={
+          <>
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-label="Open settings"
+              onClick={() => setSettingsOpen(true)}
+            >
+              <Settings className="size-4" />
+            </Button>
+            {windowDecorationMode === "borderless" && <WindowControls />}
+          </>
+        }
         sidebar={
           <div className="flex h-full flex-col gap-4">
             <PagesList

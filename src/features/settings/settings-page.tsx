@@ -1,0 +1,314 @@
+import { useEffect, useState } from "react";
+import { ArrowLeft, Check, Loader2, RotateCcw, Save, Trash2 } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { WindowControls } from "@/app/window-controls";
+import { loadSettings, restartApp, saveSettings, type SettingsSnapshot } from "@/lib/api";
+
+type Props = {
+  onBack: () => void;
+  onDecorationModeChanged: (mode: "native" | "borderless" | "kde") => void;
+};
+
+const API_KEYS = [
+  ["OPENROUTER_API_KEY", "OpenRouter API key"],
+  ["OPENAI_API_KEY", "OpenAI API key"],
+  ["COHERE_API_KEY", "Cohere API key"],
+  ["VOYAGE_API_KEY", "Voyage AI API key"],
+  ["GEMINI_API_KEY", "Gemini API key"],
+] as const;
+
+export function SettingsPage({ onBack, onDecorationModeChanged }: Props) {
+  const [settings, setSettings] = useState<SettingsSnapshot | null>(null);
+  const [secrets, setSecrets] = useState<Record<string, string>>({});
+  const [clearKeys, setClearKeys] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    loadSettings()
+      .then(setSettings)
+      .catch((reason) => setError(String(reason)));
+  }, []);
+
+  const update = <Key extends keyof SettingsSnapshot>(key: Key, value: SettingsSnapshot[Key]) => {
+    setSettings((current) => (current ? { ...current, [key]: value } : current));
+    setMessage("");
+  };
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!settings) return;
+    setBusy(true);
+    setError("");
+    try {
+      const saved = await saveSettings({
+        embeddingProvider: settings.embeddingProvider,
+        embeddingModel: settings.embeddingModel,
+        embeddingNdims: settings.embeddingNdims,
+        rerankProvider: settings.rerankProvider,
+        rerankModel: settings.rerankModel,
+        openrouterBaseUrl: settings.openrouterBaseUrl,
+        windowDecorationMode: settings.windowDecorationMode,
+        apiKeys: secrets,
+        clearKeys,
+      });
+      setSettings(saved);
+      onDecorationModeChanged(saved.windowDecorationMode);
+      setSecrets({});
+      setClearKeys([]);
+      setMessage("Saved. Restart the app to apply provider changes.");
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!settings) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-background text-foreground">
+        {error ? (
+          <p className="text-sm text-destructive">{error}</p>
+        ) : (
+          <Loader2 className="animate-spin" />
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-screen overflow-y-auto bg-background text-foreground">
+      <header
+        data-tauri-drag-region
+        className="sticky top-0 z-10 flex h-14 items-center justify-between border-b bg-background/95 px-5 backdrop-blur"
+      >
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="sm" onClick={onBack} aria-label="Back to notes">
+            <ArrowLeft className="size-4" />
+          </Button>
+          <div>
+            <h1 className="font-semibold">Settings</h1>
+            <p className="text-xs text-muted-foreground">
+              Models, providers, and local credentials
+            </p>
+          </div>
+        </div>
+        {settings.windowDecorationMode === "borderless" && <WindowControls />}
+      </header>
+
+      <form onSubmit={submit} className="mx-auto max-w-3xl space-y-8 p-6">
+        <SettingsSection
+          title="Window"
+          description="Choose the native GTK frame, a borderless notes-rs frame, or KWin's server-side decoration on native Wayland."
+        >
+          <Field label="Decoration mode">
+            <select
+              value={settings.windowDecorationMode}
+              onChange={(event) =>
+                update(
+                  "windowDecorationMode",
+                  event.currentTarget.value as SettingsSnapshot["windowDecorationMode"],
+                )
+              }
+              className="h-9 w-full rounded-md border bg-background px-3 text-sm"
+            >
+              <option value="native">Native Wayland (GTK header bar)</option>
+              <option value="borderless">Borderless (notes-rs controls)</option>
+              <option value="kde" disabled={!settings.kdeDecorationsAvailable}>
+                KDE/KWin server decoration (native Wayland)
+                {settings.kdeDecorationsAvailable ? "" : " (Wayland unavailable)"}
+              </option>
+            </select>
+          </Field>
+          <p className="text-xs text-muted-foreground">
+            Borderless applies immediately. Switching to or from KDE/KWin requires an app restart
+            because GTK chooses Wayland or X11 before creating the window.
+          </p>
+        </SettingsSection>
+
+        <SettingsSection
+          title="Embeddings"
+          description="Used for semantic and hybrid search. Changing provider, model, or dimensions rebuilds the vector index on restart."
+        >
+          <Field label="Provider">
+            <select
+              value={settings.embeddingProvider}
+              onChange={(event) => update("embeddingProvider", event.currentTarget.value)}
+              className="h-9 w-full rounded-md border bg-background px-3 text-sm"
+            >
+              <option value="openrouter">OpenRouter</option>
+              <option value="openai">OpenAI</option>
+              <option value="cohere">Cohere</option>
+              <option value="voyageai">Voyage AI</option>
+              <option value="gemini">Gemini</option>
+              <option value="local" disabled={!settings.localModelsAvailable}>
+                Local BGE-M3{settings.localModelsAvailable ? "" : " (not included in this build)"}
+              </option>
+            </select>
+          </Field>
+          <Field label="Model">
+            <Input
+              value={settings.embeddingModel}
+              onChange={(event) => update("embeddingModel", event.currentTarget.value)}
+              placeholder="provider model id"
+            />
+          </Field>
+          <Field
+            label="Dimensions"
+            hint="Required for unknown OpenRouter models; leave empty when the provider reports it."
+          >
+            <Input
+              inputMode="numeric"
+              value={settings.embeddingNdims}
+              onChange={(event) => update("embeddingNdims", event.currentTarget.value)}
+              placeholder="4096"
+            />
+          </Field>
+        </SettingsSection>
+
+        <SettingsSection
+          title="Reranking"
+          description="Reranks hybrid candidates for agentic search."
+        >
+          <Field label="Provider">
+            <select
+              value={settings.rerankProvider}
+              onChange={(event) => update("rerankProvider", event.currentTarget.value)}
+              className="h-9 w-full rounded-md border bg-background px-3 text-sm"
+            >
+              <option value="openrouter">OpenRouter</option>
+              <option value="local" disabled={!settings.localModelsAvailable}>
+                Local BGE reranker
+                {settings.localModelsAvailable ? "" : " (not included in this build)"}
+              </option>
+            </select>
+          </Field>
+          <Field label="Model">
+            <Input
+              value={settings.rerankModel}
+              onChange={(event) => update("rerankModel", event.currentTarget.value)}
+            />
+          </Field>
+          <Field label="OpenRouter base URL">
+            <Input
+              value={settings.openrouterBaseUrl}
+              onChange={(event) => update("openrouterBaseUrl", event.currentTarget.value)}
+            />
+          </Field>
+        </SettingsSection>
+
+        <SettingsSection
+          title="API keys"
+          description="Secrets are written to the app-data .env with owner-only permissions and are never returned to the webview. OpenRouter is also used by Chat and entity extraction."
+        >
+          {API_KEYS.map(([key, label]) => {
+            const configured = settings.configuredKeys.includes(key) && !clearKeys.includes(key);
+            return (
+              <Field
+                key={key}
+                label={label}
+                hint={
+                  configured ? "A key is currently configured; leave empty to keep it." : undefined
+                }
+              >
+                <div className="flex gap-2">
+                  <Input
+                    type="password"
+                    autoComplete="off"
+                    value={secrets[key] ?? ""}
+                    placeholder={configured ? "configured" : "not configured"}
+                    onChange={(event) => {
+                      const value = event.currentTarget.value;
+                      setSecrets((current) => ({ ...current, [key]: value }));
+                      if (value) setClearKeys((current) => current.filter((item) => item !== key));
+                    }}
+                  />
+                  {configured && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      aria-label={`Clear ${label}`}
+                      onClick={() => setClearKeys((current) => [...new Set([...current, key])])}
+                    >
+                      <Trash2 className="size-4" />
+                    </Button>
+                  )}
+                </div>
+              </Field>
+            );
+          })}
+          <p className="text-xs break-all text-muted-foreground">
+            Config file: {settings.configPath}
+          </p>
+        </SettingsSection>
+
+        {error && (
+          <p
+            role="alert"
+            className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
+          >
+            {error}
+          </p>
+        )}
+        {message && (
+          <p className="flex items-center gap-2 text-sm text-emerald-600">
+            <Check className="size-4" />
+            {message}
+          </p>
+        )}
+
+        <div className="flex flex-wrap gap-2 border-t pt-5">
+          <Button type="submit" disabled={busy}>
+            {busy ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
+            Save settings
+          </Button>
+          <Button type="button" variant="outline" onClick={() => void restartApp()}>
+            <RotateCcw className="size-4" />
+            Restart app
+          </Button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function SettingsSection({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="space-y-4 rounded-lg border bg-card p-5">
+      <div>
+        <h2 className="font-semibold">{title}</h2>
+        <p className="mt-1 text-sm text-muted-foreground">{description}</p>
+      </div>
+      <div className="grid gap-4">{children}</div>
+    </section>
+  );
+}
+
+function Field({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <label className="grid gap-1.5 text-sm">
+      <span className="font-medium">{label}</span>
+      {children}
+      {hint && <span className="text-xs text-muted-foreground">{hint}</span>}
+    </label>
+  );
+}

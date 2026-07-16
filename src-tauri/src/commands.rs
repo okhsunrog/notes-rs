@@ -4,8 +4,8 @@ use crate::embed::{EmbedderBackend, RerankBackend};
 use crate::sqlite::Connection;
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
-use tauri::{AppHandle, Emitter, State};
 use tauri::ipc::Channel;
+use tauri::{AppHandle, Emitter, State};
 
 pub struct AppState {
     pub conn: Connection,
@@ -48,6 +48,24 @@ pub fn startup_status(state: State<'_, Startup>) -> StartupStatus {
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .clone()
+}
+
+#[tauri::command]
+pub fn load_settings(app: AppHandle) -> Result<crate::settings::SettingsSnapshot, String> {
+    crate::settings::load(&app).map_err(err)
+}
+
+#[tauri::command]
+pub fn save_settings(
+    app: AppHandle,
+    update: crate::settings::SettingsUpdate,
+) -> Result<crate::settings::SettingsSnapshot, String> {
+    crate::settings::save(&app, update).map_err(err)
+}
+
+#[tauri::command]
+pub fn restart_app(app: AppHandle) {
+    app.restart()
 }
 
 #[tauri::command]
@@ -100,9 +118,7 @@ pub async fn split_block(
     id: i64,
     parts: Vec<db::BlockContent>,
 ) -> Result<Vec<Node>, String> {
-    let nodes = db::split_block(&state.conn, id, parts)
-        .await
-        .map_err(err)?;
+    let nodes = db::split_block(&state.conn, id, parts).await.map_err(err)?;
     let _ = app.emit("pages:changed", ());
     Ok(nodes)
 }

@@ -20,6 +20,28 @@ export type StartupStatus =
   | { state: "ready" }
   | { state: "error"; message: string };
 
+export type SettingsSnapshot = {
+  embeddingProvider: string;
+  embeddingModel: string;
+  embeddingNdims: string;
+  rerankProvider: string;
+  rerankModel: string;
+  openrouterBaseUrl: string;
+  windowDecorationMode: "native" | "borderless" | "kde";
+  kdeDecorationsAvailable: boolean;
+  configuredKeys: string[];
+  localModelsAvailable: boolean;
+  configPath: string;
+};
+
+export type SettingsUpdate = Omit<
+  SettingsSnapshot,
+  "configuredKeys" | "localModelsAvailable" | "kdeDecorationsAvailable" | "configPath"
+> & {
+  apiKeys: Record<string, string>;
+  clearKeys: string[];
+};
+
 export type ChatEvent =
   | { kind: "text_delta"; text: string }
   | { kind: "reasoning"; text: string }
@@ -86,6 +108,18 @@ export function isReady() {
 
 export function getStartupStatus() {
   return invoke<StartupStatus>("startup_status");
+}
+
+export function loadSettings() {
+  return invoke<SettingsSnapshot>("load_settings");
+}
+
+export function saveSettings(update: SettingsUpdate) {
+  return invoke<SettingsSnapshot>("save_settings", { update });
+}
+
+export function restartApp() {
+  return invoke<void>("restart_app");
 }
 
 export function listEntities(limit = 30) {

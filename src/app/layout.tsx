@@ -3,17 +3,24 @@ import { Group, Panel, Separator } from "react-resizable-panels";
 
 type Props = {
   status?: string;
+  headerActions?: ReactNode;
   sidebar: ReactNode;
   center: ReactNode;
   right: ReactNode;
 };
 
-export function AppLayout({ status, sidebar, center, right }: Props) {
+export function AppLayout({ status, headerActions, sidebar, center, right }: Props) {
   return (
     <div className="flex h-screen flex-col bg-background text-foreground">
-      <header className="flex h-12 shrink-0 items-baseline justify-between border-b px-4">
+      <header
+        data-tauri-drag-region
+        className="flex h-12 shrink-0 items-center justify-between border-b px-4"
+      >
         <h1 className="text-lg font-semibold tracking-tight">notes-rs</h1>
-        {status && <span className="text-xs text-muted-foreground">{status}</span>}
+        <div className="flex items-center gap-3">
+          {status && <span className="text-xs text-muted-foreground">{status}</span>}
+          {headerActions}
+        </div>
       </header>
 
       <Group orientation="horizontal" className="flex-1">

@@ -3,11 +3,19 @@ mod commands;
 mod db;
 mod embed;
 mod extract;
+mod settings;
 mod sqlite;
 mod stem;
 
 use std::sync::{Arc, RwLock};
 use tauri::{Emitter, Manager};
+
+#[cfg(target_os = "linux")]
+pub fn prepare_window_backend() {
+    if let Err(error) = settings::prepare_linux_window_backend() {
+        eprintln!("notes-rs: could not prepare the saved window backend: {error:#}");
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -42,6 +50,9 @@ pub fn run() {
                 Ok(()) => tracing::info!(?env_path, "loaded .env"),
                 Err(dotenvy::Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => tracing::warn!(?env_path, error = %e, "failed to load .env"),
+            }
+            if let Err(error) = settings::apply_saved_window_preferences(&handle) {
+                tracing::warn!(%error, "failed to apply saved window preferences");
             }
 
             let db_path = data_dir.join("notes.db");
@@ -100,6 +111,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::is_ready,
             commands::startup_status,
+            commands::load_settings,
+            commands::save_settings,
+            commands::restart_app,
             commands::create_node,
             commands::update_node,
             commands::update_block_with_refs,

@@ -46,7 +46,9 @@ Vite+ owns frontend formatting, linting, type checking, testing, dependency mana
 
 ## Configuration
 
-Desktop launches load `.env` from the platform-specific Tauri app-data directory. The default cloud setup requires:
+Open **Settings** from the title bar to configure embedding and reranking providers, API keys, model dimensions, and window decorations. Linux offers the native GTK header, a borderless notes-rs frame, and native-Wayland KWin server decorations. The KWin mode removes Tao's custom GTK header and lets GTK negotiate the KDE server-decoration protocol; it does not use XWayland. Secrets are stored in the platform-specific Tauri app-data `.env` with owner-only permissions and existing values are never returned to the webview. Provider and window-backend changes take effect after using **Restart app**.
+
+The same file can be managed manually. The default cloud setup requires:
 
 ```dotenv
 OPENROUTER_API_KEY=your-key
