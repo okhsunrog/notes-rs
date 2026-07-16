@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Outliner } from "@/features/outliner/outliner";
 import { AttachmentsCard } from "@/features/attachments/attachments-card";
 import { renamePage, type Node } from "@/lib/api";
+import { DebouncedAction } from "@/lib/debounced-action";
 
 type Props = {
   node: Node;
@@ -33,7 +34,7 @@ export function PageView({
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [focusBody, setFocusBody] = useState(false);
 
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autosave = useRef(new DebouncedAction()).current;
   const titleInput = useRef<HTMLInputElement>(null);
   const nodeRef = useRef(node);
   const titleRef = useRef(title);
@@ -45,10 +46,7 @@ export function PageView({
   onStatusRef.current = onStatus;
 
   const flush = useCallback(async () => {
-    if (timer.current) {
-      clearTimeout(timer.current);
-      timer.current = null;
-    }
+    autosave.cancel();
     const current = nodeRef.current;
     const nextTitle = titleRef.current.trim() || null;
     if (nextTitle === (current.title ?? null)) {
@@ -65,27 +63,20 @@ export function PageView({
       setSaveState("error");
       onStatusRef.current(`save error: ${String(err)}`);
     }
-  }, []);
+  }, [autosave]);
 
   const scheduleSave = useCallback(() => {
     setSaveState("dirty");
-    if (timer.current) clearTimeout(timer.current);
-    timer.current = setTimeout(() => {
-      timer.current = null;
-      void flush();
-    }, AUTOSAVE_MS);
-  }, [flush]);
+    autosave.schedule(() => void flush(), AUTOSAVE_MS);
+  }, [autosave, flush]);
 
   useEffect(() => {
-    if (timer.current) {
-      clearTimeout(timer.current);
-      timer.current = null;
-    }
+    autosave.cancel();
     nodeRef.current = node;
     setTitle(node.title ?? "");
     setSaveState("idle");
     setFocusBody(false);
-  }, [node]);
+  }, [autosave, node]);
 
   useEffect(() => {
     if (!autoFocusTitle) return;
@@ -96,13 +87,11 @@ export function PageView({
 
   useEffect(() => {
     return () => {
-      if (timer.current) {
-        clearTimeout(timer.current);
-        timer.current = null;
+      if (autosave.cancel()) {
         void flush();
       }
     };
-  }, [flush]);
+  }, [autosave, flush]);
 
   return (
     <article className="editor-page mx-auto flex min-h-full max-w-[52rem] flex-col px-8 pt-12 pb-24 sm:px-12 lg:px-16">

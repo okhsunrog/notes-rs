@@ -1,6 +1,5 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { GitFork, Loader2, Redo2, Search, Settings, Undo2 } from "lucide-react";
 import { AppLayout } from "@/app/layout";
 import { WindowControls } from "@/app/window-controls";
@@ -13,20 +12,11 @@ import { PagesList } from "@/features/pages/pages-list";
 import { PageView } from "@/features/pages/page-view";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import {
-  getContainingPage,
-  getHistoryStatus,
-  getNodeByUuid,
-  getStartupStatus,
-  loadSettings,
-  createNote,
-  deletePage,
-  redo,
-  undo,
-  type Node,
-  type SearchHit,
-} from "@/lib/api";
+import { loadSettings, type Node } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
+import { useAppShortcuts } from "@/app/use-app-shortcuts";
+import { useStartupState } from "@/app/use-startup-state";
+import { useNotesWorkspace } from "@/features/pages/use-notes-workspace";
 
 const SettingsPage = lazy(() =>
   import("@/features/settings/settings-page").then((module) => ({
@@ -35,77 +25,31 @@ const SettingsPage = lazy(() =>
 );
 
 function App() {
-  const queryClient = useQueryClient();
-  const [ready, setReady] = useState(false);
-  const [startupError, setStartupError] = useState("");
+  const { ready, startupError } = useStartupState();
   const [status, setStatus] = useState("");
-  const [hits, setHits] = useState<SearchHit[]>([]);
-  const [activePageUuid, setActivePageUuid] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [windowDecorationMode, setWindowDecorationMode] = useState<"native" | "borderless">(
     "native",
   );
-  const [creatingNote, setCreatingNote] = useState(false);
-  const creatingNoteRef = useRef(false);
-  const [newNote, setNewNote] = useState<{ pageUuid: string; blockId: number | null } | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [graphOpen, setGraphOpen] = useState(false);
+  const workspace = useNotesWorkspace(ready, setStatus);
 
   const settingsQuery = useQuery({
     queryKey: queryKeys.settings,
     queryFn: loadSettings,
   });
-  const historyQuery = useQuery({
-    queryKey: queryKeys.history,
-    queryFn: getHistoryStatus,
-    enabled: ready,
-  });
-  const activeNodeQuery = useQuery({
-    queryKey: queryKeys.node(activePageUuid ?? "inactive"),
-    queryFn: () => getNodeByUuid(activePageUuid as string),
-    enabled: activePageUuid !== null,
-  });
-  const activeNode = activeNodeQuery.data ?? null;
-  const history = historyQuery.data ?? ([0, 0] as const);
-
   const createNewNote = useCallback(async () => {
-    if (creatingNoteRef.current) return;
-    creatingNoteRef.current = true;
-    setCreatingNote(true);
-    try {
-      const note = await createNote();
-      queryClient.setQueryData(queryKeys.node(note.page.uuid), note.page);
-      queryClient.setQueryData(queryKeys.children(note.page.uuid), [note.initialBlock]);
-      await queryClient.invalidateQueries({ queryKey: queryKeys.pages });
-      setNewNote({ pageUuid: note.page.uuid, blockId: note.initialBlock.id });
-      setActivePageUuid(note.page.uuid);
-      setGraphOpen(false);
-      setHits([]);
-      setStatus("New note ready — name it, then press Enter to write.");
-      window.dispatchEvent(new Event("notes-rs:show-main"));
-    } catch (error) {
-      setStatus(`create error: ${String(error)}`);
-    } finally {
-      creatingNoteRef.current = false;
-      setCreatingNote(false);
-    }
-  }, [queryClient]);
+    setGraphOpen(false);
+    await workspace.createNewNote();
+  }, [workspace]);
 
-  const moveHistory = useCallback(
-    async (direction: "undo" | "redo") => {
-      try {
-        const changed = direction === "undo" ? await undo() : await redo();
-        if (changed) {
-          setActivePageUuid(null);
-          setHits([]);
-          setStatus(direction === "undo" ? "Undid structural change." : "Redid structural change.");
-          await queryClient.invalidateQueries({ queryKey: queryKeys.root });
-        }
-      } catch (error) {
-        setStatus(`${direction} error: ${String(error)}`);
-      }
+  const openNode = useCallback(
+    async (node: Node) => {
+      setGraphOpen(false);
+      await workspace.openNode(node);
     },
-    [queryClient],
+    [workspace],
   );
 
   useEffect(() => {
@@ -114,105 +58,13 @@ function App() {
     }
   }, [settingsQuery.data]);
 
-  useEffect(() => {
-    if (!ready) return;
-    const keydown = (event: KeyboardEvent) => {
-      const target = event.target;
-      if (target instanceof Element && target.matches("input, textarea, [contenteditable=true]"))
-        return;
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
-        event.preventDefault();
-        void moveHistory(event.shiftKey ? "redo" : "undo");
-      }
-    };
-    window.addEventListener("keydown", keydown);
-    return () => window.removeEventListener("keydown", keydown);
-  }, [ready, moveHistory]);
-
-  useEffect(() => {
-    if (!ready) return;
-    const keydown = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
-        event.preventDefault();
-        setSearchOpen(true);
-        return;
-      }
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "n") {
-        event.preventDefault();
-        void createNewNote();
-      }
-    };
-    window.addEventListener("keydown", keydown);
-    return () => window.removeEventListener("keydown", keydown);
-  }, [ready, createNewNote]);
-
-  useEffect(() => {
-    let cancelled = false;
-    getStartupStatus()
-      .then((result) => {
-        if (cancelled) return;
-        if (result.state === "ready") setReady(true);
-        if (result.state === "error") setStartupError(result.message);
-      })
-      .catch(() => {
-        /* startup state not yet registered: keep listening */
-      });
-    const unlistenPromise = listen("app:ready", () => {
-      if (!cancelled) setReady(true);
-    });
-    const unlistenError = listen<string>("app:startup-error", ({ payload }) => {
-      if (!cancelled) setStartupError(payload);
-    });
-    return () => {
-      cancelled = true;
-      void unlistenPromise.then((un) => un());
-      void unlistenError.then((un) => un());
-    };
-  }, []);
-
-  function applyUpdated(updated: Node) {
-    setHits((hs) => hs.map((h) => (h.node.id === updated.id ? { ...h, node: updated } : h)));
-    queryClient.setQueryData(queryKeys.node(updated.uuid), updated);
-    void queryClient.invalidateQueries({ queryKey: queryKeys.pages });
-  }
-
-  async function openSearchResult(node: Node) {
-    try {
-      const page = node.kind === "page" ? node : await getContainingPage(node.id);
-      if (!page) {
-        setStatus(`No containing page found for #${node.id}`);
-        return;
-      }
-      queryClient.setQueryData(queryKeys.node(page.uuid), page);
-      setActivePageUuid(page.uuid);
-      setGraphOpen(false);
-      window.dispatchEvent(new Event("notes-rs:show-main"));
-      if (page.id !== node.id) {
-        setStatus(`Opened ${page.title ?? "page"} containing #${node.id}`);
-      }
-    } catch (error) {
-      setStatus(`open error: ${String(error)}`);
-    }
-  }
-
-  async function removePage(node: Node) {
-    if (
-      !window.confirm(
-        `Delete “${node.title ?? "untitled"}” and all of its blocks? A backup will be created first.`,
-      )
-    )
-      return;
-    try {
-      if (await deletePage(node.id)) {
-        setActivePageUuid(null);
-        queryClient.removeQueries({ queryKey: queryKeys.node(node.uuid), exact: true });
-        setHits((current) => current.filter((hit) => hit.node.id !== node.id));
-        setStatus("Page deleted; a recovery backup was created.");
-      }
-    } catch (error) {
-      setStatus(`delete error: ${String(error)}`);
-    }
-  }
+  useAppShortcuts({
+    enabled: ready,
+    createNote: () => void createNewNote(),
+    openSearch: () => setSearchOpen(true),
+    undo: () => void workspace.moveHistory("undo"),
+    redo: () => void workspace.moveHistory("redo"),
+  });
 
   if (settingsOpen) {
     return (
@@ -228,10 +80,8 @@ function App() {
           onDecorationModeChanged={setWindowDecorationMode}
           dataAvailable={ready}
           onDataChanged={() => {
-            setActivePageUuid(null);
-            setHits([]);
+            workspace.resetWorkspace();
             setStatus("Imported archive.");
-            void queryClient.invalidateQueries({ queryKey: queryKeys.root });
           }}
         />
       </Suspense>
@@ -302,8 +152,8 @@ function App() {
               variant="ghost"
               size="sm"
               aria-label="Undo structural change"
-              disabled={history[0] === 0}
-              onClick={() => void moveHistory("undo")}
+              disabled={workspace.history[0] === 0}
+              onClick={() => void workspace.moveHistory("undo")}
             >
               <Undo2 className="size-4" />
             </Button>
@@ -311,8 +161,8 @@ function App() {
               variant="ghost"
               size="sm"
               aria-label="Redo structural change"
-              disabled={history[1] === 0}
-              onClick={() => void moveHistory("redo")}
+              disabled={workspace.history[1] === 0}
+              onClick={() => void workspace.moveHistory("redo")}
             >
               <Redo2 className="size-4" />
             </Button>
@@ -330,48 +180,47 @@ function App() {
         sidebar={
           <div className="flex h-full flex-col gap-4">
             <PagesList
-              selectedUuid={activePageUuid}
+              selectedUuid={workspace.activePageUuid}
               onCreate={createNewNote}
-              onSelect={(page) => {
-                setNewNote(null);
-                queryClient.setQueryData(queryKeys.node(page.uuid), page);
-                setActivePageUuid(page.uuid);
-                window.dispatchEvent(new Event("notes-rs:show-main"));
-              }}
+              onSelect={workspace.selectPage}
               onStatus={setStatus}
             />
             <EntitiesCard variant="compact" />
           </div>
         }
         center={
-          activeNode ? (
+          workspace.activeNode ? (
             <PageView
-              key={activeNode.uuid}
-              node={activeNode}
-              initialBlockId={newNote?.pageUuid === activeNode.uuid ? newNote.blockId : null}
-              autoFocusTitle={newNote?.pageUuid === activeNode.uuid}
-              onSaved={applyUpdated}
+              key={workspace.activeNode.uuid}
+              node={workspace.activeNode}
+              initialBlockId={
+                workspace.newNote?.pageUuid === workspace.activeNode.uuid
+                  ? workspace.newNote.blockId
+                  : null
+              }
+              autoFocusTitle={workspace.newNote?.pageUuid === workspace.activeNode.uuid}
+              onSaved={workspace.applyUpdated}
               onStatus={setStatus}
-              onClose={() => setActivePageUuid(null)}
-              onDelete={removePage}
+              onClose={workspace.closePage}
+              onDelete={workspace.removePage}
             />
           ) : (
             <HomeView
-              creating={creatingNote}
-              hits={hits}
-              setHits={setHits}
+              creating={workspace.creatingNote}
+              hits={workspace.hits}
+              setHits={workspace.setHits}
               onCreate={createNewNote}
-              onOpenNode={openSearchResult}
+              onOpenNode={openNode}
               onStatus={setStatus}
             />
           )
         }
-        right={<KnowledgePanel node={activeNode} onOpenNode={openSearchResult} />}
+        right={<KnowledgePanel node={workspace.activeNode} onOpenNode={openNode} />}
         fullWorkspace={
           graphOpen ? (
             <GraphWorkspace
-              node={activeNode}
-              onOpenNode={openSearchResult}
+              node={workspace.activeNode}
+              onOpenNode={openNode}
               onClose={() => setGraphOpen(false)}
             />
           ) : undefined
@@ -385,10 +234,10 @@ function App() {
           </div>
           <SearchCard
             variant="dialog"
-            hits={hits}
-            setHits={setHits}
+            hits={workspace.hits}
+            setHits={workspace.setHits}
             onOpenNode={async (node) => {
-              await openSearchResult(node);
+              await openNode(node);
               setSearchOpen(false);
             }}
             onStatus={setStatus}

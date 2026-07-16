@@ -4,25 +4,12 @@ import { useTheme } from "next-themes";
 import {
   ArrowLeft,
   Check,
-  DatabaseBackup,
-  Download,
-  FolderOpen,
   Loader2,
-  Pause,
-  Play,
   RotateCcw,
   Save,
   Trash2,
-  Upload,
-  Activity,
-  AppWindow,
-  BrainCircuit,
-  Database,
-  FolderSync,
-  KeyRound,
   Laptop,
   Moon,
-  Palette,
   PlugZap,
   Sparkles,
   Sun,
@@ -53,6 +40,9 @@ import {
   type SecretKey,
 } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
+import { Field, FieldGroup, ModeButton, SettingsSection, ToggleField } from "./settings-controls";
+import { toSettingsUpdate } from "./settings-update";
+import { DataSettingsSections } from "./data-settings-sections";
 
 type Props = {
   onBack: () => void;
@@ -122,28 +112,7 @@ export function SettingsPage({
     setBusy(true);
     setError("");
     try {
-      const saved = await saveSettings({
-        localOnly: settings.localOnly,
-        entityExtractionEnabled: settings.entityExtractionEnabled,
-        queryRewritingEnabled: settings.queryRewritingEnabled,
-        chatModel: settings.chatModel,
-        chatProtocol: settings.chatProtocol,
-        chatBaseUrl: settings.chatBaseUrl,
-        extractionModel: settings.extractionModel,
-        extractionProtocol: settings.extractionProtocol,
-        extractionBaseUrl: settings.extractionBaseUrl,
-        embeddingProvider: settings.embeddingProvider,
-        embeddingModel: settings.embeddingModel,
-        embeddingNdims: settings.embeddingNdims,
-        rerankProvider: settings.rerankProvider,
-        rerankModel: settings.rerankModel,
-        openrouterBaseUrl: settings.openrouterBaseUrl,
-        openaiBaseUrl: settings.openaiBaseUrl,
-        windowDecorationMode: settings.windowDecorationMode,
-        syncDirectory: settings.syncDirectory,
-        apiKeys: secrets,
-        clearKeys,
-      });
+      const saved = await saveSettings(toSettingsUpdate(settings, secrets, clearKeys));
       setSettings(saved);
       queryClient.setQueryData(queryKeys.settings, saved);
       onDecorationModeChanged(saved.windowDecorationMode);
@@ -211,28 +180,7 @@ export function SettingsPage({
     setError("");
     try {
       // Persist a newly selected directory before using it.
-      const saved = await saveSettings({
-        localOnly: current.localOnly,
-        entityExtractionEnabled: current.entityExtractionEnabled,
-        queryRewritingEnabled: current.queryRewritingEnabled,
-        chatModel: current.chatModel,
-        chatProtocol: current.chatProtocol,
-        chatBaseUrl: current.chatBaseUrl,
-        extractionModel: current.extractionModel,
-        extractionProtocol: current.extractionProtocol,
-        extractionBaseUrl: current.extractionBaseUrl,
-        embeddingProvider: current.embeddingProvider,
-        embeddingModel: current.embeddingModel,
-        embeddingNdims: current.embeddingNdims,
-        rerankProvider: current.rerankProvider,
-        rerankModel: current.rerankModel,
-        openrouterBaseUrl: current.openrouterBaseUrl,
-        openaiBaseUrl: current.openaiBaseUrl,
-        windowDecorationMode: current.windowDecorationMode,
-        syncDirectory: current.syncDirectory,
-        apiKeys: {},
-        clearKeys: [],
-      });
+      const saved = await saveSettings(toSettingsUpdate(current));
       setSettings(saved);
       queryClient.setQueryData(queryKeys.settings, saved);
       const path = direction === "push" ? await syncPush() : await syncPull();
@@ -786,161 +734,17 @@ export function SettingsPage({
           </p>
         </SettingsSection>
 
-        <SettingsSection
-          title="Data"
-          description="Portable JSON archives include every note, graph edge, and attachment. Destructive operations automatically create a timestamped recovery backup in app data."
-        >
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              disabled={!dataAvailable || busy}
-              onClick={() => void dataAction("export")}
-            >
-              <Download className="size-4" /> Export archive
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={!dataAvailable || busy}
-              onClick={() => void dataAction("import")}
-            >
-              <Upload className="size-4" /> Import archive
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={!dataAvailable || busy}
-              onClick={() => void dataAction("backup")}
-            >
-              <DatabaseBackup className="size-4" /> Create backup
-            </Button>
-          </div>
-          {!dataAvailable && (
-            <p className="text-xs text-muted-foreground">
-              Data tools become available after the database starts successfully.
-            </p>
-          )}
-        </SettingsSection>
-
-        <SettingsSection
-          title="Folder sync"
-          description="Manual, conflict-safe sync through a folder managed by Syncthing, Nextcloud, Dropbox, or another file synchronizer. Push writes one atomic snapshot; pull always creates a local recovery backup first."
-        >
-          <Field label="Sync directory">
-            <div className="flex gap-2">
-              <Input
-                value={settings.syncDirectory ?? ""}
-                onChange={(event) => update("syncDirectory", event.currentTarget.value || null)}
-                placeholder="Choose a directory…"
-              />
-              <Button
-                type="button"
-                variant="outline"
-                aria-label="Choose sync directory"
-                onClick={() => void chooseSync()}
-              >
-                <FolderOpen className="size-4" />
-              </Button>
-            </div>
-          </Field>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              disabled={!dataAvailable || busy || !settings.syncDirectory?.trim()}
-              onClick={() => void runSync("push")}
-            >
-              <Upload className="size-4" /> Push snapshot
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={!dataAvailable || busy || !settings.syncDirectory?.trim()}
-              onClick={() => void runSync("pull")}
-            >
-              <Download className="size-4" /> Pull snapshot
-            </Button>
-          </div>
-        </SettingsSection>
-
-        <SettingsSection
-          title="Background indexing"
-          description="Embedding and entity-extraction queues run after saves. Failed jobs use exponential backoff instead of retrying continuously."
-        >
-          {background ? (
-            <>
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                <QueueMetric label="Embeddings" value={background.embeddingsPending} />
-                <QueueMetric label="Embedding retries" value={background.embeddingsFailed} />
-                <QueueMetric label="Extractions" value={background.extractionsPending} />
-                <QueueMetric label="Extraction retries" value={background.extractionsFailed} />
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => void backgroundAction("pause")}
-                >
-                  {background.paused ? <Play className="size-4" /> : <Pause className="size-4" />}
-                  {background.paused ? "Resume" : "Pause"}
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => void backgroundAction("retry")}
-                >
-                  <RotateCcw className="size-4" /> Retry failed
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => void backgroundAction("clear")}
-                >
-                  <Trash2 className="size-4" /> Cancel pending
-                </Button>
-              </div>
-              {background.failures.length > 0 && (
-                <div className="space-y-2">
-                  <p className="text-xs font-semibold tracking-wide text-foreground uppercase">
-                    Recent failures
-                  </p>
-                  {background.failures.map((failure) => (
-                    <div
-                      key={`${failure.queue}-${failure.nodeId}`}
-                      className="rounded-xl border border-destructive/20 bg-destructive/[0.035] p-3 text-xs"
-                    >
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-medium text-foreground">
-                          {failure.queue === "embedding" ? "Embedding" : "Entity extraction"}
-                        </span>
-                        <span className="rounded-full bg-muted px-2 py-0.5 text-muted-foreground">
-                          {failure.failureKind}
-                        </span>
-                        <span className={failure.terminal ? "text-destructive" : "text-amber-600"}>
-                          {failure.terminal ? "Needs attention" : "Retry scheduled"}
-                        </span>
-                        <span className="ml-auto text-muted-foreground">
-                          attempt {failure.retryCount}
-                        </span>
-                      </div>
-                      <p className="mt-1 text-muted-foreground">
-                        {failure.nodeTitle || `Node #${failure.nodeId}`}
-                      </p>
-                      <p className="mt-2 line-clamp-4 break-all text-destructive/90">
-                        {failure.lastError}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </>
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              Indexing status is available after startup.
-            </p>
-          )}
-        </SettingsSection>
+        <DataSettingsSections
+          settings={settings}
+          background={background}
+          dataAvailable={dataAvailable}
+          busy={busy}
+          updateSyncDirectory={(directory) => update("syncDirectory", directory)}
+          dataAction={dataAction}
+          chooseSync={chooseSync}
+          runSync={runSync}
+          backgroundAction={backgroundAction}
+        />
 
         {error && (
           <p
@@ -969,153 +773,5 @@ export function SettingsPage({
         </div>
       </form>
     </div>
-  );
-}
-
-function SettingsSection({
-  title,
-  description,
-  children,
-}: {
-  title: string;
-  description: string;
-  children: React.ReactNode;
-}) {
-  const Icon =
-    {
-      Appearance: Palette,
-      Window: AppWindow,
-      "AI & privacy": BrainCircuit,
-      Embeddings: BrainCircuit,
-      Reranking: BrainCircuit,
-      "API keys": KeyRound,
-      Data: Database,
-      "Folder sync": FolderSync,
-      "Background indexing": Activity,
-    }[title] ?? Palette;
-  return (
-    <section className="space-y-5 rounded-3xl border border-border/60 bg-card/70 p-5 shadow-sm backdrop-blur sm:p-6">
-      <div className="flex gap-3">
-        <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
-          <Icon className="size-3.5" />
-        </span>
-        <div>
-          <h2 className="font-semibold tracking-tight">{title}</h2>
-          <p className="mt-1 text-sm text-muted-foreground">{description}</p>
-        </div>
-      </div>
-      <div className="grid gap-4">{children}</div>
-    </section>
-  );
-}
-
-function ToggleField({
-  checked,
-  disabled,
-  label,
-  description,
-  onChange,
-}: {
-  checked: boolean;
-  disabled?: boolean;
-  label: string;
-  description: string;
-  onChange: (checked: boolean) => void;
-}) {
-  return (
-    <label
-      className={cn(
-        "flex items-start justify-between gap-4 rounded-2xl border border-border/60 bg-background/55 p-4",
-        disabled && "opacity-55",
-      )}
-    >
-      <span>
-        <span className="block text-sm font-medium">{label}</span>
-        <span className="mt-1 block text-xs leading-relaxed text-muted-foreground">
-          {description}
-        </span>
-      </span>
-      <input
-        type="checkbox"
-        checked={checked}
-        disabled={disabled}
-        onChange={(event) => onChange(event.currentTarget.checked)}
-        className="mt-1 size-4 shrink-0 accent-primary"
-      />
-    </label>
-  );
-}
-
-function Field({
-  label,
-  hint,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <label className="grid gap-1.5 text-sm">
-      <span className="font-medium">{label}</span>
-      {children}
-      {hint && <span className="text-xs text-muted-foreground">{hint}</span>}
-    </label>
-  );
-}
-
-function FieldGroup({
-  label,
-  hint,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="grid gap-1.5 text-sm">
-      <span className="font-medium">{label}</span>
-      {children}
-      {hint && <span className="text-xs text-muted-foreground">{hint}</span>}
-    </div>
-  );
-}
-
-function QueueMetric({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="rounded-xl border border-border/60 bg-background/70 p-3">
-      <div className="text-lg font-semibold tabular-nums">{value}</div>
-      <div className="text-xs text-muted-foreground">{label}</div>
-    </div>
-  );
-}
-
-function ModeButton({
-  active,
-  icon,
-  label,
-  onClick,
-}: {
-  active: boolean;
-  icon: React.ReactNode;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      aria-pressed={active}
-      onClick={onClick}
-      className={cn(
-        "flex h-10 items-center justify-center gap-2 rounded-xl text-xs font-medium transition",
-        active
-          ? "bg-background text-foreground shadow-sm"
-          : "text-muted-foreground hover:text-foreground",
-      )}
-    >
-      {icon}
-      {label}
-    </button>
   );
 }

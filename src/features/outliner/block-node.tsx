@@ -25,6 +25,7 @@ import { renderMarkdown } from "./render-markdown";
 import { detectTrigger, type Trigger } from "./autocomplete";
 import { AutocompleteMenu, nodeToItem, type AutocompleteItem } from "./autocomplete-menu";
 import { queryKeys } from "@/lib/query";
+import { reconcileRemoteDraft } from "./editor-sync";
 
 type Props = {
   block: Node;
@@ -85,12 +86,13 @@ export function BlockNode({ block, parent, depth }: Props) {
       setRemoteConflict(null);
       return;
     }
-    if (block.content === previous.content) {
+    const decision = reconcileRemoteDraft(previous.content, draftRef.current, block.content);
+    if (decision === "unchanged") {
       blockRef.current = block;
       return;
     }
 
-    if (draftRef.current !== previous.content) {
+    if (decision === "conflict") {
       clearTimer();
       remoteConflictRef.current = block;
       setRemoteConflict(block);
