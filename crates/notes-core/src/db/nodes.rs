@@ -13,12 +13,12 @@ pub async fn create_node(
     {
         return Ok(existing);
     }
-    let uuid = uuid::Uuid::now_v7().to_string();
+    let uuid = uuid::Uuid::now_v7();
     let now = chrono::Utc::now().timestamp();
     apply_local(
         conn,
         vec![OpKind::NodeCreate(NodeCreate {
-            uuid: uuid.clone(),
+            uuid,
             node_kind: kind,
             title,
             content,
@@ -45,10 +45,7 @@ pub async fn update_node(
     apply_local(
         conn,
         vec![
-            OpKind::NodeSetTitle(NodeSetTitle {
-                uuid: uuid.clone(),
-                title,
-            }),
+            OpKind::NodeSetTitle(NodeSetTitle { uuid, title }),
             OpKind::NodeSetContent(NodeSetContent {
                 uuid,
                 content,
@@ -80,7 +77,7 @@ pub async fn update_block_with_refs(
     apply_local(
         conn,
         vec![OpKind::NodeSetContent(NodeSetContent {
-            uuid: node.uuid.clone(),
+            uuid: node.uuid,
             content: block.content,
             content_json: None,
         })],
@@ -106,12 +103,13 @@ pub async fn split_block(
     }
     let (source_uuid, parent_uuid, mut siblings) = conn
         .call(
-            move |database| -> rusqlite::Result<(String, String, Vec<String>)> {
-                let (source_uuid, parent_id, kind): (String, i64, NodeKind) = database.query_row(
-                    "SELECT uuid, parent_id, kind FROM nodes WHERE id = ?1",
-                    [id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )?;
+            move |database| -> rusqlite::Result<(uuid::Uuid, uuid::Uuid, Vec<uuid::Uuid>)> {
+                let (source_uuid, parent_id, kind): (uuid::Uuid, i64, NodeKind) = database
+                    .query_row(
+                        "SELECT uuid, parent_id, kind FROM nodes WHERE id = ?1",
+                        [id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )?;
                 if kind != NodeKind::Block {
                     return Err(rusqlite::Error::InvalidParameterName(
                         "only a block can be split".into(),
@@ -127,7 +125,7 @@ pub async fn split_block(
                         "SELECT uuid FROM nodes WHERE parent_id = ?1 ORDER BY position, uuid",
                     )?;
                     statement
-                        .query_map([parent_id], |row| row.get::<_, String>(0))?
+                        .query_map([parent_id], |row| row.get::<_, uuid::Uuid>(0))?
                         .collect::<Result<Vec<_>, _>>()?
                 };
                 Ok((source_uuid, parent_uuid, siblings))
@@ -139,22 +137,22 @@ pub async fn split_block(
         .position(|uuid| uuid == &source_uuid)
         .context("split source is missing from its siblings")?;
     let now = chrono::Utc::now().timestamp();
-    let mut result_uuids = vec![source_uuid.clone()];
+    let mut result_uuids = vec![source_uuid];
     let mut kinds = vec![OpKind::NodeSetContent(NodeSetContent {
         uuid: source_uuid,
         content: parts[0].content.clone(),
         content_json: None,
     })];
     for part in parts.into_iter().skip(1) {
-        let uuid = uuid::Uuid::now_v7().to_string();
-        result_uuids.push(uuid.clone());
+        let uuid = uuid::Uuid::now_v7();
+        result_uuids.push(uuid);
         kinds.push(OpKind::NodeCreate(NodeCreate {
             uuid,
             node_kind: NodeKind::Block,
             title: None,
             content: part.content,
             content_json: None,
-            parent_uuid: Some(parent_uuid.clone()),
+            parent_uuid: Some(parent_uuid),
             position: Some(0.0),
             created_at: now,
         }));
@@ -166,7 +164,7 @@ pub async fn split_block(
     kinds.extend(siblings.into_iter().enumerate().map(|(index, uuid)| {
         OpKind::NodeMove(NodeMove {
             uuid,
-            parent_uuid: Some(parent_uuid.clone()),
+            parent_uuid: Some(parent_uuid),
             position: (index as f64 + 1.0) * 1024.0,
         })
     }));
@@ -280,7 +278,7 @@ pub async fn list_block_children(conn: &Connection, parent_id: i64) -> Result<Ve
 pub async fn delete_page(conn: &Connection, id: i64) -> Result<Option<Vec<Node>>> {
     let Some((uuids, attachments)) = conn
         .call(
-            move |database| -> rusqlite::Result<Option<(Vec<String>, Vec<Node>)>> {
+            move |database| -> rusqlite::Result<Option<(Vec<uuid::Uuid>, Vec<Node>)>> {
                 let exists = database
                     .query_row(
                         "SELECT 1 FROM nodes WHERE id = ?1 AND kind = 'page'",
@@ -303,7 +301,7 @@ pub async fn delete_page(conn: &Connection, id: i64) -> Result<Option<Vec<Node>>
                      ORDER BY id DESC",
                     )?;
                     statement
-                        .query_map([id], |row| row.get::<_, String>(0))?
+                        .query_map([id], |row| row.get::<_, uuid::Uuid>(0))?
                         .collect::<Result<Vec<_>, _>>()?
                 };
                 let attachments = {
@@ -333,7 +331,7 @@ pub async fn delete_page(conn: &Connection, id: i64) -> Result<Option<Vec<Node>>
         .iter()
         .map(|attachment| {
             OpKind::NodeDelete(NodeDelete {
-                uuid: attachment.uuid.clone(),
+                uuid: attachment.uuid,
             })
         })
         .collect::<Vec<_>>();

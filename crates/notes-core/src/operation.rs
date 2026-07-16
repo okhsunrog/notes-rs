@@ -15,8 +15,8 @@ pub enum Origin {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Op {
-    pub op_id: String,
-    pub device_id: String,
+    pub op_id: uuid::Uuid,
+    pub device_id: uuid::Uuid,
     pub hlc: Hlc,
     pub format_version: u32,
     #[serde(flatten)]
@@ -39,59 +39,59 @@ pub enum OpKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NodeCreate {
-    pub uuid: String,
+    pub uuid: uuid::Uuid,
     pub node_kind: NodeKind,
     pub title: Option<String>,
     pub content: String,
     pub content_json: Option<String>,
-    pub parent_uuid: Option<String>,
+    pub parent_uuid: Option<uuid::Uuid>,
     pub position: Option<f64>,
     pub created_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NodeSetContent {
-    pub uuid: String,
+    pub uuid: uuid::Uuid,
     pub content: String,
     pub content_json: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NodeSetTitle {
-    pub uuid: String,
+    pub uuid: uuid::Uuid,
     pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NodeMove {
-    pub uuid: String,
-    pub parent_uuid: Option<String>,
+    pub uuid: uuid::Uuid,
+    pub parent_uuid: Option<uuid::Uuid>,
     pub position: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NodeDelete {
-    pub uuid: String,
+    pub uuid: uuid::Uuid,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EdgeAdd {
-    pub src_uuid: String,
-    pub dst_uuid: String,
+    pub src_uuid: uuid::Uuid,
+    pub dst_uuid: uuid::Uuid,
     pub edge_kind: String,
     pub weight: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EdgeRemove {
-    pub src_uuid: String,
-    pub dst_uuid: String,
+    pub src_uuid: uuid::Uuid,
+    pub dst_uuid: uuid::Uuid,
     pub edge_kind: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AttachmentAdd {
-    pub node_uuid: String,
+    pub node_uuid: uuid::Uuid,
     pub blob_hash: String,
     pub filename: String,
     pub mime: String,
@@ -100,14 +100,14 @@ pub struct AttachmentAdd {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AttachmentRemove {
-    pub node_uuid: String,
+    pub node_uuid: uuid::Uuid,
     pub blob_hash: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ApplyOutcome {
     pub applied: bool,
-    pub affected_uuids: Vec<String>,
+    pub affected_uuids: Vec<uuid::Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -122,12 +122,12 @@ pub struct SyncSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SnapshotNode {
-    pub uuid: String,
+    pub uuid: uuid::Uuid,
     pub kind: NodeKind,
     pub title: Option<String>,
     pub content: String,
     pub content_json: Option<String>,
-    pub parent_uuid: Option<String>,
+    pub parent_uuid: Option<uuid::Uuid>,
     pub position: Option<f64>,
     pub content_hlc: Option<Hlc>,
     pub title_hlc: Option<Hlc>,
@@ -138,15 +138,15 @@ pub struct SnapshotNode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SnapshotTombstone {
-    pub uuid: String,
+    pub uuid: uuid::Uuid,
     pub deleted_hlc: Hlc,
-    pub root_uuid: Option<String>,
+    pub root_uuid: Option<uuid::Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SnapshotEdge {
-    pub src_uuid: String,
-    pub dst_uuid: String,
+    pub src_uuid: uuid::Uuid,
+    pub dst_uuid: uuid::Uuid,
     pub kind: String,
     pub hlc: Hlc,
     pub present: bool,
@@ -155,7 +155,7 @@ pub struct SnapshotEdge {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SnapshotAttachment {
-    pub node_uuid: String,
+    pub node_uuid: uuid::Uuid,
     pub blob_hash: String,
     pub hlc: Hlc,
     pub present: bool,
@@ -181,15 +181,13 @@ pub async fn local_ops(conn: &Connection, kinds: Vec<OpKind>) -> Result<Vec<Op>>
             .optional()?
             .and_then(|value| value.parse::<Hlc>().ok());
         let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
-        let device_uuid = uuid::Uuid::parse_str(&device_id)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         let mut operations = Vec::with_capacity(kinds.len());
         let mut clock = previous;
         for kind in kinds {
-            let hlc = Hlc::send(clock.as_ref(), now, device_uuid);
+            let hlc = Hlc::send(clock.as_ref(), now, device_id);
             operations.push(Op {
-                op_id: uuid::Uuid::new_v4().to_string(),
-                device_id: device_id.clone(),
+                op_id: uuid::Uuid::now_v7(),
+                device_id,
                 hlc: hlc.clone(),
                 format_version: FORMAT_VERSION,
                 kind,
@@ -271,20 +269,19 @@ pub async fn pending_outbox(conn: &Connection, limit: u32) -> Result<Vec<Op>> {
 
 pub async fn apply_sequenced(conn: &Connection, seq: u64, op: &Op) -> Result<ApplyOutcome> {
     let outcome = apply(conn, op, Origin::Remote).await?;
-    acknowledge_server_op(conn, &op.op_id, seq).await?;
+    acknowledge_server_op(conn, op.op_id, seq).await?;
     advance_sync_cursor(conn, seq).await?;
     Ok(outcome)
 }
 
-pub async fn acknowledge_server_op(conn: &Connection, op_id: &str, seq: u64) -> Result<()> {
-    let op_id = op_id.to_string();
+pub async fn acknowledge_server_op(conn: &Connection, op_id: uuid::Uuid, seq: u64) -> Result<()> {
     conn.call(move |database| {
         let transaction = database.transaction()?;
         transaction.execute(
             "UPDATE applied_ops SET seq = ?2 WHERE op_id = ?1",
             rusqlite::params![op_id, seq as i64],
         )?;
-        transaction.execute("DELETE FROM sync_outbox WHERE op_id = ?1", [&op_id])?;
+        transaction.execute("DELETE FROM sync_outbox WHERE op_id = ?1", [op_id])?;
         transaction.commit()?;
         Ok(())
     })
@@ -390,12 +387,6 @@ pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> 
             snapshot.format_version
         );
     }
-    for node in &snapshot.nodes {
-        require_uuid(&node.uuid)?;
-        if let Some(parent_uuid) = &node.parent_uuid {
-            require_uuid(parent_uuid)?;
-        }
-    }
     let mut clocks = snapshot
         .nodes
         .iter()
@@ -428,8 +419,7 @@ pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> 
              DELETE FROM sync_outbox;",
         )?;
         for node in &snapshot.nodes {
-            let id = db::stable_node_id(&node.uuid)
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            let id = db::stable_node_id(&node.uuid);
             let body = crate::stem::stem(&format!(
                 "{}\n{}",
                 node.title.as_deref().unwrap_or(""),
@@ -472,8 +462,7 @@ pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> 
             .iter()
             .filter(|node| node.kind == NodeKind::Block)
         {
-            let id = db::stable_node_id(&node.uuid)
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            let id = db::stable_node_id(&node.uuid);
             let (wikilinks, block_refs) = parse_refs(&node.content);
             db::replace_block_refs_tx_at(
                 &transaction,
@@ -643,24 +632,17 @@ fn validate(operation: &Op) -> Result<()> {
             operation.format_version
         );
     }
-    uuid::Uuid::parse_str(&operation.op_id).context("invalid operation ID")?;
-    uuid::Uuid::parse_str(&operation.device_id).context("invalid device ID")?;
-    if operation.hlc.device_id().to_string() != operation.device_id {
+    if operation.hlc.device_id() != operation.device_id {
         bail!("hybrid logical clock device suffix does not match device_id");
     }
     match &operation.kind {
-        OpKind::NodeCreate(payload) => {
-            require_uuid(&payload.uuid)?;
-        }
-        OpKind::NodeSetContent(payload) => require_uuid(&payload.uuid)?,
-        OpKind::NodeSetTitle(payload) => require_uuid(&payload.uuid)?,
+        OpKind::NodeCreate(_) | OpKind::NodeSetContent(_) | OpKind::NodeSetTitle(_) => {}
         OpKind::NodeMove(payload) => {
-            require_uuid(&payload.uuid)?;
             if !payload.position.is_finite() {
                 bail!("node position must be finite");
             }
         }
-        OpKind::NodeDelete(payload) => require_uuid(&payload.uuid)?,
+        OpKind::NodeDelete(_) => {}
         OpKind::EdgeAdd(payload) => {
             require_edge(&payload.src_uuid, &payload.dst_uuid, &payload.edge_kind)?;
             if !payload.weight.is_finite() {
@@ -671,13 +653,11 @@ fn validate(operation: &Op) -> Result<()> {
             require_edge(&payload.src_uuid, &payload.dst_uuid, &payload.edge_kind)?;
         }
         OpKind::AttachmentAdd(payload) => {
-            require_uuid(&payload.node_uuid)?;
             if payload.blob_hash.trim().is_empty() || payload.filename.trim().is_empty() {
                 bail!("attachment_add requires blob_hash and filename");
             }
         }
         OpKind::AttachmentRemove(payload) => {
-            require_uuid(&payload.node_uuid)?;
             if payload.blob_hash.trim().is_empty() {
                 bail!("attachment_remove requires blob_hash");
             }
@@ -686,14 +666,7 @@ fn validate(operation: &Op) -> Result<()> {
     Ok(())
 }
 
-fn require_uuid(uuid: &str) -> Result<()> {
-    uuid::Uuid::parse_str(uuid).context("operation requires a valid node UUID")?;
-    Ok(())
-}
-
-fn require_edge(src: &str, dst: &str, kind: &str) -> Result<()> {
-    require_uuid(src)?;
-    require_uuid(dst)?;
+fn require_edge(src: &uuid::Uuid, dst: &uuid::Uuid, kind: &str) -> Result<()> {
     if src == dst || kind.trim().is_empty() {
         bail!("edge requires distinct nodes and a kind");
     }
@@ -704,7 +677,7 @@ fn apply_one(
     transaction: &rusqlite::Transaction<'_>,
     operation: &Op,
     _origin: Origin,
-) -> rusqlite::Result<Vec<String>> {
+) -> rusqlite::Result<Vec<uuid::Uuid>> {
     let timestamp = operation_timestamp(operation);
     match &operation.kind {
         OpKind::NodeCreate(payload) => apply_node_create(transaction, operation, payload),
@@ -752,7 +725,7 @@ fn apply_one(
                     )?;
                 }
             }
-            Ok(vec![payload.uuid.clone()])
+            Ok(vec![payload.uuid])
         }
         OpKind::NodeSetTitle(payload) => {
             let Some(content) = transaction
@@ -763,7 +736,7 @@ fn apply_one(
                 )
                 .optional()?
             else {
-                return Ok(vec![payload.uuid.clone()]);
+                return Ok(vec![payload.uuid]);
             };
             transaction.execute(
                 "UPDATE nodes SET title = ?2,
@@ -781,7 +754,7 @@ fn apply_one(
                     timestamp,
                 ],
             )?;
-            Ok(vec![payload.uuid.clone()])
+            Ok(vec![payload.uuid])
         }
         OpKind::NodeMove(payload) => {
             let changed = transaction.execute(
@@ -806,7 +779,7 @@ fn apply_one(
                     rusqlite::params![payload.uuid, timestamp],
                 )?;
             }
-            Ok(vec![payload.uuid.clone()])
+            Ok(vec![payload.uuid])
         }
         OpKind::NodeDelete(payload) => {
             let root_uuid = containing_page_uuid(transaction, &payload.uuid)?;
@@ -832,8 +805,8 @@ fn apply_one(
                     .optional()?;
                 if let Some(deleted_id) = deleted_id {
                     let root_id = root_uuid
-                        .as_deref()
-                        .filter(|root_uuid| *root_uuid != payload.uuid)
+                        .as_ref()
+                        .filter(|root_uuid| **root_uuid != payload.uuid)
                         .map(|root_uuid| {
                             transaction
                                 .query_row(
@@ -863,30 +836,30 @@ fn apply_one(
                 )?;
                 reconcile_node_structure(transaction)?;
             }
-            Ok(vec![payload.uuid.clone()])
+            Ok(vec![payload.uuid])
         }
         OpKind::EdgeAdd(payload) => {
             write_edge_intent(transaction, payload, &operation.hlc, true)?;
-            Ok(vec![payload.src_uuid.clone(), payload.dst_uuid.clone()])
+            Ok(vec![payload.src_uuid, payload.dst_uuid])
         }
         OpKind::EdgeRemove(payload) => {
             write_edge_intent(
                 transaction,
                 &EdgeAdd {
-                    src_uuid: payload.src_uuid.clone(),
-                    dst_uuid: payload.dst_uuid.clone(),
+                    src_uuid: payload.src_uuid,
+                    dst_uuid: payload.dst_uuid,
                     edge_kind: payload.edge_kind.clone(),
                     weight: 0.0,
                 },
                 &operation.hlc,
                 false,
             )?;
-            Ok(vec![payload.src_uuid.clone(), payload.dst_uuid.clone()])
+            Ok(vec![payload.src_uuid, payload.dst_uuid])
         }
         OpKind::AttachmentAdd(payload) => apply_attachment_add(transaction, operation, payload),
         OpKind::AttachmentRemove(payload) => {
             write_attachment_intent(transaction, payload, None, &operation.hlc, false)?;
-            Ok(vec![payload.node_uuid.clone()])
+            Ok(vec![payload.node_uuid])
         }
     }
 }
@@ -895,7 +868,7 @@ fn apply_node_create(
     transaction: &rusqlite::Transaction<'_>,
     operation: &Op,
     payload: &NodeCreate,
-) -> rusqlite::Result<Vec<String>> {
+) -> rusqlite::Result<Vec<uuid::Uuid>> {
     let tombstone = transaction
         .query_row(
             "SELECT deleted_hlc FROM tombstones WHERE uuid = ?1",
@@ -908,15 +881,14 @@ fn apply_node_create(
             .parse::<Hlc>()
             .is_ok_and(|deleted_hlc| operation.hlc <= deleted_hlc)
         {
-            return Ok(vec![payload.uuid.clone()]);
+            return Ok(vec![payload.uuid]);
         }
         // A newer explicit node_create is the inverse operation used by Undo.
         // Ordinary edits still cannot resurrect a tombstoned node.
         transaction.execute("DELETE FROM tombstones WHERE uuid = ?1", [&payload.uuid])?;
     }
-    let parent_id = resolve_parent(transaction, payload.parent_uuid.as_deref())?;
-    let node_id = db::stable_node_id(&payload.uuid)
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let parent_id = resolve_parent(transaction, payload.parent_uuid.as_ref())?;
+    let node_id = db::stable_node_id(&payload.uuid);
     let body = crate::stem::stem(&format!(
         "{}\n{}",
         payload.title.as_deref().unwrap_or(""),
@@ -1002,13 +974,13 @@ fn apply_node_create(
         )?;
     }
     reconcile_deferred_for_node(transaction, &payload.uuid)?;
-    Ok(vec![payload.uuid.clone()])
+    Ok(vec![payload.uuid])
 }
 
 fn adopt_page_stub(
     transaction: &rusqlite::Transaction<'_>,
-    stub_uuid: &str,
-    canonical_uuid: &str,
+    stub_uuid: &uuid::Uuid,
+    canonical_uuid: &uuid::Uuid,
     title: &str,
     canonical_id: i64,
 ) -> rusqlite::Result<()> {
@@ -1073,19 +1045,19 @@ fn apply_attachment_add(
     transaction: &rusqlite::Transaction<'_>,
     operation: &Op,
     payload: &AttachmentAdd,
-) -> rusqlite::Result<Vec<String>> {
+) -> rusqlite::Result<Vec<uuid::Uuid>> {
     let attachment_uuid = attachment_uuid(&payload.node_uuid, &payload.blob_hash);
     write_attachment_intent(
         transaction,
         &AttachmentRemove {
-            node_uuid: payload.node_uuid.clone(),
+            node_uuid: payload.node_uuid,
             blob_hash: payload.blob_hash.clone(),
         },
         Some(payload),
         &operation.hlc,
         true,
     )?;
-    Ok(vec![payload.node_uuid.clone(), attachment_uuid])
+    Ok(vec![payload.node_uuid, attachment_uuid])
 }
 
 fn write_edge_intent(
@@ -1121,8 +1093,8 @@ fn write_edge_intent(
 
 fn reconcile_edge(
     transaction: &rusqlite::Transaction<'_>,
-    src_uuid: &str,
-    dst_uuid: &str,
+    src_uuid: &uuid::Uuid,
+    dst_uuid: &uuid::Uuid,
     kind: &str,
 ) -> rusqlite::Result<()> {
     let intent = transaction
@@ -1201,7 +1173,7 @@ fn write_attachment_intent(
 
 fn reconcile_attachment(
     transaction: &rusqlite::Transaction<'_>,
-    node_uuid: &str,
+    node_uuid: &uuid::Uuid,
     blob_hash: &str,
 ) -> rusqlite::Result<()> {
     let intent = transaction
@@ -1221,8 +1193,7 @@ fn reconcile_attachment(
         )
         .optional()?;
     let attachment_uuid = attachment_uuid(node_uuid, blob_hash);
-    let attachment_id = db::stable_node_id(&attachment_uuid)
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let attachment_id = db::stable_node_id(&attachment_uuid);
     let Some((present, filename, mime, size, hlc)) = intent else {
         return Ok(());
     };
@@ -1287,7 +1258,7 @@ fn reconcile_attachment(
 
 fn resolve_parent(
     transaction: &rusqlite::Transaction<'_>,
-    parent_uuid: Option<&str>,
+    parent_uuid: Option<&uuid::Uuid>,
 ) -> rusqlite::Result<Option<i64>> {
     let Some(parent_uuid) = parent_uuid else {
         return Ok(None);
@@ -1306,7 +1277,7 @@ fn resolve_parent(
         .query_row(
             "SELECT root_uuid FROM tombstones WHERE uuid = ?1",
             [parent_uuid],
-            |row| row.get::<_, Option<String>>(0),
+            |row| row.get::<_, Option<uuid::Uuid>>(0),
         )
         .optional()?
         .flatten();
@@ -1326,8 +1297,8 @@ fn resolve_parent(
 
 fn containing_page_uuid(
     transaction: &rusqlite::Transaction<'_>,
-    node_uuid: &str,
-) -> rusqlite::Result<Option<String>> {
+    node_uuid: &uuid::Uuid,
+) -> rusqlite::Result<Option<uuid::Uuid>> {
     transaction
         .query_row(
             "WITH RECURSIVE ancestors(id, uuid, kind, parent_id, depth) AS (
@@ -1338,7 +1309,7 @@ fn containing_page_uuid(
              )
              SELECT uuid FROM ancestors WHERE kind = 'page' ORDER BY depth LIMIT 1",
             [node_uuid],
-            |row| row.get::<_, String>(0),
+            |row| row.get::<_, uuid::Uuid>(0),
         )
         .optional()
 }
@@ -1352,8 +1323,8 @@ fn reconcile_node_structure(transaction: &rusqlite::Transaction<'_>) -> rusqlite
         statement
             .query_map([], |row| {
                 Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, uuid::Uuid>(0)?,
+                    row.get::<_, Option<uuid::Uuid>>(1)?,
                     row.get::<_, f64>(2)?,
                     row.get::<_, String>(3)?,
                 ))
@@ -1364,7 +1335,7 @@ fn reconcile_node_structure(transaction: &rusqlite::Transaction<'_>) -> rusqlite
     // Re-materialize every winning intent first. Cycle breaking happens only
     // in parent_id, so a later delivery can always reproduce the same graph.
     for (node_uuid, parent_uuid, position, hlc) in &intents {
-        let parent_id = resolve_parent(transaction, parent_uuid.as_deref())?;
+        let parent_id = resolve_parent(transaction, parent_uuid.as_ref())?;
         transaction.execute(
             "UPDATE nodes SET parent_id = ?2, position = ?3, structure_hlc = ?4
              WHERE uuid = ?1 AND kind = 'block'
@@ -1390,7 +1361,7 @@ fn reconcile_node_structure(transaction: &rusqlite::Transaction<'_>) -> rusqlite
                 .query_map([], |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
+                        row.get::<_, uuid::Uuid>(1)?,
                         row.get::<_, Option<i64>>(2)?,
                         row.get::<_, String>(3)?,
                     ))
@@ -1410,10 +1381,7 @@ fn reconcile_node_structure(transaction: &rusqlite::Transaction<'_>) -> rusqlite
                     cycle_to_break = chain[cycle_start..]
                         .iter()
                         .filter_map(|id| by_id.get(id).copied())
-                        .min_by(|left, right| {
-                            (left.3.as_str(), left.1.as_str())
-                                .cmp(&(right.3.as_str(), right.1.as_str()))
-                        })
+                        .min_by(|left, right| (&left.3, left.1).cmp(&(&right.3, right.1)))
                         .map(|node| node.0);
                     break;
                 }
@@ -1436,7 +1404,7 @@ fn reconcile_node_structure(transaction: &rusqlite::Transaction<'_>) -> rusqlite
 
 fn reconcile_deferred_for_node(
     transaction: &rusqlite::Transaction<'_>,
-    uuid: &str,
+    uuid: &uuid::Uuid,
 ) -> rusqlite::Result<()> {
     let edges = {
         let mut statement = transaction.prepare(
@@ -1446,8 +1414,8 @@ fn reconcile_deferred_for_node(
         statement
             .query_map([uuid], |row| {
                 Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
+                    row.get::<_, uuid::Uuid>(0)?,
+                    row.get::<_, uuid::Uuid>(1)?,
                     row.get::<_, String>(2)?,
                 ))
             })?
@@ -1479,7 +1447,9 @@ fn sync_is_configured(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Resu
     )
 }
 
-fn meta_or_insert_device_id(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Result<String> {
+fn meta_or_insert_device_id(
+    transaction: &rusqlite::Transaction<'_>,
+) -> rusqlite::Result<uuid::Uuid> {
     if let Some(device_id) = transaction
         .query_row(
             "SELECT value FROM sync_meta WHERE key = 'device_id'",
@@ -1488,12 +1458,13 @@ fn meta_or_insert_device_id(transaction: &rusqlite::Transaction<'_>) -> rusqlite
         )
         .optional()?
     {
-        return Ok(device_id);
+        return uuid::Uuid::parse_str(&device_id)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)));
     }
-    let device_id = uuid::Uuid::new_v4().to_string();
+    let device_id = uuid::Uuid::new_v4();
     transaction.execute(
         "INSERT INTO sync_meta(key, value) VALUES ('device_id', ?1)",
-        [&device_id],
+        [device_id.to_string()],
     )?;
     Ok(device_id)
 }
@@ -1507,8 +1478,7 @@ fn observe_hlc(transaction: &rusqlite::Transaction<'_>, incoming: &Hlc) -> rusql
         )
         .optional()?;
     let current = current.and_then(|value| value.parse::<Hlc>().ok());
-    let device_id = uuid::Uuid::parse_str(&meta_or_insert_device_id(transaction)?)
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let device_id = meta_or_insert_device_id(transaction)?;
     let observed = if incoming.device_id() == device_id {
         current
             .clone()
@@ -1560,12 +1530,11 @@ fn delimited(content: &str, open: &str, close: &str) -> Vec<String> {
     values
 }
 
-fn attachment_uuid(node_uuid: &str, blob_hash: &str) -> String {
+fn attachment_uuid(node_uuid: &uuid::Uuid, blob_hash: &str) -> uuid::Uuid {
     uuid::Uuid::new_v5(
         &uuid::Uuid::NAMESPACE_OID,
         format!("notes-rs:attachment:{node_uuid}:{blob_hash}").as_bytes(),
     )
-    .to_string()
 }
 
 #[cfg(test)]
@@ -1583,8 +1552,8 @@ mod tests {
     fn remote_op(device: u128, wall_ms: u64, counter: u32, kind: OpKind) -> Op {
         let device_id = uuid::Uuid::from_u128(device);
         Op {
-            op_id: uuid::Uuid::new_v4().to_string(),
-            device_id: device_id.to_string(),
+            op_id: uuid::Uuid::new_v4(),
+            device_id,
             hlc: Hlc::new(wall_ms, counter, device_id),
             format_version: FORMAT_VERSION,
             kind,
@@ -1594,10 +1563,10 @@ mod tests {
     fn create_node_op(
         device: u128,
         wall_ms: u64,
-        uuid: &str,
+        uuid: &uuid::Uuid,
         kind: &str,
         title: Option<&str>,
-        parent_uuid: Option<&str>,
+        parent_uuid: Option<&uuid::Uuid>,
         position: Option<f64>,
     ) -> Op {
         remote_op(
@@ -1605,12 +1574,12 @@ mod tests {
             wall_ms,
             0,
             OpKind::NodeCreate(NodeCreate {
-                uuid: uuid.into(),
+                uuid: *uuid,
                 node_kind: kind.parse().expect("valid test node kind"),
                 title: title.map(str::to_owned),
                 content: String::new(),
                 content_json: None,
-                parent_uuid: parent_uuid.map(str::to_owned),
+                parent_uuid: parent_uuid.copied(),
                 position,
                 created_at: (wall_ms / 1_000) as i64,
             }),
@@ -1621,17 +1590,20 @@ mod tests {
     fn envelope_round_trips_with_flat_kind_and_payload() {
         let device_id = uuid::Uuid::new_v4();
         let operation = Op {
-            op_id: uuid::Uuid::new_v4().to_string(),
-            device_id: device_id.to_string(),
+            op_id: uuid::Uuid::new_v4(),
+            device_id,
             hlc: Hlc::new(42, 3, device_id),
             format_version: FORMAT_VERSION,
             kind: OpKind::NodeDelete(NodeDelete {
-                uuid: "node".into(),
+                uuid: uuid::Uuid::from_u128(1),
             }),
         };
         let json = serde_json::to_value(&operation).expect("serialize operation");
         assert_eq!(json["kind"], "node_delete");
-        assert_eq!(json["payload"]["uuid"], "node");
+        assert_eq!(
+            json["payload"]["uuid"],
+            uuid::Uuid::from_u128(1).to_string()
+        );
         assert_eq!(
             serde_json::from_value::<Op>(json).expect("deserialize operation"),
             operation
@@ -1659,7 +1631,7 @@ mod tests {
             })
             .await
             .expect("configure sync");
-        let node_uuid = uuid::Uuid::new_v4().to_string();
+        let node_uuid = uuid::Uuid::new_v4();
         let operation = local_ops(
             &connection,
             vec![OpKind::NodeCreate(NodeCreate {
@@ -1714,11 +1686,11 @@ mod tests {
     #[tokio::test]
     async fn older_content_operation_cannot_overwrite_newer_content() {
         let (_directory, connection) = database().await;
-        let node_uuid = uuid::Uuid::new_v4().to_string();
+        let node_uuid = uuid::Uuid::new_v4();
         let create = local_ops(
             &connection,
             vec![OpKind::NodeCreate(NodeCreate {
-                uuid: node_uuid.clone(),
+                uuid: node_uuid,
                 node_kind: NodeKind::Page,
                 title: Some("LWW".into()),
                 content: "initial".into(),
@@ -1738,12 +1710,12 @@ mod tests {
             &connection,
             vec![
                 OpKind::NodeSetContent(NodeSetContent {
-                    uuid: node_uuid.clone(),
+                    uuid: node_uuid,
                     content: "older".into(),
                     content_json: None,
                 }),
                 OpKind::NodeSetContent(NodeSetContent {
-                    uuid: node_uuid.clone(),
+                    uuid: node_uuid,
                     content: "newer".into(),
                     content_json: None,
                 }),
@@ -1773,12 +1745,12 @@ mod tests {
     #[tokio::test]
     async fn edits_cannot_resurrect_a_tombstoned_node() {
         let (_directory, connection) = database().await;
-        let node_uuid = uuid::Uuid::new_v4().to_string();
+        let node_uuid = uuid::Uuid::new_v4();
         let mut operations = local_ops(
             &connection,
             vec![
                 OpKind::NodeCreate(NodeCreate {
-                    uuid: node_uuid.clone(),
+                    uuid: node_uuid,
                     node_kind: NodeKind::Page,
                     title: Some("Deleted".into()),
                     content: String::new(),
@@ -1787,11 +1759,9 @@ mod tests {
                     position: None,
                     created_at: 1,
                 }),
-                OpKind::NodeDelete(NodeDelete {
-                    uuid: node_uuid.clone(),
-                }),
+                OpKind::NodeDelete(NodeDelete { uuid: node_uuid }),
                 OpKind::NodeSetContent(NodeSetContent {
-                    uuid: node_uuid.clone(),
+                    uuid: node_uuid,
                     content: "must not return".into(),
                     content_json: None,
                 }),
@@ -1830,11 +1800,11 @@ mod tests {
     async fn canonical_page_create_adopts_an_existing_wikilink_stub() {
         let (_directory, connection) = database().await;
         let (_direct_directory, direct) = database().await;
-        let block_uuid = uuid::Uuid::new_v4().to_string();
+        let block_uuid = uuid::Uuid::new_v4();
         let block = local_ops(
             &connection,
             vec![OpKind::NodeCreate(NodeCreate {
-                uuid: block_uuid.clone(),
+                uuid: block_uuid,
                 node_kind: NodeKind::Block,
                 title: None,
                 content: "See [[Roadmap]]".into(),
@@ -1856,11 +1826,11 @@ mod tests {
             .expect("stub")
             .uuid;
 
-        let canonical_uuid = uuid::Uuid::new_v4().to_string();
+        let canonical_uuid = uuid::Uuid::new_v4();
         let page = local_ops(
             &connection,
             vec![OpKind::NodeCreate(NodeCreate {
-                uuid: canonical_uuid.clone(),
+                uuid: canonical_uuid,
                 node_kind: NodeKind::Page,
                 title: Some("Roadmap".into()),
                 content: String::new(),
@@ -1913,8 +1883,8 @@ mod tests {
     async fn edge_add_remove_converges_when_delivered_in_reverse_order() {
         let (_left_dir, left) = database().await;
         let (_right_dir, right) = database().await;
-        let src = uuid::Uuid::new_v4().to_string();
-        let dst = uuid::Uuid::new_v4().to_string();
+        let src = uuid::Uuid::new_v4();
+        let dst = uuid::Uuid::new_v4();
         let initial = vec![
             create_node_op(1, 1_000, &src, "page", Some("Source"), None, None),
             create_node_op(1, 1_001, &dst, "page", Some("Target"), None, None),
@@ -1929,8 +1899,8 @@ mod tests {
             2_000,
             0,
             OpKind::EdgeAdd(EdgeAdd {
-                src_uuid: src.clone(),
-                dst_uuid: dst.clone(),
+                src_uuid: src,
+                dst_uuid: dst,
                 edge_kind: "relates_to".into(),
                 weight: 0.8,
             }),
@@ -1970,9 +1940,9 @@ mod tests {
     async fn concurrent_moves_forming_a_cycle_break_identically() {
         let (_left_dir, left) = database().await;
         let (_right_dir, right) = database().await;
-        let page = uuid::Uuid::new_v4().to_string();
-        let first = uuid::Uuid::new_v4().to_string();
-        let second = uuid::Uuid::new_v4().to_string();
+        let page = uuid::Uuid::new_v4();
+        let first = uuid::Uuid::new_v4();
+        let second = uuid::Uuid::new_v4();
         let initial = vec![
             create_node_op(1, 1_000, &page, "page", Some("Root"), None, None),
             create_node_op(1, 1_001, &first, "block", None, Some(&page), Some(1.0)),
@@ -1988,8 +1958,8 @@ mod tests {
             2_000,
             0,
             OpKind::NodeMove(NodeMove {
-                uuid: first.clone(),
-                parent_uuid: Some(second.clone()),
+                uuid: first,
+                parent_uuid: Some(second),
                 position: 1.0,
             }),
         );
@@ -1998,8 +1968,8 @@ mod tests {
             2_000,
             0,
             OpKind::NodeMove(NodeMove {
-                uuid: second.clone(),
-                parent_uuid: Some(first.clone()),
+                uuid: second,
+                parent_uuid: Some(first),
                 position: 1.0,
             }),
         );
@@ -2025,7 +1995,10 @@ mod tests {
                         )?;
                         statement
                             .query_map([], |row| {
-                                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                                Ok((
+                                    row.get::<_, uuid::Uuid>(0)?,
+                                    row.get::<_, Option<uuid::Uuid>>(1)?,
+                                ))
                             })?
                             .collect::<Result<Vec<_>, _>>()
                     })
@@ -2040,9 +2013,9 @@ mod tests {
     async fn concurrent_child_survives_parent_delete_at_page_root() {
         let (_left_dir, left) = database().await;
         let (_right_dir, right) = database().await;
-        let page = uuid::Uuid::new_v4().to_string();
-        let parent = uuid::Uuid::new_v4().to_string();
-        let child = uuid::Uuid::new_v4().to_string();
+        let page = uuid::Uuid::new_v4();
+        let parent = uuid::Uuid::new_v4();
+        let child = uuid::Uuid::new_v4();
         let initial = vec![
             create_node_op(1, 1_000, &page, "page", Some("Root"), None, None),
             create_node_op(1, 1_001, &parent, "block", None, Some(&page), Some(1.0)),
@@ -2052,14 +2025,7 @@ mod tests {
                 .await
                 .expect("initial parent");
         }
-        let delete = remote_op(
-            1,
-            2_000,
-            0,
-            OpKind::NodeDelete(NodeDelete {
-                uuid: parent.clone(),
-            }),
-        );
+        let delete = remote_op(1, 2_000, 0, OpKind::NodeDelete(NodeDelete { uuid: parent }));
         let create_child =
             create_node_op(2, 2_000, &child, "block", None, Some(&parent), Some(1.0));
         apply_batch(
@@ -2073,9 +2039,8 @@ mod tests {
             .await
             .expect("create first");
         for connection in [&left, &right] {
-            let parent_uuid: Option<String> = connection
+            let parent_uuid: Option<uuid::Uuid> = connection
                 .call({
-                    let child = child.clone();
                     move |database| {
                         database.query_row(
                             "SELECT parent.uuid FROM nodes child
@@ -2088,16 +2053,16 @@ mod tests {
                 })
                 .await
                 .expect("child parent");
-            assert_eq!(parent_uuid.as_deref(), Some(page.as_str()));
+            assert_eq!(parent_uuid, Some(page));
         }
     }
 
     #[tokio::test]
     async fn equal_sibling_positions_are_ordered_by_uuid() {
         let (_directory, connection) = database().await;
-        let page = uuid::Uuid::new_v4().to_string();
-        let low = uuid::Uuid::from_u128(10).to_string();
-        let high = uuid::Uuid::from_u128(20).to_string();
+        let page = uuid::Uuid::new_v4();
+        let low = uuid::Uuid::from_u128(10);
+        let high = uuid::Uuid::from_u128(20);
         let operations = vec![
             create_node_op(1, 1_000, &page, "page", Some("Root"), None, None),
             create_node_op(2, 1_001, &high, "block", None, Some(&page), Some(1.0)),
@@ -2127,7 +2092,7 @@ mod tests {
     async fn attachment_add_remove_is_lww_and_order_independent() {
         let (_left_dir, left) = database().await;
         let (_right_dir, right) = database().await;
-        let page = uuid::Uuid::new_v4().to_string();
+        let page = uuid::Uuid::new_v4();
         let create_page = create_node_op(1, 1_000, &page, "page", Some("Root"), None, None);
         for connection in [&left, &right] {
             apply(connection, &create_page, Origin::Remote)
@@ -2139,7 +2104,7 @@ mod tests {
             2_000,
             0,
             OpKind::AttachmentAdd(AttachmentAdd {
-                node_uuid: page.clone(),
+                node_uuid: page,
                 blob_hash: "abc123".into(),
                 filename: "file.txt".into(),
                 mime: "text/plain".into(),

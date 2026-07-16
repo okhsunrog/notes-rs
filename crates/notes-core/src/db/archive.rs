@@ -65,15 +65,15 @@ pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<(
     let target_nodes = archive
         .nodes
         .iter()
-        .map(|node| (node.id, node.uuid.clone()))
+        .map(|node| (node.id, node.uuid))
         .collect::<std::collections::HashMap<_, _>>();
     let descriptions = archive
         .entity_descriptions
         .into_iter()
         .filter_map(|description| {
             Some((
-                target_nodes.get(&description.source_node_id)?.clone(),
-                target_nodes.get(&description.entity_node_id)?.clone(),
+                *target_nodes.get(&description.source_node_id)?,
+                *target_nodes.get(&description.entity_node_id)?,
                 description.description,
                 description.created_at,
             ))
@@ -112,36 +112,34 @@ fn archive_transition_kinds(current: &DataArchive, target: &DataArchive) -> Resu
     let current_by_uuid = current
         .nodes
         .iter()
-        .map(|node| (node.uuid.as_str(), node))
+        .map(|node| (node.uuid, node))
         .collect::<BTreeMap<_, _>>();
     let target_by_uuid = target
         .nodes
         .iter()
-        .map(|node| (node.uuid.as_str(), node))
+        .map(|node| (node.uuid, node))
         .collect::<BTreeMap<_, _>>();
     let target_id_to_uuid = target
         .nodes
         .iter()
-        .map(|node| (node.id, node.uuid.as_str()))
+        .map(|node| (node.id, node.uuid))
         .collect::<HashMap<_, _>>();
     let current_id_to_uuid = current
         .nodes
         .iter()
-        .map(|node| (node.id, node.uuid.as_str()))
+        .map(|node| (node.id, node.uuid))
         .collect::<HashMap<_, _>>();
     let mut kinds = Vec::new();
 
     for uuid in current_by_uuid.keys().rev() {
         if !target_by_uuid.contains_key(uuid) {
-            kinds.push(OpKind::NodeDelete(NodeDelete {
-                uuid: (*uuid).to_string(),
-            }));
+            kinds.push(OpKind::NodeDelete(NodeDelete { uuid: *uuid }));
         }
     }
     for (uuid, target_node) in &target_by_uuid {
         match current_by_uuid.get(uuid) {
             None => kinds.push(OpKind::NodeCreate(NodeCreate {
-                uuid: (*uuid).to_string(),
+                uuid: *uuid,
                 node_kind: target_node.kind,
                 title: target_node.title.clone(),
                 content: target_node.content.clone(),
@@ -153,7 +151,7 @@ fn archive_transition_kinds(current: &DataArchive, target: &DataArchive) -> Resu
             Some(current_node) => {
                 if current_node.title != target_node.title {
                     kinds.push(OpKind::NodeSetTitle(NodeSetTitle {
-                        uuid: (*uuid).to_string(),
+                        uuid: *uuid,
                         title: target_node.title.clone(),
                     }));
                 }
@@ -161,7 +159,7 @@ fn archive_transition_kinds(current: &DataArchive, target: &DataArchive) -> Resu
                     || current_node.content_json != target_node.content_json
                 {
                     kinds.push(OpKind::NodeSetContent(NodeSetContent {
-                        uuid: (*uuid).to_string(),
+                        uuid: *uuid,
                         content: target_node.content.clone(),
                         content_json: target_node.content_json.clone(),
                     }));
@@ -176,7 +174,7 @@ fn archive_transition_kinds(current: &DataArchive, target: &DataArchive) -> Resu
         let parent_uuid = target_node
             .parent_id
             .and_then(|parent_id| target_id_to_uuid.get(&parent_id))
-            .map(|uuid| (*uuid).to_string());
+            .copied();
         let current_structure = current_by_uuid.get(uuid).map(|node| {
             (
                 node.parent_id
@@ -185,24 +183,24 @@ fn archive_transition_kinds(current: &DataArchive, target: &DataArchive) -> Resu
                 node.position,
             )
         });
-        if current_structure != Some((parent_uuid.as_deref(), target_node.position)) {
+        if current_structure != Some((parent_uuid, target_node.position)) {
             kinds.push(OpKind::NodeMove(NodeMove {
-                uuid: (*uuid).to_string(),
+                uuid: *uuid,
                 parent_uuid,
                 position: target_node.position.unwrap_or(1024.0),
             }));
         }
     }
 
-    let edge_map = |archive: &DataArchive, ids: &HashMap<i64, &str>| {
+    let edge_map = |archive: &DataArchive, ids: &HashMap<i64, uuid::Uuid>| {
         archive
             .edges
             .iter()
             .filter_map(|edge| {
                 Some((
                     (
-                        (*ids.get(&edge.src)?).to_string(),
-                        (*ids.get(&edge.dst)?).to_string(),
+                        *ids.get(&edge.src)?,
+                        *ids.get(&edge.dst)?,
                         edge.kind.clone(),
                     ),
                     edge.weight,
@@ -216,17 +214,17 @@ fn archive_transition_kinds(current: &DataArchive, target: &DataArchive) -> Resu
     let target_keys = target_edges.keys().cloned().collect::<BTreeSet<_>>();
     for (src_uuid, dst_uuid, edge_kind) in current_keys.difference(&target_keys) {
         kinds.push(OpKind::EdgeRemove(operation::EdgeRemove {
-            src_uuid: src_uuid.clone(),
-            dst_uuid: dst_uuid.clone(),
+            src_uuid: *src_uuid,
+            dst_uuid: *dst_uuid,
             edge_kind: edge_kind.clone(),
         }));
     }
     for (src_uuid, dst_uuid, edge_kind) in target_keys.difference(&current_keys) {
         kinds.push(OpKind::EdgeAdd(EdgeAdd {
-            src_uuid: src_uuid.clone(),
-            dst_uuid: dst_uuid.clone(),
+            src_uuid: *src_uuid,
+            dst_uuid: *dst_uuid,
             edge_kind: edge_kind.clone(),
-            weight: target_edges[&(src_uuid.clone(), dst_uuid.clone(), edge_kind.clone())],
+            weight: target_edges[&(*src_uuid, *dst_uuid, edge_kind.clone())],
         }));
     }
     Ok(kinds)

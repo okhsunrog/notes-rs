@@ -107,7 +107,7 @@ pub async fn replace_extracted_edges(
             let entity_id = if let Some(id) = existing {
                 id
             } else {
-                let uuid = uuid::Uuid::now_v7().to_string();
+                let uuid = uuid::Uuid::now_v7();
                 let body = crate::stem::stem(name);
                 tx.execute(
                     "INSERT INTO nodes
@@ -283,8 +283,7 @@ pub(crate) fn replace_block_refs_tx_at(
             Some(id) => id,
             None => {
                 let uuid = page_uuid(title);
-                let id = stable_node_id(&uuid)
-                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+                let id = stable_node_id(&uuid);
                 tx.execute(
                     "INSERT INTO nodes (id, uuid, kind, title, content, content_json,
                                         body_stemmed, parent_id, position,
@@ -310,6 +309,10 @@ pub(crate) fn replace_block_refs_tx_at(
         if uuid.is_empty() {
             continue;
         }
+        let Ok(uuid) = uuid::Uuid::parse_str(uuid) else {
+            broken += 1;
+            continue;
+        };
         let target = tx
             .query_row("SELECT id FROM nodes WHERE uuid = ?1", [uuid], |row| {
                 row.get::<_, i64>(0)
@@ -330,16 +333,14 @@ pub(crate) fn replace_block_refs_tx_at(
     Ok(broken)
 }
 
-pub(crate) fn page_uuid(title: &str) -> String {
+pub(crate) fn page_uuid(title: &str) -> uuid::Uuid {
     uuid::Uuid::new_v5(
         &uuid::Uuid::NAMESPACE_OID,
         format!("notes-rs:page:{}", title.trim().to_lowercase()).as_bytes(),
     )
-    .to_string()
 }
 
-pub(crate) fn stable_node_id(uuid: &str) -> Result<i64, uuid::Error> {
-    let uuid = uuid::Uuid::parse_str(uuid)?;
+pub(crate) fn stable_node_id(uuid: &uuid::Uuid) -> i64 {
     let mut high = [0_u8; 8];
     let mut low = [0_u8; 8];
     high.copy_from_slice(&uuid.as_bytes()[..8]);
@@ -347,7 +348,7 @@ pub(crate) fn stable_node_id(uuid: &str) -> Result<i64, uuid::Error> {
     // Tauri sends IDs through JavaScript, so keep them inside Number's exact
     // integer range while retaining 53 bits of UUID-derived entropy.
     let value = (u64::from_be_bytes(high) ^ u64::from_be_bytes(low)) & ((1_u64 << 53) - 1);
-    Ok(value.max(1) as i64)
+    value.max(1) as i64
 }
 
 pub async fn neighbors(conn: &Connection, node_id: i64, depth: u32) -> Result<Vec<Node>> {

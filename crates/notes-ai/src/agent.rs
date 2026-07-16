@@ -1261,7 +1261,7 @@ mod tests {
         let candidates = vec![
             Node {
                 id: 1,
-                uuid: "one".into(),
+                uuid: uuid::Uuid::from_u128(1),
                 kind: NodeKind::Page,
                 title: Some("First note".into()),
                 content: String::new(),
@@ -1273,7 +1273,7 @@ mod tests {
             },
             Node {
                 id: 2,
-                uuid: "two".into(),
+                uuid: uuid::Uuid::from_u128(2),
                 kind: NodeKind::Page,
                 title: Some("Second note".into()),
                 content: String::new(),

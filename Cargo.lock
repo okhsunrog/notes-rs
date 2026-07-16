@@ -3205,6 +3205,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -3278,6 +3279,7 @@ dependencies = [
  "serde",
  "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -4857,6 +4859,7 @@ dependencies = [
  "fallible-streaming-iterator",
  "libsqlite3-sys",
  "smallvec",
+ "uuid",
 ]
 
 [[package]]

@@ -17,7 +17,7 @@ pub struct SequencedOp {
 #[derive(Debug, Clone, Default)]
 pub struct LoopbackServer {
     log: Vec<SequencedOp>,
-    by_op_id: HashMap<String, u64>,
+    by_op_id: HashMap<uuid::Uuid, u64>,
 }
 
 impl LoopbackServer {
@@ -37,7 +37,7 @@ impl LoopbackServer {
             }
             if server
                 .by_op_id
-                .insert(item.envelope.op_id.clone(), item.seq)
+                .insert(item.envelope.op_id, item.seq)
                 .is_some()
             {
                 bail!("loopback oplog contains a duplicate op_id");
@@ -56,7 +56,7 @@ impl LoopbackServer {
                 }
                 let seq = self.log.len() as u64 + 1;
                 let item = SequencedOp { seq, envelope };
-                self.by_op_id.insert(item.envelope.op_id.clone(), seq);
+                self.by_op_id.insert(item.envelope.op_id, seq);
                 self.log.push(item.clone());
                 item
             })
@@ -114,7 +114,7 @@ impl SyncClient {
         for accepted in server.ingest(outbox) {
             // A transport ack prunes the outbox; the server echo remains in
             // the log and exercises idempotent redelivery on catch-up.
-            acknowledge_server_op(&self.conn, &accepted.envelope.op_id, accepted.seq).await?;
+            acknowledge_server_op(&self.conn, accepted.envelope.op_id, accepted.seq).await?;
         }
 
         self.catch_up(server, &mut stats).await?;

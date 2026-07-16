@@ -7,38 +7,40 @@ pub async fn create_block(
     content: String,
     content_json: Option<String>,
 ) -> Result<Node> {
-    let uuid = uuid::Uuid::now_v7().to_string();
+    let uuid = uuid::Uuid::now_v7();
     let now = chrono::Utc::now().timestamp();
     let (parent_uuid, position) = conn
-        .call(move |database| -> rusqlite::Result<(Option<String>, f64)> {
-            let parent_uuid = parent_id
-                .map(|parent_id| {
-                    database.query_row(
-                        "SELECT uuid FROM nodes WHERE id = ?1 AND kind IN ('page', 'block')",
-                        [parent_id],
-                        |row| row.get::<_, String>(0),
-                    )
-                })
-                .transpose()?;
-            let position = match position {
-                Some(position) => position,
-                None => match parent_id {
-                    Some(parent_id) => database.query_row(
-                        "SELECT COALESCE(MAX(position), 0.0) + 1024.0
+        .call(
+            move |database| -> rusqlite::Result<(Option<uuid::Uuid>, f64)> {
+                let parent_uuid = parent_id
+                    .map(|parent_id| {
+                        database.query_row(
+                            "SELECT uuid FROM nodes WHERE id = ?1 AND kind IN ('page', 'block')",
+                            [parent_id],
+                            |row| row.get::<_, uuid::Uuid>(0),
+                        )
+                    })
+                    .transpose()?;
+                let position = match position {
+                    Some(position) => position,
+                    None => match parent_id {
+                        Some(parent_id) => database.query_row(
+                            "SELECT COALESCE(MAX(position), 0.0) + 1024.0
                          FROM nodes WHERE parent_id = ?1",
-                        [parent_id],
-                        |row| row.get(0),
-                    )?,
-                    None => 1024.0,
-                },
-            };
-            Ok((parent_uuid, position))
-        })
+                            [parent_id],
+                            |row| row.get(0),
+                        )?,
+                        None => 1024.0,
+                    },
+                };
+                Ok((parent_uuid, position))
+            },
+        )
         .await?;
     apply_local(
         conn,
         vec![OpKind::NodeCreate(NodeCreate {
-            uuid: uuid.clone(),
+            uuid,
             node_kind: NodeKind::Block,
             title: None,
             content,
@@ -65,8 +67,8 @@ pub async fn move_block(
 ) -> Result<Node> {
     let (uuid, parent_uuid, position) = conn
         .call(
-            move |database| -> rusqlite::Result<(String, Option<String>, f64)> {
-                let (uuid, kind): (String, NodeKind) = database.query_row(
+            move |database| -> rusqlite::Result<(uuid::Uuid, Option<uuid::Uuid>, f64)> {
+                let (uuid, kind): (uuid::Uuid, NodeKind) = database.query_row(
                     "SELECT uuid, kind FROM nodes WHERE id = ?1",
                     [id],
                     |row| Ok((row.get(0)?, row.get(1)?)),
@@ -101,7 +103,7 @@ pub async fn move_block(
                         database.query_row(
                             "SELECT uuid FROM nodes WHERE id = ?1 AND kind IN ('page', 'block')",
                             [parent_id],
-                            |row| row.get::<_, String>(0),
+                            |row| row.get::<_, uuid::Uuid>(0),
                         )
                     })
                     .transpose()?;
@@ -124,7 +126,7 @@ pub async fn move_block(
     apply_local(
         conn,
         vec![OpKind::NodeMove(NodeMove {
-            uuid: uuid.clone(),
+            uuid,
             parent_uuid,
             position,
         })],
@@ -150,10 +152,10 @@ pub async fn reorder_block(
             let mut statement = database
                 .prepare("SELECT uuid, position FROM nodes WHERE parent_id IS ?1 ORDER BY position, uuid")?;
             statement
-                .query_map([parent_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)))?
+                .query_map([parent_id], |row| Ok((row.get::<_, uuid::Uuid>(0)?, row.get::<_, f64>(1)?)))?
                 .collect::<Result<Vec<_>, _>>()?
         };
-        let uuid: String = database.query_row("SELECT uuid FROM nodes WHERE id = ?1", [id], |row| row.get(0))?;
+        let uuid: uuid::Uuid = database.query_row("SELECT uuid FROM nodes WHERE id = ?1", [id], |row| row.get(0))?;
         let index = siblings
             .iter()
             .position(|(sibling_uuid, _)| *sibling_uuid == uuid)
@@ -170,7 +172,7 @@ pub async fn reorder_block(
                 moves.push((sibling_uuid, (new_index as f64 + 1.0) * 1024.0));
             }
         }
-        let parent_uuid = parent_id.map(|parent_id| database.query_row("SELECT uuid FROM nodes WHERE id = ?1", [parent_id], |row| row.get::<_, String>(0))).transpose()?;
+        let parent_uuid = parent_id.map(|parent_id| database.query_row("SELECT uuid FROM nodes WHERE id = ?1", [parent_id], |row| row.get::<_, uuid::Uuid>(0))).transpose()?;
         Ok((uuid, parent_uuid, moves))
     }).await?;
     let kinds = moves
@@ -178,7 +180,7 @@ pub async fn reorder_block(
         .map(|(uuid, position)| {
             OpKind::NodeMove(NodeMove {
                 uuid,
-                parent_uuid: parent_uuid.clone(),
+                parent_uuid,
                 position,
             })
         })
@@ -194,7 +196,7 @@ pub async fn reorder_block(
 /// successful delete.
 pub async fn delete_block(conn: &Connection, id: i64) -> Result<bool> {
     let uuid = conn
-        .call(move |c| -> rusqlite::Result<Option<String>> {
+        .call(move |c| -> rusqlite::Result<Option<uuid::Uuid>> {
             let kids: i64 = c.query_row(
                 "SELECT COUNT(*) FROM nodes WHERE parent_id = ?1",
                 [id],
@@ -242,15 +244,11 @@ pub async fn get_page_by_title(conn: &Connection, title: String) -> Result<Optio
     .await
 }
 
-pub async fn get_node_by_uuid(conn: &Connection, uuid: String) -> Result<Option<Node>> {
-    let trimmed = uuid.trim().to_string();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
+pub async fn get_node_by_uuid(conn: &Connection, uuid: uuid::Uuid) -> Result<Option<Node>> {
     conn.call(move |c| -> rusqlite::Result<Option<Node>> {
         let sql = format!("SELECT {NODE_COLUMNS} FROM nodes WHERE uuid = ?1 LIMIT 1");
         let mut stmt = c.prepare(&sql)?;
-        let mut rows = stmt.query([&trimmed])?;
+        let mut rows = stmt.query([uuid])?;
         if let Some(r) = rows.next()? {
             Ok(Some(row_to_node(r)?))
         } else {

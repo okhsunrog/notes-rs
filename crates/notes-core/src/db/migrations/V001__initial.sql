@@ -1,6 +1,6 @@
 CREATE TABLE nodes (
   id INTEGER PRIMARY KEY,
-  uuid TEXT UNIQUE NOT NULL,
+  uuid BLOB UNIQUE NOT NULL CHECK (length(uuid) = 16),
   kind TEXT NOT NULL CHECK (kind IN ('page', 'block', 'tag', 'entity', 'attachment')),
   title TEXT,
   content TEXT NOT NULL DEFAULT '',
@@ -60,22 +60,22 @@ CREATE TABLE history_redo (
 
 CREATE TABLE sync_outbox (
   rowid INTEGER PRIMARY KEY,
-  op_id TEXT NOT NULL UNIQUE,
+  op_id BLOB NOT NULL UNIQUE CHECK (length(op_id) = 16),
   envelope TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
 CREATE TABLE applied_ops (
-  op_id TEXT PRIMARY KEY,
+  op_id BLOB PRIMARY KEY CHECK (length(op_id) = 16),
   seq INTEGER
 );
 CREATE TABLE tombstones (
-  uuid TEXT PRIMARY KEY,
+  uuid BLOB PRIMARY KEY CHECK (length(uuid) = 16),
   deleted_hlc TEXT NOT NULL,
-  root_uuid TEXT
+  root_uuid BLOB CHECK (root_uuid IS NULL OR length(root_uuid) = 16)
 );
 CREATE TABLE edge_lww (
-  src_uuid TEXT NOT NULL,
-  dst_uuid TEXT NOT NULL,
+  src_uuid BLOB NOT NULL CHECK (length(src_uuid) = 16),
+  dst_uuid BLOB NOT NULL CHECK (length(dst_uuid) = 16),
   kind TEXT NOT NULL,
   hlc TEXT NOT NULL,
   present INTEGER NOT NULL,
@@ -83,13 +83,13 @@ CREATE TABLE edge_lww (
   PRIMARY KEY(src_uuid, dst_uuid, kind)
 );
 CREATE TABLE node_structure_lww (
-  node_uuid TEXT PRIMARY KEY,
-  parent_uuid TEXT,
+  node_uuid BLOB PRIMARY KEY CHECK (length(node_uuid) = 16),
+  parent_uuid BLOB CHECK (parent_uuid IS NULL OR length(parent_uuid) = 16),
   position REAL NOT NULL,
   hlc TEXT NOT NULL
 );
 CREATE TABLE attachment_lww (
-  node_uuid TEXT NOT NULL,
+  node_uuid BLOB NOT NULL CHECK (length(node_uuid) = 16),
   blob_hash TEXT NOT NULL,
   hlc TEXT NOT NULL,
   present INTEGER NOT NULL,

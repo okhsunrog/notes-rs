@@ -22,7 +22,7 @@ pub struct AppState {
     pub embedder: Arc<dyn EmbedderBackend>,
     pub reranker: Arc<dyn RerankBackend>,
     pub background_paused: Arc<AtomicBool>,
-    pub chat_cancellations: Arc<std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    pub chat_cancellations: Arc<std::sync::Mutex<HashMap<uuid::Uuid, Arc<AtomicBool>>>>,
 }
 
 /// The single frontend invalidation stream for persisted Rust state.
@@ -1013,7 +1013,7 @@ pub async fn get_page_by_title(
 #[specta::specta]
 pub async fn get_node_by_uuid(
     state: State<'_, AppState>,
-    uuid: String,
+    uuid: uuid::Uuid,
 ) -> Result<Option<Node>, String> {
     db::get_node_by_uuid(&state.conn, uuid).await.map_err(err)
 }
@@ -1277,22 +1277,16 @@ pub async fn chat_stream(
     message: String,
     allow_writes: bool,
     active_node_id: Option<i64>,
-    request_id: String,
+    request_id: uuid::Uuid,
     on_event: Channel<ChatEvent>,
 ) -> Result<String, String> {
-    if request_id.len() > 128 || request_id.trim().is_empty() {
-        return Err("invalid chat request ID".into());
-    }
     let cancellation = Arc::new(AtomicBool::new(false));
     {
         let mut active = state
             .chat_cancellations
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if active
-            .insert(request_id.clone(), cancellation.clone())
-            .is_some()
-        {
+        if active.insert(request_id, cancellation.clone()).is_some() {
             return Err("a chat request with this ID is already active".into());
         }
     }
@@ -1329,7 +1323,7 @@ pub async fn chat_stream(
 
 #[tauri::command]
 #[specta::specta]
-pub fn cancel_chat(state: State<'_, AppState>, request_id: String) -> bool {
+pub fn cancel_chat(state: State<'_, AppState>, request_id: uuid::Uuid) -> bool {
     let active = state
         .chat_cancellations
         .lock()

@@ -128,6 +128,7 @@ export const events = {
 };
 
 /* Types */
+/**  A queued background job that has failed at least once. */
 export type BackgroundFailure = {
 	queue: BackgroundQueue,
 	nodeId: number,

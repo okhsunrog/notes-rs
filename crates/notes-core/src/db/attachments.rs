@@ -73,7 +73,7 @@ pub async fn delete_attachment(conn: &Connection, id: i64) -> Result<Option<Node
                         "SELECT parent.uuid FROM edges e JOIN nodes parent ON parent.id = e.src
              WHERE e.dst = ?1 AND e.kind = 'attachment' LIMIT 1",
                         [id],
-                        |row| row.get::<_, String>(0),
+                        |row| row.get::<_, uuid::Uuid>(0),
                     )
                     .optional()?;
                 let blob_hash = node
@@ -99,9 +99,7 @@ pub async fn delete_attachment(conn: &Connection, id: i64) -> Result<Option<Node
             blob_hash,
         })
     } else {
-        OpKind::NodeDelete(NodeDelete {
-            uuid: node.uuid.clone(),
-        })
+        OpKind::NodeDelete(NodeDelete { uuid: node.uuid })
     };
     apply_local(conn, vec![kind]).await?;
     Ok(Some(node))

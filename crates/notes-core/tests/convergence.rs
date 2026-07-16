@@ -7,11 +7,11 @@ use proptest::prelude::*;
 
 type NodeState = (
     i64,
-    String,
-    String,
-    Option<String>,
+    uuid::Uuid,
     String,
     Option<String>,
+    String,
+    Option<uuid::Uuid>,
     Option<i64>,
     Option<String>,
     Option<String>,
@@ -23,9 +23,9 @@ type NodeState = (
 #[derive(Debug, Clone, PartialEq)]
 struct SourceState {
     nodes: Vec<NodeState>,
-    edges: Vec<(String, String, String, i64, i64)>,
-    tombstones: Vec<(String, String, Option<String>)>,
-    edge_lww: Vec<(String, String, String, String, bool, i64)>,
+    edges: Vec<(uuid::Uuid, uuid::Uuid, String, i64, i64)>,
+    tombstones: Vec<(uuid::Uuid, String, Option<uuid::Uuid>)>,
+    edge_lww: Vec<(uuid::Uuid, uuid::Uuid, String, String, bool, i64)>,
 }
 
 async fn database() -> (tempfile::TempDir, Connection) {
@@ -42,9 +42,8 @@ fn op(index: usize, wall_ms: u64, kind: OpKind) -> Op {
         op_id: uuid::Uuid::new_v5(
             &uuid::Uuid::NAMESPACE_OID,
             format!("convergence-op-{index}").as_bytes(),
-        )
-        .to_string(),
-        device_id: device_id.to_string(),
+        ),
+        device_id,
         hlc: Hlc::new(wall_ms, 0, device_id),
         format_version: 1,
         kind,
@@ -53,21 +52,21 @@ fn op(index: usize, wall_ms: u64, kind: OpKind) -> Op {
 
 fn create(
     index: usize,
-    uuid: &str,
+    uuid: &uuid::Uuid,
     kind: &str,
-    parent_uuid: Option<&str>,
+    parent_uuid: Option<&uuid::Uuid>,
     position: Option<f64>,
 ) -> Op {
     op(
         index,
         1_000 + index as u64,
         OpKind::NodeCreate(NodeCreate {
-            uuid: uuid.into(),
+            uuid: *uuid,
             node_kind: kind.parse().expect("valid test node kind"),
             title: (kind == "page").then(|| "Root".into()),
             content: String::new(),
             content_json: None,
-            parent_uuid: parent_uuid.map(str::to_owned),
+            parent_uuid: parent_uuid.copied(),
             position,
             created_at: 1,
         }),
@@ -168,44 +167,44 @@ fn build_operation(
     action: u8,
     clock: u8,
     choose_second: bool,
-    page: &str,
-    first: &str,
-    second: &str,
+    page: &uuid::Uuid,
+    first: &uuid::Uuid,
+    second: &uuid::Uuid,
 ) -> Op {
     let node = if choose_second { second } else { first };
     let wall_ms = 2_000 + u64::from(clock % 8);
     let kind = match action % 7 {
         0 => OpKind::NodeSetContent(NodeSetContent {
-            uuid: node.into(),
+            uuid: *node,
             content: format!("content-{index}"),
             content_json: None,
         }),
         1 => OpKind::NodeSetTitle(NodeSetTitle {
-            uuid: page.into(),
+            uuid: *page,
             title: Some(format!("title-{index}")),
         }),
         2 => OpKind::NodeMove(NodeMove {
-            uuid: first.into(),
-            parent_uuid: Some(if choose_second { second } else { page }.into()),
+            uuid: *first,
+            parent_uuid: Some(*if choose_second { second } else { page }),
             position: f64::from(clock % 3),
         }),
         3 => OpKind::NodeMove(NodeMove {
-            uuid: second.into(),
-            parent_uuid: Some(if choose_second { first } else { page }.into()),
+            uuid: *second,
+            parent_uuid: Some(*if choose_second { first } else { page }),
             position: f64::from(clock % 3),
         }),
         4 => OpKind::EdgeAdd(EdgeAdd {
-            src_uuid: first.into(),
-            dst_uuid: second.into(),
+            src_uuid: *first,
+            dst_uuid: *second,
             edge_kind: "relates_to".into(),
             weight: f64::from(clock % 10) / 10.0,
         }),
         5 => OpKind::EdgeRemove(EdgeRemove {
-            src_uuid: first.into(),
-            dst_uuid: second.into(),
+            src_uuid: *first,
+            dst_uuid: *second,
             edge_kind: "relates_to".into(),
         }),
-        _ => OpKind::NodeDelete(NodeDelete { uuid: node.into() }),
+        _ => OpKind::NodeDelete(NodeDelete { uuid: *node }),
     };
     op(index + 10, wall_ms, kind)
 }
@@ -228,9 +227,9 @@ proptest! {
         runtime.block_on(async {
             let (_left_dir, left) = database().await;
             let (_right_dir, right) = database().await;
-            let page = uuid::Uuid::from_u128(1).to_string();
-            let first = uuid::Uuid::from_u128(2).to_string();
-            let second = uuid::Uuid::from_u128(3).to_string();
+            let page = uuid::Uuid::from_u128(1);
+            let first = uuid::Uuid::from_u128(2);
+            let second = uuid::Uuid::from_u128(3);
             let initial = vec![
                 create(0, &page, "page", None, None),
                 create(1, &first, "block", Some(&page), Some(1.0)),

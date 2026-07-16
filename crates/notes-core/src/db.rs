@@ -128,7 +128,7 @@ async fn check_embedder_compat(conn: &Connection, embedder_id: &str, ndims: usiz
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct Node {
     pub id: i64,
-    pub uuid: String,
+    pub uuid: uuid::Uuid,
     pub kind: NodeKind,
     pub title: Option<String>,
     pub content: String,
@@ -164,7 +164,7 @@ async fn apply_local(conn: &Connection, kinds: Vec<OpKind>) -> Result<()> {
     Ok(())
 }
 
-async fn require_node_uuid(conn: &Connection, id: i64) -> Result<String> {
+async fn require_node_uuid(conn: &Connection, id: i64) -> Result<uuid::Uuid> {
     conn.call(move |database| {
         database.query_row("SELECT uuid FROM nodes WHERE id = ?1", [id], |row| {
             row.get(0)
@@ -178,7 +178,7 @@ async fn require_node_uuids(
     conn: &Connection,
     first: i64,
     second: i64,
-) -> Result<(String, String)> {
+) -> Result<(uuid::Uuid, uuid::Uuid)> {
     conn.call(move |database| {
         let first_uuid =
             database.query_row("SELECT uuid FROM nodes WHERE id = ?1", [first], |row| {
@@ -200,8 +200,12 @@ async fn count_missing_block_refs(conn: &Connection, block_uuids: Vec<String>) -
             if uuid.trim().is_empty() {
                 continue;
             }
+            let Ok(uuid) = uuid::Uuid::parse_str(uuid.trim()) else {
+                broken += 1;
+                continue;
+            };
             let exists = database
-                .query_row("SELECT 1 FROM nodes WHERE uuid = ?1", [&uuid], |_| Ok(()))
+                .query_row("SELECT 1 FROM nodes WHERE uuid = ?1", [uuid], |_| Ok(()))
                 .optional()?
                 .is_some();
             if !exists {
@@ -255,8 +259,8 @@ pub struct GraphSnapshot {
     pub edges: Vec<Edge>,
 }
 
-type AttachmentDeleteRecord = (Node, Option<String>, Option<String>);
-type ReorderPlan = (String, Option<String>, Vec<(String, f64)>);
+type AttachmentDeleteRecord = (Node, Option<uuid::Uuid>, Option<String>);
+type ReorderPlan = (uuid::Uuid, Option<uuid::Uuid>, Vec<(uuid::Uuid, f64)>);
 
 #[cfg(test)]
 mod tests {
@@ -612,7 +616,7 @@ mod tests {
             .await
             .expect("restore archive");
 
-        let restored = get_node_by_uuid(&connection, block.uuid.clone())
+        let restored = get_node_by_uuid(&connection, block.uuid)
             .await
             .expect("query block")
             .expect("restored block");
