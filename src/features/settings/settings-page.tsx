@@ -56,6 +56,8 @@ type Props = {
 };
 
 const API_KEYS = [
+  ["CHAT_API_KEY", "Chat API key"],
+  ["EXTRACT_API_KEY", "Separate extraction API key"],
   ["OPENROUTER_API_KEY", "OpenRouter API key"],
   ["OPENAI_API_KEY", "OpenAI API key"],
   ["COHERE_API_KEY", "Cohere API key"],
@@ -116,13 +118,18 @@ export function SettingsPage({
         entityExtractionEnabled: settings.entityExtractionEnabled,
         queryRewritingEnabled: settings.queryRewritingEnabled,
         chatModel: settings.chatModel,
+        chatProtocol: settings.chatProtocol,
+        chatBaseUrl: settings.chatBaseUrl,
         extractionModel: settings.extractionModel,
+        extractionProtocol: settings.extractionProtocol,
+        extractionBaseUrl: settings.extractionBaseUrl,
         embeddingProvider: settings.embeddingProvider,
         embeddingModel: settings.embeddingModel,
         embeddingNdims: settings.embeddingNdims,
         rerankProvider: settings.rerankProvider,
         rerankModel: settings.rerankModel,
         openrouterBaseUrl: settings.openrouterBaseUrl,
+        openaiBaseUrl: settings.openaiBaseUrl,
         windowDecorationMode: settings.windowDecorationMode,
         syncDirectory: settings.syncDirectory,
         apiKeys: secrets,
@@ -199,13 +206,18 @@ export function SettingsPage({
         entityExtractionEnabled: current.entityExtractionEnabled,
         queryRewritingEnabled: current.queryRewritingEnabled,
         chatModel: current.chatModel,
+        chatProtocol: current.chatProtocol,
+        chatBaseUrl: current.chatBaseUrl,
         extractionModel: current.extractionModel,
+        extractionProtocol: current.extractionProtocol,
+        extractionBaseUrl: current.extractionBaseUrl,
         embeddingProvider: current.embeddingProvider,
         embeddingModel: current.embeddingModel,
         embeddingNdims: current.embeddingNdims,
         rerankProvider: current.rerankProvider,
         rerankModel: current.rerankModel,
         openrouterBaseUrl: current.openrouterBaseUrl,
+        openaiBaseUrl: current.openaiBaseUrl,
         windowDecorationMode: current.windowDecorationMode,
         syncDirectory: current.syncDirectory,
         apiKeys: {},
@@ -393,6 +405,84 @@ export function SettingsPage({
               onChange={(event) => update("chatModel", event.currentTarget.value)}
             />
           </Field>
+          <Field label="Chat API protocol">
+            <select
+              value={settings.chatProtocol}
+              disabled={settings.localOnly}
+              onChange={(event) => {
+                const protocol = event.currentTarget.value as SettingsSnapshot["chatProtocol"];
+                setSettings((current) =>
+                  current
+                    ? {
+                        ...current,
+                        chatProtocol: protocol,
+                        chatBaseUrl:
+                          protocol === "anthropic"
+                            ? "https://api.anthropic.com"
+                            : "https://api.openai.com/v1",
+                      }
+                    : current,
+                );
+              }}
+              className="h-10 w-full rounded-xl border border-border/70 bg-background/70 px-3 text-sm shadow-none"
+            >
+              <option value="openai">OpenAI-compatible (Chat Completions)</option>
+              <option value="anthropic">Anthropic-compatible (Messages)</option>
+            </select>
+          </Field>
+          <Field
+            label="Chat API base URL"
+            hint="Any compatible HTTP(S) server, including OpenRouter, Ollama, vLLM, llama.cpp, LM Studio, or a private proxy."
+          >
+            <Input
+              value={settings.chatBaseUrl}
+              disabled={settings.localOnly}
+              onChange={(event) => update("chatBaseUrl", event.currentTarget.value)}
+              placeholder={
+                settings.chatProtocol === "anthropic"
+                  ? "https://api.anthropic.com"
+                  : "http://localhost:11434/v1"
+              }
+            />
+          </Field>
+          <Field label="Extraction API protocol" hint="Inherit uses the Chat server and key.">
+            <select
+              value={settings.extractionProtocol}
+              disabled={settings.localOnly || !settings.entityExtractionEnabled}
+              onChange={(event) => {
+                const protocol = event.currentTarget
+                  .value as SettingsSnapshot["extractionProtocol"];
+                setSettings((current) =>
+                  current
+                    ? {
+                        ...current,
+                        extractionProtocol: protocol,
+                        extractionBaseUrl:
+                          protocol === "inherit"
+                            ? ""
+                            : protocol === "anthropic"
+                              ? "https://api.anthropic.com"
+                              : "https://api.openai.com/v1",
+                      }
+                    : current,
+                );
+              }}
+              className="h-10 w-full rounded-xl border border-border/70 bg-background/70 px-3 text-sm shadow-none"
+            >
+              <option value="inherit">Inherit Chat provider</option>
+              <option value="openai">Separate OpenAI-compatible server</option>
+              <option value="anthropic">Separate Anthropic-compatible server</option>
+            </select>
+          </Field>
+          {settings.extractionProtocol !== "inherit" && (
+            <Field label="Extraction API base URL">
+              <Input
+                value={settings.extractionBaseUrl}
+                disabled={settings.localOnly || !settings.entityExtractionEnabled}
+                onChange={(event) => update("extractionBaseUrl", event.currentTarget.value)}
+              />
+            </Field>
+          )}
           <Field label="Extraction model">
             <Input
               value={settings.extractionModel}
@@ -491,6 +581,18 @@ export function SettingsPage({
               placeholder="4096"
             />
           </Field>
+          {settings.embeddingProvider === "openai" && (
+            <Field
+              label="OpenAI-compatible embeddings base URL"
+              hint="The complete API base before /embeddings; local no-auth servers are supported."
+            >
+              <Input
+                value={settings.openaiBaseUrl}
+                onChange={(event) => update("openaiBaseUrl", event.currentTarget.value)}
+                placeholder="http://localhost:11434/v1"
+              />
+            </Field>
+          )}
         </SettingsSection>
 
         <SettingsSection
@@ -519,7 +621,7 @@ export function SettingsPage({
           </Field>
           <Field
             label="OpenRouter base URL"
-            hint="Used consistently by Chat, extraction, embeddings, and reranking."
+            hint="Used only by OpenRouter embeddings and reranking. Chat has its own protocol-neutral endpoint above."
           >
             <Input
               value={settings.openrouterBaseUrl}

@@ -1,15 +1,15 @@
 use crate::sqlite::Connection;
 use anyhow::Result;
+use llm_relay::RigClient;
 use rig::client::CompletionClient;
-use rig::extractor::Extractor;
-use rig::providers::openrouter;
+use rig::completion::CompletionModel;
+use rig::extractor::ExtractorBuilder;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter};
-use tokio::sync::OnceCell;
 use tokio::time::{Duration, sleep};
 
 /// Stable change-detection hash of (title, content). Sha1 is fine here —
@@ -70,35 +70,35 @@ pub struct ExtractionResult {
     pub relations: Vec<ExtractedRelation>,
 }
 
-pub struct EntityExtractor {
-    inner: OnceCell<Extractor<openrouter::CompletionModel, ExtractionResult>>,
-}
+pub struct EntityExtractor;
 
 impl EntityExtractor {
     pub fn new() -> Self {
-        Self {
-            inner: OnceCell::new(),
-        }
-    }
-
-    async fn get(&self) -> Result<&Extractor<openrouter::CompletionModel, ExtractionResult>> {
-        self.inner
-            .get_or_try_init(|| async {
-                let client = crate::settings::openrouter_client()?;
-                let extractor = client
-                    .extractor::<ExtractionResult>(crate::settings::extraction_model())
-                    .preamble(PREAMBLE)
-                    .retries(2)
-                    .build();
-                Ok::<_, anyhow::Error>(extractor)
-            })
-            .await
+        Self
     }
 
     pub async fn extract(&self, text: String) -> Result<ExtractionResult> {
-        let ex = self.get().await?;
-        Ok(ex.extract(text).await?)
+        let config = crate::settings::extraction_completion_config()?;
+        match config.rig_client()? {
+            RigClient::OpenAi(client) => {
+                extract_with_model(client.completion_model(&config.model), text).await
+            }
+            RigClient::Anthropic(client) => {
+                extract_with_model(client.completion_model(&config.model), text).await
+            }
+        }
     }
+}
+
+async fn extract_with_model<M: CompletionModel + 'static>(
+    model: M,
+    text: String,
+) -> Result<ExtractionResult> {
+    let extractor = ExtractorBuilder::new(model)
+        .preamble(PREAMBLE)
+        .retries(2)
+        .build();
+    Ok(extractor.extract(text).await?)
 }
 
 pub fn spawn_worker(

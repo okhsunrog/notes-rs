@@ -34,13 +34,18 @@ export type SettingsSnapshot = {
   entityExtractionEnabled: boolean;
   queryRewritingEnabled: boolean;
   chatModel: string;
+  chatProtocol: "openai" | "anthropic";
+  chatBaseUrl: string;
   extractionModel: string;
+  extractionProtocol: "inherit" | "openai" | "anthropic";
+  extractionBaseUrl: string;
   embeddingProvider: string;
   embeddingModel: string;
   embeddingNdims: string;
   rerankProvider: string;
   rerankModel: string;
   openrouterBaseUrl: string;
+  openaiBaseUrl: string;
   windowDecorationMode: "native" | "borderless" | "kde";
   syncDirectory: string;
   kdeDecorationsAvailable: boolean;

@@ -7,6 +7,8 @@ use tauri::{AppHandle, Manager};
 pub const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 const SECRET_KEYS: &[&str] = &[
+    "CHAT_API_KEY",
+    "EXTRACT_API_KEY",
     "OPENROUTER_API_KEY",
     "OPENAI_API_KEY",
     "COHERE_API_KEY",
@@ -21,13 +23,18 @@ pub struct SettingsSnapshot {
     pub entity_extraction_enabled: bool,
     pub query_rewriting_enabled: bool,
     pub chat_model: String,
+    pub chat_protocol: String,
+    pub chat_base_url: String,
     pub extraction_model: String,
+    pub extraction_protocol: String,
+    pub extraction_base_url: String,
     pub embedding_provider: String,
     pub embedding_model: String,
     pub embedding_ndims: String,
     pub rerank_provider: String,
     pub rerank_model: String,
     pub openrouter_base_url: String,
+    pub openai_base_url: String,
     pub window_decoration_mode: String,
     pub sync_directory: String,
     pub kde_decorations_available: bool,
@@ -43,13 +50,18 @@ pub struct SettingsUpdate {
     pub entity_extraction_enabled: bool,
     pub query_rewriting_enabled: bool,
     pub chat_model: String,
+    pub chat_protocol: String,
+    pub chat_base_url: String,
     pub extraction_model: String,
+    pub extraction_protocol: String,
+    pub extraction_base_url: String,
     pub embedding_provider: String,
     pub embedding_model: String,
     pub embedding_ndims: String,
     pub rerank_provider: String,
     pub rerank_model: String,
     pub openrouter_base_url: String,
+    pub openai_base_url: String,
     pub window_decoration_mode: String,
     pub sync_directory: String,
     #[serde(default)]
@@ -91,13 +103,21 @@ pub fn load(app: &AppHandle) -> Result<SettingsSnapshot> {
         entity_extraction_enabled: value("ENTITY_EXTRACTION_ENABLED", "true") == "true",
         query_rewriting_enabled: value("QUERY_REWRITING_ENABLED", "true") == "true",
         chat_model: value("CHAT_MODEL", "deepseek/deepseek-v4-flash"),
+        chat_protocol: value("CHAT_PROTOCOL", "openai"),
+        chat_base_url: value(
+            "CHAT_BASE_URL",
+            &value("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_BASE_URL),
+        ),
         extraction_model: value("EXTRACT_MODEL", "deepseek/deepseek-v4-flash"),
+        extraction_protocol: value("EXTRACT_PROTOCOL", "inherit"),
+        extraction_base_url: value("EXTRACT_BASE_URL", ""),
         embedding_provider: value("EMBED_PROVIDER", "openrouter"),
         embedding_model: value("EMBED_MODEL", "qwen/qwen3-embedding-8b"),
         embedding_ndims: value("EMBED_NDIMS", "4096"),
         rerank_provider: value("RERANK_PROVIDER", "openrouter"),
         rerank_model: value("RERANK_MODEL", "cohere/rerank-v3.5"),
         openrouter_base_url: value("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_BASE_URL),
+        openai_base_url: value("OPENAI_BASE_URL", "https://api.openai.com/v1"),
         window_decoration_mode: values
             .get("WINDOW_DECORATION_MODE")
             .cloned()
@@ -131,7 +151,11 @@ pub fn save(app: &AppHandle, update: SettingsUpdate) -> Result<SettingsSnapshot>
         update.query_rewriting_enabled.to_string(),
     );
     set_or_remove(&mut values, "CHAT_MODEL", update.chat_model);
+    set_or_remove(&mut values, "CHAT_PROTOCOL", update.chat_protocol);
+    set_or_remove(&mut values, "CHAT_BASE_URL", update.chat_base_url);
     set_or_remove(&mut values, "EXTRACT_MODEL", update.extraction_model);
+    set_or_remove(&mut values, "EXTRACT_PROTOCOL", update.extraction_protocol);
+    set_or_remove(&mut values, "EXTRACT_BASE_URL", update.extraction_base_url);
     set_or_remove(&mut values, "EMBED_PROVIDER", update.embedding_provider);
     set_or_remove(&mut values, "EMBED_MODEL", update.embedding_model);
     set_or_remove(&mut values, "EMBED_NDIMS", update.embedding_ndims);
@@ -142,6 +166,7 @@ pub fn save(app: &AppHandle, update: SettingsUpdate) -> Result<SettingsSnapshot>
         "OPENROUTER_BASE_URL",
         update.openrouter_base_url,
     );
+    set_or_remove(&mut values, "OPENAI_BASE_URL", update.openai_base_url);
     values.remove("WINDOW_DECORATIONS");
     values.insert(
         "WINDOW_DECORATION_MODE".into(),
@@ -261,6 +286,19 @@ fn validate(update: &SettingsUpdate) -> Result<()> {
     if update.chat_model.trim().is_empty() || update.extraction_model.trim().is_empty() {
         bail!("chat and extraction model IDs cannot be empty");
     }
+    if !matches!(update.chat_protocol.as_str(), "openai" | "anthropic") {
+        bail!("chat protocol must be openai or anthropic");
+    }
+    if !matches!(
+        update.extraction_protocol.as_str(),
+        "inherit" | "openai" | "anthropic"
+    ) {
+        bail!("extraction protocol must inherit chat, use openai, or use anthropic");
+    }
+    validate_http_base_url(&update.chat_base_url)?;
+    if update.extraction_protocol != "inherit" {
+        validate_http_base_url(&update.extraction_base_url)?;
+    }
     if !update.embedding_ndims.trim().is_empty() {
         let dimensions = update
             .embedding_ndims
@@ -272,6 +310,7 @@ fn validate(update: &SettingsUpdate) -> Result<()> {
         }
     }
     validate_http_base_url(&update.openrouter_base_url)?;
+    validate_http_base_url(&update.openai_base_url)?;
     Ok(())
 }
 
@@ -297,7 +336,7 @@ fn openrouter_client_from(
     api_key: String,
     base_url: &str,
 ) -> Result<rig::providers::openrouter::Client> {
-    validate_http_base_url(&base_url)?;
+    validate_http_base_url(base_url)?;
     rig::providers::openrouter::Client::builder()
         .base_url(base_url.trim_end_matches('/'))
         .api_key(api_key)
@@ -330,6 +369,60 @@ pub fn chat_model() -> String {
 
 pub fn extraction_model() -> String {
     std::env::var("EXTRACT_MODEL").unwrap_or_else(|_| "deepseek/deepseek-v4-flash".into())
+}
+
+pub fn chat_completion_config() -> Result<llm_relay::ClientConfig> {
+    completion_config(
+        &std::env::var("CHAT_PROTOCOL").unwrap_or_else(|_| "openai".into()),
+        std::env::var("CHAT_BASE_URL")
+            .ok()
+            .or_else(|| std::env::var("OPENROUTER_BASE_URL").ok()),
+        std::env::var("CHAT_API_KEY")
+            .ok()
+            .or_else(|| std::env::var("OPENROUTER_API_KEY").ok()),
+        chat_model(),
+    )
+}
+
+pub fn extraction_completion_config() -> Result<llm_relay::ClientConfig> {
+    let protocol = std::env::var("EXTRACT_PROTOCOL").unwrap_or_else(|_| "inherit".into());
+    if protocol == "inherit" {
+        let mut config = chat_completion_config()?;
+        config.model = extraction_model();
+        return Ok(config);
+    }
+    completion_config(
+        &protocol,
+        std::env::var("EXTRACT_BASE_URL").ok(),
+        std::env::var("EXTRACT_API_KEY")
+            .ok()
+            .or_else(|| std::env::var("CHAT_API_KEY").ok())
+            .or_else(|| std::env::var("OPENROUTER_API_KEY").ok()),
+        extraction_model(),
+    )
+}
+
+fn completion_config(
+    protocol: &str,
+    base_url: Option<String>,
+    api_key: Option<String>,
+    model: String,
+) -> Result<llm_relay::ClientConfig> {
+    let api_key = api_key.unwrap_or_default();
+    match protocol {
+        "openai" => {
+            let base_url = base_url.unwrap_or_else(|| "https://api.openai.com/v1".into());
+            let config = llm_relay::ClientConfig::openai_compatible(base_url, api_key, model);
+            if config.api_key.is_empty() {
+                Ok(config.without_auth())
+            } else {
+                Ok(config)
+            }
+        }
+        "anthropic" => Ok(llm_relay::ClientConfig::anthropic(api_key, model)
+            .base_url(base_url.unwrap_or_else(|| "https://api.anthropic.com".into()))),
+        other => bail!("unsupported completion protocol: {other}"),
+    }
 }
 
 pub fn ensure_cloud_ai_allowed(feature: &str) -> Result<()> {
@@ -416,5 +509,31 @@ mod tests {
         let client = openrouter_client_from("test-key".into(), "http://127.0.0.1:11434/custom/v1/")
             .expect("build custom client");
         assert_eq!(client.base_url(), "http://127.0.0.1:11434/custom/v1");
+    }
+
+    #[test]
+    fn builds_protocol_neutral_completion_configs() {
+        let openai = completion_config(
+            "openai",
+            Some("http://localhost:11434/v1".into()),
+            None,
+            "qwen3".into(),
+        )
+        .expect("local OpenAI-compatible config");
+        assert_eq!(openai.provider, llm_relay::Provider::OpenAiCompatible);
+        assert_eq!(openai.auth_scheme, llm_relay::AuthScheme::None);
+
+        let anthropic = completion_config(
+            "anthropic",
+            Some("https://proxy.example/anthropic".into()),
+            Some("secret".into()),
+            "custom-claude".into(),
+        )
+        .expect("Anthropic-compatible config");
+        assert_eq!(anthropic.provider, llm_relay::Provider::Anthropic);
+        assert_eq!(
+            anthropic.auth_scheme,
+            llm_relay::AuthScheme::Header("x-api-key".into())
+        );
     }
 }

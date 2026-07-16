@@ -6,7 +6,7 @@ use fastembed::{
     EmbeddingModel as FeModel, InitOptions, RerankInitOptions, RerankerModel, TextEmbedding,
     TextRerank,
 };
-use rig::client::{EmbeddingsClient, ProviderClient};
+use rig::client::ProviderClient;
 use rig::embeddings::EmbeddingModel;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -62,13 +62,23 @@ pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
             }
         }
         "openai" => {
-            use rig::providers::openai;
             let model = model_env.unwrap_or_else(|| "text-embedding-3-small".into());
-            let client = openai::Client::from_env().context("OPENAI_API_KEY not set")?;
-            let m = client.embedding_model(&model);
-            Ok(Arc::new(RigEmbedder {
-                model: m,
+            let ndims = ndims_env
+                .or_else(|| default_ndims_for_model(&model))
+                .with_context(|| format!("EMBED_NDIMS required for OpenAI model {model}"))?;
+            let base_url = std::env::var("OPENAI_BASE_URL")
+                .unwrap_or_else(|_| "https://api.openai.com/v1".into());
+            let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+            let mut config =
+                llm_relay::EmbeddingsConfig::openai_compatible(base_url, api_key, model.clone())
+                    .dimensions(ndims as u32);
+            if config.api_key.is_empty() {
+                config = config.without_auth();
+            }
+            Ok(Arc::new(RelayEmbedder {
+                client: llm_relay::EmbeddingsClient::new(config)?,
                 id: format!("openai:{model}"),
+                ndims,
             }))
         }
         "openrouter" => {
@@ -193,6 +203,37 @@ impl EmbedderBackend for LocalBgeM3 {
 pub struct RigEmbedder<M: EmbeddingModel> {
     model: M,
     id: String,
+}
+
+pub struct RelayEmbedder {
+    client: llm_relay::EmbeddingsClient,
+    id: String,
+    ndims: usize,
+}
+
+#[async_trait]
+impl EmbedderBackend for RelayEmbedder {
+    fn ndims(&self) -> usize {
+        self.ndims
+    }
+
+    fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    async fn embed_passages(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
+        self.client
+            .create_embeddings(&texts)
+            .await
+            .context("llm-relay passage embeddings")
+    }
+
+    async fn embed_query(&self, text: String) -> Result<Vec<f32>> {
+        self.client
+            .create_embedding(&text)
+            .await
+            .context("llm-relay query embedding")
+    }
 }
 
 pub struct AsymmetricRigEmbedder<M: EmbeddingModel> {

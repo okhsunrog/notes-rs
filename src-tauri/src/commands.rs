@@ -864,6 +864,7 @@ pub async fn chat(state: State<'_, AppState>, message: String) -> Result<String,
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn chat_stream(
     app: AppHandle,
     state: State<'_, AppState>,

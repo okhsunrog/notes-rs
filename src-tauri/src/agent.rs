@@ -2,10 +2,10 @@ use crate::db::{self, Node, SearchHit};
 use crate::embed::{EmbedderBackend, RerankBackend};
 use crate::sqlite::Connection;
 use futures::StreamExt;
+use llm_relay::RigClient;
 use rig::agent::MultiTurnStreamItem;
 use rig::client::CompletionClient;
-use rig::completion::{Message, Prompt};
-use rig::providers::openrouter;
+use rig::completion::{CompletionModel, Message, Prompt};
 use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingPrompt};
 use rig::tool::{Tool, ToolError};
 use serde::{Deserialize, Serialize};
@@ -113,7 +113,6 @@ impl QueryRewriter {
 
     async fn try_rewrite(&self, query: &str) -> anyhow::Result<String> {
         crate::settings::ensure_cloud_ai_allowed("query rewriting")?;
-        let client = crate::settings::openrouter_client()?;
         let prompt = format!(
             "Conversation history:\n{history}\nSearch query: {query}\n\n\
              Rewrite the query into a fully standalone form that resolves \
@@ -125,20 +124,34 @@ impl QueryRewriter {
             history = self.history_text,
             query = query,
         );
-        let agent = client
-            .agent(crate::settings::chat_model())
-            .preamble("You rewrite search queries to be self-contained.")
-            .max_tokens(120)
-            .build();
-        let raw: String = agent.prompt(prompt).await?;
-        Ok(raw
-            .trim()
-            .trim_start_matches("Rewritten query:")
-            .trim_matches('"')
-            .trim_matches('`')
-            .trim()
-            .to_string())
+        let config = crate::settings::chat_completion_config()?;
+        match config.rig_client()? {
+            RigClient::OpenAi(client) => {
+                rewrite_with_model(client.completion_model(&config.model), prompt).await
+            }
+            RigClient::Anthropic(client) => {
+                rewrite_with_model(client.completion_model(&config.model), prompt).await
+            }
+        }
     }
+}
+
+async fn rewrite_with_model<M: CompletionModel + 'static>(
+    model: M,
+    prompt: String,
+) -> anyhow::Result<String> {
+    let agent = rig::agent::AgentBuilder::new(model)
+        .preamble("You rewrite search queries to be self-contained.")
+        .max_tokens(120)
+        .build();
+    let raw: String = agent.prompt(prompt).await?;
+    Ok(raw
+        .trim()
+        .trim_start_matches("Rewritten query:")
+        .trim_matches('"')
+        .trim_matches('`')
+        .trim()
+        .to_string())
 }
 
 /// Heuristic gate: only call the rewriter when the query has tells of a
@@ -785,16 +798,16 @@ impl Tool for LinkNodes {
 
 // ───────────────────────── runner ─────────────────────────
 
-fn build_agent(
+fn build_agent<M: CompletionModel + 'static>(
+    model: M,
     conn: Connection,
     embedder: Arc<dyn EmbedderBackend>,
     reranker: Arc<dyn RerankBackend>,
     rewriter: QueryRewriter,
     allow_writes: bool,
     active_node_id: Option<i64>,
-) -> Result<rig::agent::Agent<openrouter::CompletionModel>, AgentError> {
+) -> Result<rig::agent::Agent<M>, AgentError> {
     crate::settings::ensure_cloud_ai_allowed("chat").map_err(AgentError::from)?;
-    let client = crate::settings::openrouter_client().map_err(AgentError::from)?;
     let preamble = active_node_id.map_or_else(
         || SYSTEM_PROMPT.to_string(),
         |id| {
@@ -804,8 +817,7 @@ fn build_agent(
             )
         },
     );
-    let mut builder = client
-        .agent(crate::settings::chat_model())
+    let mut builder = rig::agent::AgentBuilder::new(model)
         .preamble(&preamble)
         .max_tokens(2048)
         .tool(SearchAndExpand {
@@ -840,8 +852,44 @@ pub async fn run_chat(
     reranker: Arc<dyn RerankBackend>,
     message: String,
 ) -> Result<String, AgentError> {
-    // Single-shot chat — no prior turns to resolve references against.
+    let config = crate::settings::chat_completion_config().map_err(AgentError::from)?;
+    match config
+        .rig_client()
+        .map_err(anyhow::Error::from)
+        .map_err(AgentError::from)?
+    {
+        RigClient::OpenAi(client) => {
+            run_chat_with_model(
+                client.completion_model(&config.model),
+                conn,
+                embedder,
+                reranker,
+                message,
+            )
+            .await
+        }
+        RigClient::Anthropic(client) => {
+            run_chat_with_model(
+                client.completion_model(&config.model),
+                conn,
+                embedder,
+                reranker,
+                message,
+            )
+            .await
+        }
+    }
+}
+
+async fn run_chat_with_model<M: CompletionModel + 'static>(
+    model: M,
+    conn: Connection,
+    embedder: Arc<dyn EmbedderBackend>,
+    reranker: Arc<dyn RerankBackend>,
+    message: String,
+) -> Result<String, AgentError> {
     let agent = build_agent(
+        model,
         conn,
         embedder,
         reranker,
@@ -907,6 +955,7 @@ pub enum ChatEvent {
     Cancelled,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_chat_stream(
     conn: Connection,
     embedder: Arc<dyn EmbedderBackend>,
@@ -934,8 +983,62 @@ pub async fn run_chat_stream(
             "chat history exceeds the 24-turn or 32000-character budget".into(),
         ));
     }
+    let config = crate::settings::chat_completion_config().map_err(AgentError::from)?;
+    let emit: Arc<dyn Fn(ChatEvent) + Send + Sync> = Arc::new(emit);
+    match config
+        .rig_client()
+        .map_err(anyhow::Error::from)
+        .map_err(AgentError::from)?
+    {
+        RigClient::OpenAi(client) => {
+            run_chat_stream_with_model(
+                client.completion_model(&config.model),
+                conn,
+                embedder,
+                reranker,
+                history,
+                message,
+                allow_writes,
+                active_node_id,
+                cancelled,
+                emit,
+            )
+            .await
+        }
+        RigClient::Anthropic(client) => {
+            run_chat_stream_with_model(
+                client.completion_model(&config.model),
+                conn,
+                embedder,
+                reranker,
+                history,
+                message,
+                allow_writes,
+                active_node_id,
+                cancelled,
+                emit,
+            )
+            .await
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_chat_stream_with_model<M: CompletionModel + 'static>(
+    model: M,
+    conn: Connection,
+    embedder: Arc<dyn EmbedderBackend>,
+    reranker: Arc<dyn RerankBackend>,
+    history: Vec<ChatTurn>,
+    message: String,
+    allow_writes: bool,
+    active_node_id: Option<i64>,
+    cancelled: Arc<AtomicBool>,
+    emit: Arc<dyn Fn(ChatEvent) + Send + Sync>,
+) -> Result<String, AgentError> {
     let rewriter = QueryRewriter::new(&history);
     let agent = build_agent(
+        model,
         conn,
         embedder,
         reranker,
