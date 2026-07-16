@@ -1,8 +1,11 @@
 //! Sync protocol boundary for notes-rs.
 //!
-//! The op format, HLC, apply integration, and client state machine land in
-//! Phases 1 and 2. This crate exists in Phase 0 so both hosts have a stable
-//! dependency boundary before behavior changes.
+//! Phase 1 exposes the versioned operation wire types and apply boundary here.
+//! The HLC merge policy and client state machine are implemented in Phase 2.
 
-/// Wire-format version reserved by the approved sync architecture.
-pub const FORMAT_VERSION: u32 = 1;
+pub use notes_core::operation::FORMAT_VERSION;
+pub use notes_core::operation::{
+    AttachmentAdd, AttachmentRemove, EdgeAdd, EdgeRemove, NodeCreate, NodeDelete, NodeMove,
+    NodeSetContent, NodeSetTitle,
+};
+pub use notes_core::{ApplyOutcome, Op, OpKind, Origin, apply, apply_batch, local_ops};
