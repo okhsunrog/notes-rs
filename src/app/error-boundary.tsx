@@ -17,7 +17,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
   render() {
     if (!this.state.error) return this.props.children;
     return (
-      <main className="flex h-screen items-center justify-center bg-background p-6 text-foreground">
+      <main className="app-shell flex h-full items-center justify-center p-6 text-foreground">
         <section className="max-w-lg rounded-lg border border-destructive/40 bg-card p-6">
           <h1 className="font-semibold text-destructive">The interface encountered an error</h1>
           <p className="mt-2 text-sm break-words text-muted-foreground">

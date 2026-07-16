@@ -1,4 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { useTheme } from "next-themes";
+import { getMobileSystemInfo, setSystemBarsStyle } from "@/lib/api";
 
 export const PALETTES = [
   {
@@ -50,6 +52,7 @@ const AppearanceContext = createContext<AppearanceContextValue | null>(null);
 const STORAGE_KEY = "notes-rs.palette";
 
 export function AppearanceProvider({ children }: { children: React.ReactNode }) {
+  const { resolvedTheme } = useTheme();
   const [palette, setPalette] = useState<PaletteId>(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
     return PALETTES.some((item) => item.id === saved) ? (saved as PaletteId) : "iris";
@@ -59,6 +62,32 @@ export function AppearanceProvider({ children }: { children: React.ReactNode }) 
     document.documentElement.dataset.palette = palette;
     localStorage.setItem(STORAGE_KEY, palette);
   }, [palette]);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    const updateInsets = async () => {
+      const info = await getMobileSystemInfo();
+      if (!info) return;
+      root.dataset.mobile = "true";
+      root.style.setProperty("--safe-area-inset-top", `${info.safeArea.top}px`);
+      root.style.setProperty("--safe-area-inset-right", `${info.safeArea.right}px`);
+      root.style.setProperty("--safe-area-inset-bottom", `${info.safeArea.bottom}px`);
+      root.style.setProperty("--safe-area-inset-left", `${info.safeArea.left}px`);
+    };
+
+    void updateInsets().catch(() => undefined);
+    window.addEventListener("resize", updateInsets);
+    window.addEventListener("orientationchange", updateInsets);
+    return () => {
+      window.removeEventListener("resize", updateInsets);
+      window.removeEventListener("orientationchange", updateInsets);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!resolvedTheme) return;
+    void setSystemBarsStyle(resolvedTheme === "dark").catch(() => undefined);
+  }, [resolvedTheme]);
 
   const value = useMemo(() => ({ palette, setPalette }), [palette]);
   return <AppearanceContext.Provider value={value}>{children}</AppearanceContext.Provider>;

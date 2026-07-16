@@ -103,6 +103,8 @@ export const splitBlock = (id: number, parts: BlockContent[]) =>
   unwrapCommand(commands.splitBlock(id, parts));
 export const isReady = commands.isReady;
 export const getStartupStatus = commands.startupStatus;
+export const getMobileSystemInfo = checkedCommand(commands.mobileSystemInfo);
+export const setSystemBarsStyle = checkedCommand(commands.setSystemBarsStyle);
 export const loadSettings = checkedCommand(commands.loadSettings);
 export const saveSettings = checkedCommand(commands.saveSettings);
 

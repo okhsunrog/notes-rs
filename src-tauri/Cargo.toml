@@ -56,6 +56,7 @@ tauri-plugin-mcp-bridge = "0.12.0"
 tauri-plugin-dialog = "2.7.1"
 
 [target.'cfg(target_os = "android")'.dependencies]
+tauri-plugin-mobile-system = { path = "../plugins/tauri-plugin-mobile-system" }
 tauri-plugin-android-fs = "28.4.0"
 tracing-logcat = "0.1.0"
 

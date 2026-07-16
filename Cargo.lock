@@ -3438,6 +3438,7 @@ dependencies = [
  "tauri-plugin-android-fs",
  "tauri-plugin-dialog",
  "tauri-plugin-mcp-bridge",
+ "tauri-plugin-mobile-system",
  "tauri-plugin-opener",
  "tauri-specta",
  "tempfile",
@@ -6275,6 +6276,16 @@ dependencies = [
  "webview2-com",
  "windows",
  "windows-core 0.61.2",
+]
+
+[[package]]
+name = "tauri-plugin-mobile-system"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

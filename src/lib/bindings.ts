@@ -10,6 +10,11 @@ import * as __TAURI_EVENT from "@tauri-apps/api/event";
 export const commands = {
 	isReady: () => __TAURI_INVOKE<boolean>("is_ready"),
 	startupStatus: () => __TAURI_INVOKE<StartupStatus>("startup_status"),
+	mobileSystemInfo: () => typedError<{
+	deviceName: string,
+	safeArea: SafeAreaInsets,
+} | null, CommandError>(__TAURI_INVOKE("mobile_system_info")),
+	setSystemBarsStyle: (darkBackground: boolean) => typedError<null, CommandError>(__TAURI_INVOKE("set_system_bars_style", { darkBackground })),
 	syncStatus: () => __TAURI_INVOKE<SyncStatus>("sync_status"),
 	loadSettings: () => typedError<SettingsSnapshot, CommandError>(__TAURI_INVOKE("load_settings")),
 	saveSettings: (update: SettingsUpdate) => typedError<SettingsSnapshot, CommandError>(__TAURI_INVOKE("save_settings", { update })),
@@ -215,6 +220,11 @@ export type GraphSnapshot = {
 	edges: Edge[],
 };
 
+export type MobileSystemInfo = {
+	deviceName: string,
+	safeArea: SafeAreaInsets,
+};
+
 export type Node = {
 	id: number,
 	uuid: string,
@@ -248,6 +258,13 @@ export type ProviderProbeResult = {
 };
 
 export type RerankProvider = "openrouter" | "local";
+
+export type SafeAreaInsets = {
+	top: number | null,
+	right: number | null,
+	bottom: number | null,
+	left: number | null,
+};
 
 export type SearchHit = {
 	node: Node,

@@ -4,6 +4,17 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
+  --app-viewport-background:
+    radial-gradient(
+      circle at 15% -20%,
+      color-mix(in oklch, var(--primary) 13%, transparent),
+      transparent 38%
+    ),
+    var(--background);
+  --safe-area-inset-top: env(safe-area-inset-top, 0px);
+  --safe-area-inset-right: env(safe-area-inset-right, 0px);
+  --safe-area-inset-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-area-inset-left: env(safe-area-inset-left, 0px);
   --radius: 0.625rem;
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
@@ -323,8 +334,27 @@
   * {
     @apply border-border outline-ring/50;
   }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  html,
+  #root {
+    background: var(--app-viewport-background);
+    background-attachment: fixed;
+    background-position: top left;
+    background-size: 100vw 100dvh;
+  }
+  #root {
+    box-sizing: border-box;
+    overflow: hidden;
+    padding: var(--safe-area-inset-top) var(--safe-area-inset-right) var(--safe-area-inset-bottom)
+      var(--safe-area-inset-left);
+  }
   body {
-    @apply bg-background text-foreground;
+    @apply text-foreground;
+    background: transparent;
     font-family:
       Inter,
       "SF Pro Text",
@@ -337,15 +367,53 @@
   }
 }
 
+/* Android WebView does not populate env(safe-area-inset-*). Native insets are
+   copied into the variables above. These masks keep scrolling surfaces from
+   showing through transparent edge-to-edge system bars. Dialog portals stay
+   above them at z-50. */
+html::before,
+html::after {
+  position: fixed;
+  z-index: 40;
+  right: 0;
+  left: 0;
+  display: block;
+  background: var(--app-viewport-background);
+  background-repeat: no-repeat;
+  background-size: 100vw 100dvh;
+  content: "";
+  pointer-events: none;
+}
+
+html::before {
+  top: 0;
+  background-position: top left;
+  height: var(--safe-area-inset-top);
+}
+
+html::after {
+  bottom: 0;
+  background-position: bottom left;
+  height: var(--safe-area-inset-bottom);
+}
+
+[data-slot="dialog-content"] {
+  max-height: calc(
+    100dvh - 2rem - var(--safe-area-inset-top) - var(--safe-area-inset-bottom)
+  ) !important;
+  overflow-y: auto;
+}
+
+[data-slot="dialog-content"].search-dialog {
+  max-height: min(
+    70vh,
+    calc(100dvh - 2rem - var(--safe-area-inset-top) - var(--safe-area-inset-bottom))
+  ) !important;
+}
+
 @layer components {
   .app-shell {
-    background:
-      radial-gradient(
-        circle at 15% -20%,
-        color-mix(in oklch, var(--primary) 13%, transparent),
-        transparent 38%
-      ),
-      var(--background);
+    background: transparent;
   }
 
   .workspace-frame {

@@ -27,7 +27,7 @@ export function AppLayout({ status, headerActions, sidebar, center, right, fullW
   }, []);
 
   return (
-    <div className="app-shell flex h-screen flex-col overflow-hidden bg-background text-foreground">
+    <div className="app-shell flex h-full flex-col overflow-hidden text-foreground">
       <header
         data-tauri-drag-region
         className="relative z-20 flex h-14 shrink-0 items-center justify-between px-3"

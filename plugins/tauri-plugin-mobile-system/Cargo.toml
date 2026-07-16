@@ -1,0 +1,18 @@
+[package]
+name = "tauri-plugin-mobile-system"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Small reusable Tauri mobile system integration for notes-rs"
+license = "MIT"
+links = "tauri-plugin-mobile-system"
+
+[dependencies]
+serde.workspace = true
+tauri = "2.11.5"
+thiserror.workspace = true
+
+[build-dependencies]
+tauri-plugin = { version = "2.6.3", features = ["build"] }

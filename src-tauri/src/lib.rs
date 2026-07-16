@@ -14,6 +14,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         .commands(tauri_specta::collect_commands![
             commands::is_ready,
             commands::startup_status,
+            commands::mobile_system_info,
+            commands::set_system_bars_style,
             commands::sync_status,
             commands::load_settings,
             commands::save_settings,
@@ -104,7 +106,9 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_dialog::init());
 
     #[cfg(target_os = "android")]
-    let builder = builder.plugin(tauri_plugin_android_fs::init());
+    let builder = builder
+        .plugin(tauri_plugin_android_fs::init())
+        .plugin(tauri_plugin_mobile_system::init());
 
     // Development-only bridge for MCP-powered UI inspection and automation.
     // Restrict it to localhost; release builds do not register the plugin.

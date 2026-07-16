@@ -249,7 +249,7 @@ export function SettingsPage({
 
   if (!settings) {
     return (
-      <div className="flex h-screen items-center justify-center bg-background text-foreground">
+      <div className="app-shell flex h-full items-center justify-center text-foreground">
         {error ? (
           <p className="text-sm text-destructive">{error}</p>
         ) : (
@@ -260,7 +260,7 @@ export function SettingsPage({
   }
 
   return (
-    <div className="app-shell h-screen overflow-y-auto bg-background text-foreground">
+    <div className="app-shell h-full overflow-y-auto text-foreground">
       <header
         data-tauri-drag-region
         className="sticky top-0 z-20 flex h-16 items-center justify-between border-b border-border/50 bg-background/80 px-5 backdrop-blur-xl"

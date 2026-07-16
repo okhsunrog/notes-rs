@@ -1,6 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["crates/notes-core", "crates/notes-ai", "crates/notes-sync", "server", "src-tauri"]
+members = [
+  "crates/notes-core",
+  "crates/notes-ai",
+  "crates/notes-sync",
+  "plugins/tauri-plugin-mobile-system",
+  "server",
+  "src-tauri",
+]
 
 [workspace.package]
 version = "0.1.0"

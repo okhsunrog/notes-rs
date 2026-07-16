@@ -3,6 +3,6 @@
   "identifier": "mobile",
   "description": "Minimal capability for the Android main webview",
   "windows": ["main"],
-  "permissions": ["core:default", "android-fs:default", "opener:default"],
+  "permissions": ["core:default", "android-fs:default", "mobile-system:default", "opener:default"],
   "platforms": ["android"]
 }

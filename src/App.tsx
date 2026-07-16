@@ -75,7 +75,7 @@ function App() {
     return (
       <Suspense
         fallback={
-          <div className="flex h-screen items-center justify-center bg-background">
+          <div className="app-shell flex h-full items-center justify-center">
             <Loader2 className="size-5 animate-spin text-muted-foreground" />
           </div>
         }
@@ -95,7 +95,7 @@ function App() {
 
   if (!ready) {
     return (
-      <div className="flex h-screen flex-col items-center justify-center gap-3 bg-background text-foreground">
+      <div className="app-shell flex h-full flex-col items-center justify-center gap-3 text-foreground">
         {windowDecorationMode === "borderless" && (
           <div
             data-tauri-drag-region
@@ -254,7 +254,7 @@ function App() {
         }
       />
       <Dialog open={searchOpen} onOpenChange={setSearchOpen}>
-        <DialogContent className="top-[18%] max-h-[70vh] max-w-2xl translate-y-0 overflow-y-auto rounded-2xl border-border/60 bg-background/95 p-3 shadow-2xl backdrop-blur-xl">
+        <DialogContent className="search-dialog top-[18%] max-w-2xl translate-y-0 rounded-2xl border-border/60 bg-background/95 p-3 shadow-2xl backdrop-blur-xl">
           <div className="sr-only">
             <DialogTitle>Search notes</DialogTitle>
             <DialogDescription>Search all notes and blocks.</DialogDescription>
@@ -271,7 +271,14 @@ function App() {
           />
         </DialogContent>
       </Dialog>
-      <Toaster position="bottom-right" />
+      <Toaster
+        position="bottom-right"
+        mobileOffset={{
+          right: "calc(1rem + var(--safe-area-inset-right))",
+          bottom: "calc(1rem + var(--safe-area-inset-bottom))",
+          left: "calc(1rem + var(--safe-area-inset-left))",
+        }}
+      />
     </>
   );
 }
