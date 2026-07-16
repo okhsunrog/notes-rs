@@ -804,6 +804,7 @@ fn apply_one(
                     )
                     .optional()?;
                 if let Some(deleted_id) = deleted_id {
+                    db::cleanup_extraction_source_tx(transaction, deleted_id)?;
                     let root_id = root_uuid
                         .as_ref()
                         .filter(|root_uuid| **root_uuid != payload.uuid)

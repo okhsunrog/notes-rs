@@ -1,5 +1,95 @@
 use super::*;
 
+pub(crate) fn cleanup_extraction_source_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    source_id: i64,
+) -> rusqlite::Result<()> {
+    let affected_entity_ids = {
+        let mut statement = transaction.prepare(
+            "SELECT entity_node_id FROM entity_descriptions WHERE source_node_id = ?1
+             UNION
+             SELECT endpoint.id
+               FROM extracted_edge_sources provenance
+               JOIN edges edge ON edge.id = provenance.edge_id
+               JOIN nodes endpoint ON endpoint.id IN (edge.src, edge.dst)
+              WHERE provenance.source_node_id = ?1 AND endpoint.kind = 'entity'",
+        )?;
+        statement
+            .query_map([source_id], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let edge_ids = {
+        let mut statement = transaction
+            .prepare("SELECT edge_id FROM extracted_edge_sources WHERE source_node_id = ?1")?;
+        statement
+            .query_map([source_id], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    transaction.execute(
+        "DELETE FROM extracted_edge_sources WHERE source_node_id = ?1",
+        [source_id],
+    )?;
+    transaction.execute(
+        "DELETE FROM entity_descriptions WHERE source_node_id = ?1",
+        [source_id],
+    )?;
+    for edge_id in edge_ids {
+        transaction.execute(
+            "DELETE FROM edges
+              WHERE id = ?1
+                AND NOT EXISTS (SELECT 1 FROM extracted_edge_sources WHERE edge_id = ?1)",
+            [edge_id],
+        )?;
+    }
+    for entity_id in affected_entity_ids {
+        transaction.execute(
+            "DELETE FROM nodes
+              WHERE id = ?1 AND kind = 'entity'
+                AND NOT EXISTS (
+                  SELECT 1 FROM entity_descriptions WHERE entity_node_id = ?1
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM edges WHERE src = ?1 OR dst = ?1
+                )",
+            [entity_id],
+        )?;
+    }
+    Ok(())
+}
+
+pub async fn cleanup_orphan_entities(conn: &Connection) -> Result<()> {
+    conn.call(|database| -> rusqlite::Result<()> {
+        let transaction = database.transaction()?;
+        // Older builds let extracted relation edges outlive their provenance
+        // when a source note was deleted. Such entity-to-entity edges were not
+        // user-authored by any current UI flow and are safe to discard.
+        transaction.execute_batch(
+            "DELETE FROM edges
+              WHERE id IN (
+                SELECT edge.id FROM edges edge
+                JOIN nodes source ON source.id = edge.src AND source.kind = 'entity'
+                JOIN nodes target ON target.id = edge.dst AND target.kind = 'entity'
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM extracted_edge_sources provenance
+                  WHERE provenance.edge_id = edge.id
+                )
+              );
+             DELETE FROM nodes
+              WHERE kind = 'entity'
+                AND NOT EXISTS (
+                  SELECT 1 FROM entity_descriptions descriptions
+                  WHERE descriptions.entity_node_id = nodes.id
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM edges WHERE src = nodes.id OR dst = nodes.id
+                );",
+        )?;
+        transaction.commit()?;
+        Ok(())
+    })
+    .await
+}
+
 pub async fn link_nodes(
     conn: &Connection,
     src: i64,

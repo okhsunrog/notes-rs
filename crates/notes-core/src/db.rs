@@ -57,6 +57,7 @@ pub async fn open(path: impl AsRef<Path>, embedder_id: &str, ndims: usize) -> Re
     })
     .await?;
     migrations::migrate(&conn, ndims).await?;
+    cleanup_orphan_entities(&conn).await?;
     check_embedder_compat(&conn, embedder_id, ndims).await?;
     Ok(conn)
 }
@@ -373,6 +374,58 @@ mod tests {
             .await
             .expect("count generated edges");
         assert_eq!(generated_edges, 0);
+    }
+
+    #[tokio::test]
+    async fn deleting_the_last_extraction_source_removes_orphan_entities() {
+        let (_database, connection) = temporary_database().await;
+        let page = create_node(
+            &connection,
+            NodeKind::Page,
+            Some("Source".into()),
+            "Entity source".into(),
+            None,
+        )
+        .await
+        .expect("create source page");
+        replace_extracted_edges(
+            &connection,
+            page.id,
+            page.title.clone(),
+            page.content.clone(),
+            vec![
+                ("Alpha".into(), Some("First".into())),
+                ("Beta".into(), None),
+            ],
+            vec![("Alpha".into(), "Beta".into(), "related".into())],
+        )
+        .await
+        .expect("extract entities");
+        assert_eq!(
+            list_entities(&connection, 10)
+                .await
+                .expect("list entities")
+                .len(),
+            2
+        );
+
+        delete_page(&connection, page.id)
+            .await
+            .expect("delete page");
+
+        assert!(
+            list_entities(&connection, 10)
+                .await
+                .expect("list entities after delete")
+                .is_empty()
+        );
+        assert!(
+            graph_snapshot(&connection, None)
+                .await
+                .expect("graph after delete")
+                .nodes
+                .is_empty()
+        );
     }
 
     #[tokio::test]
