@@ -1,9 +1,5 @@
 use crate::sqlite::Connection;
 use anyhow::Result;
-use llm_relay::RigClient;
-use rig::client::CompletionClient;
-use rig::completion::CompletionModel;
-use rig::extractor::ExtractorBuilder;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
@@ -47,6 +43,7 @@ If the note has no extractable entities, return empty arrays. Do not invent.
 "#;
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExtractedEntity {
     /// Canonical name of the entity.
     pub name: String,
@@ -55,6 +52,7 @@ pub struct ExtractedEntity {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExtractedRelation {
     /// Source entity name (must match one in `entities`).
     pub src: String,
@@ -65,6 +63,7 @@ pub struct ExtractedRelation {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExtractionResult {
     pub entities: Vec<ExtractedEntity>,
     pub relations: Vec<ExtractedRelation>,
@@ -78,30 +77,18 @@ impl EntityExtractor {
     }
 
     pub async fn extract(&self, text: String) -> Result<ExtractionResult> {
-        let config = crate::settings::extraction_completion_config()?;
-        match config.rig_client()? {
-            RigClient::OpenAi(client) => {
-                extract_with_model(client.completion_model(&config.model), text).await
-            }
-            RigClient::Anthropic(client) => {
-                extract_with_model(client.completion_model(&config.model), text).await
-            }
-        }
+        let config = crate::settings::extraction_completion_config()?.max_tokens(2_048);
+        let client = llm_relay::LlmClient::new(config)?;
+        let response = client
+            .complete_structured::<ExtractionResult>(&text, "entity_extraction", Some(PREAMBLE))
+            .await?;
+        tracing::info!(
+            input_tokens = response.usage.input_tokens,
+            output_tokens = response.usage.output_tokens,
+            "entity extraction completed"
+        );
+        Ok(response.data)
     }
-}
-
-async fn extract_with_model<M: CompletionModel + 'static>(
-    model: M,
-    text: String,
-) -> Result<ExtractionResult> {
-    let extractor = ExtractorBuilder::new(model)
-        .preamble(PREAMBLE)
-        // The durable extraction queue already retries with exponential
-        // backoff. Retrying inside one tick multiplies permanent 4xx failures
-        // and can burn through a provider quota without improving recovery.
-        .retries(0)
-        .build();
-    Ok(extractor.extract(text).await?)
 }
 
 pub fn spawn_worker(
@@ -190,4 +177,23 @@ async fn apply(
         relations,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extraction_contract_rejects_provider_shortcuts() {
+        let error = serde_json::from_value::<ExtractionResult>(serde_json::json!({
+            "entities": ["Aurora:A project."],
+            "relations": []
+        }))
+        .expect_err("entity strings must not bypass the typed schema");
+        assert!(
+            error
+                .to_string()
+                .contains("expected struct ExtractedEntity")
+        );
+    }
 }
