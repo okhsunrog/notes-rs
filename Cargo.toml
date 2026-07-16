@@ -27,6 +27,7 @@ rusqlite = { version = "0.40.1", default-features = false, features = [
   "bundled",
   "load_extension",
 ] }
+rusqlite_migration = "2.6.0"
 rust-stemmers = "1.2.0"
 schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }
