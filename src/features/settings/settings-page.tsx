@@ -13,10 +13,23 @@ import {
   Save,
   Trash2,
   Upload,
+  Activity,
+  AppWindow,
+  BrainCircuit,
+  Database,
+  FolderSync,
+  KeyRound,
+  Laptop,
+  Moon,
+  Palette,
+  Sparkles,
+  Sun,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { WindowControls } from "@/app/window-controls";
+import { PALETTES, useAppearance } from "@/app/appearance";
+import { cn } from "@/lib/utils";
 import {
   createBackup,
   chooseSyncDirectory,
@@ -57,6 +70,7 @@ export function SettingsPage({
   onDataChanged,
 }: Props) {
   const { theme, setTheme } = useTheme();
+  const { palette, setPalette } = useAppearance();
   const [settings, setSettings] = useState<SettingsSnapshot | null>(null);
   const [secrets, setSecrets] = useState<Record<string, string>>({});
   const [clearKeys, setClearKeys] = useState<string[]>([]);
@@ -228,41 +242,90 @@ export function SettingsPage({
   }
 
   return (
-    <div className="h-screen overflow-y-auto bg-background text-foreground">
+    <div className="app-shell h-screen overflow-y-auto bg-background text-foreground">
       <header
         data-tauri-drag-region
-        className="sticky top-0 z-10 flex h-14 items-center justify-between border-b bg-background/95 px-5 backdrop-blur"
+        className="sticky top-0 z-20 flex h-16 items-center justify-between border-b border-border/50 bg-background/80 px-5 backdrop-blur-xl"
       >
         <div className="flex items-center gap-3">
-          <Button variant="ghost" size="sm" onClick={onBack} aria-label="Back to notes">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="rounded-xl"
+            onClick={onBack}
+            aria-label="Back to notes"
+          >
             <ArrowLeft className="size-4" />
           </Button>
+          <div className="brand-mark flex size-9 items-center justify-center rounded-xl text-primary-foreground shadow-sm">
+            <Sparkles className="size-4" />
+          </div>
           <div>
-            <h1 className="font-semibold">Settings</h1>
-            <p className="text-xs text-muted-foreground">
-              Models, providers, and local credentials
-            </p>
+            <h1 className="font-semibold tracking-tight">Settings</h1>
+            <p className="text-xs text-muted-foreground">Make notes-rs feel like your own</p>
           </div>
         </div>
         {settings.windowDecorationMode === "borderless" && <WindowControls />}
       </header>
 
-      <form onSubmit={submit} className="mx-auto max-w-3xl space-y-8 p-6">
+      <form onSubmit={submit} className="mx-auto max-w-4xl space-y-7 p-6 pb-24 sm:p-10">
         <SettingsSection
           title="Appearance"
-          description="Follow the desktop color scheme or keep a fixed light or dark palette."
+          description="Choose a brightness mode and a color atmosphere. Every palette has a tuned light and dark version."
         >
-          <Field label="Color theme">
-            <select
-              value={theme ?? "system"}
-              onChange={(event) => setTheme(event.currentTarget.value)}
-              className="h-9 w-full rounded-md border bg-background px-3 text-sm"
-            >
-              <option value="system">System</option>
-              <option value="light">Light</option>
-              <option value="dark">Dark</option>
-            </select>
-          </Field>
+          <FieldGroup label="Brightness">
+            <div className="grid grid-cols-3 gap-2 rounded-2xl bg-muted/70 p-1.5">
+              <ModeButton
+                active={theme === "system"}
+                icon={<Laptop className="size-4" />}
+                label="System"
+                onClick={() => setTheme("system")}
+              />
+              <ModeButton
+                active={theme === "light"}
+                icon={<Sun className="size-4" />}
+                label="Light"
+                onClick={() => setTheme("light")}
+              />
+              <ModeButton
+                active={theme === "dark"}
+                icon={<Moon className="size-4" />}
+                label="Dark"
+                onClick={() => setTheme("dark")}
+              />
+            </div>
+          </FieldGroup>
+          <FieldGroup label="Color palette" hint="Applied instantly and saved on this device.">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {PALETTES.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  aria-pressed={palette === item.id}
+                  onClick={() => setPalette(item.id)}
+                  className={cn(
+                    "group rounded-2xl border p-3 text-left transition hover:-translate-y-0.5 hover:shadow-md",
+                    palette === item.id
+                      ? "border-primary/50 bg-primary/8 ring-3 ring-primary/10"
+                      : "border-border/60 bg-background/55 hover:border-primary/25",
+                  )}
+                >
+                  <span className="mb-3 flex h-8 overflow-hidden rounded-xl ring-1 ring-black/5">
+                    {item.swatches.map((color) => (
+                      <span key={color} className="flex-1" style={{ backgroundColor: color }} />
+                    ))}
+                  </span>
+                  <span className="flex items-center gap-2 text-sm font-semibold">
+                    {item.name}
+                    {palette === item.id && <Check className="ml-auto size-3.5 text-primary" />}
+                  </span>
+                  <span className="mt-1 block text-[11px] text-muted-foreground">
+                    {item.description}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </FieldGroup>
         </SettingsSection>
 
         <SettingsSection
@@ -278,7 +341,7 @@ export function SettingsPage({
                   event.currentTarget.value as SettingsSnapshot["windowDecorationMode"],
                 )
               }
-              className="h-9 w-full rounded-md border bg-background px-3 text-sm"
+              className="h-10 w-full rounded-xl border border-border/70 bg-background/70 px-3 text-sm shadow-none"
             >
               <option value="native">Native Wayland (GTK header bar)</option>
               <option value="borderless">Borderless (notes-rs controls)</option>
@@ -302,7 +365,7 @@ export function SettingsPage({
             <select
               value={settings.embeddingProvider}
               onChange={(event) => update("embeddingProvider", event.currentTarget.value)}
-              className="h-9 w-full rounded-md border bg-background px-3 text-sm"
+              className="h-10 w-full rounded-xl border border-border/70 bg-background/70 px-3 text-sm shadow-none"
             >
               <option value="openrouter">OpenRouter</option>
               <option value="openai">OpenAI</option>
@@ -342,7 +405,7 @@ export function SettingsPage({
             <select
               value={settings.rerankProvider}
               onChange={(event) => update("rerankProvider", event.currentTarget.value)}
-              className="h-9 w-full rounded-md border bg-background px-3 text-sm"
+              className="h-10 w-full rounded-xl border border-border/70 bg-background/70 px-3 text-sm shadow-none"
             >
               <option value="openrouter">OpenRouter</option>
               <option value="local" disabled={!settings.localModelsAvailable}>
@@ -572,11 +635,27 @@ function SettingsSection({
   description: string;
   children: React.ReactNode;
 }) {
+  const Icon =
+    {
+      Appearance: Palette,
+      Window: AppWindow,
+      Embeddings: BrainCircuit,
+      Reranking: BrainCircuit,
+      "API keys": KeyRound,
+      Data: Database,
+      "Folder sync": FolderSync,
+      "Background indexing": Activity,
+    }[title] ?? Palette;
   return (
-    <section className="space-y-4 rounded-lg border bg-card p-5">
-      <div>
-        <h2 className="font-semibold">{title}</h2>
-        <p className="mt-1 text-sm text-muted-foreground">{description}</p>
+    <section className="space-y-5 rounded-3xl border border-border/60 bg-card/70 p-5 shadow-sm backdrop-blur sm:p-6">
+      <div className="flex gap-3">
+        <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+          <Icon className="size-3.5" />
+        </span>
+        <div>
+          <h2 className="font-semibold tracking-tight">{title}</h2>
+          <p className="mt-1 text-sm text-muted-foreground">{description}</p>
+        </div>
       </div>
       <div className="grid gap-4">{children}</div>
     </section>
@@ -601,11 +680,58 @@ function Field({
   );
 }
 
+function FieldGroup({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="grid gap-1.5 text-sm">
+      <span className="font-medium">{label}</span>
+      {children}
+      {hint && <span className="text-xs text-muted-foreground">{hint}</span>}
+    </div>
+  );
+}
+
 function QueueMetric({ label, value }: { label: string; value: number }) {
   return (
-    <div className="rounded-md border bg-background p-3">
+    <div className="rounded-xl border border-border/60 bg-background/70 p-3">
       <div className="text-lg font-semibold tabular-nums">{value}</div>
       <div className="text-xs text-muted-foreground">{label}</div>
     </div>
+  );
+}
+
+function ModeButton({
+  active,
+  icon,
+  label,
+  onClick,
+}: {
+  active: boolean;
+  icon: React.ReactNode;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      className={cn(
+        "flex h-10 items-center justify-center gap-2 rounded-xl text-xs font-medium transition",
+        active
+          ? "bg-background text-foreground shadow-sm"
+          : "text-muted-foreground hover:text-foreground",
+      )}
+    >
+      {icon}
+      {label}
+    </button>
   );
 }
