@@ -15,6 +15,10 @@ export type Node = {
 
 export type SearchHit = { node: Node; score: number };
 export type Mode = "fts" | "vec" | "hybrid" | "agentic";
+export type StartupStatus =
+  | { state: "starting"; message: string }
+  | { state: "ready" }
+  | { state: "error"; message: string };
 
 export type ChatEvent =
   | { kind: "text_delta"; text: string }
@@ -62,8 +66,26 @@ export function updateNode(args: {
   return invoke<void>("update_node", args);
 }
 
+export type BlockContent = {
+  content: string;
+  wikilinkTitles: string[];
+  blockUuids: string[];
+};
+
+export function updateBlockWithRefs(id: number, block: BlockContent) {
+  return invoke<[Node, number]>("update_block_with_refs", { id, block });
+}
+
+export function splitBlock(id: number, parts: BlockContent[]) {
+  return invoke<Node[]>("split_block", { id, parts });
+}
+
 export function isReady() {
   return invoke<boolean>("is_ready");
+}
+
+export function getStartupStatus() {
+  return invoke<StartupStatus>("startup_status");
 }
 
 export function listEntities(limit = 30) {
@@ -80,6 +102,10 @@ export function createPage(title: string) {
 
 export function getNode(id: number) {
   return invoke<Node | null>("get_node", { id });
+}
+
+export function getContainingPage(id: number) {
+  return invoke<Node | null>("get_containing_page", { id });
 }
 
 export function listBlockChildren(parentId: number) {
@@ -101,6 +127,10 @@ export function moveBlock(args: {
   newPosition: number | null;
 }) {
   return invoke<Node>("move_block", args);
+}
+
+export function reorderBlock(id: number, direction: "up" | "down") {
+  return invoke<Node>("reorder_block", { id, direction });
 }
 
 export function deleteBlock(id: number) {

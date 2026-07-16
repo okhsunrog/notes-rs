@@ -8,19 +8,22 @@ import { EntitiesCard } from "@/features/entities/entities-card";
 import { ChatCard } from "@/features/chat/chat-card";
 import { PagesList } from "@/features/pages/pages-list";
 import { PageView } from "@/features/pages/page-view";
-import { isReady, type Node, type SearchHit } from "@/lib/api";
+import { getContainingPage, getStartupStatus, type Node, type SearchHit } from "@/lib/api";
 
 function App() {
   const [ready, setReady] = useState(false);
+  const [startupError, setStartupError] = useState("");
   const [status, setStatus] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [activeNode, setActiveNode] = useState<Node | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    isReady()
-      .then((r) => {
-        if (!cancelled && r) setReady(true);
+    getStartupStatus()
+      .then((result) => {
+        if (cancelled) return;
+        if (result.state === "ready") setReady(true);
+        if (result.state === "error") setStartupError(result.message);
       })
       .catch(() => {
         /* startup state not yet registered: keep listening */
@@ -28,9 +31,13 @@ function App() {
     const unlistenPromise = listen("app:ready", () => {
       if (!cancelled) setReady(true);
     });
+    const unlistenError = listen<string>("app:startup-error", ({ payload }) => {
+      if (!cancelled) setStartupError(payload);
+    });
     return () => {
       cancelled = true;
       void unlistenPromise.then((un) => un());
+      void unlistenError.then((un) => un());
     };
   }, []);
 
@@ -41,11 +48,39 @@ function App() {
     }
   }
 
+  async function openSearchResult(node: Node) {
+    try {
+      const page = node.kind === "page" ? node : await getContainingPage(node.id);
+      if (!page) {
+        setStatus(`No containing page found for #${node.id}`);
+        return;
+      }
+      setActiveNode(page);
+      if (page.id !== node.id) {
+        setStatus(`Opened ${page.title ?? "page"} containing #${node.id}`);
+      }
+    } catch (error) {
+      setStatus(`open error: ${String(error)}`);
+    }
+  }
+
   if (!ready) {
     return (
       <div className="flex h-screen flex-col items-center justify-center gap-3 bg-background text-foreground">
-        <Loader2 className="size-6 animate-spin text-muted-foreground" />
-        <p className="text-sm text-muted-foreground">starting notes-rs…</p>
+        {startupError ? (
+          <div className="max-w-lg rounded-md border border-destructive/40 bg-destructive/5 p-5">
+            <h1 className="font-semibold text-destructive">notes-rs could not start</h1>
+            <p className="mt-2 text-sm break-words text-muted-foreground">{startupError}</p>
+            <p className="mt-3 text-xs text-muted-foreground">
+              Update the provider configuration in the app data .env file, then restart the app.
+            </p>
+          </div>
+        ) : (
+          <>
+            <Loader2 className="size-6 animate-spin text-muted-foreground" />
+            <p className="text-sm text-muted-foreground">starting notes-rs…</p>
+          </>
+        )}
       </div>
     );
   }
@@ -67,6 +102,7 @@ function App() {
         center={
           activeNode ? (
             <PageView
+              key={activeNode.id}
               node={activeNode}
               onSaved={applyUpdated}
               onStatus={setStatus}
@@ -80,7 +116,7 @@ function App() {
               <SearchCard
                 hits={hits}
                 setHits={setHits}
-                onOpenNode={setActiveNode}
+                onOpenNode={openSearchResult}
                 onStatus={setStatus}
               />
             </div>

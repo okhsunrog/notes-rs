@@ -4,7 +4,7 @@ use crate::embed::{EmbedderBackend, RerankBackend};
 use crate::sqlite::Connection;
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use tauri::ipc::Channel;
 
 pub struct AppState {
@@ -65,6 +65,7 @@ pub async fn create_node(
 
 #[tauri::command]
 pub async fn update_node(
+    app: AppHandle,
     state: State<'_, AppState>,
     id: i64,
     title: Option<String>,
@@ -73,7 +74,37 @@ pub async fn update_node(
 ) -> Result<(), String> {
     db::update_node(&state.conn, id, title, content, content_json)
         .await
-        .map_err(err)
+        .map_err(err)?;
+    let _ = app.emit("pages:changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn update_block_with_refs(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+    block: db::BlockContent,
+) -> Result<(Node, u32), String> {
+    let result = db::update_block_with_refs(&state.conn, id, block)
+        .await
+        .map_err(err)?;
+    let _ = app.emit("pages:changed", ());
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn split_block(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+    parts: Vec<db::BlockContent>,
+) -> Result<Vec<Node>, String> {
+    let nodes = db::split_block(&state.conn, id, parts)
+        .await
+        .map_err(err)?;
+    let _ = app.emit("pages:changed", ());
+    Ok(nodes)
 }
 
 #[tauri::command]
@@ -159,20 +190,34 @@ pub async fn move_block(
 }
 
 #[tauri::command]
+pub async fn reorder_block(
+    state: State<'_, AppState>,
+    id: i64,
+    direction: String,
+) -> Result<Node, String> {
+    db::reorder_block(&state.conn, id, direction)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
 pub async fn delete_block(state: State<'_, AppState>, id: i64) -> Result<bool, String> {
     db::delete_block(&state.conn, id).await.map_err(err)
 }
 
 #[tauri::command]
 pub async fn replace_block_refs(
+    app: AppHandle,
     state: State<'_, AppState>,
     block_id: i64,
     wikilink_titles: Vec<String>,
     block_uuids: Vec<String>,
 ) -> Result<u32, String> {
-    db::replace_block_refs(&state.conn, block_id, wikilink_titles, block_uuids)
+    let broken = db::replace_block_refs(&state.conn, block_id, wikilink_titles, block_uuids)
         .await
-        .map_err(err)
+        .map_err(err)?;
+    let _ = app.emit("pages:changed", ());
+    Ok(broken)
 }
 
 #[tauri::command]
@@ -193,23 +238,40 @@ pub async fn get_node_by_uuid(
 
 #[tauri::command]
 pub async fn get_or_create_page_by_title(
+    app: AppHandle,
     state: State<'_, AppState>,
     title: String,
 ) -> Result<Node, String> {
-    db::get_or_create_page_by_title(&state.conn, title)
+    let page = db::get_or_create_page_by_title(&state.conn, title)
         .await
-        .map_err(err)
+        .map_err(err)?;
+    let _ = app.emit("pages:changed", ());
+    Ok(page)
 }
 
 #[tauri::command]
-pub async fn create_page(state: State<'_, AppState>, title: String) -> Result<Node, String> {
+pub async fn create_page(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    title: String,
+) -> Result<Node, String> {
     let title = title.trim().to_string();
     if title.is_empty() {
         return Err("title is required".into());
     }
-    db::create_node(&state.conn, "page".into(), Some(title), String::new(), None)
+    let page = db::create_node(&state.conn, "page".into(), Some(title), String::new(), None)
         .await
-        .map_err(err)
+        .map_err(err)?;
+    let _ = app.emit("pages:changed", ());
+    Ok(page)
+}
+
+#[tauri::command]
+pub async fn get_containing_page(
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<Option<Node>, String> {
+    db::get_containing_page(&state.conn, id).await.map_err(err)
 }
 
 #[tauri::command]

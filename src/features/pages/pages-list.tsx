@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { Plus, FileText } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -26,6 +27,11 @@ export function PagesList({ selectedId, onSelect, onStatus }: Props) {
 
   useEffect(() => {
     void refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    const unlisten = listen("pages:changed", () => void refresh());
+    return () => void unlisten.then((stop) => stop());
   }, [refresh]);
 
   async function submit(e: React.FormEvent) {

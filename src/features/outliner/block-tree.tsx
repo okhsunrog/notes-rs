@@ -28,7 +28,7 @@ export function BlockChildren({ parent, depth }: Props) {
         content: "",
         contentJson: null,
       });
-      store.insertAfter(parent.id, null, created);
+      await store.refresh(parent.id);
       store.setEditing(created.id);
     } catch (e) {
       console.error("create block failed", e);

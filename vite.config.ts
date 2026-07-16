@@ -55,6 +55,6 @@ export default defineConfig({
   },
 
   staged: {
-    "*": "vp check --fix",
+    "*.{js,jsx,ts,tsx,json,jsonc,css,md,yaml,yml}": "vp check --fix",
   },
 });

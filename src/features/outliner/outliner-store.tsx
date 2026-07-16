@@ -7,6 +7,7 @@ type Store = {
   /** undefined = not loaded yet; [] = loaded, empty. */
   getChildren: (parentId: number) => Node[] | undefined;
   ensureLoaded: (parentId: number) => void;
+  refresh: (parentId: number) => Promise<void>;
   loadError: (parentId: number) => string | undefined;
   replaceBlock: (updated: Node) => void;
   insertAfter: (parentId: number, afterId: number | null, block: Node) => void;
@@ -54,6 +55,20 @@ export function OutlinerProvider({ children }: { children: React.ReactNode }) {
     };
 
     const loadError = (parentId: number) => errorMap.current.get(parentId);
+
+    const refresh = async (parentId: number) => {
+      loadingSet.current.add(parentId);
+      errorMap.current.delete(parentId);
+      try {
+        childrenMap.current.set(parentId, await listBlockChildren(parentId));
+      } catch (error) {
+        errorMap.current.set(parentId, String(error));
+        throw error;
+      } finally {
+        loadingSet.current.delete(parentId);
+        bump();
+      }
+    };
 
     const replaceBlock = (updated: Node) => {
       const pid = updated.parent_id;
@@ -116,6 +131,7 @@ export function OutlinerProvider({ children }: { children: React.ReactNode }) {
     return {
       getChildren,
       ensureLoaded,
+      refresh,
       loadError,
       replaceBlock,
       insertAfter,

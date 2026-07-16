@@ -5,10 +5,12 @@ import {
   createBlock,
   deleteBlock,
   moveBlock,
-  replaceBlockRefs,
+  reorderBlock,
   searchBlocksFts,
   searchPagesByTitle,
-  updateNode,
+  splitBlock,
+  updateBlockWithRefs,
+  type BlockContent,
   type Node,
 } from "@/lib/api";
 import { BlockChildren } from "./block-tree";
@@ -32,10 +34,16 @@ const AUTOSAVE_MS = 400;
 const AC_DEBOUNCE_MS = 120;
 const LONG_BLOCK_CHARS = 600;
 
+function blockContent(content: string): BlockContent {
+  const { wikilinks, blockRefs } = parseRefs(content);
+  return { content, wikilinkTitles: wikilinks, blockUuids: blockRefs };
+}
+
 export function BlockNode({ block, parent, depth }: Props) {
   const store = useOutliner();
   const editing = store.editingId === block.id;
-  const [collapsed, setCollapsed] = useState(false);
+  const collapseKey = `outliner.collapsed.${block.uuid}`;
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem(collapseKey) === "1");
   const [saveState, setSaveState] = useState<SaveState>("idle");
 
   const draftRef = useRef(block.content);
@@ -82,26 +90,10 @@ export function BlockNode({ block, parent, depth }: Props) {
     }
     setSaveState("saving");
     try {
-      await updateNode({
-        id: current.id,
-        title: current.title,
-        content: next,
-        contentJson: null,
-      });
-      const updated: Node = {
-        ...current,
-        content: next,
-        content_json: null,
-        updated_at: Math.floor(Date.now() / 1000),
-      };
+      const [updated] = await updateBlockWithRefs(current.id, blockContent(next));
+      blockRef.current = updated;
       store.replaceBlock(updated);
       setSaveState("idle");
-      const { wikilinks, blockRefs } = parseRefs(next);
-      replaceBlockRefs({
-        blockId: current.id,
-        wikilinkTitles: wikilinks,
-        blockUuids: blockRefs,
-      }).catch((e) => console.error("ref replace failed", e));
     } catch (err) {
       console.error("block save failed", err);
       setSaveState("error");
@@ -197,36 +189,17 @@ export function BlockNode({ block, parent, depth }: Props) {
     const selEnd = el.selectionEnd;
     editRef.current?.replaceRange(selStart, selEnd, paragraphs[0]);
 
-    // Create one sibling block per remaining paragraph, in order.
-    let prevId = block.id;
-    for (let i = 1; i < paragraphs.length; i++) {
-      const siblings = store.getChildren(parent.id) ?? [];
-      const pos = positionAfter(siblings, prevId);
-      try {
-        const created = await createBlock({
-          parentId: parent.id,
-          position: pos,
-          content: paragraphs[i],
-          contentJson: null,
-        });
-        store.insertAfter(parent.id, prevId, created);
-        // Emit refs for the newly-created block since it never flows through
-        // `flush()` (its content is set at creation time).
-        const { wikilinks, blockRefs } = parseRefs(paragraphs[i]);
-        if (wikilinks.length > 0 || blockRefs.length > 0) {
-          replaceBlockRefs({
-            blockId: created.id,
-            wikilinkTitles: wikilinks,
-            blockUuids: blockRefs,
-          }).catch((err) => console.error("ref replace (paste) failed", err));
-        }
-        prevId = created.id;
-      } catch (err) {
-        console.error("paste split: create failed", err);
-        break;
-      }
+    clearTimer();
+    try {
+      const parts = [draftRef.current, ...paragraphs.slice(1)].map(blockContent);
+      const changed = await splitBlock(block.id, parts);
+      await store.refresh(parent.id);
+      store.setEditing(changed[changed.length - 1]?.id ?? block.id);
+    } catch (error) {
+      console.error("paste split failed", error);
+      setSaveState("error");
+      return;
     }
-    if (prevId !== block.id) store.setEditing(prevId);
 
     if (!localStorage.getItem("outliner.paste-split.notified")) {
       toast.info("Each paragraph became a separate block.", { duration: 4000 });
@@ -247,62 +220,17 @@ export function BlockNode({ block, parent, depth }: Props) {
       toast.info("No paragraph breaks found — add blank lines between paragraphs first.");
       return;
     }
-    // Update current block content → paragraphs[0].
+    clearTimer();
     try {
-      await updateNode({
-        id: block.id,
-        title: block.title,
-        content: paragraphs[0],
-        contentJson: null,
-      });
-      const updated: Node = {
-        ...block,
-        content: paragraphs[0],
-        content_json: null,
-        updated_at: Math.floor(Date.now() / 1000),
-      };
-      store.replaceBlock(updated);
+      const changed = await splitBlock(block.id, paragraphs.map(blockContent));
       draftRef.current = paragraphs[0];
       setDraftLen(paragraphs[0].length);
-      if (editing && editRef.current) {
-        editRef.current.replaceRange(0, source.length, paragraphs[0]);
-      }
-      const { wikilinks, blockRefs } = parseRefs(paragraphs[0]);
-      replaceBlockRefs({
-        blockId: block.id,
-        wikilinkTitles: wikilinks,
-        blockUuids: blockRefs,
-      }).catch((err) => console.error("ref replace failed", err));
+      await store.refresh(parent.id);
+      store.setEditing(changed[changed.length - 1]?.id ?? block.id);
     } catch (err) {
-      console.error("split: update current failed", err);
+      console.error("split failed", err);
+      setSaveState("error");
       return;
-    }
-    // Create siblings for paragraphs 1..N.
-    let prevId = block.id;
-    for (let i = 1; i < paragraphs.length; i++) {
-      const siblings = store.getChildren(parent.id) ?? [];
-      const pos = positionAfter(siblings, prevId);
-      try {
-        const created = await createBlock({
-          parentId: parent.id,
-          position: pos,
-          content: paragraphs[i],
-          contentJson: null,
-        });
-        store.insertAfter(parent.id, prevId, created);
-        const { wikilinks, blockRefs } = parseRefs(paragraphs[i]);
-        if (wikilinks.length > 0 || blockRefs.length > 0) {
-          replaceBlockRefs({
-            blockId: created.id,
-            wikilinkTitles: wikilinks,
-            blockUuids: blockRefs,
-          }).catch((err) => console.error("ref replace failed", err));
-        }
-        prevId = created.id;
-      } catch (err) {
-        console.error("split: create failed", err);
-        break;
-      }
     }
   };
 
@@ -327,7 +255,7 @@ export function BlockNode({ block, parent, depth }: Props) {
         content: "",
         contentJson: null,
       });
-      store.insertAfter(parent.id, block.id, created);
+      await store.refresh(parent.id);
       store.setEditing(created.id);
     } catch (e) {
       console.error("enter (new sibling) failed", e);
@@ -362,7 +290,7 @@ export function BlockNode({ block, parent, depth }: Props) {
         newParentId: prev.id,
         newPosition: null,
       });
-      store.moveLocal(moved, parent.id);
+      await Promise.all([store.refresh(parent.id), store.refresh(prev.id)]);
       store.setEditing(moved.id);
     } catch (e) {
       console.error("tab indent failed", e);
@@ -381,7 +309,7 @@ export function BlockNode({ block, parent, depth }: Props) {
         newParentId: grandparentId,
         newPosition: newPos,
       });
-      store.moveLocal(moved, parent.id);
+      await Promise.all([store.refresh(parent.id), store.refresh(grandparentId)]);
       store.setEditing(moved.id);
     } catch (e) {
       console.error("shift-tab outdent failed", e);
@@ -392,6 +320,25 @@ export function BlockNode({ block, parent, depth }: Props) {
     const siblings = store.getChildren(parent.id) ?? [];
     const target = dir === "up" ? prevSibling(siblings, block.id) : nextSibling(siblings, block.id);
     if (target) store.setEditing(target.id);
+  };
+
+  const toggleCollapsed = () => {
+    setCollapsed((value) => {
+      const next = !value;
+      localStorage.setItem(collapseKey, next ? "1" : "0");
+      return next;
+    });
+  };
+
+  const onReorder = async (direction: "up" | "down") => {
+    await flush();
+    try {
+      await reorderBlock(block.id, direction);
+      await store.refresh(parent.id);
+      store.setEditing(block.id);
+    } catch (error) {
+      console.error("block reorder failed", error);
+    }
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -428,6 +375,16 @@ export function BlockNode({ block, parent, depth }: Props) {
       // Any other key falls through (so typing continues to update the query).
     }
 
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      toggleCollapsed();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+      e.preventDefault();
+      void onReorder(e.key === "ArrowUp" ? "up" : "down");
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
       e.preventDefault();
       void onEnter();
@@ -467,7 +424,7 @@ export function BlockNode({ block, parent, depth }: Props) {
         <button
           type="button"
           className="mt-1.5 flex size-4 shrink-0 items-center justify-center text-muted-foreground/50 hover:text-foreground"
-          onClick={() => setCollapsed((c) => !c)}
+          onClick={toggleCollapsed}
           title={collapsed ? "expand" : "collapse"}
         >
           {collapsed ? (

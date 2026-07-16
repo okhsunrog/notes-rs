@@ -96,6 +96,7 @@ export function PageView({ node, onSaved, onStatus, onClose }: Props) {
         </Button>
         <Input
           value={title}
+          onBlur={() => void flush()}
           onChange={(e) => {
             setTitle(e.currentTarget.value);
             scheduleSave();

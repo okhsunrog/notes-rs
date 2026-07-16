@@ -15,7 +15,7 @@ import { search, type Mode, type Node, type SearchHit } from "@/lib/api";
 type Props = {
   hits: SearchHit[];
   setHits: React.Dispatch<React.SetStateAction<SearchHit[]>>;
-  onOpenNode: (n: Node) => void;
+  onOpenNode: (n: Node) => void | Promise<void>;
   onStatus: (s: string) => void;
 };
 
@@ -75,7 +75,7 @@ export function SearchCard({ hits, setHits, onOpenNode, onStatus }: Props) {
               <button
                 key={h.node.id}
                 type="button"
-                onClick={() => onOpenNode(h.node)}
+                onClick={() => void onOpenNode(h.node)}
                 className="w-full rounded-md border bg-card p-3 text-left text-sm transition hover:bg-accent"
               >
                 <div className="flex items-center gap-2">
