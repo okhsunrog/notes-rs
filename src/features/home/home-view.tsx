@@ -36,7 +36,7 @@ export function HomeView({ creating, hits, setHits, onCreate, onOpenNode, onStat
           className="brand-button mt-8 h-12 rounded-xl px-5 shadow-lg shadow-primary/20"
         >
           <FilePlus2 className="size-4" />
-          Create your first note
+          Create a new note
           <ArrowRight className="ml-2 size-4" />
         </Button>
         <p className="mt-3 text-xs text-muted-foreground">

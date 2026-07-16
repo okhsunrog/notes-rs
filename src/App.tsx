@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { Loader2, Redo2, Search, Settings, Undo2 } from "lucide-react";
 import { AppLayout } from "@/app/layout";
@@ -40,11 +40,13 @@ function App() {
   );
   const [history, setHistory] = useState<[number, number]>([0, 0]);
   const [creatingNote, setCreatingNote] = useState(false);
+  const creatingNoteRef = useRef(false);
   const [newNote, setNewNote] = useState<{ pageId: number; blockId: number | null } | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
 
   const createNewNote = useCallback(async () => {
-    if (creatingNote) return;
+    if (creatingNoteRef.current) return;
+    creatingNoteRef.current = true;
     setCreatingNote(true);
     try {
       const pages = await listPages();
@@ -73,9 +75,10 @@ function App() {
     } catch (error) {
       setStatus(`create error: ${String(error)}`);
     } finally {
+      creatingNoteRef.current = false;
       setCreatingNote(false);
     }
-  }, [creatingNote]);
+  }, []);
 
   const moveHistory = useCallback(async (direction: "undo" | "redo") => {
     try {

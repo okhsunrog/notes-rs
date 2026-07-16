@@ -9,7 +9,7 @@ The right-hand Graph tab visualizes the selected page's local knowledge neighbor
 - Hierarchical block outliner with autosave, wikilinks, block references, autocomplete, persisted folding, structural undo/redo, atomic paragraph splitting, attachments, and keyboard navigation.
 - SQLite/FTS5 search with English/Russian stemming, `sqlite-vec` semantic retrieval, reciprocal-rank fusion, backlink boost, configurable reranking, and an OpenRouter-backed graph agent.
 - Background embeddings and entity extraction with exponential backoff, stale-result protection, queue status, pause/resume, retry, and cancellation controls.
-- Local graph/backlinks explorer, system/light/dark themes, responsive narrow-window tabs, import/export, backups, and manual conflict-safe folder sync.
+- Local graph/backlinks explorer, six configurable color atmospheres with tuned light/dark variants, responsive narrow-window tabs, import/export, backups, and manual conflict-safe folder sync.
 - Debug-only, localhost-bound Tauri MCP bridge for accessibility snapshots, screenshots, interaction, logs, and IPC inspection.
 
 ### Outliner shortcuts
@@ -23,6 +23,29 @@ The right-hand Graph tab visualizes the selected page's local knowledge neighbor
 | `Ctrl/Cmd+Enter`                  | Toggle the persisted fold state                                     |
 | `Backspace` on an empty leaf      | Delete the block                                                    |
 | `Ctrl/Cmd+Z` / `Ctrl/Cmd+Shift+Z` | Native text undo/redo while editing; structural undo/redo elsewhere |
+
+### Start writing
+
+Select **New note** in the sidebar or press `Ctrl/Cmd+N`. A uniquely named untitled page is created and its title is selected immediately. Type a title and press `Enter` to move straight into the first block. `Ctrl/Cmd+K` opens search from anywhere in the workspace.
+
+Appearance is configured independently in **Settings → Appearance**:
+
+- Brightness: System, Light, or Dark.
+- Palette: Iris, Tidal, Ember, Sakura, Nordic, or Moss.
+
+Palette changes are applied immediately and kept locally for the next launch.
+
+## Current scope
+
+This repository is a capable demo rather than a complete Obsidian or Logseq replacement. The main remaining product work is:
+
+- Markdown vault and importer interoperability, including migration from Obsidian and Logseq.
+- Daily notes, templates, tags/properties UI, saved queries, and a plugin or extension model.
+- Automatic multi-device sync with conflict resolution; current folder sync exchanges explicit snapshots.
+- Drag-and-drop block movement, cross-block selection, inline transclusion, and richer Markdown editing.
+- A scalable interactive graph with filters and layouts; the current graph is a compact local-neighborhood view.
+- End-to-end UI regression tests in CI, accessibility testing beyond semantic snapshots, and production packaging/signing across all supported platforms.
+- Bundle splitting and lazy loading for heavier Settings, graph, and assistant surfaces.
 
 ## Development
 
@@ -47,7 +70,7 @@ With the Tauri development app running, Codex can capture screenshots and DOM sn
 
 ```sh
 vp exec tauri-mcp driver-session start --port 9223
-vp exec tauri-mcp webview-dom-snapshot
+vp exec tauri-mcp webview-dom-snapshot --type accessibility
 vp exec tauri-mcp webview-screenshot --file screenshot.png
 ```
 

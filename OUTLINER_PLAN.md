@@ -1,5 +1,7 @@
 # Outliner UI plan
 
+> Status: shipped. This is the original design record; implementation details in the source and README now take precedence over historical future-tense notes below.
+
 Durable plan for the per-block outliner that replaces BlockNote. Written before a context compact so the next session can pick up cold.
 
 ## Context: where we are
@@ -124,7 +126,7 @@ Steps 1–4 are the load-bearing core. 5–7 are the "feels right" layer. 8–10
 
 ## Open questions to decide as we go
 
-- **Folding state:** UI-only in v1, lost on refresh. Decide later whether to persist in `node_properties` (when we re-introduce it) or LocalStorage.
+- **Folding state:** shipped with per-block LocalStorage persistence.
 - **Per-block ref tracking:** simpler to re-emit-and-cleanup on every save (delete all edges where src=block_id AND kind='refs', then re-insert). Inefficient but correct. Switch to diff-based if hot-path-slow.
 - **Optimistic UI vs round-trip:** start with round-trip for safety; layer in optimistic update for Enter / Tab specifically since those need to feel instant.
 - **Block-ref autocomplete UX:** `((` shows FTS results from all blocks — but search-as-you-type might be too slow with a full vector pipeline. Use FTS-only for autocomplete, defer rerank to explicit search.
@@ -143,14 +145,11 @@ Steps 1–4 are the load-bearing core. 5–7 are the "feels right" layer. 8–10
 
 ## After the outliner ships
 
-These were deferred _behind_ the outliner; revisit after:
+These were deferred _behind_ the outliner. Graph expansion, agent backlink/tag/subtree tools, local BGE models, dark mode, the error boundary, and node deletion have since shipped. Remaining larger follow-ups are:
 
-- Better `neighbors` with edge-kind filter + direction.
-- New agent tools: `find_backlinks`, `find_tagged`, `read_subtree`, `read_ancestors`, `read_block`.
 - Chunker over blocks (the agreed algorithm: block-chunk for ≥ THRESHOLD_LARGE, parent-cluster chunk for parents with small children, breadcrumb prefix, sentence→word→grapheme degradation).
-- BGE-M3 embedder swap.
 - Multi-column FTS5 (`title`, `fcontent`, `body`, `tags`) with column weights at query time.
-- URL routing (`/page/:id`), dark mode, error boundary, bundle splitting, delete-node path.
+- Stable page routing/deep links, richer graph controls, and bundle splitting.
 
 ## Reference repos cloned at /tmp during planning
 
