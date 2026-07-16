@@ -2,6 +2,8 @@
 
 A graph-native personal knowledge app built with Tauri, React, TypeScript, SQLite/FTS5, and vector search. Notes are stored as an outline of addressable blocks with wikilinks, block references, backlinks, hybrid retrieval, and an OpenRouter-backed agent.
 
+The right-hand Graph tab visualizes the selected page's local knowledge neighborhood and backlinks. Settings includes portable JSON export/import and timestamped local backups; imports and page deletion create a recovery backup automatically.
+
 ## Development
 
 Install the [Vite+ CLI](https://viteplus.dev/guide/), then let it provision the pinned Node.js and Bun versions and install dependencies:

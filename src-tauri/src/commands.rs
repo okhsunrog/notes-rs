@@ -5,7 +5,8 @@ use crate::sqlite::Connection;
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
 use tauri::ipc::Channel;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 
 pub struct AppState {
     pub conn: Connection,
@@ -168,6 +169,115 @@ pub async fn list_pages(
     db::list_pages(&state.conn, limit.unwrap_or(200))
         .await
         .map_err(err)
+}
+
+#[tauri::command]
+pub async fn delete_page(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<bool, String> {
+    write_backup(&app, &state.conn, "before-delete")
+        .await
+        .map_err(err)?;
+    let deleted = db::delete_page(&state.conn, id).await.map_err(err)?;
+    if deleted {
+        let _ = app.emit("pages:changed", ());
+        let _ = app.emit("entities:changed", ());
+    }
+    Ok(deleted)
+}
+
+#[tauri::command]
+pub async fn find_backlinks(
+    state: State<'_, AppState>,
+    id: i64,
+    kind: Option<String>,
+) -> Result<Vec<Node>, String> {
+    db::find_backlinks(&state.conn, id, kind).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn graph_snapshot(
+    state: State<'_, AppState>,
+    focus_id: Option<i64>,
+) -> Result<db::GraphSnapshot, String> {
+    db::graph_snapshot(&state.conn, focus_id).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn export_data(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    let Some(path) = app
+        .dialog()
+        .file()
+        .add_filter("notes-rs archive", &["json"])
+        .set_file_name(format!(
+            "notes-rs-{}.json",
+            chrono::Utc::now().format("%Y%m%d-%H%M%S")
+        ))
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+    let path = path.into_path().map_err(err)?;
+    let archive = db::export_archive(&state.conn).await.map_err(err)?;
+    let json = serde_json::to_string_pretty(&archive).map_err(err)?;
+    std::fs::write(&path, json).map_err(err)?;
+    Ok(Some(path.display().to_string()))
+}
+
+#[tauri::command]
+pub async fn import_data(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    let Some(path) = app
+        .dialog()
+        .file()
+        .add_filter("notes-rs archive", &["json"])
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let path = path.into_path().map_err(err)?;
+    let json = std::fs::read_to_string(&path).map_err(err)?;
+    let archive: db::DataArchive = serde_json::from_str(&json).map_err(err)?;
+    write_backup(&app, &state.conn, "before-import")
+        .await
+        .map_err(err)?;
+    db::import_archive(&state.conn, archive)
+        .await
+        .map_err(err)?;
+    let _ = app.emit("pages:changed", ());
+    let _ = app.emit("entities:changed", ());
+    Ok(Some(path.display().to_string()))
+}
+
+#[tauri::command]
+pub async fn create_backup(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+    write_backup(&app, &state.conn, "manual")
+        .await
+        .map(|path| path.display().to_string())
+        .map_err(err)
+}
+
+async fn write_backup(
+    app: &AppHandle,
+    connection: &Connection,
+    reason: &str,
+) -> anyhow::Result<std::path::PathBuf> {
+    let directory = app.path().app_data_dir()?.join("backups");
+    std::fs::create_dir_all(&directory)?;
+    let path = directory.join(format!(
+        "notes-rs-{reason}-{}.json",
+        chrono::Utc::now().format("%Y%m%d-%H%M%S")
+    ));
+    let archive = db::export_archive(connection).await?;
+    std::fs::write(&path, serde_json::to_string_pretty(&archive)?)?;
+    Ok(path)
 }
 
 #[tauri::command]

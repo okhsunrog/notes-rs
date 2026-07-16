@@ -6,7 +6,7 @@ import { WindowControls } from "@/app/window-controls";
 import { Toaster } from "@/components/ui/sonner";
 import { SearchCard } from "@/features/search/search-card";
 import { EntitiesCard } from "@/features/entities/entities-card";
-import { ChatCard } from "@/features/chat/chat-card";
+import { KnowledgePanel } from "@/features/graph/knowledge-panel";
 import { PagesList } from "@/features/pages/pages-list";
 import { PageView } from "@/features/pages/page-view";
 import { SettingsPage } from "@/features/settings/settings-page";
@@ -15,6 +15,7 @@ import {
   getContainingPage,
   getStartupStatus,
   loadSettings,
+  deletePage,
   type Node,
   type SearchHit,
 } from "@/lib/api";
@@ -83,11 +84,35 @@ function App() {
     }
   }
 
+  async function removePage(node: Node) {
+    if (
+      !window.confirm(
+        `Delete “${node.title ?? "untitled"}” and all of its blocks? A backup will be created first.`,
+      )
+    )
+      return;
+    try {
+      if (await deletePage(node.id)) {
+        setActiveNode(null);
+        setHits((current) => current.filter((hit) => hit.node.id !== node.id));
+        setStatus("Page deleted; a recovery backup was created.");
+      }
+    } catch (error) {
+      setStatus(`delete error: ${String(error)}`);
+    }
+  }
+
   if (settingsOpen) {
     return (
       <SettingsPage
         onBack={() => setSettingsOpen(false)}
         onDecorationModeChanged={setWindowDecorationMode}
+        dataAvailable={ready}
+        onDataChanged={() => {
+          setActiveNode(null);
+          setHits([]);
+          setStatus("Imported archive.");
+        }}
       />
     );
   }
@@ -160,6 +185,7 @@ function App() {
               onSaved={applyUpdated}
               onStatus={setStatus}
               onClose={() => setActiveNode(null)}
+              onDelete={removePage}
             />
           ) : (
             <div className="mx-auto max-w-3xl space-y-4">
@@ -175,7 +201,7 @@ function App() {
             </div>
           )
         }
-        right={<ChatCard />}
+        right={<KnowledgePanel node={activeNode} onOpenNode={openSearchResult} />}
       />
       <Toaster position="bottom-right" />
     </>

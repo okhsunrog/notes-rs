@@ -470,6 +470,7 @@ pub struct Node {
 
 const NODE_COLUMNS: &str =
     "id, uuid, kind, title, content, content_json, parent_id, position, created_at, updated_at";
+const NODE_COLUMNS_N: &str = "n.id, n.uuid, n.kind, n.title, n.content, n.content_json, n.parent_id, n.position, n.created_at, n.updated_at";
 
 fn row_to_node(r: &rusqlite::Row<'_>) -> rusqlite::Result<Node> {
     Ok(Node {
@@ -490,6 +491,30 @@ fn row_to_node(r: &rusqlite::Row<'_>) -> rusqlite::Result<Node> {
 pub struct SearchHit {
     pub node: Node,
     pub score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Edge {
+    pub src: i64,
+    pub dst: i64,
+    pub kind: String,
+    pub weight: f64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataArchive {
+    pub format: String,
+    pub version: u32,
+    pub exported_at: i64,
+    pub nodes: Vec<Node>,
+    pub edges: Vec<Edge>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphSnapshot {
+    pub nodes: Vec<Node>,
+    pub edges: Vec<Edge>,
 }
 
 pub async fn create_node(
@@ -1003,14 +1028,14 @@ pub async fn find_backlinks(
         .call(move |c| -> rusqlite::Result<Vec<Node>> {
             let sql = if kind.is_some() {
                 format!(
-                    "SELECT {NODE_COLUMNS} FROM nodes n
+                    "SELECT {NODE_COLUMNS_N} FROM nodes n
                      JOIN edges e ON e.src = n.id
                      WHERE e.dst = ?1 AND e.kind = ?2
                      ORDER BY n.updated_at DESC"
                 )
             } else {
                 format!(
-                    "SELECT {NODE_COLUMNS} FROM nodes n
+                    "SELECT {NODE_COLUMNS_N} FROM nodes n
                      JOIN edges e ON e.src = n.id
                      WHERE e.dst = ?1
                      ORDER BY n.updated_at DESC"
@@ -1044,7 +1069,7 @@ pub async fn read_ancestors(conn: &Connection, node_id: i64) -> Result<Vec<Node>
                    SELECT n.id, n.parent_id, u.depth + 1
                      FROM up u JOIN nodes n ON n.id = u.parent_id
                  )
-                 SELECT {NODE_COLUMNS} FROM up u
+                 SELECT {NODE_COLUMNS_N} FROM up u
                  JOIN nodes n ON n.id = u.id
                  ORDER BY u.depth DESC"
             );
@@ -1080,7 +1105,7 @@ pub async fn read_subtree(conn: &Connection, node_id: i64, depth: u32) -> Result
                      FROM down d JOIN nodes n ON n.parent_id = d.id
                      WHERE d.depth < ?2
                  )
-                 SELECT {NODE_COLUMNS} FROM down d
+                 SELECT {NODE_COLUMNS_N} FROM down d
                  JOIN nodes n ON n.id = d.id
                  WHERE n.id != ?1
                  ORDER BY d.sort_path"
@@ -1103,7 +1128,7 @@ pub async fn find_tagged(conn: &Connection, title: String) -> Result<Vec<Node>> 
     let rows = conn
         .call(move |c| -> rusqlite::Result<Vec<Node>> {
             let sql = format!(
-                "SELECT {NODE_COLUMNS} FROM nodes n
+                "SELECT {NODE_COLUMNS_N} FROM nodes n
                  WHERE EXISTS (
                    SELECT 1 FROM edges e
                    JOIN nodes t ON t.id = e.dst
@@ -1373,6 +1398,173 @@ pub async fn list_block_children(conn: &Connection, parent_id: i64) -> Result<Ve
         })
         .await?;
     Ok(rows)
+}
+
+pub async fn delete_page(conn: &Connection, id: i64) -> Result<bool> {
+    conn.call(move |database| -> rusqlite::Result<bool> {
+        let deleted =
+            database.execute("DELETE FROM nodes WHERE id = ?1 AND kind = 'page'", [id])?;
+        Ok(deleted == 1)
+    })
+    .await
+}
+
+pub async fn graph_snapshot(conn: &Connection, focus_id: Option<i64>) -> Result<GraphSnapshot> {
+    conn.call(move |database| -> rusqlite::Result<GraphSnapshot> {
+        let nodes = if let Some(focus_id) = focus_id {
+            let sql = format!(
+                "SELECT DISTINCT {NODE_COLUMNS} FROM nodes n
+                 WHERE n.id = ?1
+                    OR n.id IN (SELECT src FROM edges WHERE dst = ?1)
+                    OR n.id IN (SELECT dst FROM edges WHERE src = ?1)
+                    OR n.parent_id = ?1
+                    OR n.id = (SELECT parent_id FROM nodes WHERE id = ?1)
+                 ORDER BY n.kind, n.title, n.id
+                 LIMIT 100"
+            );
+            let mut statement = database.prepare(&sql)?;
+            statement
+                .query_map([focus_id], row_to_node)?
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            let sql = format!(
+                "SELECT {NODE_COLUMNS} FROM nodes
+                 WHERE kind IN ('page', 'entity')
+                 ORDER BY updated_at DESC LIMIT 100"
+            );
+            let mut statement = database.prepare(&sql)?;
+            statement
+                .query_map([], row_to_node)?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let ids = nodes.iter().map(|node| node.id).collect::<Vec<_>>();
+        let edges = if ids.is_empty() {
+            Vec::new()
+        } else {
+            let placeholders = std::iter::repeat_n("?", ids.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT src, dst, kind, weight, created_at FROM edges
+                 WHERE src IN ({placeholders}) AND dst IN ({placeholders})
+                 ORDER BY created_at DESC LIMIT 250"
+            );
+            let parameters = ids.iter().chain(ids.iter());
+            let mut statement = database.prepare(&sql)?;
+            statement
+                .query_map(rusqlite::params_from_iter(parameters), |row| {
+                    Ok(Edge {
+                        src: row.get(0)?,
+                        dst: row.get(1)?,
+                        kind: row.get(2)?,
+                        weight: row.get(3)?,
+                        created_at: row.get(4)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        Ok(GraphSnapshot { nodes, edges })
+    })
+    .await
+}
+
+pub async fn export_archive(conn: &Connection) -> Result<DataArchive> {
+    conn.call(|database| -> rusqlite::Result<DataArchive> {
+        let nodes = {
+            let sql = format!("SELECT {NODE_COLUMNS} FROM nodes ORDER BY id");
+            let mut statement = database.prepare(&sql)?;
+            statement
+                .query_map([], row_to_node)?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let edges = {
+            let mut statement = database
+                .prepare("SELECT src, dst, kind, weight, created_at FROM edges ORDER BY id")?;
+            statement
+                .query_map([], |row| {
+                    Ok(Edge {
+                        src: row.get(0)?,
+                        dst: row.get(1)?,
+                        kind: row.get(2)?,
+                        weight: row.get(3)?,
+                        created_at: row.get(4)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        Ok(DataArchive {
+            format: "notes-rs".into(),
+            version: 1,
+            exported_at: chrono::Utc::now().timestamp(),
+            nodes,
+            edges,
+        })
+    })
+    .await
+}
+
+pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<()> {
+    if archive.format != "notes-rs" || archive.version != 1 {
+        anyhow::bail!("unsupported notes-rs archive format or version");
+    }
+    conn.call(move |database| -> rusqlite::Result<()> {
+        let transaction = database.transaction()?;
+        transaction.execute("DELETE FROM vec_nodes", [])?;
+        transaction.execute("DELETE FROM nodes", [])?;
+
+        for node in &archive.nodes {
+            let body = crate::stem::stem(&format!(
+                "{}\n{}",
+                node.title.as_deref().unwrap_or(""),
+                node.content
+            ));
+            transaction.execute(
+                "INSERT INTO nodes
+                   (id, uuid, kind, title, content, content_json, body_stemmed,
+                    parent_id, position, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, ?10)",
+                rusqlite::params![
+                    node.id,
+                    node.uuid,
+                    node.kind,
+                    node.title,
+                    node.content,
+                    node.content_json,
+                    body,
+                    node.position,
+                    node.created_at,
+                    node.updated_at
+                ],
+            )?;
+        }
+        for node in &archive.nodes {
+            if let Some(parent_id) = node.parent_id {
+                transaction.execute(
+                    "UPDATE nodes SET parent_id = ?2 WHERE id = ?1",
+                    rusqlite::params![node.id, parent_id],
+                )?;
+            }
+        }
+        for edge in archive.edges {
+            transaction.execute(
+                "INSERT OR IGNORE INTO edges(src, dst, kind, weight, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![edge.src, edge.dst, edge.kind, edge.weight, edge.created_at],
+            )?;
+        }
+        transaction.execute_batch(
+            "DELETE FROM extracted_edge_sources;
+             UPDATE nodes SET last_extracted_hash = NULL
+               WHERE kind IN ('page', 'block');
+             INSERT OR REPLACE INTO extract_queue(node_id, enqueued_at, retry_count, last_attempt)
+               SELECT id, unixepoch(), 0, NULL FROM nodes WHERE kind IN ('page', 'block');
+             INSERT OR REPLACE INTO embed_queue(node_id, enqueued_at, retry_count, last_attempt)
+               SELECT id, unixepoch(), 0, NULL FROM nodes;",
+        )?;
+        transaction.commit()?;
+        Ok(())
+    })
+    .await
 }
 
 /// Create a block. If `position` is `None`, append at end of parent's children
@@ -2152,5 +2344,54 @@ mod tests {
         );
         assert_eq!(siblings[0].position, Some(1024.0));
         assert_eq!(siblings[1].position, Some(2048.0));
+    }
+
+    #[tokio::test]
+    async fn archive_round_trip_restores_nodes_edges_and_hierarchy() {
+        let (_database, connection) = temporary_database().await;
+        let page = create_node(
+            &connection,
+            "page".into(),
+            Some("Original".into()),
+            String::new(),
+            None,
+        )
+        .await
+        .expect("create page");
+        let block = create_block(
+            &connection,
+            Some(page.id),
+            None,
+            "A [[Linked]] block".into(),
+            None,
+        )
+        .await
+        .expect("create block");
+        replace_block_refs(&connection, block.id, vec!["Linked".into()], Vec::new())
+            .await
+            .expect("create reference");
+        let archive = export_archive(&connection).await.expect("export archive");
+
+        delete_page(&connection, page.id)
+            .await
+            .expect("delete page");
+        import_archive(&connection, archive)
+            .await
+            .expect("restore archive");
+
+        let restored = get_node(&connection, block.id)
+            .await
+            .expect("query block")
+            .expect("restored block");
+        assert_eq!(restored.parent_id, Some(page.id));
+        let linked = get_page_by_title(&connection, "Linked".into())
+            .await
+            .expect("query linked page")
+            .expect("linked page restored");
+        let backlinks = find_backlinks(&connection, linked.id, Some("refs".into()))
+            .await
+            .expect("query backlinks");
+        assert_eq!(backlinks.len(), 1);
+        assert_eq!(backlinks[0].id, block.id);
     }
 }

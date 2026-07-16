@@ -1,13 +1,33 @@
 import { useEffect, useState } from "react";
-import { ArrowLeft, Check, Loader2, RotateCcw, Save, Trash2 } from "lucide-react";
+import {
+  ArrowLeft,
+  Check,
+  DatabaseBackup,
+  Download,
+  Loader2,
+  RotateCcw,
+  Save,
+  Trash2,
+  Upload,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { WindowControls } from "@/app/window-controls";
-import { loadSettings, restartApp, saveSettings, type SettingsSnapshot } from "@/lib/api";
+import {
+  createBackup,
+  exportData,
+  importData,
+  loadSettings,
+  restartApp,
+  saveSettings,
+  type SettingsSnapshot,
+} from "@/lib/api";
 
 type Props = {
   onBack: () => void;
   onDecorationModeChanged: (mode: "native" | "borderless" | "kde") => void;
+  dataAvailable: boolean;
+  onDataChanged: () => void;
 };
 
 const API_KEYS = [
@@ -18,7 +38,12 @@ const API_KEYS = [
   ["GEMINI_API_KEY", "Gemini API key"],
 ] as const;
 
-export function SettingsPage({ onBack, onDecorationModeChanged }: Props) {
+export function SettingsPage({
+  onBack,
+  onDecorationModeChanged,
+  dataAvailable,
+  onDataChanged,
+}: Props) {
   const [settings, setSettings] = useState<SettingsSnapshot | null>(null);
   const [secrets, setSecrets] = useState<Record<string, string>>({});
   const [clearKeys, setClearKeys] = useState<string[]>([]);
@@ -59,6 +84,37 @@ export function SettingsPage({ onBack, onDecorationModeChanged }: Props) {
       setSecrets({});
       setClearKeys([]);
       setMessage("Saved. Restart the app to apply provider changes.");
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function dataAction(action: "export" | "import" | "backup") {
+    if (!dataAvailable) return;
+    if (
+      action === "import" &&
+      !window.confirm(
+        "Replace the current database with the selected archive? A backup will be created first.",
+      )
+    )
+      return;
+    setBusy(true);
+    setError("");
+    try {
+      const path =
+        action === "export"
+          ? await exportData()
+          : action === "import"
+            ? await importData()
+            : await createBackup();
+      if (path) {
+        setMessage(
+          `${action === "backup" ? "Backup created" : action === "export" ? "Exported" : "Imported"}: ${path}`,
+        );
+        if (action === "import") onDataChanged();
+      }
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -243,6 +299,43 @@ export function SettingsPage({ onBack, onDecorationModeChanged }: Props) {
           <p className="text-xs break-all text-muted-foreground">
             Config file: {settings.configPath}
           </p>
+        </SettingsSection>
+
+        <SettingsSection
+          title="Data"
+          description="Portable JSON archives include every note and graph edge. Destructive operations automatically create a timestamped recovery backup in app data."
+        >
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!dataAvailable || busy}
+              onClick={() => void dataAction("export")}
+            >
+              <Download className="size-4" /> Export archive
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!dataAvailable || busy}
+              onClick={() => void dataAction("import")}
+            >
+              <Upload className="size-4" /> Import archive
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!dataAvailable || busy}
+              onClick={() => void dataAction("backup")}
+            >
+              <DatabaseBackup className="size-4" /> Create backup
+            </Button>
+          </div>
+          {!dataAvailable && (
+            <p className="text-xs text-muted-foreground">
+              Data tools become available after the database starts successfully.
+            </p>
+          )}
         </SettingsSection>
 
         {error && (

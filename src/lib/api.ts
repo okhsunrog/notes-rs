@@ -14,6 +14,8 @@ export type Node = {
 };
 
 export type SearchHit = { node: Node; score: number };
+export type Edge = { src: number; dst: number; kind: string; weight: number; created_at: number };
+export type GraphSnapshot = { nodes: Node[]; edges: Edge[] };
 export type Mode = "fts" | "vec" | "hybrid" | "agentic";
 export type StartupStatus =
   | { state: "starting"; message: string }
@@ -132,6 +134,30 @@ export function listPages(limit = 200) {
 
 export function createPage(title: string) {
   return invoke<Node>("create_page", { title });
+}
+
+export function deletePage(id: number) {
+  return invoke<boolean>("delete_page", { id });
+}
+
+export function findBacklinks(id: number, kind: string | null = null) {
+  return invoke<Node[]>("find_backlinks", { id, kind });
+}
+
+export function getGraphSnapshot(focusId: number | null = null) {
+  return invoke<GraphSnapshot>("graph_snapshot", { focusId });
+}
+
+export function exportData() {
+  return invoke<string | null>("export_data");
+}
+
+export function importData() {
+  return invoke<string | null>("import_data");
+}
+
+export function createBackup() {
+  return invoke<string>("create_backup");
 }
 
 export function getNode(id: number) {

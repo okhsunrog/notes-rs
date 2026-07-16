@@ -23,7 +23,9 @@ pub fn run() {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    let mut builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+    let mut builder = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init());
 
     // Development-only bridge for MCP-powered UI inspection and automation.
     // Restrict it to localhost; release builds do not register the plugin.
@@ -131,6 +133,12 @@ pub fn run() {
             commands::chat_stream,
             commands::list_entities,
             commands::list_pages,
+            commands::delete_page,
+            commands::find_backlinks,
+            commands::graph_snapshot,
+            commands::export_data,
+            commands::import_data,
+            commands::create_backup,
             commands::create_page,
             commands::list_block_children,
             commands::create_block,

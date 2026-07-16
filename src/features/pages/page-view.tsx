@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, Check, Loader2 } from "lucide-react";
+import { ArrowLeft, Check, Loader2, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Outliner } from "@/features/outliner/outliner";
@@ -10,13 +10,14 @@ type Props = {
   onSaved: (updated: Node) => void;
   onStatus: (s: string) => void;
   onClose: () => void;
+  onDelete: (node: Node) => void | Promise<void>;
 };
 
 type SaveState = "idle" | "dirty" | "saving" | "saved" | "error";
 
 const AUTOSAVE_MS = 400;
 
-export function PageView({ node, onSaved, onStatus, onClose }: Props) {
+export function PageView({ node, onSaved, onStatus, onClose, onDelete }: Props) {
   const [title, setTitle] = useState(node.title ?? "");
   const [saveState, setSaveState] = useState<SaveState>("idle");
 
@@ -105,6 +106,15 @@ export function PageView({ node, onSaved, onStatus, onClose }: Props) {
           className="h-10 border-0 bg-transparent px-0 text-2xl font-semibold shadow-none focus-visible:ring-0"
         />
         <SaveIndicator state={saveState} />
+        <Button
+          variant="ghost"
+          size="sm"
+          className="ml-auto text-muted-foreground hover:text-destructive"
+          aria-label="Delete page"
+          onClick={() => void onDelete(node)}
+        >
+          <Trash2 className="size-4" />
+        </Button>
       </div>
 
       <div className="text-xs text-muted-foreground">
