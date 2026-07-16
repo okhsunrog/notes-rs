@@ -88,10 +88,19 @@ pub struct ProviderProbeResult {
 #[derive(Debug, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CapabilityProbeResult {
-    name: String,
+    name: ProbeCapability,
     ok: bool,
-    latency_ms: u128,
+    latency_ms: u64,
     detail: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeCapability {
+    Completion,
+    Streaming,
+    RequiredTool,
+    StructuredOutput,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -101,21 +110,21 @@ struct StructuredProbe {
 }
 
 fn probe_result(
-    name: &str,
+    name: ProbeCapability,
     started: std::time::Instant,
     result: Result<String, impl std::fmt::Display>,
 ) -> CapabilityProbeResult {
     match result {
         Ok(detail) => CapabilityProbeResult {
-            name: name.into(),
+            name,
             ok: true,
-            latency_ms: started.elapsed().as_millis(),
+            latency_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
             detail: detail.chars().take(240).collect(),
         },
         Err(error) => CapabilityProbeResult {
-            name: name.into(),
+            name,
             ok: false,
-            latency_ms: started.elapsed().as_millis(),
+            latency_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
             detail: error.to_string().chars().take(500).collect(),
         },
     }
@@ -208,7 +217,11 @@ pub async fn test_completion_provider(
                 Ok(text)
             }
         });
-    capabilities.push(probe_result("completion", started, completion));
+    capabilities.push(probe_result(
+        ProbeCapability::Completion,
+        started,
+        completion,
+    ));
 
     let started = std::time::Instant::now();
     let streaming = async {
@@ -231,7 +244,7 @@ pub async fn test_completion_provider(
         }
     }
     .await;
-    capabilities.push(probe_result("streaming", started, streaming));
+    capabilities.push(probe_result(ProbeCapability::Streaming, started, streaming));
 
     let started = std::time::Instant::now();
     let tools = [llm_relay::ToolDefinition::new(
@@ -264,7 +277,11 @@ pub async fn test_completion_provider(
                     body: response.text(),
                 })
         });
-    capabilities.push(probe_result("required tool", started, tool_call));
+    capabilities.push(probe_result(
+        ProbeCapability::RequiredTool,
+        started,
+        tool_call,
+    ));
 
     let started = std::time::Instant::now();
     let structured = client
@@ -275,7 +292,11 @@ pub async fn test_completion_provider(
         )
         .await
         .map(|response| response.data.status);
-    capabilities.push(probe_result("structured output", started, structured));
+    capabilities.push(probe_result(
+        ProbeCapability::StructuredOutput,
+        started,
+        structured,
+    ));
 
     Ok(ProviderProbeResult { capabilities })
 }
@@ -543,7 +564,7 @@ pub async fn graph_snapshot(
 pub async fn export_data(
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<std::path::PathBuf>, String> {
     let Some(path) = app
         .dialog()
         .file()
@@ -561,7 +582,7 @@ pub async fn export_data(
     add_archive_files(&app, &mut archive).map_err(err)?;
     let json = serde_json::to_string_pretty(&archive).map_err(err)?;
     std::fs::write(&path, json).map_err(err)?;
-    Ok(Some(path.display().to_string()))
+    Ok(Some(path))
 }
 
 #[tauri::command]
@@ -569,7 +590,7 @@ pub async fn export_data(
 pub async fn import_data(
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<std::path::PathBuf>, String> {
     let Some(path) = app
         .dialog()
         .file()
@@ -591,16 +612,16 @@ pub async fn import_data(
     emit_domain(&app, DomainEvent::HistoryChanged);
     let _ = app.emit("pages:changed", ());
     let _ = app.emit("entities:changed", ());
-    Ok(Some(path.display().to_string()))
+    Ok(Some(path))
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn create_backup(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
-    write_backup(&app, &state.conn, "manual")
-        .await
-        .map(|path| path.display().to_string())
-        .map_err(err)
+pub async fn create_backup(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<std::path::PathBuf, String> {
+    write_backup(&app, &state.conn, "manual").await.map_err(err)
 }
 
 async fn write_backup(
@@ -622,20 +643,23 @@ async fn write_backup(
 
 #[tauri::command]
 #[specta::specta]
-pub fn choose_sync_directory(app: AppHandle) -> Result<Option<String>, String> {
+pub fn choose_sync_directory(app: AppHandle) -> Result<Option<std::path::PathBuf>, String> {
     app.dialog()
         .file()
         .blocking_pick_folder()
-        .map(|path| path.into_path().map(|path| path.display().to_string()))
+        .map(|path| path.into_path())
         .transpose()
         .map_err(err)
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn sync_push(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+pub async fn sync_push(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<std::path::PathBuf, String> {
     let settings = crate::settings::load(&app).map_err(err)?;
-    let directory = sync_directory(&settings.sync_directory).map_err(err)?;
+    let directory = sync_directory(settings.sync_directory.as_deref()).map_err(err)?;
     std::fs::create_dir_all(&directory).map_err(err)?;
     let mut archive = db::export_archive(&state.conn).await.map_err(err)?;
     add_archive_files(&app, &mut archive).map_err(err)?;
@@ -647,14 +671,17 @@ pub async fn sync_push(app: AppHandle, state: State<'_, AppState>) -> Result<Str
     )
     .map_err(err)?;
     std::fs::rename(&temporary, &path).map_err(err)?;
-    Ok(path.display().to_string())
+    Ok(path)
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn sync_pull(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+pub async fn sync_pull(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<std::path::PathBuf, String> {
     let settings = crate::settings::load(&app).map_err(err)?;
-    let path = sync_directory(&settings.sync_directory)
+    let path = sync_directory(settings.sync_directory.as_deref())
         .map_err(err)?
         .join("notes-rs-sync.json");
     let archive =
@@ -669,15 +696,13 @@ pub async fn sync_pull(app: AppHandle, state: State<'_, AppState>) -> Result<Str
     emit_domain(&app, DomainEvent::HistoryChanged);
     let _ = app.emit("pages:changed", ());
     let _ = app.emit("entities:changed", ());
-    Ok(path.display().to_string())
+    Ok(path)
 }
 
-fn sync_directory(value: &str) -> anyhow::Result<std::path::PathBuf> {
-    let value = value.trim();
-    if value.is_empty() {
-        anyhow::bail!("choose a sync directory in Settings first");
-    }
-    Ok(std::path::PathBuf::from(value))
+fn sync_directory(value: Option<&std::path::Path>) -> anyhow::Result<std::path::PathBuf> {
+    value
+        .map(std::path::Path::to_path_buf)
+        .context("choose a sync directory in Settings first")
 }
 
 #[tauri::command]

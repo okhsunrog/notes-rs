@@ -1,5 +1,6 @@
 [package]
 name = "notes-rs"
+default-run = "notes-rs"
 version.workspace = true
 description = "A graph-native personal knowledge app with hybrid retrieval and agentic RAG"
 authors.workspace = true
@@ -39,6 +40,7 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber = "0.3.23"
 uuid.workspace = true
+url.workspace = true
 chrono.workspace = true
 llm-relay.workspace = true
 futures.workspace = true

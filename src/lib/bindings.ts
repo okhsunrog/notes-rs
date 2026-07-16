@@ -158,7 +158,7 @@ export type BlockContent = {
 };
 
 export type CapabilityProbeResult = {
-	name: string,
+	name: ProbeCapability,
 	ok: boolean,
 	latencyMs: number,
 	detail: string,
@@ -214,6 +214,8 @@ export type Node = {
 /**  Closed set of node shapes understood by storage, sync and the UI. */
 export type NodeKind = "page" | "block" | "tag" | "entity" | "attachment";
 
+export type ProbeCapability = "completion" | "streaming" | "required_tool" | "structured_output";
+
 export type ProviderKeyScope = "chat" | "extraction";
 
 export type ProviderProbeRequest = {
@@ -237,6 +239,8 @@ export type SearchHit = {
 	score: number | null,
 };
 
+export type SecretKey = "CHAT_API_KEY" | "EXTRACT_API_KEY" | "OPENROUTER_API_KEY" | "OPENAI_API_KEY" | "COHERE_API_KEY" | "VOYAGE_API_KEY" | "GEMINI_API_KEY";
+
 export type SettingsSnapshot = {
 	localOnly: boolean,
 	entityExtractionEnabled: boolean,
@@ -246,18 +250,18 @@ export type SettingsSnapshot = {
 	chatBaseUrl: string,
 	extractionModel: string,
 	extractionProtocol: ExtractionProtocol,
-	extractionBaseUrl: string,
+	extractionBaseUrl: string | null,
 	embeddingProvider: EmbeddingProvider,
 	embeddingModel: string,
-	embeddingNdims: string,
+	embeddingNdims: number | null,
 	rerankProvider: RerankProvider,
 	rerankModel: string,
 	openrouterBaseUrl: string,
 	openaiBaseUrl: string,
 	windowDecorationMode: WindowDecorationMode,
-	syncDirectory: string,
+	syncDirectory: string | null,
 	kdeDecorationsAvailable: boolean,
-	configuredKeys: string[],
+	configuredKeys: SecretKey[],
 	localModelsAvailable: boolean,
 	configPath: string,
 };
@@ -271,18 +275,18 @@ export type SettingsUpdate = {
 	chatBaseUrl: string,
 	extractionModel: string,
 	extractionProtocol: ExtractionProtocol,
-	extractionBaseUrl: string,
+	extractionBaseUrl: string | null,
 	embeddingProvider: EmbeddingProvider,
 	embeddingModel: string,
-	embeddingNdims: string,
+	embeddingNdims: number | null,
 	rerankProvider: RerankProvider,
 	rerankModel: string,
 	openrouterBaseUrl: string,
 	openaiBaseUrl: string,
 	windowDecorationMode: WindowDecorationMode,
-	syncDirectory: string,
-	apiKeys?: { [key in string]: string },
-	clearKeys?: string[],
+	syncDirectory: string | null,
+	apiKeys?: Partial<{ [key in SecretKey]: string }>,
+	clearKeys?: SecretKey[],
 };
 
 export type StartupStatus = { state: "starting"; message: string } | { state: "ready" } | { state: "error"; message: string };

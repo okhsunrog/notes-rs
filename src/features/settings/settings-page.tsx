@@ -50,6 +50,7 @@ import {
   type BackgroundStatus,
   type EmbeddingProvider,
   type RerankProvider,
+  type SecretKey,
 } from "@/lib/api";
 
 type Props = {
@@ -67,7 +68,7 @@ const API_KEYS = [
   ["COHERE_API_KEY", "Cohere API key"],
   ["VOYAGE_API_KEY", "Voyage AI API key"],
   ["GEMINI_API_KEY", "Gemini API key"],
-] as const;
+] as const satisfies readonly (readonly [SecretKey, string])[];
 
 export function SettingsPage({
   onBack,
@@ -78,8 +79,8 @@ export function SettingsPage({
   const { theme, setTheme } = useTheme();
   const { palette, setPalette } = useAppearance();
   const [settings, setSettings] = useState<SettingsSnapshot | null>(null);
-  const [secrets, setSecrets] = useState<Record<string, string>>({});
-  const [clearKeys, setClearKeys] = useState<string[]>([]);
+  const [secrets, setSecrets] = useState<Partial<Record<SecretKey, string>>>({});
+  const [clearKeys, setClearKeys] = useState<SecretKey[]>([]);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -274,7 +275,8 @@ export function SettingsPage({
       if (protocol === "inherit") throw new Error("invalid inherited extraction protocol");
       const result = await testCompletionProvider({
         protocol,
-        baseUrl: scope === "chat" || inherited ? settings.chatBaseUrl : settings.extractionBaseUrl,
+        baseUrl:
+          scope === "chat" || inherited ? settings.chatBaseUrl : (settings.extractionBaseUrl ?? ""),
         model: scope === "chat" ? settings.chatModel : settings.extractionModel,
         apiKey:
           scope === "extraction" && !inherited
@@ -415,7 +417,7 @@ export function SettingsPage({
                             entityExtractionEnabled: false,
                             embeddingProvider: "local",
                             embeddingModel: "bge-m3",
-                            embeddingNdims: "1024",
+                            embeddingNdims: 1024,
                             rerankProvider: "local",
                             rerankModel: "bge-reranker-v2-m3",
                           }
@@ -518,9 +520,9 @@ export function SettingsPage({
           {settings.extractionProtocol !== "inherit" && (
             <Field label="Extraction API base URL">
               <Input
-                value={settings.extractionBaseUrl}
+                value={settings.extractionBaseUrl ?? ""}
                 disabled={settings.localOnly || !settings.entityExtractionEnabled}
-                onChange={(event) => update("extractionBaseUrl", event.currentTarget.value)}
+                onChange={(event) => update("extractionBaseUrl", event.currentTarget.value || null)}
               />
             </Field>
           )}
@@ -582,7 +584,7 @@ export function SettingsPage({
                         className="rounded-lg border border-border/50 px-3 py-2 text-xs"
                       >
                         <div className="flex items-center justify-between gap-2">
-                          <span className="font-medium">{capability.name}</span>
+                          <span className="font-medium">{capability.name.replace(/_/g, " ")}</span>
                           <span className={capability.ok ? "text-emerald-600" : "text-destructive"}>
                             {capability.ok ? "supported" : "failed"} · {capability.latencyMs} ms
                           </span>
@@ -638,13 +640,13 @@ export function SettingsPage({
               disabled={settings.localOnly}
               onChange={(event) => {
                 const provider = event.currentTarget.value as EmbeddingProvider;
-                const defaults: Record<EmbeddingProvider, [string, string]> = {
-                  openrouter: ["qwen/qwen3-embedding-8b", "4096"],
-                  openai: ["text-embedding-3-small", "1536"],
-                  cohere: ["embed-multilingual-v3.0", "1024"],
-                  voyageai: ["voyage-3-large", "1024"],
-                  gemini: ["gemini-embedding-2", "3072"],
-                  local: ["bge-m3", "1024"],
+                const defaults: Record<EmbeddingProvider, [string, number]> = {
+                  openrouter: ["qwen/qwen3-embedding-8b", 4096],
+                  openai: ["text-embedding-3-small", 1536],
+                  cohere: ["embed-multilingual-v3.0", 1024],
+                  voyageai: ["voyage-3-large", 1024],
+                  gemini: ["gemini-embedding-2", 3072],
+                  local: ["bge-m3", 1024],
                 };
                 const [model, dimensions] = defaults[provider];
                 setSettings((current) =>
@@ -683,8 +685,11 @@ export function SettingsPage({
           >
             <Input
               inputMode="numeric"
-              value={settings.embeddingNdims}
-              onChange={(event) => update("embeddingNdims", event.currentTarget.value)}
+              value={settings.embeddingNdims ?? ""}
+              onChange={(event) => {
+                const value = event.currentTarget.value;
+                update("embeddingNdims", value ? Number(value) : null);
+              }}
               placeholder="4096"
             />
           </Field>
@@ -829,8 +834,8 @@ export function SettingsPage({
           <Field label="Sync directory">
             <div className="flex gap-2">
               <Input
-                value={settings.syncDirectory}
-                onChange={(event) => update("syncDirectory", event.currentTarget.value)}
+                value={settings.syncDirectory ?? ""}
+                onChange={(event) => update("syncDirectory", event.currentTarget.value || null)}
                 placeholder="Choose a directory…"
               />
               <Button
@@ -847,7 +852,7 @@ export function SettingsPage({
             <Button
               type="button"
               variant="outline"
-              disabled={!dataAvailable || busy || !settings.syncDirectory.trim()}
+              disabled={!dataAvailable || busy || !settings.syncDirectory?.trim()}
               onClick={() => void runSync("push")}
             >
               <Upload className="size-4" /> Push snapshot
@@ -855,7 +860,7 @@ export function SettingsPage({
             <Button
               type="button"
               variant="outline"
-              disabled={!dataAvailable || busy || !settings.syncDirectory.trim()}
+              disabled={!dataAvailable || busy || !settings.syncDirectory?.trim()}
               onClick={() => void runSync("pull")}
             >
               <Download className="size-4" /> Pull snapshot

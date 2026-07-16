@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -10,16 +10,6 @@ pub use notes_ai::config::DEFAULT_OPENROUTER_BASE_URL;
 pub use notes_ai::config::{
     CompletionProtocol, EmbeddingProvider, ExtractionProtocol, RerankProvider,
 };
-
-const SECRET_KEYS: &[&str] = &[
-    "CHAT_API_KEY",
-    "EXTRACT_API_KEY",
-    "OPENROUTER_API_KEY",
-    "OPENAI_API_KEY",
-    "COHERE_API_KEY",
-    "VOYAGE_API_KEY",
-    "GEMINI_API_KEY",
-];
 
 macro_rules! settings_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
@@ -68,6 +58,50 @@ settings_enum!(ProviderKeyScope {
     Extraction => "extraction",
 });
 
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, specta::Type,
+)]
+pub enum SecretKey {
+    #[serde(rename = "CHAT_API_KEY")]
+    Chat,
+    #[serde(rename = "EXTRACT_API_KEY")]
+    Extraction,
+    #[serde(rename = "OPENROUTER_API_KEY")]
+    OpenRouter,
+    #[serde(rename = "OPENAI_API_KEY")]
+    OpenAi,
+    #[serde(rename = "COHERE_API_KEY")]
+    Cohere,
+    #[serde(rename = "VOYAGE_API_KEY")]
+    Voyage,
+    #[serde(rename = "GEMINI_API_KEY")]
+    Gemini,
+}
+
+impl SecretKey {
+    const ALL: [Self; 7] = [
+        Self::Chat,
+        Self::Extraction,
+        Self::OpenRouter,
+        Self::OpenAi,
+        Self::Cohere,
+        Self::Voyage,
+        Self::Gemini,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "CHAT_API_KEY",
+            Self::Extraction => "EXTRACT_API_KEY",
+            Self::OpenRouter => "OPENROUTER_API_KEY",
+            Self::OpenAi => "OPENAI_API_KEY",
+            Self::Cohere => "COHERE_API_KEY",
+            Self::Voyage => "VOYAGE_API_KEY",
+            Self::Gemini => "GEMINI_API_KEY",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsSnapshot {
@@ -76,23 +110,23 @@ pub struct SettingsSnapshot {
     pub query_rewriting_enabled: bool,
     pub chat_model: String,
     pub chat_protocol: CompletionProtocol,
-    pub chat_base_url: String,
+    pub chat_base_url: url::Url,
     pub extraction_model: String,
     pub extraction_protocol: ExtractionProtocol,
-    pub extraction_base_url: String,
+    pub extraction_base_url: Option<url::Url>,
     pub embedding_provider: EmbeddingProvider,
     pub embedding_model: String,
-    pub embedding_ndims: String,
+    pub embedding_ndims: Option<u32>,
     pub rerank_provider: RerankProvider,
     pub rerank_model: String,
-    pub openrouter_base_url: String,
-    pub openai_base_url: String,
+    pub openrouter_base_url: url::Url,
+    pub openai_base_url: url::Url,
     pub window_decoration_mode: WindowDecorationMode,
-    pub sync_directory: String,
+    pub sync_directory: Option<PathBuf>,
     pub kde_decorations_available: bool,
-    pub configured_keys: Vec<String>,
+    pub configured_keys: Vec<SecretKey>,
     pub local_models_available: bool,
-    pub config_path: String,
+    pub config_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize, specta::Type)]
@@ -103,23 +137,23 @@ pub struct SettingsUpdate {
     pub query_rewriting_enabled: bool,
     pub chat_model: String,
     pub chat_protocol: CompletionProtocol,
-    pub chat_base_url: String,
+    pub chat_base_url: url::Url,
     pub extraction_model: String,
     pub extraction_protocol: ExtractionProtocol,
-    pub extraction_base_url: String,
+    pub extraction_base_url: Option<url::Url>,
     pub embedding_provider: EmbeddingProvider,
     pub embedding_model: String,
-    pub embedding_ndims: String,
+    pub embedding_ndims: Option<u32>,
     pub rerank_provider: RerankProvider,
     pub rerank_model: String,
-    pub openrouter_base_url: String,
-    pub openai_base_url: String,
+    pub openrouter_base_url: url::Url,
+    pub openai_base_url: url::Url,
     pub window_decoration_mode: WindowDecorationMode,
-    pub sync_directory: String,
+    pub sync_directory: Option<PathBuf>,
     #[serde(default)]
-    pub api_keys: BTreeMap<String, String>,
+    pub api_keys: BTreeMap<SecretKey, String>,
     #[serde(default)]
-    pub clear_keys: Vec<String>,
+    pub clear_keys: Vec<SecretKey>,
 }
 
 pub fn config_path(app: &AppHandle) -> Result<PathBuf> {
@@ -140,15 +174,14 @@ pub fn load(app: &AppHandle) -> Result<SettingsSnapshot> {
             .or_else(|| std::env::var(key).ok())
             .unwrap_or_else(|| default.into())
     };
-    let configured_keys = SECRET_KEYS
-        .iter()
+    let configured_keys = SecretKey::ALL
+        .into_iter()
         .filter(|key| {
             values
-                .get(**key)
+                .get(key.as_str())
                 .is_some_and(|secret| !secret.trim().is_empty())
-                || std::env::var(key).is_ok_and(|secret| !secret.trim().is_empty())
+                || std::env::var(key.as_str()).is_ok_and(|secret| !secret.trim().is_empty())
         })
-        .map(|key| (*key).to_string())
         .collect();
     Ok(SettingsSnapshot {
         local_only: value("AI_LOCAL_ONLY", "false") == "true",
@@ -159,17 +192,29 @@ pub fn load(app: &AppHandle) -> Result<SettingsSnapshot> {
         chat_base_url: value(
             "CHAT_BASE_URL",
             &value("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_BASE_URL),
-        ),
+        )
+        .parse()
+        .context("CHAT_BASE_URL must be an absolute URL")?,
         extraction_model: value("EXTRACT_MODEL", "deepseek/deepseek-v4-flash"),
         extraction_protocol: value("EXTRACT_PROTOCOL", "inherit").parse()?,
-        extraction_base_url: value("EXTRACT_BASE_URL", ""),
+        extraction_base_url: non_empty(&value("EXTRACT_BASE_URL", ""))
+            .map(str::parse)
+            .transpose()
+            .context("EXTRACT_BASE_URL must be an absolute URL")?,
         embedding_provider: value("EMBED_PROVIDER", "openrouter").parse()?,
         embedding_model: value("EMBED_MODEL", "qwen/qwen3-embedding-8b"),
-        embedding_ndims: value("EMBED_NDIMS", "4096"),
+        embedding_ndims: non_empty(&value("EMBED_NDIMS", "4096"))
+            .map(str::parse)
+            .transpose()
+            .context("EMBED_NDIMS must be a positive integer")?,
         rerank_provider: value("RERANK_PROVIDER", "openrouter").parse()?,
         rerank_model: value("RERANK_MODEL", "cohere/rerank-v3.5"),
-        openrouter_base_url: value("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_BASE_URL),
-        openai_base_url: value("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        openrouter_base_url: value("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_BASE_URL)
+            .parse()
+            .context("OPENROUTER_BASE_URL must be an absolute URL")?,
+        openai_base_url: value("OPENAI_BASE_URL", "https://api.openai.com/v1")
+            .parse()
+            .context("OPENAI_BASE_URL must be an absolute URL")?,
         window_decoration_mode: values
             .get("WINDOW_DECORATION_MODE")
             .cloned()
@@ -181,12 +226,12 @@ pub fn load(app: &AppHandle) -> Result<SettingsSnapshot> {
                 }
             })
             .parse()?,
-        sync_directory: value("SYNC_DIRECTORY", ""),
+        sync_directory: non_empty(&value("SYNC_DIRECTORY", "")).map(PathBuf::from),
         kde_decorations_available: cfg!(target_os = "linux")
             && std::env::var_os("WAYLAND_DISPLAY").is_some(),
         configured_keys,
         local_models_available: cfg!(feature = "local-models"),
-        config_path: path.display().to_string(),
+        config_path: path,
     })
 }
 
@@ -209,21 +254,40 @@ pub fn save(app: &AppHandle, update: SettingsUpdate) -> Result<SettingsSnapshot>
         "CHAT_PROTOCOL",
         update.chat_protocol.to_string(),
     );
-    set_or_remove(&mut values, "CHAT_BASE_URL", update.chat_base_url);
+    set_or_remove(
+        &mut values,
+        "CHAT_BASE_URL",
+        update.chat_base_url.to_string(),
+    );
     set_or_remove(&mut values, "EXTRACT_MODEL", update.extraction_model);
     set_or_remove(
         &mut values,
         "EXTRACT_PROTOCOL",
         update.extraction_protocol.to_string(),
     );
-    set_or_remove(&mut values, "EXTRACT_BASE_URL", update.extraction_base_url);
+    set_or_remove(
+        &mut values,
+        "EXTRACT_BASE_URL",
+        update
+            .extraction_base_url
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default(),
+    );
     set_or_remove(
         &mut values,
         "EMBED_PROVIDER",
         update.embedding_provider.to_string(),
     );
     set_or_remove(&mut values, "EMBED_MODEL", update.embedding_model);
-    set_or_remove(&mut values, "EMBED_NDIMS", update.embedding_ndims);
+    set_or_remove(
+        &mut values,
+        "EMBED_NDIMS",
+        update
+            .embedding_ndims
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+    );
     set_or_remove(
         &mut values,
         "RERANK_PROVIDER",
@@ -233,25 +297,34 @@ pub fn save(app: &AppHandle, update: SettingsUpdate) -> Result<SettingsSnapshot>
     set_or_remove(
         &mut values,
         "OPENROUTER_BASE_URL",
-        update.openrouter_base_url,
+        update.openrouter_base_url.to_string(),
     );
-    set_or_remove(&mut values, "OPENAI_BASE_URL", update.openai_base_url);
+    set_or_remove(
+        &mut values,
+        "OPENAI_BASE_URL",
+        update.openai_base_url.to_string(),
+    );
     values.remove("WINDOW_DECORATIONS");
     values.insert(
         "WINDOW_DECORATION_MODE".into(),
         update.window_decoration_mode.to_string(),
     );
-    set_or_remove(&mut values, "SYNC_DIRECTORY", update.sync_directory);
+    set_or_remove(
+        &mut values,
+        "SYNC_DIRECTORY",
+        update
+            .sync_directory
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    );
 
-    let allowed: BTreeSet<&str> = SECRET_KEYS.iter().copied().collect();
     for key in update.clear_keys {
-        if allowed.contains(key.as_str()) {
-            values.remove(&key);
-        }
+        values.remove(key.as_str());
     }
     for (key, secret) in update.api_keys {
-        if allowed.contains(key.as_str()) && !secret.trim().is_empty() {
-            values.insert(key, secret.trim().to_string());
+        if !secret.trim().is_empty() {
+            values.insert(key.as_str().into(), secret.trim().to_string());
         }
     }
     write_env(&path, &values)?;
@@ -338,22 +411,21 @@ fn validate(update: &SettingsUpdate) -> Result<()> {
     if update.chat_model.trim().is_empty() || update.extraction_model.trim().is_empty() {
         bail!("chat and extraction model IDs cannot be empty");
     }
-    notes_ai::config::validate_http_base_url(&update.chat_base_url)?;
+    notes_ai::config::validate_http_base_url(update.chat_base_url.as_str())?;
     if update.extraction_protocol != ExtractionProtocol::Inherit {
-        notes_ai::config::validate_http_base_url(&update.extraction_base_url)?;
+        let extraction_base_url = update
+            .extraction_base_url
+            .as_ref()
+            .context("an extraction base URL is required for a separate protocol")?;
+        notes_ai::config::validate_http_base_url(extraction_base_url.as_str())?;
     }
-    if !update.embedding_ndims.trim().is_empty() {
-        let dimensions = update
-            .embedding_ndims
-            .trim()
-            .parse::<usize>()
-            .context("embedding dimensions must be a positive integer")?;
-        if dimensions == 0 || dimensions > 65_536 {
-            bail!("embedding dimensions must be between 1 and 65536");
-        }
+    if let Some(dimensions) = update.embedding_ndims
+        && (dimensions == 0 || dimensions > 65_536)
+    {
+        bail!("embedding dimensions must be between 1 and 65536");
     }
-    notes_ai::config::validate_http_base_url(&update.openrouter_base_url)?;
-    notes_ai::config::validate_http_base_url(&update.openai_base_url)?;
+    notes_ai::config::validate_http_base_url(update.openrouter_base_url.as_str())?;
+    notes_ai::config::validate_http_base_url(update.openai_base_url.as_str())?;
     Ok(())
 }
 
@@ -382,6 +454,11 @@ fn set_or_remove(values: &mut BTreeMap<String, String>, key: &str, value: String
     } else {
         values.insert(key.into(), value.into());
     }
+}
+
+fn non_empty(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
 }
 
 fn read_env(path: &Path) -> Result<BTreeMap<String, String>> {
