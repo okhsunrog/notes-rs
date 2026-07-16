@@ -1452,19 +1452,18 @@ fn meta_or_insert_device_id(
 ) -> rusqlite::Result<uuid::Uuid> {
     if let Some(device_id) = transaction
         .query_row(
-            "SELECT value FROM sync_meta WHERE key = 'device_id'",
+            "SELECT device_id FROM local_device WHERE singleton = 1",
             [],
-            |row| row.get::<_, String>(0),
+            |row| row.get::<_, uuid::Uuid>(0),
         )
         .optional()?
     {
-        return uuid::Uuid::parse_str(&device_id)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)));
+        return Ok(device_id);
     }
     let device_id = uuid::Uuid::new_v4();
     transaction.execute(
-        "INSERT INTO sync_meta(key, value) VALUES ('device_id', ?1)",
-        [device_id.to_string()],
+        "INSERT INTO local_device(singleton, device_id) VALUES (1, ?1)",
+        [device_id],
     )?;
     Ok(device_id)
 }

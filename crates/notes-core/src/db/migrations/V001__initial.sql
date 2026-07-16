@@ -102,6 +102,10 @@ CREATE TABLE sync_meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE local_device (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  device_id BLOB UNIQUE NOT NULL CHECK (length(device_id) = 16)
+);
 
 CREATE VIRTUAL TABLE nodes_fts USING fts5(
   body_stemmed,
