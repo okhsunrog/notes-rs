@@ -1,11 +1,21 @@
 //! Sync protocol boundary for notes-rs.
 //!
-//! Phase 1 exposes the versioned operation wire types and apply boundary here.
-//! The HLC merge policy and client state machine are implemented in Phase 2.
+//! Versioned wire types, HLC merge semantics, and the transport-independent
+//! client state machine shared by desktop and the future server host.
 
+mod machine;
+
+pub use machine::{LoopbackServer, SequencedOp, SyncClient, SyncStats};
+
+pub use notes_core::Hlc;
 pub use notes_core::operation::FORMAT_VERSION;
 pub use notes_core::operation::{
     AttachmentAdd, AttachmentRemove, EdgeAdd, EdgeRemove, NodeCreate, NodeDelete, NodeMove,
     NodeSetContent, NodeSetTitle,
 };
-pub use notes_core::{ApplyOutcome, Op, OpKind, Origin, apply, apply_batch, local_ops};
+pub use notes_core::{
+    ApplyOutcome, Op, OpKind, Origin, SnapshotAttachment, SnapshotEdge, SnapshotNode,
+    SnapshotTombstone, SyncSnapshot, acknowledge_server_op, apply, apply_batch, apply_sequenced,
+    configure_sync, export_sync_snapshot, import_sync_snapshot, local_ops, pending_outbox,
+    sync_cursor,
+};
