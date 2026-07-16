@@ -4,6 +4,7 @@ import type {
   BackgroundStatus,
   BlockContent,
   ChatEvent,
+  CommandError,
   Edge,
   EmbeddingProvider,
   GraphSnapshot,
@@ -33,6 +34,30 @@ export type {
   StartupStatus,
 };
 
+type CommandOutcome<T> = { status: "ok"; data: T } | { status: "error"; error: CommandError };
+
+export class CommandFailure extends Error {
+  readonly code: CommandError["code"];
+
+  constructor(error: CommandError) {
+    super(error.message);
+    this.name = "CommandFailure";
+    this.code = error.code;
+  }
+}
+
+export async function unwrapCommand<T>(outcome: Promise<CommandOutcome<T>>): Promise<T> {
+  const result = await outcome;
+  if (result.status === "error") throw new CommandFailure(result.error);
+  return result.data;
+}
+
+function checkedCommand<Args extends unknown[], Value>(
+  command: (...args: Args) => Promise<CommandOutcome<Value>>,
+) {
+  return (...args: Args) => unwrapCommand(command(...args));
+}
+
 export type Mode = "fts" | "vec" | "hybrid" | "agentic";
 
 export type ToolCallView = {
@@ -56,7 +81,7 @@ export function createNode(args: {
   content: string;
   contentJson: string | null;
 }) {
-  return commands.createNode(args.kind, args.title, args.content, args.contentJson);
+  return unwrapCommand(commands.createNode(args.kind, args.title, args.content, args.contentJson));
 }
 
 export function updateNode(args: {
@@ -65,18 +90,19 @@ export function updateNode(args: {
   content: string;
   contentJson: string | null;
 }) {
-  return commands.updateNode(args.id, args.title, args.content, args.contentJson);
+  return unwrapCommand(commands.updateNode(args.id, args.title, args.content, args.contentJson));
 }
 
 export const setBlockContent = (uuid: string, block: BlockContent) =>
-  commands.setBlockContent(uuid, block);
-export const renamePage = commands.renamePage;
-export const createNote = commands.createNote;
-export const splitBlock = (id: number, parts: BlockContent[]) => commands.splitBlock(id, parts);
+  unwrapCommand(commands.setBlockContent(uuid, block));
+export const renamePage = checkedCommand(commands.renamePage);
+export const createNote = checkedCommand(commands.createNote);
+export const splitBlock = (id: number, parts: BlockContent[]) =>
+  unwrapCommand(commands.splitBlock(id, parts));
 export const isReady = commands.isReady;
 export const getStartupStatus = commands.startupStatus;
-export const loadSettings = commands.loadSettings;
-export const saveSettings = commands.saveSettings;
+export const loadSettings = checkedCommand(commands.loadSettings);
+export const saveSettings = checkedCommand(commands.saveSettings);
 
 export function testCompletionProvider(request: {
   protocol: "openai" | "anthropic";
@@ -85,41 +111,46 @@ export function testCompletionProvider(request: {
   apiKey?: string;
   keyScope?: "chat" | "extraction";
 }) {
-  return commands.testCompletionProvider({
-    ...request,
-    apiKey: request.apiKey ?? null,
-    keyScope: request.keyScope ?? null,
-  });
+  return unwrapCommand(
+    commands.testCompletionProvider({
+      ...request,
+      apiKey: request.apiKey ?? null,
+      keyScope: request.keyScope ?? null,
+    }),
+  );
 }
 
 export const restartApp = commands.restartApp;
-export const getBackgroundStatus = commands.backgroundStatus;
+export const chatStream = checkedCommand(commands.chatStream);
+export const cancelChat = commands.cancelChat;
+export const getBackgroundStatus = checkedCommand(commands.backgroundStatus);
 export const setBackgroundPaused = commands.setBackgroundPaused;
-export const retryBackgroundJobs = commands.retryBackgroundJobs;
-export const clearBackgroundJobs = commands.clearBackgroundJobs;
-export const listEntities = (limit = 30) => commands.listEntities(limit);
-export const listPages = (limit = 200) => commands.listPages(limit);
-export const createPage = commands.createPage;
-export const deletePage = commands.deletePage;
+export const retryBackgroundJobs = checkedCommand(commands.retryBackgroundJobs);
+export const clearBackgroundJobs = checkedCommand(commands.clearBackgroundJobs);
+export const listEntities = (limit = 30) => unwrapCommand(commands.listEntities(limit));
+export const listPages = (limit = 200) => unwrapCommand(commands.listPages(limit));
+export const createPage = checkedCommand(commands.createPage);
+export const deletePage = checkedCommand(commands.deletePage);
 export const findBacklinks = (id: number, kind: string | null = null) =>
-  commands.findBacklinks(id, kind);
-export const getGraphSnapshot = (focusId: number | null = null) => commands.graphSnapshot(focusId);
-export const exportData = commands.exportData;
-export const importData = commands.importData;
-export const createBackup = commands.createBackup;
-export const chooseSyncDirectory = commands.chooseSyncDirectory;
-export const syncPush = commands.syncPush;
-export const syncPull = commands.syncPull;
-export const attachFile = commands.attachFile;
-export const listAttachments = commands.listAttachments;
-export const openAttachment = commands.openAttachment;
-export const deleteAttachment = commands.deleteAttachment;
-export const getHistoryStatus = commands.historyStatus;
-export const undo = commands.undo;
-export const redo = commands.redo;
-export const getNode = commands.getNode;
-export const getContainingPage = commands.getContainingPage;
-export const listBlockChildren = commands.listBlockChildren;
+  unwrapCommand(commands.findBacklinks(id, kind));
+export const getGraphSnapshot = (focusId: number | null = null) =>
+  unwrapCommand(commands.graphSnapshot(focusId));
+export const exportData = checkedCommand(commands.exportData);
+export const importData = checkedCommand(commands.importData);
+export const createBackup = checkedCommand(commands.createBackup);
+export const chooseSyncDirectory = checkedCommand(commands.chooseSyncDirectory);
+export const syncPush = checkedCommand(commands.syncPush);
+export const syncPull = checkedCommand(commands.syncPull);
+export const attachFile = checkedCommand(commands.attachFile);
+export const listAttachments = checkedCommand(commands.listAttachments);
+export const openAttachment = checkedCommand(commands.openAttachment);
+export const deleteAttachment = checkedCommand(commands.deleteAttachment);
+export const getHistoryStatus = checkedCommand(commands.historyStatus);
+export const undo = checkedCommand(commands.undo);
+export const redo = checkedCommand(commands.redo);
+export const getNode = checkedCommand(commands.getNode);
+export const getContainingPage = checkedCommand(commands.getContainingPage);
+export const listBlockChildren = checkedCommand(commands.listBlockChildren);
 
 export function createBlock(args: {
   parentId: number | null;
@@ -127,39 +158,44 @@ export function createBlock(args: {
   content: string;
   contentJson: string | null;
 }) {
-  return commands.createBlock(args.parentId, args.position, args.content, args.contentJson);
+  return unwrapCommand(
+    commands.createBlock(args.parentId, args.position, args.content, args.contentJson),
+  );
 }
 
-export const indentBlock = commands.indentBlock;
-export const outdentBlock = commands.outdentBlock;
-export const moveBlockUp = commands.moveBlockUp;
-export const moveBlockDown = commands.moveBlockDown;
-export const deleteBlock = commands.deleteBlock;
+export const indentBlock = checkedCommand(commands.indentBlock);
+export const outdentBlock = checkedCommand(commands.outdentBlock);
+export const moveBlockUp = checkedCommand(commands.moveBlockUp);
+export const moveBlockDown = checkedCommand(commands.moveBlockDown);
+export const deleteBlock = checkedCommand(commands.deleteBlock);
 
 export function replaceBlockRefs(args: {
   blockId: number;
   wikilinkTitles: string[];
   blockUuids: string[];
 }) {
-  return commands.replaceBlockRefs(args.blockId, args.wikilinkTitles, args.blockUuids);
+  return unwrapCommand(
+    commands.replaceBlockRefs(args.blockId, args.wikilinkTitles, args.blockUuids),
+  );
 }
 
-export const getOrCreatePageByTitle = commands.getOrCreatePageByTitle;
-export const getPageByTitle = commands.getPageByTitle;
-export const getNodeByUuid = commands.getNodeByUuid;
+export const getOrCreatePageByTitle = checkedCommand(commands.getOrCreatePageByTitle);
+export const getPageByTitle = checkedCommand(commands.getPageByTitle);
+export const getNodeByUuid = checkedCommand(commands.getNodeByUuid);
 export const searchPagesByTitle = (query: string, limit = 8) =>
-  commands.searchPagesByTitle(query, limit);
-export const searchBlocksFts = (query: string, limit = 8) => commands.searchBlocksFts(query, limit);
+  unwrapCommand(commands.searchPagesByTitle(query, limit));
+export const searchBlocksFts = (query: string, limit = 8) =>
+  unwrapCommand(commands.searchBlocksFts(query, limit));
 
 export function search(mode: Mode, query: string, limit = 20) {
   switch (mode) {
     case "fts":
-      return commands.searchFts(query, limit);
+      return unwrapCommand(commands.searchFts(query, limit));
     case "vec":
-      return commands.searchVec(query, limit);
+      return unwrapCommand(commands.searchVec(query, limit));
     case "hybrid":
-      return commands.searchHybrid(query, limit);
+      return unwrapCommand(commands.searchHybrid(query, limit));
     case "agentic":
-      return commands.searchAgentic(query, limit);
+      return unwrapCommand(commands.searchAgentic(query, limit));
   }
 }

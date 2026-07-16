@@ -9,7 +9,6 @@ use tauri::{Emitter, Manager};
 
 fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
     tauri_specta::Builder::<tauri::Wry>::new()
-        .error_handling(tauri_specta::ErrorHandlingMode::Throw)
         .commands(tauri_specta::collect_commands![
             commands::is_ready,
             commands::startup_status,

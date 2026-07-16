@@ -17,6 +17,80 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tauri_specta::Event;
 
+pub type CommandResult<T> = Result<T, CommandError>;
+
+#[derive(Debug, Clone, Copy, Serialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandErrorCode {
+    InvalidInput,
+    NotFound,
+    Conflict,
+    Unavailable,
+    Internal,
+}
+
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandError {
+    pub code: CommandErrorCode,
+    pub message: String,
+}
+
+impl CommandError {
+    fn from_message(message: String) -> Self {
+        let normalized = message.to_ascii_lowercase();
+        let code = if normalized.contains("not found")
+            || normalized.contains("disappeared")
+            || normalized.contains("no containing")
+        {
+            CommandErrorCode::NotFound
+        } else if normalized.contains("must ")
+            || normalized.contains("requires ")
+            || normalized.contains("required")
+            || normalized.contains("invalid")
+            || normalized.contains("empty")
+            || normalized.contains("limited to")
+        {
+            CommandErrorCode::InvalidInput
+        } else if normalized.contains("cannot")
+            || normalized.contains("already")
+            || normalized.contains("conflict")
+            || normalized.contains("descendant")
+        {
+            CommandErrorCode::Conflict
+        } else if normalized.contains("timeout")
+            || normalized.contains("network")
+            || normalized.contains("provider")
+            || normalized.contains("unavailable")
+        {
+            CommandErrorCode::Unavailable
+        } else {
+            CommandErrorCode::Internal
+        };
+        Self { code, message }
+    }
+}
+
+impl From<String> for CommandError {
+    fn from(message: String) -> Self {
+        Self::from_message(message)
+    }
+}
+
+impl From<&str> for CommandError {
+    fn from(message: &str) -> Self {
+        Self::from_message(message.to_owned())
+    }
+}
+
+impl std::fmt::Display for CommandError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CommandError {}
+
 pub struct AppState {
     pub conn: Connection,
     pub embedder: Arc<dyn EmbedderBackend>,
@@ -178,8 +252,8 @@ pub enum StartupStatus {
     Error { message: String },
 }
 
-fn err<E: std::fmt::Display>(e: E) -> String {
-    e.to_string()
+fn err<E: std::fmt::Display>(error: E) -> CommandError {
+    CommandError::from_message(error.to_string())
 }
 
 #[tauri::command]
@@ -203,7 +277,7 @@ pub fn startup_status(state: State<'_, Startup>) -> StartupStatus {
 
 #[tauri::command]
 #[specta::specta]
-pub fn load_settings(app: AppHandle) -> Result<crate::settings::SettingsSnapshot, String> {
+pub fn load_settings(app: AppHandle) -> CommandResult<crate::settings::SettingsSnapshot> {
     crate::settings::load(&app).map_err(err)
 }
 
@@ -212,7 +286,7 @@ pub fn load_settings(app: AppHandle) -> Result<crate::settings::SettingsSnapshot
 pub fn save_settings(
     app: AppHandle,
     update: crate::settings::SettingsUpdate,
-) -> Result<crate::settings::SettingsSnapshot, String> {
+) -> CommandResult<crate::settings::SettingsSnapshot> {
     let settings = crate::settings::save(&app, update).map_err(err)?;
     emit_domain(&app, DomainEvent::SettingsChanged);
     Ok(settings)
@@ -222,7 +296,7 @@ pub fn save_settings(
 #[specta::specta]
 pub async fn test_completion_provider(
     request: ProviderProbeRequest,
-) -> Result<ProviderProbeResult, String> {
+) -> CommandResult<ProviderProbeResult> {
     let mut config = crate::settings::completion_config_for_probe(
         request.protocol,
         request.base_url,
@@ -341,7 +415,7 @@ pub fn restart_app(app: AppHandle) {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn background_status(state: State<'_, AppState>) -> Result<BackgroundStatus, String> {
+pub async fn background_status(state: State<'_, AppState>) -> CommandResult<BackgroundStatus> {
     let queues = db::queue_status(&state.conn).await.map_err(err)?;
     Ok(BackgroundStatus {
         paused: state.background_paused.load(Ordering::Acquire),
@@ -365,7 +439,7 @@ pub fn set_background_paused(app: AppHandle, state: State<'_, AppState>, paused:
 pub async fn retry_background_jobs(
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> CommandResult<()> {
     db::retry_background_jobs(&state.conn).await.map_err(err)?;
     emit_domain(&app, DomainEvent::BackgroundStatusChanged);
     Ok(())
@@ -376,7 +450,7 @@ pub async fn retry_background_jobs(
 pub async fn clear_background_jobs(
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> CommandResult<()> {
     db::clear_background_jobs(&state.conn).await.map_err(err)?;
     emit_domain(&app, DomainEvent::BackgroundStatusChanged);
     Ok(())
@@ -391,7 +465,7 @@ pub async fn create_node(
     title: Option<String>,
     content: String,
     content_json: Option<String>,
-) -> Result<Node, String> {
+) -> CommandResult<Node> {
     let node = db::create_node(&state.conn, kind, title, content, content_json)
         .await
         .map_err(err)?;
@@ -408,7 +482,7 @@ pub async fn update_node(
     title: Option<String>,
     content: String,
     content_json: Option<String>,
-) -> Result<(), String> {
+) -> CommandResult<()> {
     db::update_node(&state.conn, id, title, content, content_json)
         .await
         .map_err(err)?;
@@ -427,7 +501,7 @@ pub async fn rename_page(
     state: State<'_, AppState>,
     uuid: uuid::Uuid,
     title: Option<String>,
-) -> Result<Node, String> {
+) -> CommandResult<Node> {
     let node = db::rename_page(&state.conn, uuid, title)
         .await
         .map_err(err)?;
@@ -440,7 +514,7 @@ pub async fn rename_page(
 pub async fn create_note(
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<db::CreatedNote, String> {
+) -> CommandResult<db::CreatedNote> {
     db::checkpoint_history(&state.conn, "create note")
         .await
         .map_err(err)?;
@@ -463,7 +537,7 @@ pub async fn set_block_content(
     state: State<'_, AppState>,
     uuid: uuid::Uuid,
     block: db::BlockContent,
-) -> Result<(Node, u32), String> {
+) -> CommandResult<(Node, u32)> {
     let result = db::set_block_content(&state.conn, uuid, block)
         .await
         .map_err(err)?;
@@ -478,7 +552,7 @@ pub async fn split_block(
     state: State<'_, AppState>,
     id: i64,
     parts: Vec<db::BlockContent>,
-) -> Result<Vec<Node>, String> {
+) -> CommandResult<Vec<Node>> {
     db::checkpoint_history(&state.conn, "split block")
         .await
         .map_err(err)?;
@@ -497,7 +571,7 @@ pub async fn link_nodes(
     dst: i64,
     kind: String,
     weight: Option<f64>,
-) -> Result<(), String> {
+) -> CommandResult<()> {
     db::link_nodes(&state.conn, src, dst, kind, weight.unwrap_or(1.0))
         .await
         .map_err(err)?;
@@ -512,7 +586,7 @@ pub async fn link_nodes(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn get_node(state: State<'_, AppState>, id: i64) -> Result<Option<Node>, String> {
+pub async fn get_node(state: State<'_, AppState>, id: i64) -> CommandResult<Option<Node>> {
     db::get_node(&state.conn, id).await.map_err(err)
 }
 
@@ -522,7 +596,7 @@ pub async fn neighbors(
     state: State<'_, AppState>,
     id: i64,
     depth: u32,
-) -> Result<Vec<Node>, String> {
+) -> CommandResult<Vec<Node>> {
     db::neighbors(&state.conn, id, depth).await.map_err(err)
 }
 
@@ -531,7 +605,7 @@ pub async fn neighbors(
 pub async fn list_entities(
     state: State<'_, AppState>,
     limit: Option<u32>,
-) -> Result<Vec<Node>, String> {
+) -> CommandResult<Vec<Node>> {
     db::list_entities(&state.conn, limit.unwrap_or(50))
         .await
         .map_err(err)
@@ -542,7 +616,7 @@ pub async fn list_entities(
 pub async fn list_pages(
     state: State<'_, AppState>,
     limit: Option<u32>,
-) -> Result<Vec<Node>, String> {
+) -> CommandResult<Vec<Node>> {
     db::list_pages(&state.conn, limit.unwrap_or(200))
         .await
         .map_err(err)
@@ -554,7 +628,7 @@ pub async fn delete_page(
     app: AppHandle,
     state: State<'_, AppState>,
     id: i64,
-) -> Result<bool, String> {
+) -> CommandResult<bool> {
     let deleted_uuids = db::read_subtree(&state.conn, id, u32::MAX)
         .await
         .map_err(err)?
@@ -589,7 +663,7 @@ pub async fn find_backlinks(
     state: State<'_, AppState>,
     id: i64,
     kind: Option<String>,
-) -> Result<Vec<Node>, String> {
+) -> CommandResult<Vec<Node>> {
     db::find_backlinks(&state.conn, id, kind).await.map_err(err)
 }
 
@@ -598,7 +672,7 @@ pub async fn find_backlinks(
 pub async fn graph_snapshot(
     state: State<'_, AppState>,
     focus_id: Option<i64>,
-) -> Result<db::GraphSnapshot, String> {
+) -> CommandResult<db::GraphSnapshot> {
     db::graph_snapshot(&state.conn, focus_id).await.map_err(err)
 }
 
@@ -607,7 +681,7 @@ pub async fn graph_snapshot(
 pub async fn export_data(
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<Option<std::path::PathBuf>, String> {
+) -> CommandResult<Option<std::path::PathBuf>> {
     let Some(path) = app
         .dialog()
         .file()
@@ -633,7 +707,7 @@ pub async fn export_data(
 pub async fn import_data(
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<Option<std::path::PathBuf>, String> {
+) -> CommandResult<Option<std::path::PathBuf>> {
     let Some(path) = app
         .dialog()
         .file()
@@ -661,7 +735,7 @@ pub async fn import_data(
 pub async fn create_backup(
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<std::path::PathBuf, String> {
+) -> CommandResult<std::path::PathBuf> {
     write_backup(&app, &state.conn, "manual").await.map_err(err)
 }
 
@@ -684,7 +758,7 @@ async fn write_backup(
 
 #[tauri::command]
 #[specta::specta]
-pub fn choose_sync_directory(app: AppHandle) -> Result<Option<std::path::PathBuf>, String> {
+pub fn choose_sync_directory(app: AppHandle) -> CommandResult<Option<std::path::PathBuf>> {
     app.dialog()
         .file()
         .blocking_pick_folder()
@@ -698,7 +772,7 @@ pub fn choose_sync_directory(app: AppHandle) -> Result<Option<std::path::PathBuf
 pub async fn sync_push(
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<std::path::PathBuf, String> {
+) -> CommandResult<std::path::PathBuf> {
     let settings = crate::settings::load(&app).map_err(err)?;
     let directory = sync_directory(settings.sync_directory.as_deref()).map_err(err)?;
     std::fs::create_dir_all(&directory).map_err(err)?;
@@ -720,7 +794,7 @@ pub async fn sync_push(
 pub async fn sync_pull(
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<std::path::PathBuf, String> {
+) -> CommandResult<std::path::PathBuf> {
     let settings = crate::settings::load(&app).map_err(err)?;
     let path = sync_directory(settings.sync_directory.as_deref())
         .map_err(err)?
@@ -750,7 +824,7 @@ pub async fn attach_file(
     app: AppHandle,
     state: State<'_, AppState>,
     parent_id: i64,
-) -> Result<Option<Node>, String> {
+) -> CommandResult<Option<Node>> {
     let Some(source) = app.dialog().file().blocking_pick_file() else {
         return Ok(None);
     };
@@ -797,7 +871,7 @@ pub async fn attach_file(
 pub async fn list_attachments(
     state: State<'_, AppState>,
     parent_id: i64,
-) -> Result<Vec<Node>, String> {
+) -> CommandResult<Vec<Node>> {
     db::list_attachments(&state.conn, parent_id)
         .await
         .map_err(err)
@@ -809,7 +883,7 @@ pub async fn open_attachment(
     app: AppHandle,
     state: State<'_, AppState>,
     id: i64,
-) -> Result<(), String> {
+) -> CommandResult<()> {
     let node = db::get_node(&state.conn, id)
         .await
         .map_err(err)?
@@ -827,7 +901,7 @@ pub async fn delete_attachment(
     app: AppHandle,
     state: State<'_, AppState>,
     id: i64,
-) -> Result<bool, String> {
+) -> CommandResult<bool> {
     write_backup(&app, &state.conn, "before-attachment-delete")
         .await
         .map_err(err)?;
@@ -926,7 +1000,7 @@ fn safe_relative_path(value: &str) -> anyhow::Result<std::path::PathBuf> {
 pub async fn list_block_children(
     state: State<'_, AppState>,
     parent_id: i64,
-) -> Result<Vec<Node>, String> {
+) -> CommandResult<Vec<Node>> {
     db::list_block_children(&state.conn, parent_id)
         .await
         .map_err(err)
@@ -941,7 +1015,7 @@ pub async fn create_block(
     position: Option<f64>,
     content: String,
     content_json: Option<String>,
-) -> Result<Node, String> {
+) -> CommandResult<Node> {
     db::checkpoint_history(&state.conn, "create block")
         .await
         .map_err(err)?;
@@ -959,7 +1033,7 @@ pub async fn indent_block(
     app: AppHandle,
     state: State<'_, AppState>,
     uuid: uuid::Uuid,
-) -> Result<Node, String> {
+) -> CommandResult<Node> {
     let old_parent_id = db::get_node_by_uuid(&state.conn, uuid)
         .await
         .map_err(err)?
@@ -985,7 +1059,7 @@ pub async fn outdent_block(
     app: AppHandle,
     state: State<'_, AppState>,
     uuid: uuid::Uuid,
-) -> Result<Node, String> {
+) -> CommandResult<Node> {
     let old_parent_id = db::get_node_by_uuid(&state.conn, uuid)
         .await
         .map_err(err)?
@@ -1010,7 +1084,7 @@ async fn move_block_in_direction(
     state: &AppState,
     uuid: uuid::Uuid,
     direction: ReorderDirection,
-) -> Result<Node, String> {
+) -> CommandResult<Node> {
     db::checkpoint_history(&state.conn, "reorder block")
         .await
         .map_err(err)?;
@@ -1028,7 +1102,7 @@ pub async fn move_block_up(
     app: AppHandle,
     state: State<'_, AppState>,
     uuid: uuid::Uuid,
-) -> Result<Node, String> {
+) -> CommandResult<Node> {
     move_block_in_direction(&app, &state, uuid, ReorderDirection::Up).await
 }
 
@@ -1038,7 +1112,7 @@ pub async fn move_block_down(
     app: AppHandle,
     state: State<'_, AppState>,
     uuid: uuid::Uuid,
-) -> Result<Node, String> {
+) -> CommandResult<Node> {
     move_block_in_direction(&app, &state, uuid, ReorderDirection::Down).await
 }
 
@@ -1048,7 +1122,7 @@ pub async fn delete_block(
     app: AppHandle,
     state: State<'_, AppState>,
     id: i64,
-) -> Result<bool, String> {
+) -> CommandResult<bool> {
     let deleted_node = db::get_node(&state.conn, id)
         .await
         .map_err(err)?
@@ -1083,7 +1157,7 @@ pub async fn replace_block_refs(
     block_id: i64,
     wikilink_titles: Vec<String>,
     block_uuids: Vec<String>,
-) -> Result<u32, String> {
+) -> CommandResult<u32> {
     let broken = db::replace_block_refs(&state.conn, block_id, wikilink_titles, block_uuids)
         .await
         .map_err(err)?;
@@ -1101,7 +1175,7 @@ pub async fn replace_block_refs(
 pub async fn get_page_by_title(
     state: State<'_, AppState>,
     title: String,
-) -> Result<Option<Node>, String> {
+) -> CommandResult<Option<Node>> {
     db::get_page_by_title(&state.conn, title).await.map_err(err)
 }
 
@@ -1110,7 +1184,7 @@ pub async fn get_page_by_title(
 pub async fn get_node_by_uuid(
     state: State<'_, AppState>,
     uuid: uuid::Uuid,
-) -> Result<Option<Node>, String> {
+) -> CommandResult<Option<Node>> {
     db::get_node_by_uuid(&state.conn, uuid).await.map_err(err)
 }
 
@@ -1120,7 +1194,7 @@ pub async fn get_or_create_page_by_title(
     app: AppHandle,
     state: State<'_, AppState>,
     title: String,
-) -> Result<Node, String> {
+) -> CommandResult<Node> {
     let page = db::get_or_create_page_by_title(&state.conn, title)
         .await
         .map_err(err)?;
@@ -1134,7 +1208,7 @@ pub async fn create_page(
     app: AppHandle,
     state: State<'_, AppState>,
     title: String,
-) -> Result<Node, String> {
+) -> CommandResult<Node> {
     let title = title.trim().to_string();
     if title.is_empty() {
         return Err("title is required".into());
@@ -1158,13 +1232,13 @@ pub async fn create_page(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn history_status(state: State<'_, AppState>) -> Result<(i64, i64), String> {
+pub async fn history_status(state: State<'_, AppState>) -> CommandResult<(i64, i64)> {
     db::history_status(&state.conn).await.map_err(err)
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn undo(app: AppHandle, state: State<'_, AppState>) -> Result<bool, String> {
+pub async fn undo(app: AppHandle, state: State<'_, AppState>) -> CommandResult<bool> {
     let changed = db::undo_history(&state.conn).await.map_err(err)?;
     if changed {
         emit_domain(&app, DomainEvent::WorkspaceChanged);
@@ -1175,7 +1249,7 @@ pub async fn undo(app: AppHandle, state: State<'_, AppState>) -> Result<bool, St
 
 #[tauri::command]
 #[specta::specta]
-pub async fn redo(app: AppHandle, state: State<'_, AppState>) -> Result<bool, String> {
+pub async fn redo(app: AppHandle, state: State<'_, AppState>) -> CommandResult<bool> {
     let changed = db::redo_history(&state.conn).await.map_err(err)?;
     if changed {
         emit_domain(&app, DomainEvent::WorkspaceChanged);
@@ -1189,7 +1263,7 @@ pub async fn redo(app: AppHandle, state: State<'_, AppState>) -> Result<bool, St
 pub async fn get_containing_page(
     state: State<'_, AppState>,
     id: i64,
-) -> Result<Option<Node>, String> {
+) -> CommandResult<Option<Node>> {
     db::get_containing_page(&state.conn, id).await.map_err(err)
 }
 
@@ -1199,7 +1273,7 @@ pub async fn search_pages_by_title(
     state: State<'_, AppState>,
     query: String,
     limit: u32,
-) -> Result<Vec<Node>, String> {
+) -> CommandResult<Vec<Node>> {
     db::search_pages_by_title(&state.conn, query, limit)
         .await
         .map_err(err)
@@ -1211,7 +1285,7 @@ pub async fn search_blocks_fts(
     state: State<'_, AppState>,
     query: String,
     limit: u32,
-) -> Result<Vec<Node>, String> {
+) -> CommandResult<Vec<Node>> {
     db::search_blocks_fts(&state.conn, query, limit)
         .await
         .map_err(err)
@@ -1223,7 +1297,7 @@ pub async fn search_fts(
     state: State<'_, AppState>,
     query: String,
     limit: u32,
-) -> Result<Vec<SearchHit>, String> {
+) -> CommandResult<Vec<SearchHit>> {
     let limit = validate_search_request(&query, limit)?;
     db::search_fts(&state.conn, query, limit).await.map_err(err)
 }
@@ -1234,7 +1308,7 @@ pub async fn search_vec(
     state: State<'_, AppState>,
     query: String,
     limit: u32,
-) -> Result<Vec<SearchHit>, String> {
+) -> CommandResult<Vec<SearchHit>> {
     let limit = validate_search_request(&query, limit)?;
     let emb = state.embedder.embed_query(query).await.map_err(err)?;
     db::search_vec(&state.conn, emb, limit).await.map_err(err)
@@ -1246,7 +1320,7 @@ pub async fn search_hybrid(
     state: State<'_, AppState>,
     query: String,
     limit: u32,
-) -> Result<Vec<SearchHit>, String> {
+) -> CommandResult<Vec<SearchHit>> {
     let limit = validate_search_request(&query, limit)?;
     let emb = state
         .embedder
@@ -1265,7 +1339,7 @@ pub async fn search_agentic(
     state: State<'_, AppState>,
     query: String,
     limit: u32,
-) -> Result<Vec<SearchHit>, String> {
+) -> CommandResult<Vec<SearchHit>> {
     let limit = validate_search_request(&query, limit)?;
     let emb = state
         .embedder
@@ -1310,7 +1384,7 @@ pub async fn rerank(
     state: State<'_, AppState>,
     query: String,
     documents: Vec<String>,
-) -> Result<Vec<(usize, f32)>, String> {
+) -> CommandResult<Vec<(usize, f32)>> {
     if query.trim().is_empty() || query.chars().count() > 4_096 {
         return Err("query must contain 1 to 4096 characters".into());
     }
@@ -1320,7 +1394,7 @@ pub async fn rerank(
     state.reranker.rerank(query, documents).await.map_err(err)
 }
 
-fn validate_search_request(query: &str, limit: u32) -> Result<u32, String> {
+fn validate_search_request(query: &str, limit: u32) -> CommandResult<u32> {
     if query.trim().is_empty() || query.chars().count() > 4_096 {
         return Err("query must contain 1 to 4096 characters".into());
     }
@@ -1332,7 +1406,7 @@ fn validate_search_request(query: &str, limit: u32) -> Result<u32, String> {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn chat(state: State<'_, AppState>, message: String) -> Result<String, String> {
+pub async fn chat(state: State<'_, AppState>, message: String) -> CommandResult<String> {
     agent::run_chat(
         state.conn.clone(),
         state.embedder.clone(),
@@ -1340,7 +1414,7 @@ pub async fn chat(state: State<'_, AppState>, message: String) -> Result<String,
         message,
     )
     .await
-    .map_err(|e| e.to_string())
+    .map_err(err)
 }
 
 #[tauri::command]
@@ -1355,7 +1429,7 @@ pub async fn chat_stream(
     active_node_id: Option<i64>,
     request_id: uuid::Uuid,
     on_event: Channel<ChatEvent>,
-) -> Result<String, String> {
+) -> CommandResult<String> {
     let cancellation = Arc::new(AtomicBool::new(false));
     {
         let mut active = state
@@ -1391,7 +1465,7 @@ pub async fn chat_stream(
         emit_domain(&app, DomainEvent::WorkspaceChanged);
         emit_domain(&app, DomainEvent::HistoryChanged);
     }
-    result.map_err(|error| error.to_string())
+    result.map_err(err)
 }
 
 #[tauri::command]
@@ -1406,5 +1480,30 @@ pub fn cancel_chat(state: State<'_, AppState>, request_id: uuid::Uuid) -> bool {
         true
     } else {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_errors_expose_stable_categories() {
+        assert!(matches!(
+            CommandError::from("title is required").code,
+            CommandErrorCode::InvalidInput
+        ));
+        assert!(matches!(
+            CommandError::from("block was not found").code,
+            CommandErrorCode::NotFound
+        ));
+        assert!(matches!(
+            CommandError::from("request is already active").code,
+            CommandErrorCode::Conflict
+        ));
+        assert!(matches!(
+            CommandError::from("provider unavailable").code,
+            CommandErrorCode::Unavailable
+        ));
     }
 }

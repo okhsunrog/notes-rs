@@ -10,25 +10,25 @@ import * as __TAURI_EVENT from "@tauri-apps/api/event";
 export const commands = {
 	isReady: () => __TAURI_INVOKE<boolean>("is_ready"),
 	startupStatus: () => __TAURI_INVOKE<StartupStatus>("startup_status"),
-	loadSettings: () => __TAURI_INVOKE<SettingsSnapshot>("load_settings"),
-	saveSettings: (update: SettingsUpdate) => __TAURI_INVOKE<SettingsSnapshot>("save_settings", { update }),
-	testCompletionProvider: (request: ProviderProbeRequest) => __TAURI_INVOKE<ProviderProbeResult>("test_completion_provider", { request }),
+	loadSettings: () => typedError<SettingsSnapshot, CommandError>(__TAURI_INVOKE("load_settings")),
+	saveSettings: (update: SettingsUpdate) => typedError<SettingsSnapshot, CommandError>(__TAURI_INVOKE("save_settings", { update })),
+	testCompletionProvider: (request: ProviderProbeRequest) => typedError<ProviderProbeResult, CommandError>(__TAURI_INVOKE("test_completion_provider", { request })),
 	restartApp: () => __TAURI_INVOKE<void>("restart_app"),
-	backgroundStatus: () => __TAURI_INVOKE<BackgroundStatus>("background_status"),
+	backgroundStatus: () => typedError<BackgroundStatus, CommandError>(__TAURI_INVOKE("background_status")),
 	setBackgroundPaused: (paused: boolean) => __TAURI_INVOKE<void>("set_background_paused", { paused }),
-	retryBackgroundJobs: () => __TAURI_INVOKE<null>("retry_background_jobs"),
-	clearBackgroundJobs: () => __TAURI_INVOKE<null>("clear_background_jobs"),
-	historyStatus: () => __TAURI_INVOKE<[number, number]>("history_status"),
-	undo: () => __TAURI_INVOKE<boolean>("undo"),
-	redo: () => __TAURI_INVOKE<boolean>("redo"),
-	createNode: (kind: NodeKind, title: string | null, content: string, contentJson: string | null) => __TAURI_INVOKE<Node>("create_node", { kind, title, content, contentJson }),
-	updateNode: (id: number, title: string | null, content: string, contentJson: string | null) => __TAURI_INVOKE<null>("update_node", { id, title, content, contentJson }),
-	renamePage: (uuid: string, title: string | null) => __TAURI_INVOKE<Node>("rename_page", { uuid, title }),
-	createNote: () => __TAURI_INVOKE<CreatedNote>("create_note"),
-	setBlockContent: (uuid: string, block: BlockContent) => __TAURI_INVOKE<[Node, number]>("set_block_content", { uuid, block }),
-	splitBlock: (id: number, parts: BlockContent[]) => __TAURI_INVOKE<Node[]>("split_block", { id, parts }),
-	linkNodes: (src: number, dst: number, kind: string, weight: number | null) => __TAURI_INVOKE<null>("link_nodes", { src, dst, kind, weight }),
-	getNode: (id: number) => __TAURI_INVOKE<{
+	retryBackgroundJobs: () => typedError<null, CommandError>(__TAURI_INVOKE("retry_background_jobs")),
+	clearBackgroundJobs: () => typedError<null, CommandError>(__TAURI_INVOKE("clear_background_jobs")),
+	historyStatus: () => typedError<[number, number], CommandError>(__TAURI_INVOKE("history_status")),
+	undo: () => typedError<boolean, CommandError>(__TAURI_INVOKE("undo")),
+	redo: () => typedError<boolean, CommandError>(__TAURI_INVOKE("redo")),
+	createNode: (kind: NodeKind, title: string | null, content: string, contentJson: string | null) => typedError<Node, CommandError>(__TAURI_INVOKE("create_node", { kind, title, content, contentJson })),
+	updateNode: (id: number, title: string | null, content: string, contentJson: string | null) => typedError<null, CommandError>(__TAURI_INVOKE("update_node", { id, title, content, contentJson })),
+	renamePage: (uuid: string, title: string | null) => typedError<Node, CommandError>(__TAURI_INVOKE("rename_page", { uuid, title })),
+	createNote: () => typedError<CreatedNote, CommandError>(__TAURI_INVOKE("create_note")),
+	setBlockContent: (uuid: string, block: BlockContent) => typedError<[Node, number], CommandError>(__TAURI_INVOKE("set_block_content", { uuid, block })),
+	splitBlock: (id: number, parts: BlockContent[]) => typedError<Node[], CommandError>(__TAURI_INVOKE("split_block", { id, parts })),
+	linkNodes: (src: number, dst: number, kind: string, weight: number | null) => typedError<null, CommandError>(__TAURI_INVOKE("link_nodes", { src, dst, kind, weight })),
+	getNode: (id: number) => typedError<{
 	id: number,
 	uuid: string,
 	kind: NodeKind,
@@ -39,8 +39,8 @@ export const commands = {
 	position: number | null,
 	created_at: number,
 	updated_at: number,
-} | null>("get_node", { id }),
-	getContainingPage: (id: number) => __TAURI_INVOKE<{
+} | null, CommandError>(__TAURI_INVOKE("get_node", { id })),
+	getContainingPage: (id: number) => typedError<{
 	id: number,
 	uuid: string,
 	kind: NodeKind,
@@ -51,29 +51,29 @@ export const commands = {
 	position: number | null,
 	created_at: number,
 	updated_at: number,
-} | null>("get_containing_page", { id }),
-	neighbors: (id: number, depth: number) => __TAURI_INVOKE<Node[]>("neighbors", { id, depth }),
-	searchFts: (query: string, limit: number) => __TAURI_INVOKE<SearchHit[]>("search_fts", { query, limit }),
-	searchVec: (query: string, limit: number) => __TAURI_INVOKE<SearchHit[]>("search_vec", { query, limit }),
-	searchHybrid: (query: string, limit: number) => __TAURI_INVOKE<SearchHit[]>("search_hybrid", { query, limit }),
+} | null, CommandError>(__TAURI_INVOKE("get_containing_page", { id })),
+	neighbors: (id: number, depth: number) => typedError<Node[], CommandError>(__TAURI_INVOKE("neighbors", { id, depth })),
+	searchFts: (query: string, limit: number) => typedError<SearchHit[], CommandError>(__TAURI_INVOKE("search_fts", { query, limit })),
+	searchVec: (query: string, limit: number) => typedError<SearchHit[], CommandError>(__TAURI_INVOKE("search_vec", { query, limit })),
+	searchHybrid: (query: string, limit: number) => typedError<SearchHit[], CommandError>(__TAURI_INVOKE("search_hybrid", { query, limit })),
 	/**  Retrieve via hybrid RRF, then rerank with the configured provider. */
-	searchAgentic: (query: string, limit: number) => __TAURI_INVOKE<SearchHit[]>("search_agentic", { query, limit }),
-	rerank: (query: string, documents: string[]) => __TAURI_INVOKE<([number, number | null])[]>("rerank", { query, documents }),
-	chat: (message: string) => __TAURI_INVOKE<string>("chat", { message }),
-	chatStream: (history: ChatTurn[], message: string, allowWrites: boolean, activeNodeId: number | null, requestId: string, onEvent: Channel<ChatEvent>) => __TAURI_INVOKE<string>("chat_stream", { history, message, allowWrites, activeNodeId, requestId, onEvent }),
+	searchAgentic: (query: string, limit: number) => typedError<SearchHit[], CommandError>(__TAURI_INVOKE("search_agentic", { query, limit })),
+	rerank: (query: string, documents: string[]) => typedError<([number, number | null])[], CommandError>(__TAURI_INVOKE("rerank", { query, documents })),
+	chat: (message: string) => typedError<string, CommandError>(__TAURI_INVOKE("chat", { message })),
+	chatStream: (history: ChatTurn[], message: string, allowWrites: boolean, activeNodeId: number | null, requestId: string, onEvent: Channel<ChatEvent>) => typedError<string, CommandError>(__TAURI_INVOKE("chat_stream", { history, message, allowWrites, activeNodeId, requestId, onEvent })),
 	cancelChat: (requestId: string) => __TAURI_INVOKE<boolean>("cancel_chat", { requestId }),
-	listEntities: (limit: number | null) => __TAURI_INVOKE<Node[]>("list_entities", { limit }),
-	listPages: (limit: number | null) => __TAURI_INVOKE<Node[]>("list_pages", { limit }),
-	deletePage: (id: number) => __TAURI_INVOKE<boolean>("delete_page", { id }),
-	findBacklinks: (id: number, kind: string | null) => __TAURI_INVOKE<Node[]>("find_backlinks", { id, kind }),
-	graphSnapshot: (focusId: number | null) => __TAURI_INVOKE<GraphSnapshot>("graph_snapshot", { focusId }),
-	exportData: () => __TAURI_INVOKE<string | null>("export_data"),
-	importData: () => __TAURI_INVOKE<string | null>("import_data"),
-	createBackup: () => __TAURI_INVOKE<string>("create_backup"),
-	chooseSyncDirectory: () => __TAURI_INVOKE<string | null>("choose_sync_directory"),
-	syncPush: () => __TAURI_INVOKE<string>("sync_push"),
-	syncPull: () => __TAURI_INVOKE<string>("sync_pull"),
-	attachFile: (parentId: number) => __TAURI_INVOKE<{
+	listEntities: (limit: number | null) => typedError<Node[], CommandError>(__TAURI_INVOKE("list_entities", { limit })),
+	listPages: (limit: number | null) => typedError<Node[], CommandError>(__TAURI_INVOKE("list_pages", { limit })),
+	deletePage: (id: number) => typedError<boolean, CommandError>(__TAURI_INVOKE("delete_page", { id })),
+	findBacklinks: (id: number, kind: string | null) => typedError<Node[], CommandError>(__TAURI_INVOKE("find_backlinks", { id, kind })),
+	graphSnapshot: (focusId: number | null) => typedError<GraphSnapshot, CommandError>(__TAURI_INVOKE("graph_snapshot", { focusId })),
+	exportData: () => typedError<string | null, CommandError>(__TAURI_INVOKE("export_data")),
+	importData: () => typedError<string | null, CommandError>(__TAURI_INVOKE("import_data")),
+	createBackup: () => typedError<string, CommandError>(__TAURI_INVOKE("create_backup")),
+	chooseSyncDirectory: () => typedError<string | null, CommandError>(__TAURI_INVOKE("choose_sync_directory")),
+	syncPush: () => typedError<string, CommandError>(__TAURI_INVOKE("sync_push")),
+	syncPull: () => typedError<string, CommandError>(__TAURI_INVOKE("sync_pull")),
+	attachFile: (parentId: number) => typedError<{
 	id: number,
 	uuid: string,
 	kind: NodeKind,
@@ -84,21 +84,21 @@ export const commands = {
 	position: number | null,
 	created_at: number,
 	updated_at: number,
-} | null>("attach_file", { parentId }),
-	listAttachments: (parentId: number) => __TAURI_INVOKE<Node[]>("list_attachments", { parentId }),
-	openAttachment: (id: number) => __TAURI_INVOKE<null>("open_attachment", { id }),
-	deleteAttachment: (id: number) => __TAURI_INVOKE<boolean>("delete_attachment", { id }),
-	createPage: (title: string) => __TAURI_INVOKE<Node>("create_page", { title }),
-	listBlockChildren: (parentId: number) => __TAURI_INVOKE<Node[]>("list_block_children", { parentId }),
-	createBlock: (parentId: number | null, position: number | null, content: string, contentJson: string | null) => __TAURI_INVOKE<Node>("create_block", { parentId, position, content, contentJson }),
-	indentBlock: (uuid: string) => __TAURI_INVOKE<Node>("indent_block", { uuid }),
-	outdentBlock: (uuid: string) => __TAURI_INVOKE<Node>("outdent_block", { uuid }),
-	moveBlockUp: (uuid: string) => __TAURI_INVOKE<Node>("move_block_up", { uuid }),
-	moveBlockDown: (uuid: string) => __TAURI_INVOKE<Node>("move_block_down", { uuid }),
-	deleteBlock: (id: number) => __TAURI_INVOKE<boolean>("delete_block", { id }),
-	replaceBlockRefs: (blockId: number, wikilinkTitles: string[], blockUuids: string[]) => __TAURI_INVOKE<number>("replace_block_refs", { blockId, wikilinkTitles, blockUuids }),
-	getOrCreatePageByTitle: (title: string) => __TAURI_INVOKE<Node>("get_or_create_page_by_title", { title }),
-	getPageByTitle: (title: string) => __TAURI_INVOKE<{
+} | null, CommandError>(__TAURI_INVOKE("attach_file", { parentId })),
+	listAttachments: (parentId: number) => typedError<Node[], CommandError>(__TAURI_INVOKE("list_attachments", { parentId })),
+	openAttachment: (id: number) => typedError<null, CommandError>(__TAURI_INVOKE("open_attachment", { id })),
+	deleteAttachment: (id: number) => typedError<boolean, CommandError>(__TAURI_INVOKE("delete_attachment", { id })),
+	createPage: (title: string) => typedError<Node, CommandError>(__TAURI_INVOKE("create_page", { title })),
+	listBlockChildren: (parentId: number) => typedError<Node[], CommandError>(__TAURI_INVOKE("list_block_children", { parentId })),
+	createBlock: (parentId: number | null, position: number | null, content: string, contentJson: string | null) => typedError<Node, CommandError>(__TAURI_INVOKE("create_block", { parentId, position, content, contentJson })),
+	indentBlock: (uuid: string) => typedError<Node, CommandError>(__TAURI_INVOKE("indent_block", { uuid })),
+	outdentBlock: (uuid: string) => typedError<Node, CommandError>(__TAURI_INVOKE("outdent_block", { uuid })),
+	moveBlockUp: (uuid: string) => typedError<Node, CommandError>(__TAURI_INVOKE("move_block_up", { uuid })),
+	moveBlockDown: (uuid: string) => typedError<Node, CommandError>(__TAURI_INVOKE("move_block_down", { uuid })),
+	deleteBlock: (id: number) => typedError<boolean, CommandError>(__TAURI_INVOKE("delete_block", { id })),
+	replaceBlockRefs: (blockId: number, wikilinkTitles: string[], blockUuids: string[]) => typedError<number, CommandError>(__TAURI_INVOKE("replace_block_refs", { blockId, wikilinkTitles, blockUuids })),
+	getOrCreatePageByTitle: (title: string) => typedError<Node, CommandError>(__TAURI_INVOKE("get_or_create_page_by_title", { title })),
+	getPageByTitle: (title: string) => typedError<{
 	id: number,
 	uuid: string,
 	kind: NodeKind,
@@ -109,8 +109,8 @@ export const commands = {
 	position: number | null,
 	created_at: number,
 	updated_at: number,
-} | null>("get_page_by_title", { title }),
-	getNodeByUuid: (uuid: string) => __TAURI_INVOKE<{
+} | null, CommandError>(__TAURI_INVOKE("get_page_by_title", { title })),
+	getNodeByUuid: (uuid: string) => typedError<{
 	id: number,
 	uuid: string,
 	kind: NodeKind,
@@ -121,9 +121,9 @@ export const commands = {
 	position: number | null,
 	created_at: number,
 	updated_at: number,
-} | null>("get_node_by_uuid", { uuid }),
-	searchPagesByTitle: (query: string, limit: number) => __TAURI_INVOKE<Node[]>("search_pages_by_title", { query, limit }),
-	searchBlocksFts: (query: string, limit: number) => __TAURI_INVOKE<Node[]>("search_blocks_fts", { query, limit }),
+} | null, CommandError>(__TAURI_INVOKE("get_node_by_uuid", { uuid })),
+	searchPagesByTitle: (query: string, limit: number) => typedError<Node[], CommandError>(__TAURI_INVOKE("search_pages_by_title", { query, limit })),
+	searchBlocksFts: (query: string, limit: number) => typedError<Node[], CommandError>(__TAURI_INVOKE("search_blocks_fts", { query, limit })),
 };
 
 /** Events */
@@ -171,6 +171,13 @@ export type CapabilityProbeResult = {
 export type ChatEvent = { kind: "text_delta"; text: string } | { kind: "reasoning"; text: string } | { kind: "tool_start"; id: string; name: string; args: unknown } | { kind: "tool_end"; id: string; result: string } | { kind: "done"; text: string } | { kind: "error"; message: string } | { kind: "usage"; inputTokens: number; outputTokens: number; totalTokens: number } | { kind: "cancelled" };
 
 export type ChatTurn = { role: "user"; text: string } | { role: "assistant"; text: string };
+
+export type CommandError = {
+	code: CommandErrorCode,
+	message: string,
+};
+
+export type CommandErrorCode = "invalid_input" | "not_found" | "conflict" | "unavailable" | "internal";
 
 export type CompletionProtocol = "openai" | "anthropic";
 
@@ -300,6 +307,15 @@ export type StartupStatus = { state: "starting"; message: string } | { state: "r
 export type WindowDecorationMode = "native" | "borderless";
 
 /* Tauri Specta runtime */
+async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {
+    try {
+        return { status: "ok", data: await result };
+    } catch (e) {
+        if (e instanceof Error) throw e;
+        return { status: "error", error: e as any };
+    }
+}
+
 type EventEmit<T> = [T] extends [null] ? () => Promise<void> : (payload: T) => Promise<void>;
 
 function makeEvent<T>(name: string, serialize?: (payload: T) => unknown, deserialize?: (payload: any) => T) {

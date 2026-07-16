@@ -3,8 +3,7 @@ import { Channel } from "@tauri-apps/api/core";
 import { ArrowUp, CheckCircle2, PencilLine, Sparkles, Square, Trash2, Wrench } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import type { ChatEvent, ChatTurn, Node } from "@/lib/api";
-import { commands } from "@/lib/bindings";
+import { cancelChat, chatStream, type ChatEvent, type ChatTurn, type Node } from "@/lib/api";
 
 const CHAT_STORAGE_KEY = "notes-rs.chat.v1";
 const MarkdownResponse = lazy(() => import("@/features/chat/markdown-response"));
@@ -110,14 +109,7 @@ export function ChatCard({ node }: { node: Node | null }) {
     };
 
     try {
-      await commands.chatStream(
-        history,
-        message,
-        allowWrites,
-        node?.id ?? null,
-        requestId,
-        channel,
-      );
+      await chatStream(history, message, allowWrites, node?.id ?? null, requestId, channel);
     } catch (err) {
       setChatLog((l) => {
         const next = [...l];
@@ -296,7 +288,7 @@ export function ChatCard({ node }: { node: Node | null }) {
             onClick={
               chatBusy
                 ? () => {
-                    if (activeRequest.current) void commands.cancelChat(activeRequest.current);
+                    if (activeRequest.current) void cancelChat(activeRequest.current);
                   }
                 : undefined
             }
