@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, ExternalLink, File, Loader2, Paperclip, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -8,33 +9,43 @@ import {
   openAttachment,
   type Node,
 } from "@/lib/api";
+import { queryKeys } from "@/lib/query";
 
 export function AttachmentsCard({
   parentId,
+  parentUuid,
   onStatus,
 }: {
   parentId: number;
+  parentUuid: string;
   onStatus: (message: string) => void;
 }) {
-  const [attachments, setAttachments] = useState<Node[]>([]);
+  const queryClient = useQueryClient();
   const [busy, setBusy] = useState(false);
   const [expanded, setExpanded] = useState(false);
 
+  const attachmentsQuery = useQuery<Node[]>({
+    queryKey: queryKeys.attachments(parentUuid),
+    queryFn: () => listAttachments(parentId),
+  });
+  const attachments = attachmentsQuery.data ?? [];
+
   useEffect(() => {
-    listAttachments(parentId)
-      .then((items) => {
-        setAttachments(items);
-        if (items.length > 0) setExpanded(true);
-      })
-      .catch((error) => onStatus(`attachment error: ${String(error)}`));
-  }, [parentId, onStatus]);
+    if (attachments.length > 0) setExpanded(true);
+  }, [attachments.length]);
+
+  useEffect(() => {
+    if (attachmentsQuery.error) {
+      onStatus(`attachment error: ${String(attachmentsQuery.error)}`);
+    }
+  }, [attachmentsQuery.error, onStatus]);
 
   async function add() {
     setBusy(true);
     try {
       const attachment = await attachFile(parentId);
       if (attachment) {
-        setAttachments((current) => [...current, attachment]);
+        await queryClient.invalidateQueries({ queryKey: queryKeys.attachments(parentUuid) });
         setExpanded(true);
         onStatus(`Attached ${attachment.title ?? "file"}`);
       }
@@ -54,7 +65,7 @@ export function AttachmentsCard({
       return;
     try {
       if (await deleteAttachment(attachment.id)) {
-        setAttachments((current) => current.filter((item) => item.id !== attachment.id));
+        await queryClient.invalidateQueries({ queryKey: queryKeys.attachments(parentUuid) });
         onStatus("Attachment removed; a recovery backup was created.");
       }
     } catch (error) {

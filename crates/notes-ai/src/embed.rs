@@ -626,23 +626,33 @@ fn classify_embedding_failure(error: &anyhow::Error) -> (FailureKind, bool) {
     (FailureKind::ProviderResponse, false)
 }
 
-pub fn spawn_worker(conn: Connection, embedder: Arc<dyn EmbedderBackend>, paused: Arc<AtomicBool>) {
+pub fn spawn_worker(
+    conn: Connection,
+    embedder: Arc<dyn EmbedderBackend>,
+    on_status_changed: Arc<dyn Fn() + Send + Sync>,
+    paused: Arc<AtomicBool>,
+) {
     tokio::spawn(async move {
         loop {
-            if !paused.load(Ordering::Acquire)
-                && let Err(e) = tick(&conn, embedder.as_ref()).await
-            {
-                tracing::warn!(error = ?e, "embed worker tick failed");
+            if !paused.load(Ordering::Acquire) {
+                match tick(&conn, embedder.as_ref()).await {
+                    Ok(true) => on_status_changed(),
+                    Ok(false) => {}
+                    Err(e) => {
+                        on_status_changed();
+                        tracing::warn!(error = ?e, "embed worker tick failed");
+                    }
+                }
             }
             sleep(Duration::from_millis(500)).await;
         }
     });
 }
 
-async fn tick(conn: &Connection, embedder: &dyn EmbedderBackend) -> Result<()> {
+async fn tick(conn: &Connection, embedder: &dyn EmbedderBackend) -> Result<bool> {
     let batch = db::take_pending_embeddings(conn, 16).await?;
     if batch.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     let original_inputs = batch
         .iter()
@@ -685,7 +695,7 @@ async fn tick(conn: &Connection, embedder: &dyn EmbedderBackend) -> Result<()> {
         .filter(|(id, _)| current_inputs.get(id) == original_inputs.get(id))
         .collect();
     db::write_embeddings(conn, items).await?;
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]

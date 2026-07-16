@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, Info } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -21,6 +22,7 @@ import { parseRefs } from "./parse-refs";
 import { renderMarkdown } from "./render-markdown";
 import { detectTrigger, type Trigger } from "./autocomplete";
 import { AutocompleteMenu, nodeToItem, type AutocompleteItem } from "./autocomplete-menu";
+import { queryKeys } from "@/lib/query";
 
 type Props = {
   block: Node;
@@ -41,6 +43,7 @@ function blockContent(content: string): BlockContent {
 
 export function BlockNode({ block, parent, depth }: Props) {
   const store = useOutliner();
+  const queryClient = useQueryClient();
   const editing = store.editingId === block.id;
   const collapseKey = `outliner.collapsed.${block.uuid}`;
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(collapseKey) === "1");
@@ -48,7 +51,8 @@ export function BlockNode({ block, parent, depth }: Props) {
 
   const draftRef = useRef(block.content);
   const blockRef = useRef(block);
-  blockRef.current = block;
+  const remoteConflictRef = useRef<Node | null>(null);
+  const [remoteConflict, setRemoteConflict] = useState<Node | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const editRef = useRef<BlockEditHandle>(null);
   const [draftLen, setDraftLen] = useState(block.content.length);
@@ -69,6 +73,41 @@ export function BlockNode({ block, parent, depth }: Props) {
     }
   };
 
+  useEffect(() => {
+    const previous = blockRef.current;
+    if (block.uuid !== previous.uuid) {
+      blockRef.current = block;
+      draftRef.current = block.content;
+      setDraftLen(block.content.length);
+      remoteConflictRef.current = null;
+      setRemoteConflict(null);
+      return;
+    }
+    if (block.content === previous.content) {
+      blockRef.current = block;
+      return;
+    }
+
+    if (draftRef.current !== previous.content) {
+      clearTimer();
+      remoteConflictRef.current = block;
+      setRemoteConflict(block);
+      return;
+    }
+
+    blockRef.current = block;
+    draftRef.current = block.content;
+    setDraftLen(block.content.length);
+    if (editing) store.setEditing(null);
+  }, [block, editing, store]);
+
+  const siblings = () => queryClient.getQueryData<Node[]>(queryKeys.children(parent.uuid)) ?? [];
+
+  const invalidateChildren = (parentUuid?: string) =>
+    queryClient.invalidateQueries({
+      queryKey: parentUuid ? queryKeys.children(parentUuid) : queryKeys.childrenRoot,
+    });
+
   const closeAutocomplete = () => {
     setTrigger(null);
     setAcItems([]);
@@ -82,6 +121,10 @@ export function BlockNode({ block, parent, depth }: Props) {
 
   const flush = useCallback(async () => {
     clearTimer();
+    if (remoteConflictRef.current) {
+      setSaveState("error");
+      return;
+    }
     const current = blockRef.current;
     const next = draftRef.current;
     if (next === current.content) {
@@ -92,13 +135,16 @@ export function BlockNode({ block, parent, depth }: Props) {
     try {
       const [updated] = await updateBlockWithRefs(current.id, blockContent(next));
       blockRef.current = updated;
-      store.replaceBlock(updated);
+      queryClient.setQueryData<Node[]>(queryKeys.children(parent.uuid), (rows = []) =>
+        rows.map((row) => (row.uuid === updated.uuid ? updated : row)),
+      );
+      queryClient.setQueryData(queryKeys.node(updated.uuid), updated);
       setSaveState("idle");
     } catch (err) {
       console.error("block save failed", err);
       setSaveState("error");
     }
-  }, [store]);
+  }, [parent.uuid, queryClient]);
 
   // Re-fetch results whenever the trigger query changes.
   useEffect(() => {
@@ -172,6 +218,28 @@ export function BlockNode({ block, parent, depth }: Props) {
     void flush();
   };
 
+  const useRemoteVersion = () => {
+    const remote = remoteConflictRef.current;
+    if (!remote) return;
+    clearTimer();
+    blockRef.current = remote;
+    draftRef.current = remote.content;
+    setDraftLen(remote.content.length);
+    remoteConflictRef.current = null;
+    setRemoteConflict(null);
+    setSaveState("idle");
+    store.setEditing(null);
+  };
+
+  const keepLocalVersion = () => {
+    const remote = remoteConflictRef.current;
+    if (!remote) return;
+    blockRef.current = remote;
+    remoteConflictRef.current = null;
+    setRemoteConflict(null);
+    void flush();
+  };
+
   const onPaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const text = e.clipboardData.getData("text/plain");
     if (!text) return;
@@ -193,7 +261,7 @@ export function BlockNode({ block, parent, depth }: Props) {
     try {
       const parts = [draftRef.current, ...paragraphs.slice(1)].map(blockContent);
       const changed = await splitBlock(block.id, parts);
-      await store.refresh(parent.id);
+      await invalidateChildren(parent.uuid);
       store.setEditing(changed[changed.length - 1]?.id ?? block.id);
     } catch (error) {
       console.error("paste split failed", error);
@@ -225,7 +293,7 @@ export function BlockNode({ block, parent, depth }: Props) {
       const changed = await splitBlock(block.id, paragraphs.map(blockContent));
       draftRef.current = paragraphs[0];
       setDraftLen(paragraphs[0].length);
-      await store.refresh(parent.id);
+      await invalidateChildren(parent.uuid);
       store.setEditing(changed[changed.length - 1]?.id ?? block.id);
     } catch (err) {
       console.error("split failed", err);
@@ -246,8 +314,7 @@ export function BlockNode({ block, parent, depth }: Props) {
 
   const onEnter = async () => {
     await flush();
-    const siblings = store.getChildren(parent.id) ?? [];
-    const pos = positionAfter(siblings, block.id);
+    const pos = positionAfter(siblings(), block.id);
     try {
       const created = await createBlock({
         parentId: parent.id,
@@ -255,7 +322,7 @@ export function BlockNode({ block, parent, depth }: Props) {
         content: "",
         contentJson: null,
       });
-      await store.refresh(parent.id);
+      await invalidateChildren(parent.uuid);
       store.setEditing(created.id);
     } catch (e) {
       console.error("enter (new sibling) failed", e);
@@ -264,12 +331,13 @@ export function BlockNode({ block, parent, depth }: Props) {
 
   const onBackspaceEmpty = async () => {
     if (draftRef.current.length > 0) return false;
-    const siblings = store.getChildren(parent.id) ?? [];
-    const prev = prevSibling(siblings, block.id);
+    const prev = prevSibling(siblings(), block.id);
     try {
       const ok = await deleteBlock(block.id);
       if (!ok) return false;
-      store.removeBlock(parent.id, block.id);
+      queryClient.setQueryData<Node[]>(queryKeys.children(parent.uuid), (rows = []) =>
+        rows.filter((row) => row.uuid !== block.uuid),
+      );
       if (prev) store.setEditing(prev.id);
       else store.setEditing(null);
       return true;
@@ -281,8 +349,7 @@ export function BlockNode({ block, parent, depth }: Props) {
 
   const onTab = async () => {
     await flush();
-    const siblings = store.getChildren(parent.id) ?? [];
-    const prev = prevSibling(siblings, block.id);
+    const prev = prevSibling(siblings(), block.id);
     if (!prev) return;
     try {
       const moved = await moveBlock({
@@ -290,7 +357,7 @@ export function BlockNode({ block, parent, depth }: Props) {
         newParentId: prev.id,
         newPosition: null,
       });
-      await Promise.all([store.refresh(parent.id), store.refresh(prev.id)]);
+      await invalidateChildren();
       store.setEditing(moved.id);
     } catch (e) {
       console.error("tab indent failed", e);
@@ -309,7 +376,7 @@ export function BlockNode({ block, parent, depth }: Props) {
         newParentId: grandparentId,
         newPosition: newPos,
       });
-      await Promise.all([store.refresh(parent.id), store.refresh(grandparentId)]);
+      await invalidateChildren();
       store.setEditing(moved.id);
     } catch (e) {
       console.error("shift-tab outdent failed", e);
@@ -317,8 +384,8 @@ export function BlockNode({ block, parent, depth }: Props) {
   };
 
   const onUpDown = (dir: "up" | "down") => {
-    const siblings = store.getChildren(parent.id) ?? [];
-    const target = dir === "up" ? prevSibling(siblings, block.id) : nextSibling(siblings, block.id);
+    const rows = siblings();
+    const target = dir === "up" ? prevSibling(rows, block.id) : nextSibling(rows, block.id);
     if (target) store.setEditing(target.id);
   };
 
@@ -334,7 +401,7 @@ export function BlockNode({ block, parent, depth }: Props) {
     await flush();
     try {
       await reorderBlock(block.id, direction);
-      await store.refresh(parent.id);
+      await invalidateChildren(parent.uuid);
       store.setEditing(block.id);
     } catch (error) {
       console.error("block reorder failed", error);
@@ -467,6 +534,32 @@ export function BlockNode({ block, parent, depth }: Props) {
                 onPaste={onPaste}
                 autoFocus
               />
+              {remoteConflict && (
+                <div
+                  role="alert"
+                  className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs"
+                >
+                  <span className="mr-auto text-foreground">
+                    This block changed on another replica. Choose which version to keep.
+                  </span>
+                  <button
+                    type="button"
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={useRemoteVersion}
+                    className="rounded-md border bg-background px-2 py-1 hover:bg-accent"
+                  >
+                    Use remote
+                  </button>
+                  <button
+                    type="button"
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={keepLocalVersion}
+                    className="rounded-md bg-primary px-2 py-1 text-primary-foreground hover:bg-primary/90"
+                  >
+                    Keep mine
+                  </button>
+                </div>
+              )}
               {trigger && (
                 <AutocompleteMenu
                   items={acItems}

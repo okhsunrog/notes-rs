@@ -1,46 +1,39 @@
-import { useCallback, useEffect, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { useEffect, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { FileText, Plus, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { listPages, type Node } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { queryKeys } from "@/lib/query";
 
 type Props = {
-  selectedId: number | null;
+  selectedUuid: string | null;
   onSelect: (page: Node) => void;
   onCreate: () => void | Promise<void>;
   onStatus: (s: string) => void;
 };
 
-export function PagesList({ selectedId, onSelect, onCreate, onStatus }: Props) {
-  const [pages, setPages] = useState<Node[]>([]);
+export function PagesList({ selectedUuid, onSelect, onCreate, onStatus }: Props) {
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState(false);
-
-  const refresh = useCallback(async () => {
-    try {
-      setPages(await listPages());
-    } catch (err) {
-      onStatus(`error: ${String(err)}`);
-    }
-  }, [onStatus]);
+  const queryClient = useQueryClient();
+  const pagesQuery = useQuery({
+    queryKey: queryKeys.pages,
+    queryFn: () => listPages(),
+  });
+  const pages = pagesQuery.data ?? [];
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
-  useEffect(() => {
-    const unlisten = listen("pages:changed", () => void refresh());
-    return () => void unlisten.then((stop) => stop());
-  }, [refresh]);
+    if (pagesQuery.error) onStatus(`error: ${String(pagesQuery.error)}`);
+  }, [onStatus, pagesQuery.error]);
 
   async function create() {
     if (busy) return;
     setBusy(true);
     try {
       await onCreate();
-      await refresh();
+      await queryClient.invalidateQueries({ queryKey: queryKeys.pages });
     } catch (err) {
       onStatus(`error: ${String(err)}`);
     } finally {
@@ -105,13 +98,14 @@ export function PagesList({ selectedId, onSelect, onCreate, onStatus }: Props) {
               onClick={() => onSelect(p)}
               className={cn(
                 "group flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition hover:bg-sidebar-accent",
-                selectedId === p.id && "bg-sidebar-accent text-sidebar-accent-foreground shadow-sm",
+                selectedUuid === p.uuid &&
+                  "bg-sidebar-accent text-sidebar-accent-foreground shadow-sm",
               )}
             >
               <span
                 className={cn(
                   "flex size-7 shrink-0 items-center justify-center rounded-lg bg-background/60 text-muted-foreground shadow-sm",
-                  selectedId === p.id && "bg-primary/12 text-primary",
+                  selectedUuid === p.uuid && "bg-primary/12 text-primary",
                 )}
               >
                 <FileText className="size-3.5" />

@@ -138,14 +138,20 @@ pub fn spawn_worker(
     conn: Connection,
     extractor: Arc<EntityExtractor>,
     on_entities_changed: Arc<dyn Fn() + Send + Sync>,
+    on_status_changed: Arc<dyn Fn() + Send + Sync>,
     paused: Arc<AtomicBool>,
 ) {
     tokio::spawn(async move {
         loop {
-            if !paused.load(Ordering::Acquire)
-                && let Err(e) = tick(&conn, &extractor, on_entities_changed.as_ref()).await
-            {
-                tracing::warn!(error = ?e, "extract worker tick failed");
+            if !paused.load(Ordering::Acquire) {
+                match tick(&conn, &extractor, on_entities_changed.as_ref()).await {
+                    Ok(true) => on_status_changed(),
+                    Ok(false) => {}
+                    Err(e) => {
+                        on_status_changed();
+                        tracing::warn!(error = ?e, "extract worker tick failed");
+                    }
+                }
             }
             sleep(Duration::from_secs(2)).await;
         }
@@ -156,8 +162,9 @@ async fn tick(
     conn: &Connection,
     extractor: &EntityExtractor,
     on_entities_changed: &(dyn Fn() + Send + Sync),
-) -> Result<()> {
+) -> Result<bool> {
     let batch = db::take_pending_extractions(conn, 1).await?;
+    let changed = !batch.is_empty();
     for (node_id, title, content) in batch {
         let meaningful_text = format!("{}\n{content}", title.as_deref().unwrap_or(""));
         if meaningful_text.trim().chars().count() < 3 {
@@ -208,7 +215,7 @@ async fn tick(
             }
         }
     }
-    Ok(())
+    Ok(changed)
 }
 
 async fn apply(

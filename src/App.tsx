@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { GitFork, Loader2, Redo2, Search, Settings, Undo2 } from "lucide-react";
 import { AppLayout } from "@/app/layout";
 import { WindowControls } from "@/app/window-controls";
@@ -15,6 +16,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/compone
 import {
   getContainingPage,
   getHistoryStatus,
+  getNodeByUuid,
   getStartupStatus,
   loadSettings,
   createNote,
@@ -24,6 +26,7 @@ import {
   type Node,
   type SearchHit,
 } from "@/lib/api";
+import { queryKeys } from "@/lib/query";
 
 const SettingsPage = lazy(() =>
   import("@/features/settings/settings-page").then((module) => ({
@@ -32,21 +35,38 @@ const SettingsPage = lazy(() =>
 );
 
 function App() {
+  const queryClient = useQueryClient();
   const [ready, setReady] = useState(false);
   const [startupError, setStartupError] = useState("");
   const [status, setStatus] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
-  const [activeNode, setActiveNode] = useState<Node | null>(null);
+  const [activePageUuid, setActivePageUuid] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [windowDecorationMode, setWindowDecorationMode] = useState<"native" | "borderless">(
     "native",
   );
-  const [history, setHistory] = useState<[number, number]>([0, 0]);
   const [creatingNote, setCreatingNote] = useState(false);
   const creatingNoteRef = useRef(false);
-  const [newNote, setNewNote] = useState<{ pageId: number; blockId: number | null } | null>(null);
+  const [newNote, setNewNote] = useState<{ pageUuid: string; blockId: number | null } | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [graphOpen, setGraphOpen] = useState(false);
+
+  const settingsQuery = useQuery({
+    queryKey: queryKeys.settings,
+    queryFn: loadSettings,
+  });
+  const historyQuery = useQuery({
+    queryKey: queryKeys.history,
+    queryFn: getHistoryStatus,
+    enabled: ready,
+  });
+  const activeNodeQuery = useQuery({
+    queryKey: queryKeys.node(activePageUuid ?? "inactive"),
+    queryFn: () => getNodeByUuid(activePageUuid as string),
+    enabled: activePageUuid !== null,
+  });
+  const activeNode = activeNodeQuery.data ?? null;
+  const history = historyQuery.data ?? ([0, 0] as const);
 
   const createNewNote = useCallback(async () => {
     if (creatingNoteRef.current) return;
@@ -54,8 +74,11 @@ function App() {
     setCreatingNote(true);
     try {
       const note = await createNote();
-      setNewNote({ pageId: note.page.id, blockId: note.initialBlock.id });
-      setActiveNode(note.page);
+      queryClient.setQueryData(queryKeys.node(note.page.uuid), note.page);
+      queryClient.setQueryData(queryKeys.children(note.page.uuid), [note.initialBlock]);
+      await queryClient.invalidateQueries({ queryKey: queryKeys.pages });
+      setNewNote({ pageUuid: note.page.uuid, blockId: note.initialBlock.id });
+      setActivePageUuid(note.page.uuid);
       setGraphOpen(false);
       setHits([]);
       setStatus("New note ready — name it, then press Enter to write.");
@@ -66,42 +89,30 @@ function App() {
       creatingNoteRef.current = false;
       setCreatingNote(false);
     }
-  }, []);
+  }, [queryClient]);
 
-  const moveHistory = useCallback(async (direction: "undo" | "redo") => {
-    try {
-      const changed = direction === "undo" ? await undo() : await redo();
-      if (changed) {
-        setActiveNode(null);
-        setHits([]);
-        setStatus(direction === "undo" ? "Undid structural change." : "Redid structural change.");
-        setHistory(await getHistoryStatus());
+  const moveHistory = useCallback(
+    async (direction: "undo" | "redo") => {
+      try {
+        const changed = direction === "undo" ? await undo() : await redo();
+        if (changed) {
+          setActivePageUuid(null);
+          setHits([]);
+          setStatus(direction === "undo" ? "Undid structural change." : "Redid structural change.");
+          await queryClient.invalidateQueries({ queryKey: queryKeys.root });
+        }
+      } catch (error) {
+        setStatus(`${direction} error: ${String(error)}`);
       }
-    } catch (error) {
-      setStatus(`${direction} error: ${String(error)}`);
+    },
+    [queryClient],
+  );
+
+  useEffect(() => {
+    if (settingsQuery.data) {
+      setWindowDecorationMode(settingsQuery.data.windowDecorationMode);
     }
-  }, []);
-
-  useEffect(() => {
-    loadSettings()
-      .then((settings) => setWindowDecorationMode(settings.windowDecorationMode))
-      .catch(() => undefined);
-  }, []);
-
-  useEffect(() => {
-    if (!ready) return;
-    let active = true;
-    const refresh = () =>
-      getHistoryStatus()
-        .then((value) => active && setHistory(value))
-        .catch(() => undefined);
-    void refresh();
-    const timer = window.setInterval(refresh, 1000);
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-    };
-  }, [ready]);
+  }, [settingsQuery.data]);
 
   useEffect(() => {
     if (!ready) return;
@@ -161,9 +172,8 @@ function App() {
 
   function applyUpdated(updated: Node) {
     setHits((hs) => hs.map((h) => (h.node.id === updated.id ? { ...h, node: updated } : h)));
-    if (activeNode && activeNode.id === updated.id) {
-      setActiveNode(updated);
-    }
+    queryClient.setQueryData(queryKeys.node(updated.uuid), updated);
+    void queryClient.invalidateQueries({ queryKey: queryKeys.pages });
   }
 
   async function openSearchResult(node: Node) {
@@ -173,7 +183,8 @@ function App() {
         setStatus(`No containing page found for #${node.id}`);
         return;
       }
-      setActiveNode(page);
+      queryClient.setQueryData(queryKeys.node(page.uuid), page);
+      setActivePageUuid(page.uuid);
       setGraphOpen(false);
       window.dispatchEvent(new Event("notes-rs:show-main"));
       if (page.id !== node.id) {
@@ -193,7 +204,8 @@ function App() {
       return;
     try {
       if (await deletePage(node.id)) {
-        setActiveNode(null);
+        setActivePageUuid(null);
+        queryClient.removeQueries({ queryKey: queryKeys.node(node.uuid), exact: true });
         setHits((current) => current.filter((hit) => hit.node.id !== node.id));
         setStatus("Page deleted; a recovery backup was created.");
       }
@@ -216,9 +228,10 @@ function App() {
           onDecorationModeChanged={setWindowDecorationMode}
           dataAvailable={ready}
           onDataChanged={() => {
-            setActiveNode(null);
+            setActivePageUuid(null);
             setHits([]);
             setStatus("Imported archive.");
+            void queryClient.invalidateQueries({ queryKey: queryKeys.root });
           }}
         />
       </Suspense>
@@ -317,11 +330,12 @@ function App() {
         sidebar={
           <div className="flex h-full flex-col gap-4">
             <PagesList
-              selectedId={activeNode?.id ?? null}
+              selectedUuid={activePageUuid}
               onCreate={createNewNote}
               onSelect={(page) => {
                 setNewNote(null);
-                setActiveNode(page);
+                queryClient.setQueryData(queryKeys.node(page.uuid), page);
+                setActivePageUuid(page.uuid);
                 window.dispatchEvent(new Event("notes-rs:show-main"));
               }}
               onStatus={setStatus}
@@ -332,13 +346,13 @@ function App() {
         center={
           activeNode ? (
             <PageView
-              key={activeNode.id}
+              key={activeNode.uuid}
               node={activeNode}
-              initialBlockId={newNote?.pageId === activeNode.id ? newNote.blockId : null}
-              autoFocusTitle={newNote?.pageId === activeNode.id}
+              initialBlockId={newNote?.pageUuid === activeNode.uuid ? newNote.blockId : null}
+              autoFocusTitle={newNote?.pageUuid === activeNode.uuid}
               onSaved={applyUpdated}
               onStatus={setStatus}
-              onClose={() => setActiveNode(null)}
+              onClose={() => setActivePageUuid(null)}
               onDelete={removePage}
             />
           ) : (

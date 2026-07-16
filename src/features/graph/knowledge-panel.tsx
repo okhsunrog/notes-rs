@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, RefreshCw, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ChatCard } from "@/features/chat/chat-card";
 import { findBacklinks, getGraphSnapshot, type GraphSnapshot, type Node } from "@/lib/api";
+import { queryKeys } from "@/lib/query";
 
 type Props = {
   node: Node | null;
@@ -29,26 +31,18 @@ export function KnowledgePanel({ node }: Props) {
 }
 
 export function GraphWorkspace({ node, onOpenNode, onClose }: Props & { onClose: () => void }) {
-  const [snapshot, setSnapshot] = useState<GraphSnapshot>({ nodes: [], edges: [] });
-  const [backlinks, setBacklinks] = useState<Node[]>([]);
-  const [error, setError] = useState("");
-  const [version, setVersion] = useState(0);
-
-  useEffect(() => {
-    let cancelled = false;
-    Promise.all([getGraphSnapshot(null), node ? findBacklinks(node.id) : []])
-      .then(([graph, incoming]) => {
-        if (!cancelled) {
-          setSnapshot(graph);
-          setBacklinks(incoming);
-          setError("");
-        }
-      })
-      .catch((reason) => !cancelled && setError(String(reason)));
-    return () => {
-      cancelled = true;
-    };
-  }, [node, version]);
+  const graphQuery = useQuery({
+    queryKey: queryKeys.graph(null),
+    queryFn: () => getGraphSnapshot(null),
+  });
+  const backlinksQuery = useQuery({
+    queryKey: queryKeys.backlinks(node?.uuid ?? "inactive"),
+    queryFn: () => findBacklinks((node as Node).id),
+    enabled: node !== null,
+  });
+  const snapshot = graphQuery.data ?? { nodes: [], edges: [] };
+  const backlinks = backlinksQuery.data ?? [];
+  const error = graphQuery.error ?? backlinksQuery.error;
 
   return (
     <div className="graph-workspace flex h-full min-h-0 flex-col bg-canvas">
@@ -66,7 +60,7 @@ export function GraphWorkspace({ node, onOpenNode, onClose }: Props & { onClose:
           className="ml-auto"
           variant="ghost"
           size="sm"
-          onClick={() => setVersion((value) => value + 1)}
+          onClick={() => void Promise.all([graphQuery.refetch(), backlinksQuery.refetch()])}
         >
           <RefreshCw className="size-3.5" />
           Refresh
@@ -76,7 +70,7 @@ export function GraphWorkspace({ node, onOpenNode, onClose }: Props & { onClose:
         <div className="relative min-w-0 flex-1 overflow-hidden">
           {error && (
             <p className="absolute top-4 left-4 z-10 rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
-              {error}
+              {String(error)}
             </p>
           )}
           <GraphView snapshot={snapshot} focusId={node?.id ?? null} onOpenNode={onOpenNode} />

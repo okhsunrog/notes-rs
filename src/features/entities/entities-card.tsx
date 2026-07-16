@@ -1,33 +1,18 @@
-import { useCallback, useEffect, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { useQuery } from "@tanstack/react-query";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { listEntities, type Node } from "@/lib/api";
+import { queryKeys } from "@/lib/query";
 
 type Props = {
   variant?: "card" | "compact";
 };
 
 export function EntitiesCard({ variant = "card" }: Props = {}) {
-  const [entities, setEntities] = useState<Node[]>([]);
-
-  const refresh = useCallback(async () => {
-    try {
-      setEntities(await listEntities(30));
-    } catch {
-      /* ignore */
-    }
-  }, []);
-
-  useEffect(() => {
-    void refresh();
-    const unlistenPromise = listen("entities:changed", () => {
-      void refresh();
-    });
-    return () => {
-      void unlistenPromise.then((un) => un());
-    };
-  }, [refresh]);
+  const { data: entities = [] } = useQuery<Node[]>({
+    queryKey: queryKeys.entities,
+    queryFn: () => listEntities(30),
+  });
 
   if (variant === "compact") {
     return (

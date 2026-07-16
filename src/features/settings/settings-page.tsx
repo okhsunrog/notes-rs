@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTheme } from "next-themes";
 import {
   ArrowLeft,
@@ -47,11 +48,11 @@ import {
   syncPull,
   syncPush,
   type SettingsSnapshot,
-  type BackgroundStatus,
   type EmbeddingProvider,
   type RerankProvider,
   type SecretKey,
 } from "@/lib/api";
+import { queryKeys } from "@/lib/query";
 
 type Props = {
   onBack: () => void;
@@ -78,13 +79,13 @@ export function SettingsPage({
 }: Props) {
   const { theme, setTheme } = useTheme();
   const { palette, setPalette } = useAppearance();
+  const queryClient = useQueryClient();
   const [settings, setSettings] = useState<SettingsSnapshot | null>(null);
   const [secrets, setSecrets] = useState<Partial<Record<SecretKey, string>>>({});
   const [clearKeys, setClearKeys] = useState<SecretKey[]>([]);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
-  const [background, setBackground] = useState<BackgroundStatus | null>(null);
   const [testingProvider, setTestingProvider] = useState<"chat" | "extraction" | null>(null);
   const [providerReports, setProviderReports] = useState<
     Record<
@@ -93,26 +94,22 @@ export function SettingsPage({
     >
   >({ chat: undefined, extraction: undefined });
 
-  useEffect(() => {
-    loadSettings()
-      .then(setSettings)
-      .catch((reason) => setError(String(reason)));
-  }, []);
+  const settingsQuery = useQuery({ queryKey: queryKeys.settings, queryFn: loadSettings });
+  const backgroundQuery = useQuery({
+    queryKey: queryKeys.backgroundStatus,
+    queryFn: getBackgroundStatus,
+    enabled: dataAvailable,
+  });
+  const background = backgroundQuery.data ?? null;
 
   useEffect(() => {
-    if (!dataAvailable) return;
-    let active = true;
-    const refresh = () =>
-      getBackgroundStatus()
-        .then((status) => active && setBackground(status))
-        .catch(() => undefined);
-    void refresh();
-    const timer = window.setInterval(refresh, 1500);
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-    };
-  }, [dataAvailable]);
+    if (settingsQuery.data) setSettings(settingsQuery.data);
+  }, [settingsQuery.data]);
+
+  useEffect(() => {
+    const reason = settingsQuery.error ?? backgroundQuery.error;
+    if (reason) setError(String(reason));
+  }, [backgroundQuery.error, settingsQuery.error]);
 
   const update = <Key extends keyof SettingsSnapshot>(key: Key, value: SettingsSnapshot[Key]) => {
     setSettings((current) => (current ? { ...current, [key]: value } : current));
@@ -148,6 +145,7 @@ export function SettingsPage({
         clearKeys,
       });
       setSettings(saved);
+      queryClient.setQueryData(queryKeys.settings, saved);
       onDecorationModeChanged(saved.windowDecorationMode);
       setSecrets({});
       setClearKeys([]);
@@ -213,7 +211,7 @@ export function SettingsPage({
     setError("");
     try {
       // Persist a newly selected directory before using it.
-      await saveSettings({
+      const saved = await saveSettings({
         localOnly: current.localOnly,
         entityExtractionEnabled: current.entityExtractionEnabled,
         queryRewritingEnabled: current.queryRewritingEnabled,
@@ -235,6 +233,8 @@ export function SettingsPage({
         apiKeys: {},
         clearKeys: [],
       });
+      setSettings(saved);
+      queryClient.setQueryData(queryKeys.settings, saved);
       const path = direction === "push" ? await syncPush() : await syncPull();
       setMessage(`${direction === "push" ? "Pushed" : "Pulled"} sync snapshot: ${path}`);
       if (direction === "pull") onDataChanged();
@@ -257,7 +257,7 @@ export function SettingsPage({
         )
       )
         await clearBackgroundJobs();
-      setBackground(await getBackgroundStatus());
+      await queryClient.invalidateQueries({ queryKey: queryKeys.backgroundStatus });
     } catch (reason) {
       setError(String(reason));
     }

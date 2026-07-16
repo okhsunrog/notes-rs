@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use tauri::ipc::Channel;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tauri_specta::Event;
@@ -417,7 +417,6 @@ pub async fn update_node(
         .map_err(err)?
         .ok_or_else(|| "updated node disappeared".to_string())?;
     emit_nodes_changed(&app, &state.conn, std::slice::from_ref(&node), []).await;
-    let _ = app.emit("pages:changed", ());
     Ok(())
 }
 
@@ -433,7 +432,6 @@ pub async fn rename_page(
         .await
         .map_err(err)?;
     emit_nodes_changed(&app, &state.conn, std::slice::from_ref(&node), []).await;
-    let _ = app.emit("pages:changed", ());
     Ok(node)
 }
 
@@ -455,7 +453,6 @@ pub async fn create_note(
     )
     .await;
     emit_domain(&app, DomainEvent::HistoryChanged);
-    let _ = app.emit("pages:changed", ());
     Ok(note)
 }
 
@@ -471,7 +468,6 @@ pub async fn update_block_with_refs(
         .await
         .map_err(err)?;
     emit_nodes_changed(&app, &state.conn, std::slice::from_ref(&result.0), []).await;
-    let _ = app.emit("pages:changed", ());
     Ok(result)
 }
 
@@ -489,7 +485,6 @@ pub async fn split_block(
     let nodes = db::split_block(&state.conn, id, parts).await.map_err(err)?;
     emit_nodes_changed(&app, &state.conn, &nodes, []).await;
     emit_domain(&app, DomainEvent::HistoryChanged);
-    let _ = app.emit("pages:changed", ());
     Ok(nodes)
 }
 
@@ -576,8 +571,6 @@ pub async fn delete_page(
     if attachments.is_some() {
         // Retain attachment payloads so structural Undo can restore their
         // database nodes. Explicit attachment deletion removes the file.
-        let _ = app.emit("pages:changed", ());
-        let _ = app.emit("entities:changed", ());
         emit_domain(
             &app,
             DomainEvent::NodeDeleted {
@@ -660,8 +653,6 @@ pub async fn import_data(
         .map_err(err)?;
     emit_domain(&app, DomainEvent::WorkspaceChanged);
     emit_domain(&app, DomainEvent::HistoryChanged);
-    let _ = app.emit("pages:changed", ());
-    let _ = app.emit("entities:changed", ());
     Ok(Some(path))
 }
 
@@ -744,8 +735,6 @@ pub async fn sync_pull(
         .map_err(err)?;
     emit_domain(&app, DomainEvent::WorkspaceChanged);
     emit_domain(&app, DomainEvent::HistoryChanged);
-    let _ = app.emit("pages:changed", ());
-    let _ = app.emit("entities:changed", ());
     Ok(path)
 }
 
@@ -1064,7 +1053,6 @@ pub async fn replace_block_refs(
             node_uuids: node_uuids_for_ids(&state.conn, [block_id]).await,
         },
     );
-    let _ = app.emit("pages:changed", ());
     Ok(broken)
 }
 
@@ -1097,7 +1085,6 @@ pub async fn get_or_create_page_by_title(
         .await
         .map_err(err)?;
     emit_nodes_changed(&app, &state.conn, std::slice::from_ref(&page), []).await;
-    let _ = app.emit("pages:changed", ());
     Ok(page)
 }
 
@@ -1126,7 +1113,6 @@ pub async fn create_page(
     .map_err(err)?;
     emit_nodes_changed(&app, &state.conn, std::slice::from_ref(&page), []).await;
     emit_domain(&app, DomainEvent::HistoryChanged);
-    let _ = app.emit("pages:changed", ());
     Ok(page)
 }
 
@@ -1141,9 +1127,6 @@ pub async fn history_status(state: State<'_, AppState>) -> Result<(i64, i64), St
 pub async fn undo(app: AppHandle, state: State<'_, AppState>) -> Result<bool, String> {
     let changed = db::undo_history(&state.conn).await.map_err(err)?;
     if changed {
-        let _ = app.emit("pages:changed", ());
-        let _ = app.emit("entities:changed", ());
-        let _ = app.emit("history:changed", ());
         emit_domain(&app, DomainEvent::WorkspaceChanged);
         emit_domain(&app, DomainEvent::HistoryChanged);
     }
@@ -1155,9 +1138,6 @@ pub async fn undo(app: AppHandle, state: State<'_, AppState>) -> Result<bool, St
 pub async fn redo(app: AppHandle, state: State<'_, AppState>) -> Result<bool, String> {
     let changed = db::redo_history(&state.conn).await.map_err(err)?;
     if changed {
-        let _ = app.emit("pages:changed", ());
-        let _ = app.emit("entities:changed", ());
-        let _ = app.emit("history:changed", ());
         emit_domain(&app, DomainEvent::WorkspaceChanged);
         emit_domain(&app, DomainEvent::HistoryChanged);
     }
@@ -1368,9 +1348,6 @@ pub async fn chat_stream(
         .unwrap_or_else(|error| error.into_inner())
         .remove(&request_id);
     if allow_writes && result.is_ok() {
-        let _ = app.emit("pages:changed", ());
-        let _ = app.emit("entities:changed", ());
-        let _ = app.emit("history:changed", ());
         emit_domain(&app, DomainEvent::WorkspaceChanged);
         emit_domain(&app, DomainEvent::HistoryChanged);
     }

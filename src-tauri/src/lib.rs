@@ -156,24 +156,37 @@ pub fn run() {
                 match initialize.await {
                     Ok((conn, embedder, reranker)) => {
                         let background_paused = Arc::new(AtomicBool::new(false));
+                        let embedding_event_handle = handle.clone();
                         embed::spawn_worker(
                             conn.clone(),
                             embedder.clone(),
+                            Arc::new(move || {
+                                commands::emit_domain(
+                                    &embedding_event_handle,
+                                    commands::DomainEvent::BackgroundStatusChanged,
+                                );
+                            }),
                             background_paused.clone(),
                         );
                         if notes_ai::config::entity_extraction_enabled() {
                             let extractor = Arc::new(extract::EntityExtractor::new());
                             let event_handle = handle.clone();
+                            let status_event_handle = handle.clone();
                             extract::spawn_worker(
                                 conn.clone(),
                                 extractor,
                                 Arc::new(move || {
-                                    let _ = event_handle.emit("entities:changed", ());
                                     commands::emit_domain(
                                         &event_handle,
                                         commands::DomainEvent::GraphChanged {
                                             node_uuids: Vec::new(),
                                         },
+                                    );
+                                }),
+                                Arc::new(move || {
+                                    commands::emit_domain(
+                                        &status_event_handle,
+                                        commands::DomainEvent::BackgroundStatusChanged,
                                     );
                                 }),
                                 background_paused.clone(),

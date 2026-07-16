@@ -1,6 +1,8 @@
-import { useEffect } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, Plus } from "lucide-react";
 import { createBlock, type Node } from "@/lib/api";
+import { listBlockChildren } from "@/lib/api";
+import { queryKeys } from "@/lib/query";
 import { BlockNode } from "./block-node";
 import { useOutliner } from "./outliner-store";
 
@@ -13,12 +15,12 @@ type Props = {
  * outliner store and ensures the level is loaded on mount. */
 export function BlockChildren({ parent, depth }: Props) {
   const store = useOutliner();
-  const blocks = store.getChildren(parent.id);
-  const error = store.loadError(parent.id);
-
-  useEffect(() => {
-    store.ensureLoaded(parent.id);
-  }, [parent.id, store]);
+  const queryClient = useQueryClient();
+  const childrenQuery = useQuery({
+    queryKey: queryKeys.children(parent.uuid),
+    queryFn: () => listBlockChildren(parent.id),
+  });
+  const blocks = childrenQuery.data;
 
   const addBlock = async () => {
     try {
@@ -28,15 +30,17 @@ export function BlockChildren({ parent, depth }: Props) {
         content: "",
         contentJson: null,
       });
-      await store.refresh(parent.id);
+      await queryClient.invalidateQueries({ queryKey: queryKeys.children(parent.uuid) });
       store.setEditing(created.id);
     } catch (e) {
       console.error("create block failed", e);
     }
   };
 
-  if (error) {
-    return <div className="text-xs text-destructive">load error: {error}</div>;
+  if (childrenQuery.error) {
+    return (
+      <div className="text-xs text-destructive">load error: {childrenQuery.error.message}</div>
+    );
   }
   if (blocks === undefined) {
     return (

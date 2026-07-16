@@ -173,7 +173,7 @@ export function PageView({
         <Outliner key={node.id} page={node} initialEditingId={focusBody ? initialBlockId : null} />
       </div>
       <div className="mt-16">
-        <AttachmentsCard parentId={node.id} onStatus={onStatus} />
+        <AttachmentsCard parentId={node.id} parentUuid={node.uuid} onStatus={onStatus} />
       </div>
     </article>
   );

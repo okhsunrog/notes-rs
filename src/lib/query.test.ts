@@ -1,0 +1,50 @@
+import { describe, expect, it } from "vite-plus/test";
+import { QueryClient } from "@tanstack/react-query";
+import { applyDomainEvent, queryKeys } from "./query";
+
+describe("domain event query invalidation", () => {
+  it("invalidates the changed node, its parent children and derived views", async () => {
+    const client = new QueryClient();
+    client.setQueryData(queryKeys.node("node-a"), { uuid: "node-a" });
+    client.setQueryData(queryKeys.node("node-b"), { uuid: "node-b" });
+    client.setQueryData(queryKeys.children("parent-a"), []);
+    client.setQueryData(queryKeys.pages, []);
+    client.setQueryData(queryKeys.graph(null), { nodes: [], edges: [] });
+
+    await applyDomainEvent(client, {
+      kind: "node_changed",
+      node_uuids: ["node-a"],
+      parent_uuids: ["parent-a"],
+    });
+
+    expect(client.getQueryState(queryKeys.node("node-a"))?.isInvalidated).toBe(true);
+    expect(client.getQueryState(queryKeys.node("node-b"))?.isInvalidated).toBe(false);
+    expect(client.getQueryState(queryKeys.children("parent-a"))?.isInvalidated).toBe(true);
+    expect(client.getQueryState(queryKeys.pages)?.isInvalidated).toBe(true);
+    expect(client.getQueryState(queryKeys.graph(null))?.isInvalidated).toBe(true);
+  });
+
+  it("removes deleted node snapshots", async () => {
+    const client = new QueryClient();
+    client.setQueryData(queryKeys.node("deleted"), { uuid: "deleted" });
+
+    await applyDomainEvent(client, {
+      kind: "node_deleted",
+      node_uuids: ["deleted"],
+      parent_uuids: [],
+    });
+
+    expect(client.getQueryData(queryKeys.node("deleted"))).toBeUndefined();
+  });
+
+  it("invalidates the complete backend cache after a workspace replacement", async () => {
+    const client = new QueryClient();
+    client.setQueryData(queryKeys.settings, { localOnly: true });
+    client.setQueryData(queryKeys.history, [1, 0]);
+
+    await applyDomainEvent(client, { kind: "workspace_changed" });
+
+    expect(client.getQueryState(queryKeys.settings)?.isInvalidated).toBe(true);
+    expect(client.getQueryState(queryKeys.history)?.isInvalidated).toBe(true);
+  });
+});
