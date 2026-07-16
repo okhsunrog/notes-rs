@@ -157,8 +157,11 @@ export function testCompletionProvider(request: {
   baseUrl: string;
   model: string;
   apiKey?: string;
+  keyScope?: "chat" | "extraction";
 }) {
-  return invoke<{ latencyMs: number; response: string }>("test_completion_provider", { request });
+  return invoke<{
+    capabilities: Array<{ name: string; ok: boolean; latencyMs: number; detail: string }>;
+  }>("test_completion_provider", { request });
 }
 
 export function restartApp() {

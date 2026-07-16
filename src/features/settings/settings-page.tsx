@@ -82,7 +82,13 @@ export function SettingsPage({
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [background, setBackground] = useState<BackgroundStatus | null>(null);
-  const [testingProvider, setTestingProvider] = useState(false);
+  const [testingProvider, setTestingProvider] = useState<"chat" | "extraction" | null>(null);
+  const [providerReports, setProviderReports] = useState<
+    Record<
+      "chat" | "extraction",
+      Array<{ name: string; ok: boolean; latencyMs: number; detail: string }> | undefined
+    >
+  >({ chat: undefined, extraction: undefined });
 
   useEffect(() => {
     loadSettings()
@@ -254,25 +260,33 @@ export function SettingsPage({
     }
   }
 
-  async function testChatProvider() {
+  async function testProvider(scope: "chat" | "extraction") {
     if (!settings) return;
-    setTestingProvider(true);
+    setTestingProvider(scope);
     setError("");
     setMessage("");
     try {
+      const inherited = scope === "extraction" && settings.extractionProtocol === "inherit";
+      const protocol =
+        scope === "chat" || inherited ? settings.chatProtocol : settings.extractionProtocol;
+      if (protocol === "inherit") throw new Error("invalid inherited extraction protocol");
       const result = await testCompletionProvider({
-        protocol: settings.chatProtocol,
-        baseUrl: settings.chatBaseUrl,
-        model: settings.chatModel,
-        apiKey: secrets.CHAT_API_KEY || undefined,
+        protocol,
+        baseUrl: scope === "chat" || inherited ? settings.chatBaseUrl : settings.extractionBaseUrl,
+        model: scope === "chat" ? settings.chatModel : settings.extractionModel,
+        apiKey:
+          scope === "extraction" && !inherited
+            ? secrets.EXTRACT_API_KEY || undefined
+            : secrets.CHAT_API_KEY || undefined,
+        keyScope: scope === "extraction" && !inherited ? "extraction" : "chat",
       });
-      setMessage(
-        `Chat provider responded in ${result.latencyMs} ms: ${result.response.trim() || "OK"}`,
-      );
+      setProviderReports((current) => ({ ...current, [scope]: result.capabilities }));
     } catch (reason) {
-      setError(`Chat provider test failed: ${String(reason)}`);
+      setError(
+        `${scope === "chat" ? "Chat" : "Extraction"} provider test failed: ${String(reason)}`,
+      );
     } finally {
-      setTestingProvider(false);
+      setTestingProvider(null);
     }
   }
 
@@ -515,23 +529,71 @@ export function SettingsPage({
               onChange={(event) => update("extractionModel", event.currentTarget.value)}
             />
           </Field>
-          <div>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={settings.localOnly || testingProvider}
-              onClick={() => void testChatProvider()}
-            >
-              {testingProvider ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
-                <PlugZap className="size-4" />
-              )}
-              Test Chat provider
-            </Button>
+          <div className="space-y-3">
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                disabled={settings.localOnly || testingProvider !== null}
+                onClick={() => void testProvider("chat")}
+              >
+                {testingProvider === "chat" ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <PlugZap className="size-4" />
+                )}
+                Test Chat capabilities
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={settings.localOnly || testingProvider !== null}
+                onClick={() => void testProvider("extraction")}
+              >
+                {testingProvider === "extraction" ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Sparkles className="size-4" />
+                )}
+                Test extraction capabilities
+              </Button>
+            </div>
             <p className="mt-2 text-xs text-muted-foreground">
-              Sends one short completion request using the values above without saving them.
+              Tests completion, streaming, required tools, and strict structured output using the
+              unsaved values above.
             </p>
+            {(["chat", "extraction"] as const).map((scope) => {
+              const report = providerReports[scope];
+              if (!report) return null;
+              return (
+                <div
+                  key={scope}
+                  className="rounded-xl border border-border/60 bg-background/60 p-3"
+                >
+                  <p className="mb-2 text-xs font-semibold tracking-wide text-foreground uppercase">
+                    {scope} capabilities
+                  </p>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {report.map((capability) => (
+                      <div
+                        key={capability.name}
+                        className="rounded-lg border border-border/50 px-3 py-2 text-xs"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium">{capability.name}</span>
+                          <span className={capability.ok ? "text-emerald-600" : "text-destructive"}>
+                            {capability.ok ? "supported" : "failed"} · {capability.latencyMs} ms
+                          </span>
+                        </div>
+                        <p className="mt-1 line-clamp-3 text-muted-foreground">
+                          {capability.detail}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </SettingsSection>
 
@@ -833,6 +895,40 @@ export function SettingsPage({
                   <Trash2 className="size-4" /> Cancel pending
                 </Button>
               </div>
+              {background.failures.length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-xs font-semibold tracking-wide text-foreground uppercase">
+                    Recent failures
+                  </p>
+                  {background.failures.map((failure) => (
+                    <div
+                      key={`${failure.queue}-${failure.nodeId}`}
+                      className="rounded-xl border border-destructive/20 bg-destructive/[0.035] p-3 text-xs"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-medium text-foreground">
+                          {failure.queue === "embedding" ? "Embedding" : "Entity extraction"}
+                        </span>
+                        <span className="rounded-full bg-muted px-2 py-0.5 text-muted-foreground">
+                          {failure.failureKind}
+                        </span>
+                        <span className={failure.terminal ? "text-destructive" : "text-amber-600"}>
+                          {failure.terminal ? "Needs attention" : "Retry scheduled"}
+                        </span>
+                        <span className="ml-auto text-muted-foreground">
+                          attempt {failure.retryCount}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-muted-foreground">
+                        {failure.nodeTitle || `Node #${failure.nodeId}`}
+                      </p>
+                      <p className="mt-2 line-clamp-4 break-all text-destructive/90">
+                        {failure.lastError}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
             </>
           ) : (
             <p className="text-xs text-muted-foreground">

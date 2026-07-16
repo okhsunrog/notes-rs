@@ -2874,6 +2874,9 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 name = "llm-relay"
 version = "0.3.0"
 dependencies = [
+ "eventsource-stream",
+ "futures-core",
+ "futures-util",
  "http",
  "reqwest 0.13.4",
  "rig-core",

@@ -439,10 +439,16 @@ pub(crate) fn completion_config_for_probe(
     base_url: String,
     model: String,
     api_key: Option<String>,
+    key_scope: Option<&str>,
 ) -> Result<llm_relay::ClientConfig> {
+    let configured_key = match key_scope {
+        Some("extraction") => std::env::var("EXTRACT_API_KEY").ok(),
+        Some("chat") | None => std::env::var("CHAT_API_KEY").ok(),
+        Some(other) => bail!("unsupported provider probe key scope: {other}"),
+    };
     let api_key = api_key
         .filter(|value| !value.trim().is_empty())
-        .or_else(|| std::env::var("CHAT_API_KEY").ok())
+        .or(configured_key)
         .or_else(|| legacy_openrouter_key(protocol, Some(&base_url)));
     completion_config(protocol, Some(base_url), api_key, model)
 }

@@ -4,6 +4,7 @@ use crate::embed::{EmbedderBackend, RerankBackend};
 use crate::sqlite::Connection;
 use anyhow::Context;
 use base64::Engine;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,13 +40,49 @@ pub struct ProviderProbeRequest {
     base_url: String,
     model: String,
     api_key: Option<String>,
+    key_scope: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderProbeResult {
+    capabilities: Vec<CapabilityProbeResult>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityProbeResult {
+    name: String,
+    ok: bool,
     latency_ms: u128,
-    response: String,
+    detail: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct StructuredProbe {
+    status: String,
+}
+
+fn probe_result(
+    name: &str,
+    started: std::time::Instant,
+    result: Result<String, impl std::fmt::Display>,
+) -> CapabilityProbeResult {
+    match result {
+        Ok(detail) => CapabilityProbeResult {
+            name: name.into(),
+            ok: true,
+            latency_ms: started.elapsed().as_millis(),
+            detail: detail.chars().take(240).collect(),
+        },
+        Err(error) => CapabilityProbeResult {
+            name: name.into(),
+            ok: false,
+            latency_ms: started.elapsed().as_millis(),
+            detail: error.to_string().chars().take(500).collect(),
+        },
+    }
 }
 
 /// Registered immediately in setup so the frontend can ask whether the heavy
@@ -107,25 +144,97 @@ pub async fn test_completion_provider(
         request.base_url,
         request.model,
         request.api_key,
+        request.key_scope.as_deref(),
     )
     .map_err(err)?
     .timeout(std::time::Duration::from_secs(20))
     .max_tokens(64);
     config.retry_policy.max_retries = 0;
     let client = llm_relay::LlmClient::new(config).map_err(err)?;
+    let mut capabilities = Vec::new();
+
     let started = std::time::Instant::now();
-    let response = client
+    let completion = client
         .complete("Reply with exactly: OK", llm_relay::ChatOptions::default())
         .await
-        .map_err(err)?;
-    let text = response.text();
-    if text.trim().is_empty() {
-        return Err("provider returned an empty response".into());
+        .and_then(|response| {
+            let text = response.text();
+            if text.trim().is_empty() {
+                Err(llm_relay::LlmError::EmptyResponse)
+            } else {
+                Ok(text)
+            }
+        });
+    capabilities.push(probe_result("completion", started, completion));
+
+    let started = std::time::Instant::now();
+    let streaming = async {
+        let mut stream = client
+            .chat_stream(
+                &[llm_relay::Message::user_text("Reply with exactly: OK")],
+                llm_relay::ChatOptions::default(),
+            )
+            .await?;
+        let mut text = String::new();
+        while let Some(event) = stream.next().await {
+            if let llm_relay::StreamEvent::TextDelta { text: delta } = event? {
+                text.push_str(&delta);
+            }
+        }
+        if text.trim().is_empty() {
+            Err(llm_relay::LlmError::EmptyResponse)
+        } else {
+            Ok(text)
+        }
     }
-    Ok(ProviderProbeResult {
-        latency_ms: started.elapsed().as_millis(),
-        response: text.chars().take(120).collect(),
-    })
+    .await;
+    capabilities.push(probe_result("streaming", started, streaming));
+
+    let started = std::time::Instant::now();
+    let tools = [llm_relay::ToolDefinition::new(
+        "provider_probe",
+        "Return the requested provider probe status.",
+        serde_json::json!({
+            "type": "object",
+            "properties": { "status": { "type": "string" } },
+            "required": ["status"],
+            "additionalProperties": false
+        }),
+    )];
+    let tool_call = client
+        .complete(
+            "Call provider_probe with status OK.",
+            llm_relay::ChatOptions {
+                tools: Some(&tools),
+                required_tool: Some("provider_probe"),
+                ..llm_relay::ChatOptions::default()
+            },
+        )
+        .await
+        .and_then(|response| {
+            response
+                .tool_uses()
+                .first()
+                .map(|tool| format!("{tool:?}"))
+                .ok_or_else(|| llm_relay::LlmError::InvalidStructuredOutput {
+                    error: "provider did not return the required tool call".into(),
+                    body: response.text(),
+                })
+        });
+    capabilities.push(probe_result("required tool", started, tool_call));
+
+    let started = std::time::Instant::now();
+    let structured = client
+        .complete_structured::<StructuredProbe>(
+            "Return a status field containing exactly OK.",
+            "provider_probe",
+            None,
+        )
+        .await
+        .map(|response| response.data.status);
+    capabilities.push(probe_result("structured output", started, structured));
+
+    Ok(ProviderProbeResult { capabilities })
 }
 
 #[tauri::command]
