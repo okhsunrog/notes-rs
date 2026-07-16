@@ -109,7 +109,7 @@ export function ChatCard({ node }: { node: Node | null }) {
     };
 
     try {
-      await chatStream(history, message, allowWrites, node?.id ?? null, requestId, channel);
+      await chatStream(history, message, allowWrites, node?.uuid ?? null, requestId, channel);
     } catch (err) {
       setChatLog((l) => {
         const next = [...l];

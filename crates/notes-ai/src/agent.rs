@@ -936,6 +936,16 @@ pub async fn run_chat(
     message: String,
 ) -> Result<String, AgentError> {
     let config = crate::config::chat_completion_config().map_err(AgentError::from)?;
+    run_chat_with_config(conn, embedder, reranker, message, config).await
+}
+
+pub async fn run_chat_with_config(
+    conn: Connection,
+    embedder: Arc<dyn EmbedderBackend>,
+    reranker: Arc<dyn RerankBackend>,
+    message: String,
+    config: llm_relay::ClientConfig,
+) -> Result<String, AgentError> {
     match config
         .rig_client()
         .map_err(anyhow::Error::from)
@@ -987,7 +997,7 @@ async fn run_chat_with_model<M: CompletionModel + 'static>(
         .map_err(|e| AgentError(format!("{e:#}")))
 }
 
-#[derive(Debug, Clone, Deserialize, specta::Type)]
+#[derive(Debug, Clone, Deserialize, Serialize, specta::Type)]
 #[serde(tag = "role", rename_all = "lowercase")]
 pub enum ChatTurn {
     User { text: String },
@@ -1003,7 +1013,7 @@ impl From<ChatTurn> for Message {
     }
 }
 
-#[derive(Debug, Clone, Serialize, specta::Type)]
+#[derive(Debug, Clone, Deserialize, Serialize, specta::Type)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ChatEvent {
     TextDelta {
@@ -1051,6 +1061,35 @@ pub async fn run_chat_stream(
     cancelled: Arc<AtomicBool>,
     emit: impl Fn(ChatEvent) + Send + Sync + 'static,
 ) -> Result<String, AgentError> {
+    let config = crate::config::chat_completion_config().map_err(AgentError::from)?;
+    run_chat_stream_with_config(
+        conn,
+        embedder,
+        reranker,
+        history,
+        message,
+        allow_writes,
+        active_node_id,
+        cancelled,
+        emit,
+        config,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_chat_stream_with_config(
+    conn: Connection,
+    embedder: Arc<dyn EmbedderBackend>,
+    reranker: Arc<dyn RerankBackend>,
+    history: Vec<ChatTurn>,
+    message: String,
+    allow_writes: bool,
+    active_node_id: Option<i64>,
+    cancelled: Arc<AtomicBool>,
+    emit: impl Fn(ChatEvent) + Send + Sync + 'static,
+    config: llm_relay::ClientConfig,
+) -> Result<String, AgentError> {
     if message.trim().is_empty() || message.chars().count() > 16_000 {
         return Err(AgentError(
             "message must contain 1 to 16000 characters".into(),
@@ -1067,7 +1106,6 @@ pub async fn run_chat_stream(
             "chat history exceeds the 24-turn or 32000-character budget".into(),
         ));
     }
-    let config = crate::config::chat_completion_config().map_err(AgentError::from)?;
     let emit: Arc<dyn Fn(ChatEvent) + Send + Sync> = Arc::new(emit);
     match config
         .rig_client()

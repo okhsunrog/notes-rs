@@ -7,9 +7,12 @@ use axum::extract::{DefaultBodyLimit, Extension, Path, Query, Request, State};
 use axum::http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, WWW_AUTHENTICATE};
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use futures::{SinkExt, StreamExt};
+use notes_ai::agent::{ChatEvent, ChatTurn};
+use notes_core::db::SearchHit;
 use notes_sync::{AcceptedOps, BootstrapRequest, ClientMessage, OpsBatch, PushOps, ServerMessage};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -28,6 +31,9 @@ pub struct AppState {
     pub registry: UserRegistry,
     pub data_dir: PathBuf,
     pub max_blob_bytes: u64,
+    pub ai: Option<Arc<crate::ai::AiRuntime>>,
+    pub embedding_provider_id: String,
+    pub embedding_dimensions: usize,
 }
 
 #[derive(Clone)]
@@ -71,6 +77,25 @@ struct SyncQuery {
     since: u64,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SearchRequest {
+    query: String,
+    #[serde(default = "default_search_limit")]
+    limit: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatRequest {
+    #[serde(default)]
+    history: Vec<ChatTurn>,
+    message: String,
+    #[serde(default)]
+    allow_writes: bool,
+    active_node_uuid: Option<uuid::Uuid>,
+}
+
 impl ApiError {
     fn bad_request(message: impl Into<String>) -> Self {
         Self {
@@ -112,6 +137,14 @@ impl ApiError {
         }
     }
 
+    fn unavailable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "unavailable",
+            message: message.into(),
+        }
+    }
+
     fn internal(error: anyhow::Error) -> Self {
         tracing::error!(error = ?error, "request failed");
         Self {
@@ -149,6 +182,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/ops", get(get_ops).post(push_ops))
         .route("/v1/snapshot", get(get_snapshot))
         .route("/v1/bootstrap", post(bootstrap))
+        .route("/v1/info", get(info))
+        .route("/v1/search", post(search))
+        .route("/v1/chat", post(chat))
         .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT));
     let stream_routes = Router::new()
         .route("/v1/sync", get(sync_socket))
@@ -166,6 +202,98 @@ pub fn router(state: AppState) -> Router {
         .merge(protected)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+async fn info(State(state): State<AppState>) -> Json<notes_sync::ServerInfo> {
+    Json(notes_sync::ServerInfo {
+        embedding_provider_id: state.embedding_provider_id,
+        embedding_dimensions: state.embedding_dimensions,
+        ai_enabled: state.ai.is_some(),
+    })
+}
+
+const fn default_search_limit() -> u32 {
+    20
+}
+
+async fn search(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Json(request): Json<SearchRequest>,
+) -> Result<Json<Vec<SearchHit>>, ApiError> {
+    let ai = state
+        .ai
+        .as_ref()
+        .ok_or_else(|| ApiError::unavailable("server AI is not configured"))?;
+    ai.search(&user.0.notes, request.query, request.limit)
+        .await
+        .map(Json)
+        .map_err(|error| {
+            let message = error.to_string();
+            if message.contains("must contain") || message.contains("must be between") {
+                ApiError::bad_request(message)
+            } else {
+                ApiError::internal(error)
+            }
+        })
+}
+
+async fn chat(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Json(request): Json<ChatRequest>,
+) -> Result<Sse<impl futures::Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError> {
+    let ai = state
+        .ai
+        .clone()
+        .ok_or_else(|| ApiError::unavailable("server AI is not configured"))?;
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<ChatEvent>();
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancellation_for_emit = cancelled.clone();
+    let error_emitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let error_for_emit = error_emitted.clone();
+    let connection = user.0.notes.clone();
+    tokio::spawn(async move {
+        let event_sender = sender.clone();
+        let emit = move |event| {
+            if matches!(&event, ChatEvent::Error { .. }) {
+                error_for_emit.store(true, std::sync::atomic::Ordering::Release);
+            }
+            if event_sender.send(event).is_err() {
+                cancellation_for_emit.store(true, std::sync::atomic::Ordering::Release);
+            }
+        };
+        if let Err(error) = ai
+            .chat(
+                connection,
+                request.history,
+                request.message,
+                request.allow_writes,
+                request.active_node_uuid,
+                cancelled,
+                emit,
+            )
+            .await
+        {
+            if error_emitted.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            let _ = sender.send(ChatEvent::Error {
+                message: error.to_string(),
+            });
+        }
+    });
+    let stream = futures::stream::unfold(receiver, |mut receiver| async move {
+        let event = receiver.recv().await?;
+        let serialized = serde_json::to_string(&event).unwrap_or_else(|error| {
+            serde_json::json!({ "kind": "error", "message": error.to_string() }).to_string()
+        });
+        Some((
+            Ok(Event::default().event("chat").data(serialized)),
+            receiver,
+        ))
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -546,6 +674,7 @@ mod tests {
                 embedding_provider_id: "test".into(),
                 embedding_dimensions: 8,
             },
+            ai: None,
             users: vec![UserConfig {
                 id: "owner".into(),
                 tokens: vec![TOKEN.into()],
@@ -650,6 +779,31 @@ mod tests {
         let batch: OpsBatch = serde_json::from_slice(&body).expect("ops batch");
         assert_eq!(batch.ops.len(), 1);
         assert_eq!(batch.ops[0].seq, 1);
+    }
+
+    #[tokio::test]
+    async fn reports_server_owned_embedding_contract() {
+        let (_directory, app) = test_app().await;
+        let response = app
+            .oneshot(
+                authorized(Request::builder())
+                    .uri("/v1/info")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let info: notes_sync::ServerInfo = serde_json::from_slice(&body).expect("server info");
+        assert_eq!(info.embedding_provider_id, "test");
+        assert_eq!(info.embedding_dimensions, 8);
+        assert!(!info.ai_enabled);
     }
 
     #[tokio::test]

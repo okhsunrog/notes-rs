@@ -93,8 +93,9 @@ impl std::error::Error for CommandError {}
 
 pub struct AppState {
     pub conn: Connection,
-    pub embedder: Arc<dyn EmbedderBackend>,
-    pub reranker: Arc<dyn RerankBackend>,
+    pub embedder: Option<Arc<dyn EmbedderBackend>>,
+    pub reranker: Option<Arc<dyn RerankBackend>>,
+    pub remote_ai: Option<notes_sync::HttpTransport>,
     pub background_paused: Arc<AtomicBool>,
     pub chat_cancellations: Arc<std::sync::Mutex<HashMap<uuid::Uuid, Arc<AtomicBool>>>>,
 }
@@ -1321,7 +1322,21 @@ pub async fn search_vec(
     limit: u32,
 ) -> CommandResult<Vec<SearchHit>> {
     let limit = validate_search_request(&query, limit)?;
-    let emb = state.embedder.embed_query(query).await.map_err(err)?;
+    if let Some(remote) = &state.remote_ai {
+        return match remote.search(query.clone(), limit).await {
+            Ok(results) => Ok(results),
+            Err(error) => {
+                tracing::warn!(%error, "remote vector search unavailable; falling back to FTS");
+                db::search_fts(&state.conn, query, limit).await.map_err(err)
+            }
+        };
+    }
+    let embedder = state
+        .embedder
+        .as_ref()
+        .context("local embedding provider is unavailable")
+        .map_err(err)?;
+    let emb = embedder.embed_query(query).await.map_err(err)?;
     db::search_vec(&state.conn, emb, limit).await.map_err(err)
 }
 
@@ -1333,11 +1348,21 @@ pub async fn search_hybrid(
     limit: u32,
 ) -> CommandResult<Vec<SearchHit>> {
     let limit = validate_search_request(&query, limit)?;
-    let emb = state
+    if let Some(remote) = &state.remote_ai {
+        return match remote.search(query.clone(), limit).await {
+            Ok(results) => Ok(results),
+            Err(error) => {
+                tracing::warn!(%error, "remote hybrid search unavailable; falling back to FTS");
+                db::search_fts(&state.conn, query, limit).await.map_err(err)
+            }
+        };
+    }
+    let embedder = state
         .embedder
-        .embed_query(query.clone())
-        .await
+        .as_ref()
+        .context("local embedding provider is unavailable")
         .map_err(err)?;
+    let emb = embedder.embed_query(query.clone()).await.map_err(err)?;
     db::search_hybrid(&state.conn, query, emb, limit)
         .await
         .map_err(err)
@@ -1352,11 +1377,21 @@ pub async fn search_agentic(
     limit: u32,
 ) -> CommandResult<Vec<SearchHit>> {
     let limit = validate_search_request(&query, limit)?;
-    let emb = state
+    if let Some(remote) = &state.remote_ai {
+        return match remote.search(query.clone(), limit).await {
+            Ok(results) => Ok(results),
+            Err(error) => {
+                tracing::warn!(%error, "remote agentic search unavailable; falling back to FTS");
+                db::search_fts(&state.conn, query, limit).await.map_err(err)
+            }
+        };
+    }
+    let embedder = state
         .embedder
-        .embed_query(query.clone())
-        .await
+        .as_ref()
+        .context("local embedding provider is unavailable")
         .map_err(err)?;
+    let emb = embedder.embed_query(query.clone()).await.map_err(err)?;
     // See SearchAgentic for rationale; widening the rerank pool matters even
     // more here because the UI can ask for `limit = 3` and starve the
     // reranker otherwise.
@@ -1374,7 +1409,12 @@ pub async fn search_agentic(
             format!("{title}\n{}", h.node.content)
         })
         .collect();
-    let scored = state.reranker.rerank(query, docs).await.map_err(err)?;
+    let reranker = state
+        .reranker
+        .as_ref()
+        .context("local reranking provider is unavailable")
+        .map_err(err)?;
+    let scored = reranker.rerank(query, docs).await.map_err(err)?;
     let mut out: Vec<SearchHit> = scored
         .into_iter()
         .take(limit as usize)
@@ -1402,7 +1442,12 @@ pub async fn rerank(
     if documents.len() > 128 || documents.iter().any(|document| document.len() > 100_000) {
         return Err("reranking accepts at most 128 documents of at most 100000 bytes each".into());
     }
-    state.reranker.rerank(query, documents).await.map_err(err)
+    let reranker = state
+        .reranker
+        .as_ref()
+        .context("local reranking provider is unavailable")
+        .map_err(err)?;
+    reranker.rerank(query, documents).await.map_err(err)
 }
 
 fn validate_search_request(query: &str, limit: u32) -> CommandResult<u32> {
@@ -1418,10 +1463,26 @@ fn validate_search_request(query: &str, limit: u32) -> CommandResult<u32> {
 #[tauri::command]
 #[specta::specta]
 pub async fn chat(state: State<'_, AppState>, message: String) -> CommandResult<String> {
+    if state.remote_ai.is_some() {
+        return Err(CommandError {
+            code: CommandErrorCode::Unavailable,
+            message: "non-streaming chat is unavailable in server mode".into(),
+        });
+    }
+    let embedder = state
+        .embedder
+        .as_ref()
+        .context("local embedding provider is unavailable")
+        .map_err(err)?;
+    let reranker = state
+        .reranker
+        .as_ref()
+        .context("local reranking provider is unavailable")
+        .map_err(err)?;
     agent::run_chat(
         state.conn.clone(),
-        state.embedder.clone(),
-        state.reranker.clone(),
+        embedder.clone(),
+        reranker.clone(),
         message,
     )
     .await
@@ -1437,7 +1498,7 @@ pub async fn chat_stream(
     history: Vec<ChatTurn>,
     message: String,
     allow_writes: bool,
-    active_node_id: Option<i64>,
+    active_node_uuid: Option<uuid::Uuid>,
     request_id: uuid::Uuid,
     on_event: Channel<ChatEvent>,
 ) -> CommandResult<String> {
@@ -1452,17 +1513,54 @@ pub async fn chat_stream(
         }
     }
     let on_event = Arc::new(on_event);
+    if let Some(remote) = &state.remote_ai {
+        let channel = on_event.clone();
+        let result = remote
+            .chat_stream(
+                history,
+                message,
+                allow_writes,
+                active_node_uuid,
+                cancellation,
+                move |event| {
+                    let _ = channel.send(event);
+                },
+            )
+            .await;
+        state
+            .chat_cancellations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&request_id);
+        return result.map_err(err);
+    }
+    let embedder = state
+        .embedder
+        .as_ref()
+        .context("local embedding provider is unavailable")
+        .map_err(err)?;
+    let reranker = state
+        .reranker
+        .as_ref()
+        .context("local reranking provider is unavailable")
+        .map_err(err)?;
     let emit = move |ev: ChatEvent| {
         let _ = on_event.send(ev);
     };
     let result = agent::run_chat_stream(
         state.conn.clone(),
-        state.embedder.clone(),
-        state.reranker.clone(),
+        embedder.clone(),
+        reranker.clone(),
         history,
         message,
         allow_writes,
-        active_node_id,
+        match active_node_uuid {
+            Some(uuid) => db::get_node_by_uuid(&state.conn, uuid)
+                .await
+                .map_err(err)?
+                .map(|node| node.id),
+            None => None,
+        },
         cancellation,
         emit,
     )

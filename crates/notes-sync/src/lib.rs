@@ -11,6 +11,14 @@ pub use transport::{HttpTransport, SyncSocket};
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerInfo {
+    pub embedding_provider_id: String,
+    pub embedding_dimensions: usize,
+    pub ai_enabled: bool,
+}
+
 pub use notes_core::Hlc;
 pub use notes_core::operation::FORMAT_VERSION;
 pub use notes_core::operation::{

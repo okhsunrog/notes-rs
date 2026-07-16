@@ -15,6 +15,7 @@ const REPLAY_BATCH_SIZE: usize = 1_000;
 #[derive(Clone)]
 pub struct UserRegistry {
     tokens: Arc<HashMap<String, Arc<UserState>>>,
+    users: Arc<Vec<Arc<UserState>>>,
 }
 
 pub struct UserState {
@@ -62,16 +63,41 @@ impl UserRegistry {
             for token in &user.tokens {
                 tokens.insert(token.clone(), state.clone());
             }
+            spawn_local_outbox_publisher(state.clone());
         }
         tracing::info!(users = states.len(), "opened server user replicas");
         Ok(Self {
             tokens: Arc::new(tokens),
+            users: Arc::new(states.into_values().collect()),
         })
     }
 
     pub fn authenticate(&self, token: &str) -> Option<Arc<UserState>> {
         self.tokens.get(token).cloned()
     }
+
+    pub fn users(&self) -> impl Iterator<Item = &Arc<UserState>> {
+        self.users.iter()
+    }
+}
+
+fn spawn_local_outbox_publisher(user: Arc<UserState>) {
+    tokio::spawn(async move {
+        loop {
+            match notes_core::pending_outbox(&user.notes, 256).await {
+                Ok(operations) if operations.is_empty() => {}
+                Ok(operations) => {
+                    if let Err(error) = user.ingest(operations).await {
+                        tracing::warn!(user = %user.id, ?error, "publishing server-authored operations failed");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(user = %user.id, ?error, "reading server outbox failed");
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    });
 }
 
 impl UserState {

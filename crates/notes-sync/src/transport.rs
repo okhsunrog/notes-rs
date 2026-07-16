@@ -1,10 +1,17 @@
-use crate::{AcceptedOps, BootstrapRequest, OpsBatch, PushOps, SequencedOp, SyncSnapshot};
+use crate::{
+    AcceptedOps, BootstrapRequest, OpsBatch, PushOps, SequencedOp, ServerInfo, SyncSnapshot,
+};
 use anyhow::{Context, Result, bail};
 use futures::StreamExt;
+use notes_ai::agent::{ChatEvent, ChatTurn};
+use notes_core::db::SearchHit;
 use reqwest::StatusCode;
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -53,6 +60,10 @@ impl HttpTransport {
         self.get_json("v1/snapshot", &[]).await
     }
 
+    pub async fn info(&self) -> Result<ServerInfo> {
+        self.get_json("v1/info", &[]).await
+    }
+
     pub async fn bootstrap(&self, snapshot: SyncSnapshot) -> Result<SyncSnapshot> {
         self.post_json("v1/bootstrap", &BootstrapRequest { snapshot })
             .await
@@ -73,6 +84,96 @@ impl HttpTransport {
             .post_json("v1/ops", &PushOps { ops: operations })
             .await?;
         Ok(accepted.ops)
+    }
+
+    pub async fn search(&self, query: String, limit: u32) -> Result<Vec<SearchHit>> {
+        #[derive(Serialize)]
+        struct Request {
+            query: String,
+            limit: u32,
+        }
+        self.post_json("v1/search", &Request { query, limit }).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn chat_stream(
+        &self,
+        history: Vec<ChatTurn>,
+        message: String,
+        allow_writes: bool,
+        active_node_uuid: Option<uuid::Uuid>,
+        cancelled: Arc<AtomicBool>,
+        mut on_event: impl FnMut(ChatEvent),
+    ) -> Result<String> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Request {
+            history: Vec<ChatTurn>,
+            message: String,
+            allow_writes: bool,
+            active_node_uuid: Option<uuid::Uuid>,
+        }
+
+        let response = self
+            .client
+            .post(self.endpoint("v1/chat")?)
+            .bearer_auth(&self.token)
+            .timeout(std::time::Duration::from_secs(300))
+            .json(&Request {
+                history,
+                message,
+                allow_writes,
+                active_node_uuid,
+            })
+            .send()
+            .await?;
+        let response = require_success(response).await?;
+        let mut body = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut answer = None;
+        let mut remote_error = None;
+        loop {
+            let chunk = tokio::select! {
+                chunk = body.next() => chunk,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                    if cancelled.load(Ordering::Acquire) {
+                        on_event(ChatEvent::Cancelled);
+                        bail!("chat request was cancelled");
+                    }
+                    continue;
+                }
+            };
+            let Some(chunk) = chunk else { break };
+            let chunk = chunk.context("reading chat event stream")?;
+            buffer.push_str(
+                std::str::from_utf8(&chunk).context("chat event stream was not valid UTF-8")?,
+            );
+            while let Some(end) = buffer.find("\n\n") {
+                let frame = buffer[..end].to_owned();
+                buffer.drain(..end + 2);
+                let data = frame
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("data:"))
+                    .map(str::trim_start)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if data.is_empty() {
+                    continue;
+                }
+                let event: ChatEvent =
+                    serde_json::from_str(&data).context("decoding chat event")?;
+                match &event {
+                    ChatEvent::Done { text } => answer = Some(text.clone()),
+                    ChatEvent::Error { message } => remote_error = Some(message.clone()),
+                    _ => {}
+                }
+                on_event(event);
+            }
+        }
+        if let Some(message) = remote_error {
+            bail!("{message}");
+        }
+        answer.context("chat stream ended without a completion event")
     }
 
     pub async fn connect(&self, since: u64) -> Result<SyncSocket> {

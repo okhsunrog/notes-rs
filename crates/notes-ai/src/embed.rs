@@ -144,6 +144,31 @@ pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
     }
 }
 
+/// Builds an OpenRouter embedder from an explicit host-owned configuration.
+/// Server hosts use this instead of mutating process environment variables.
+pub fn make_openrouter_embedder(
+    api_key: String,
+    base_url: &str,
+    model: String,
+    ndims: usize,
+) -> Result<Arc<dyn EmbedderBackend>> {
+    use rig::providers::openrouter;
+
+    if api_key.trim().is_empty() {
+        bail!("OpenRouter API key cannot be empty");
+    }
+    if ndims == 0 {
+        bail!("embedding dimensions must be positive");
+    }
+    let client = crate::config::openrouter_client_from(api_key, base_url)?;
+    let embedding_model =
+        <openrouter::EmbeddingModel as EmbeddingModel>::make(&client, model.clone(), Some(ndims));
+    Ok(Arc::new(RigEmbedder {
+        model: embedding_model,
+        id: format!("openrouter:{model}"),
+    }))
+}
+
 /// Built-in ndims for well-known embedding models so users don't need to
 /// guess them. Unknown models still require `EMBED_NDIMS`.
 fn default_ndims_for_model(model: &str) -> Option<usize> {
@@ -511,13 +536,31 @@ impl OpenRouterReranker {
         let api_key = std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set")?;
         let base = std::env::var("OPENROUTER_BASE_URL")
             .unwrap_or_else(|_| crate::config::DEFAULT_OPENROUTER_BASE_URL.into());
+        Self::from_config(api_key, &base, model)
+    }
+
+    pub fn from_config(api_key: String, base_url: &str, model: String) -> Result<Self> {
+        if api_key.trim().is_empty() {
+            bail!("OpenRouter API key cannot be empty");
+        }
+        crate::config::validate_http_base_url(base_url)?;
         Ok(Self {
             client: reqwest::Client::new(),
             api_key,
             model,
-            url: format!("{}/rerank", base.trim_end_matches('/')),
+            url: format!("{}/rerank", base_url.trim_end_matches('/')),
         })
     }
+}
+
+pub fn make_openrouter_reranker(
+    api_key: String,
+    base_url: &str,
+    model: String,
+) -> Result<Arc<dyn RerankBackend>> {
+    Ok(Arc::new(OpenRouterReranker::from_config(
+        api_key, base_url, model,
+    )?))
 }
 
 #[derive(Debug, Deserialize)]

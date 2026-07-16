@@ -15,6 +15,7 @@ futures.workspace = true
 notes-ai.workspace = true
 notes-core.workspace = true
 notes-sync.workspace = true
+llm-relay.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true

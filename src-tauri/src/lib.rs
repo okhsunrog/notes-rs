@@ -2,6 +2,7 @@ mod commands;
 mod settings;
 mod sync;
 
+use anyhow::Context;
 use notes_ai::{embed, extract};
 use notes_core::db;
 use std::sync::atomic::AtomicBool;
@@ -133,6 +134,17 @@ pub fn run() {
             }
 
             let db_path = data_dir.join("notes.db");
+            let sync_credentials = settings::sync_credentials(&handle);
+            let server_mode = matches!(sync_credentials, Ok(Some(_)));
+            let remote_ai = sync_credentials
+                .as_ref()
+                .ok()
+                .and_then(Option::as_ref)
+                .map(|(server_url, token)| {
+                    notes_sync::HttpTransport::new(server_url.clone(), token.clone())
+                })
+                .transpose()?;
+            let configured_settings = settings::load(&handle);
             let sync_runtime = sync::SyncRuntime::disabled();
             let sync_status = sync_runtime.status.clone();
             app.manage(sync_runtime);
@@ -150,31 +162,63 @@ pub fn run() {
 
             tauri::async_runtime::spawn(async move {
                 let initialize = async {
-                    let embedder = embed::make_embedder()?;
-                    let id = embedder.id();
-                    let ndims = embedder.ndims();
-                    tracing::info!(embedder = %id, ndims, "embedder loaded");
+                    let (embedder, reranker, id, ndims) = if server_mode {
+                        let settings = configured_settings?;
+                        let fallback_ndims = settings
+                            .embedding_ndims
+                            .context("embedding dimensions are required in server mode")?
+                            as usize;
+                        let fallback_id = format!(
+                            "{}:{}",
+                            settings.embedding_provider, settings.embedding_model
+                        );
+                        let (id, ndims) = match remote_ai.as_ref() {
+                            Some(transport) => match transport.info().await {
+                                Ok(info) => {
+                                    if !info.ai_enabled {
+                                        anyhow::bail!("the configured sync server has AI disabled");
+                                    }
+                                    (info.embedding_provider_id, info.embedding_dimensions)
+                                }
+                                Err(error) => {
+                                    tracing::warn!(%error, "server info unavailable; opening the offline cache with saved embedding metadata");
+                                    (fallback_id, fallback_ndims)
+                                }
+                            },
+                            None => (fallback_id, fallback_ndims),
+                        };
+                        tracing::info!(embedder = %id, ndims, "using server-owned AI");
+                        (None, None, id, ndims)
+                    } else {
+                        let embedder = embed::make_embedder()?;
+                        let id = embedder.id();
+                        let ndims = embedder.ndims();
+                        let reranker = embed::make_reranker()?;
+                        tracing::info!(embedder = %id, ndims, "local AI providers loaded");
+                        (Some(embedder), Some(reranker), id, ndims)
+                    };
                     let conn = db::open(&db_path, &id, ndims).await?;
-                    let reranker = embed::make_reranker()?;
                     anyhow::Ok((conn, embedder, reranker))
                 };
 
                 match initialize.await {
                     Ok((conn, embedder, reranker)) => {
                         let background_paused = Arc::new(AtomicBool::new(false));
-                        let embedding_event_handle = handle.clone();
-                        embed::spawn_worker(
-                            conn.clone(),
-                            embedder.clone(),
-                            Arc::new(move || {
-                                commands::emit_domain(
-                                    &embedding_event_handle,
-                                    commands::DomainEvent::BackgroundStatusChanged,
-                                );
-                            }),
-                            background_paused.clone(),
-                        );
-                        if notes_ai::config::entity_extraction_enabled() {
+                        if let Some(embedder) = &embedder {
+                            let embedding_event_handle = handle.clone();
+                            embed::spawn_worker(
+                                conn.clone(),
+                                embedder.clone(),
+                                Arc::new(move || {
+                                    commands::emit_domain(
+                                        &embedding_event_handle,
+                                        commands::DomainEvent::BackgroundStatusChanged,
+                                    );
+                                }),
+                                background_paused.clone(),
+                            );
+                        }
+                        if !server_mode && notes_ai::config::entity_extraction_enabled() {
                             let extractor = Arc::new(extract::EntityExtractor::new());
                             let event_handle = handle.clone();
                             let status_event_handle = handle.clone();
@@ -204,12 +248,13 @@ pub fn run() {
                             conn: conn.clone(),
                             embedder,
                             reranker,
+                            remote_ai,
                             background_paused,
                             chat_cancellations: Arc::new(std::sync::Mutex::new(
                                 std::collections::HashMap::new(),
                             )),
                         });
-                        match settings::sync_credentials(&handle) {
+                        match sync_credentials {
                             Ok(Some((server_url, token))) => sync::spawn_worker(
                                 handle.clone(),
                                 conn.clone(),

@@ -3451,6 +3451,7 @@ dependencies = [
  "clap",
  "futures",
  "http-body-util",
+ "llm-relay",
  "notes-ai",
  "notes-core",
  "notes-sync",
@@ -3477,6 +3478,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures",
+ "notes-ai",
  "notes-core",
  "reqwest 0.13.4",
  "serde",

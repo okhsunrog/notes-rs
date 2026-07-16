@@ -18,6 +18,7 @@ async fn bootstraps_and_fanouts_operations_over_the_real_network_protocol() {
             embedding_provider_id: "test".into(),
             embedding_dimensions: 8,
         },
+        ai: None,
         users: vec![UserConfig {
             id: "owner".into(),
             tokens: vec![TOKEN.into()],
