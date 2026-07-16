@@ -132,6 +132,7 @@ pub fn run() {
             commands::startup_status,
             commands::load_settings,
             commands::save_settings,
+            commands::test_completion_provider,
             commands::restart_app,
             commands::background_status,
             commands::set_background_paused,

@@ -22,6 +22,7 @@ import {
   Laptop,
   Moon,
   Palette,
+  PlugZap,
   Sparkles,
   Sun,
 } from "lucide-react";
@@ -42,6 +43,7 @@ import {
   retryBackgroundJobs,
   saveSettings,
   setBackgroundPaused,
+  testCompletionProvider,
   syncPull,
   syncPush,
   type SettingsSnapshot,
@@ -80,6 +82,7 @@ export function SettingsPage({
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [background, setBackground] = useState<BackgroundStatus | null>(null);
+  const [testingProvider, setTestingProvider] = useState(false);
 
   useEffect(() => {
     loadSettings()
@@ -248,6 +251,28 @@ export function SettingsPage({
       setBackground(await getBackgroundStatus());
     } catch (reason) {
       setError(String(reason));
+    }
+  }
+
+  async function testChatProvider() {
+    if (!settings) return;
+    setTestingProvider(true);
+    setError("");
+    setMessage("");
+    try {
+      const result = await testCompletionProvider({
+        protocol: settings.chatProtocol,
+        baseUrl: settings.chatBaseUrl,
+        model: settings.chatModel,
+        apiKey: secrets.CHAT_API_KEY || undefined,
+      });
+      setMessage(
+        `Chat provider responded in ${result.latencyMs} ms: ${result.response.trim() || "OK"}`,
+      );
+    } catch (reason) {
+      setError(`Chat provider test failed: ${String(reason)}`);
+    } finally {
+      setTestingProvider(false);
     }
   }
 
@@ -490,6 +515,24 @@ export function SettingsPage({
               onChange={(event) => update("extractionModel", event.currentTarget.value)}
             />
           </Field>
+          <div>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={settings.localOnly || testingProvider}
+              onClick={() => void testChatProvider()}
+            >
+              {testingProvider ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <PlugZap className="size-4" />
+              )}
+              Test Chat provider
+            </Button>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Sends one short completion request using the values above without saving them.
+            </p>
+          </div>
         </SettingsSection>
 
         <SettingsSection

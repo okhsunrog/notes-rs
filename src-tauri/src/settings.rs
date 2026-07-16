@@ -372,16 +372,14 @@ pub fn extraction_model() -> String {
 }
 
 pub fn chat_completion_config() -> Result<llm_relay::ClientConfig> {
-    completion_config(
-        &std::env::var("CHAT_PROTOCOL").unwrap_or_else(|_| "openai".into()),
-        std::env::var("CHAT_BASE_URL")
-            .ok()
-            .or_else(|| std::env::var("OPENROUTER_BASE_URL").ok()),
-        std::env::var("CHAT_API_KEY")
-            .ok()
-            .or_else(|| std::env::var("OPENROUTER_API_KEY").ok()),
-        chat_model(),
-    )
+    let protocol = std::env::var("CHAT_PROTOCOL").unwrap_or_else(|_| "openai".into());
+    let base_url = std::env::var("CHAT_BASE_URL")
+        .ok()
+        .or_else(|| std::env::var("OPENROUTER_BASE_URL").ok());
+    let api_key = std::env::var("CHAT_API_KEY")
+        .ok()
+        .or_else(|| legacy_openrouter_key(&protocol, base_url.as_deref()));
+    completion_config(&protocol, base_url, api_key, chat_model())
 }
 
 pub fn extraction_completion_config() -> Result<llm_relay::ClientConfig> {
@@ -391,18 +389,29 @@ pub fn extraction_completion_config() -> Result<llm_relay::ClientConfig> {
         config.model = extraction_model();
         return Ok(config);
     }
-    completion_config(
-        &protocol,
-        std::env::var("EXTRACT_BASE_URL").ok(),
-        std::env::var("EXTRACT_API_KEY")
-            .ok()
-            .or_else(|| std::env::var("CHAT_API_KEY").ok())
-            .or_else(|| std::env::var("OPENROUTER_API_KEY").ok()),
-        extraction_model(),
-    )
+    let base_url = std::env::var("EXTRACT_BASE_URL").ok();
+    let api_key = std::env::var("EXTRACT_API_KEY")
+        .ok()
+        .or_else(|| std::env::var("CHAT_API_KEY").ok())
+        .or_else(|| legacy_openrouter_key(&protocol, base_url.as_deref()));
+    completion_config(&protocol, base_url, api_key, extraction_model())
 }
 
-fn completion_config(
+fn legacy_openrouter_key(protocol: &str, base_url: Option<&str>) -> Option<String> {
+    if protocol != "openai" {
+        return None;
+    }
+    let host = base_url
+        .and_then(|value| reqwest::Url::parse(value).ok())
+        .and_then(|url| url.host_str().map(str::to_owned));
+    if host.as_deref() == Some("openrouter.ai") {
+        std::env::var("OPENROUTER_API_KEY").ok()
+    } else {
+        None
+    }
+}
+
+pub(crate) fn completion_config(
     protocol: &str,
     base_url: Option<String>,
     api_key: Option<String>,
@@ -423,6 +432,19 @@ fn completion_config(
             .base_url(base_url.unwrap_or_else(|| "https://api.anthropic.com".into()))),
         other => bail!("unsupported completion protocol: {other}"),
     }
+}
+
+pub(crate) fn completion_config_for_probe(
+    protocol: &str,
+    base_url: String,
+    model: String,
+    api_key: Option<String>,
+) -> Result<llm_relay::ClientConfig> {
+    let api_key = api_key
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| std::env::var("CHAT_API_KEY").ok())
+        .or_else(|| legacy_openrouter_key(protocol, Some(&base_url)));
+    completion_config(protocol, Some(base_url), api_key, model)
 }
 
 pub fn ensure_cloud_ai_allowed(feature: &str) -> Result<()> {

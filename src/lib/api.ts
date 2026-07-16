@@ -141,6 +141,15 @@ export function saveSettings(update: SettingsUpdate) {
   return invoke<SettingsSnapshot>("save_settings", { update });
 }
 
+export function testCompletionProvider(request: {
+  protocol: "openai" | "anthropic";
+  baseUrl: string;
+  model: string;
+  apiKey?: string;
+}) {
+  return invoke<{ latencyMs: number; response: string }>("test_completion_provider", { request });
+}
+
 export function restartApp() {
   return invoke<void>("restart_app");
 }

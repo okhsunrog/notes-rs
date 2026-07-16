@@ -4,7 +4,7 @@ use crate::embed::{EmbedderBackend, RerankBackend};
 use crate::sqlite::Connection;
 use anyhow::Context;
 use base64::Engine;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -29,6 +29,22 @@ pub struct BackgroundStatus {
     pub embeddings_failed: i64,
     pub extractions_pending: i64,
     pub extractions_failed: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderProbeRequest {
+    protocol: String,
+    base_url: String,
+    model: String,
+    api_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderProbeResult {
+    latency_ms: u128,
+    response: String,
 }
 
 /// Registered immediately in setup so the frontend can ask whether the heavy
@@ -79,6 +95,36 @@ pub fn save_settings(
     update: crate::settings::SettingsUpdate,
 ) -> Result<crate::settings::SettingsSnapshot, String> {
     crate::settings::save(&app, update).map_err(err)
+}
+
+#[tauri::command]
+pub async fn test_completion_provider(
+    request: ProviderProbeRequest,
+) -> Result<ProviderProbeResult, String> {
+    let mut config = crate::settings::completion_config_for_probe(
+        &request.protocol,
+        request.base_url,
+        request.model,
+        request.api_key,
+    )
+    .map_err(err)?
+    .timeout(std::time::Duration::from_secs(20))
+    .max_tokens(12);
+    config.retry_policy.max_retries = 0;
+    let client = llm_relay::LlmClient::new(config).map_err(err)?;
+    let started = std::time::Instant::now();
+    let response = client
+        .complete("Reply with exactly: OK", llm_relay::ChatOptions::default())
+        .await
+        .map_err(err)?;
+    let text = response.text();
+    if text.trim().is_empty() {
+        return Err("provider returned an empty response".into());
+    }
+    Ok(ProviderProbeResult {
+        latency_ms: started.elapsed().as_millis(),
+        response: text.chars().take(120).collect(),
+    })
 }
 
 #[tauri::command]
