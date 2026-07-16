@@ -1,4 +1,3 @@
-use crate::sqlite::Connection;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 #[cfg(feature = "local-models")]
@@ -6,6 +5,7 @@ use fastembed::{
     EmbeddingModel as FeModel, InitOptions, RerankInitOptions, RerankerModel, TextEmbedding,
     TextRerank,
 };
+use notes_core::{Connection, db};
 use rig::client::ProviderClient;
 use rig::embeddings::EmbeddingModel;
 use serde::Deserialize;
@@ -38,7 +38,7 @@ pub trait EmbedderBackend: Send + Sync {
 ///                   specific defaults for the known ones (OpenAI / Qwen).
 pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
     let provider = std::env::var("EMBED_PROVIDER").unwrap_or_else(|_| "openrouter".into());
-    if crate::settings::local_only() && !matches!(provider.as_str(), "local" | "fastembed") {
+    if crate::config::local_only() && !matches!(provider.as_str(), "local" | "fastembed") {
         bail!("AI_LOCAL_ONLY requires EMBED_PROVIDER=local");
     }
     let model_env = std::env::var("EMBED_MODEL").ok();
@@ -92,7 +92,7 @@ pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
                          set it explicitly (e.g. 4096 for qwen/qwen3-embedding-8b)"
                     )
                 })?;
-            let client = crate::settings::openrouter_client()?;
+            let client = crate::config::openrouter_client()?;
             let m = <openrouter::EmbeddingModel as EmbeddingModel>::make(
                 &client,
                 model.clone(),
@@ -428,7 +428,7 @@ pub trait RerankBackend: Send + Sync {
 
 pub fn make_reranker() -> Result<Arc<dyn RerankBackend>> {
     let provider = std::env::var("RERANK_PROVIDER").unwrap_or_else(|_| "openrouter".into());
-    if crate::settings::local_only() && !matches!(provider.as_str(), "local" | "fastembed") {
+    if crate::config::local_only() && !matches!(provider.as_str(), "local" | "fastembed") {
         bail!("AI_LOCAL_ONLY requires RERANK_PROVIDER=local");
     }
     let model_env = std::env::var("RERANK_MODEL").ok();
@@ -507,7 +507,7 @@ impl OpenRouterReranker {
     pub fn new(model: String) -> Result<Self> {
         let api_key = std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set")?;
         let base = std::env::var("OPENROUTER_BASE_URL")
-            .unwrap_or_else(|_| crate::settings::DEFAULT_OPENROUTER_BASE_URL.into());
+            .unwrap_or_else(|_| crate::config::DEFAULT_OPENROUTER_BASE_URL.into());
         Ok(Self {
             client: reqwest::Client::new(),
             api_key,
@@ -635,7 +635,7 @@ pub fn spawn_worker(conn: Connection, embedder: Arc<dyn EmbedderBackend>, paused
 }
 
 async fn tick(conn: &Connection, embedder: &dyn EmbedderBackend) -> Result<()> {
-    let batch = crate::db::take_pending_embeddings(conn, 16).await?;
+    let batch = db::take_pending_embeddings(conn, 16).await?;
     if batch.is_empty() {
         return Ok(());
     }
@@ -648,14 +648,8 @@ async fn tick(conn: &Connection, embedder: &dyn EmbedderBackend) -> Result<()> {
         Ok(embeddings) => embeddings,
         Err(error) => {
             let (kind, terminal) = classify_embedding_failure(&error);
-            crate::db::record_embedding_failure(
-                conn,
-                ids.clone(),
-                kind,
-                &error.to_string(),
-                terminal,
-            )
-            .await?;
+            db::record_embedding_failure(conn, ids.clone(), kind, &error.to_string(), terminal)
+                .await?;
             return Err(error.context("embedding batch failed; retry scheduled with backoff"));
         }
     };
@@ -670,13 +664,13 @@ async fn tick(conn: &Connection, embedder: &dyn EmbedderBackend) -> Result<()> {
             ids.len(),
             embedder.ndims()
         );
-        crate::db::record_embedding_failure(conn, ids.clone(), "schema", &error, true).await?;
+        db::record_embedding_failure(conn, ids.clone(), "schema", &error, true).await?;
         anyhow::bail!(error);
     }
     // A structural Undo/import can replace nodes while a network request is
     // in flight. Only commit vectors whose current composed input is exactly
     // the text sent to the provider.
-    let current_inputs = crate::db::take_pending_embeddings(conn, ids.len().max(16) as u32)
+    let current_inputs = db::take_pending_embeddings(conn, ids.len().max(16) as u32)
         .await?
         .into_iter()
         .collect::<std::collections::HashMap<_, _>>();
@@ -685,7 +679,7 @@ async fn tick(conn: &Connection, embedder: &dyn EmbedderBackend) -> Result<()> {
         .zip(embs)
         .filter(|(id, _)| current_inputs.get(id) == original_inputs.get(id))
         .collect();
-    crate::db::write_embeddings(conn, items).await?;
+    db::write_embeddings(conn, items).await?;
     Ok(())
 }
 

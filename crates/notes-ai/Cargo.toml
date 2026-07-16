@@ -1,0 +1,29 @@
+[package]
+name = "notes-ai"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Host-independent AI pipelines and agent for notes-rs"
+
+[features]
+default = []
+local-models = ["dep:fastembed"]
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+fastembed = { workspace = true, optional = true }
+futures.workspace = true
+llm-relay.workspace = true
+notes-core.workspace = true
+reqwest.workspace = true
+rig.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true

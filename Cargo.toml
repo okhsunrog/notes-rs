@@ -1,0 +1,39 @@
+[workspace]
+resolver = "3"
+members = ["crates/notes-core", "crates/notes-ai", "crates/notes-sync", "server", "src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["okhsunrog <me@okhsunrog.dev>"]
+repository = "https://github.com/okhsunrog/notes-rs"
+homepage = "https://github.com/okhsunrog/notes-rs"
+
+[workspace.dependencies]
+anyhow = "1.0.103"
+async-channel = "2.5.0"
+async-trait = "0.1.89"
+chrono = { version = "0.4.45", features = ["serde"] }
+futures = "0.3.32"
+fastembed = "5.17.3"
+llm-relay = { path = "../llm-relay", features = ["embeddings", "rig", "streaming"] }
+notes-ai = { path = "crates/notes-ai" }
+notes-core = { path = "crates/notes-core" }
+notes-sync = { path = "crates/notes-sync" }
+reqwest = { version = "0.13.4", default-features = false }
+rig = { package = "rig-core", version = "0.40.0" }
+rusqlite = { version = "0.40.1", default-features = false, features = [
+  "bundled",
+  "load_extension",
+] }
+rust-stemmers = "1.2.0"
+schemars = "1.2.1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+sha1 = "0.11.0"
+sqlite-vec = "0.1.9"
+tempfile = "3.27.0"
+thiserror = "2.0.18"
+tokio = { version = "1.52.4", features = ["full"] }
+tracing = "0.1.44"
+uuid = { version = "1.24.0", features = ["v4", "serde"] }

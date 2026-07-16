@@ -1,0 +1,13 @@
+[package]
+name = "notes-server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Self-hostable synchronization and AI host for notes-rs"
+
+[dependencies]
+notes-ai.workspace = true
+notes-core.workspace = true
+notes-sync.workspace = true

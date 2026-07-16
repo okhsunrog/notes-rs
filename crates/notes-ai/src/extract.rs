@@ -1,11 +1,10 @@
-use crate::sqlite::Connection;
 use anyhow::Result;
+use notes_core::{Connection, db};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::{AppHandle, Emitter};
 use tokio::time::{Duration, sleep};
 
 /// Stable change-detection hash of (title, content). Sha1 is fine here —
@@ -109,13 +108,19 @@ fn classify_failure(error: &anyhow::Error) -> (&'static str, bool) {
     ("configuration", true)
 }
 
+impl Default for EntityExtractor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EntityExtractor {
     pub fn new() -> Self {
         Self
     }
 
     pub async fn extract(&self, text: String) -> Result<ExtractionResult> {
-        let config = crate::settings::extraction_completion_config()?.max_tokens(2_048);
+        let config = crate::config::extraction_completion_config()?.max_tokens(2_048);
         let client = llm_relay::LlmClient::new(config)?;
         let response = client
             .complete_structured::<ExtractionResult>(&text, "entity_extraction", Some(PREAMBLE))
@@ -132,13 +137,13 @@ impl EntityExtractor {
 pub fn spawn_worker(
     conn: Connection,
     extractor: Arc<EntityExtractor>,
-    app: AppHandle,
+    on_entities_changed: Arc<dyn Fn() + Send + Sync>,
     paused: Arc<AtomicBool>,
 ) {
     tokio::spawn(async move {
         loop {
             if !paused.load(Ordering::Acquire)
-                && let Err(e) = tick(&conn, &extractor, &app).await
+                && let Err(e) = tick(&conn, &extractor, on_entities_changed.as_ref()).await
             {
                 tracing::warn!(error = ?e, "extract worker tick failed");
             }
@@ -147,39 +152,43 @@ pub fn spawn_worker(
     });
 }
 
-async fn tick(conn: &Connection, extractor: &EntityExtractor, app: &AppHandle) -> Result<()> {
-    let batch = crate::db::take_pending_extractions(conn, 1).await?;
+async fn tick(
+    conn: &Connection,
+    extractor: &EntityExtractor,
+    on_entities_changed: &(dyn Fn() + Send + Sync),
+) -> Result<()> {
+    let batch = db::take_pending_extractions(conn, 1).await?;
     for (node_id, title, content) in batch {
         let meaningful_text = format!("{}\n{content}", title.as_deref().unwrap_or(""));
         if meaningful_text.trim().chars().count() < 3 {
-            crate::db::finish_extraction(conn, node_id).await?;
+            db::finish_extraction(conn, node_id).await?;
             continue;
         }
         let new_hash = content_hash(title.as_deref(), &content);
         // Skip the LLM call if (title, content) is identical to the last
         // successful extraction — typo-fix cycles re-fire the update trigger
         // but produce no semantic change worth extracting again.
-        let prev_hash = crate::db::get_last_extracted_hash(conn, node_id).await?;
+        let prev_hash = db::get_last_extracted_hash(conn, node_id).await?;
         if prev_hash.as_deref() == Some(new_hash.as_str()) {
-            crate::db::finish_extraction(conn, node_id).await?;
+            db::finish_extraction(conn, node_id).await?;
             continue;
         }
         match extractor.extract(meaningful_text).await {
             Ok(result) => {
                 match apply(conn, node_id, title.clone(), content.clone(), result).await {
                     Ok(()) => {
-                        crate::db::set_last_extracted_hash(conn, node_id, new_hash).await?;
-                        crate::db::finish_extraction(conn, node_id).await?;
+                        db::set_last_extracted_hash(conn, node_id, new_hash).await?;
+                        db::finish_extraction(conn, node_id).await?;
                         // A replacement can add or remove the final mention,
                         // so refresh even when the new result is empty.
-                        let _ = app.emit("entities:changed", ());
+                        on_entities_changed();
                     }
                     Err(e) => {
                         tracing::warn!(node_id, error = ?e, "applying extraction failed");
                         // If the source changed while the request was in flight,
                         // its update trigger already replaced this queue row.
                         if !e.to_string().contains("source changed") {
-                            crate::db::record_extraction_failure(
+                            db::record_extraction_failure(
                                 conn,
                                 node_id,
                                 "apply",
@@ -194,7 +203,7 @@ async fn tick(conn: &Connection, extractor: &EntityExtractor, app: &AppHandle) -
             Err(e) => {
                 tracing::warn!(node_id, error = ?e, "extraction failed; will retry with backoff");
                 let (kind, terminal) = classify_failure(&e);
-                crate::db::record_extraction_failure(conn, node_id, kind, &e.to_string(), terminal)
+                db::record_extraction_failure(conn, node_id, kind, &e.to_string(), terminal)
                     .await?;
             }
         }
@@ -219,7 +228,7 @@ async fn apply(
         .into_iter()
         .map(|relation| (relation.src, relation.dst, relation.kind))
         .collect();
-    crate::db::replace_extracted_edges(
+    db::replace_extracted_edges(
         conn,
         source_id,
         expected_title,

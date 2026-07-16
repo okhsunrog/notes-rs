@@ -1,8 +1,8 @@
-use crate::db::{self, Node, SearchHit};
 use crate::embed::{EmbedderBackend, RerankBackend};
-use crate::sqlite::Connection;
 use futures::StreamExt;
 use llm_relay::RigClient;
+use notes_core::Connection;
+use notes_core::db::{self, Node, SearchHit};
 use rig::agent::MultiTurnStreamItem;
 use rig::client::CompletionClient;
 use rig::completion::{CompletionModel, Message, Prompt};
@@ -100,7 +100,7 @@ impl QueryRewriter {
     pub async fn rewrite(&self, query: &str) -> String {
         if self.history_text.is_empty()
             || !looks_contextual(query)
-            || !crate::settings::query_rewriting_enabled()
+            || !crate::config::query_rewriting_enabled()
         {
             return query.to_string();
         }
@@ -115,7 +115,7 @@ impl QueryRewriter {
     }
 
     async fn try_rewrite(&self, query: &str) -> anyhow::Result<String> {
-        crate::settings::ensure_cloud_ai_allowed("query rewriting")?;
+        crate::config::ensure_cloud_ai_allowed("query rewriting")?;
         let prompt = format!(
             "Conversation history:\n{history}\nSearch query: {query}\n\n\
              Rewrite the query into a fully standalone form that resolves \
@@ -127,7 +127,7 @@ impl QueryRewriter {
             history = self.history_text,
             query = query,
         );
-        let config = crate::settings::chat_completion_config()?;
+        let config = crate::config::chat_completion_config()?;
         match config.rig_client()? {
             RigClient::OpenAi(client) => {
                 rewrite_with_model(client.completion_model(&config.model), prompt).await
@@ -889,7 +889,7 @@ fn build_agent<M: CompletionModel + 'static>(
     allow_writes: bool,
     active_node_id: Option<i64>,
 ) -> Result<rig::agent::Agent<M>, AgentError> {
-    crate::settings::ensure_cloud_ai_allowed("chat").map_err(AgentError::from)?;
+    crate::config::ensure_cloud_ai_allowed("chat").map_err(AgentError::from)?;
     let preamble = active_node_id.map_or_else(
         || SYSTEM_PROMPT.to_string(),
         |id| {
@@ -935,7 +935,7 @@ pub async fn run_chat(
     reranker: Arc<dyn RerankBackend>,
     message: String,
 ) -> Result<String, AgentError> {
-    let config = crate::settings::chat_completion_config().map_err(AgentError::from)?;
+    let config = crate::config::chat_completion_config().map_err(AgentError::from)?;
     match config
         .rig_client()
         .map_err(anyhow::Error::from)
@@ -1066,7 +1066,7 @@ pub async fn run_chat_stream(
             "chat history exceeds the 24-turn or 32000-character budget".into(),
         ));
     }
-    let config = crate::settings::chat_completion_config().map_err(AgentError::from)?;
+    let config = crate::config::chat_completion_config().map_err(AgentError::from)?;
     let emit: Arc<dyn Fn(ChatEvent) + Send + Sync> = Arc::new(emit);
     match config
         .rig_client()

@@ -1,0 +1,25 @@
+[package]
+name = "notes-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Domain model and SQLite storage engine for notes-rs"
+
+[dependencies]
+anyhow.workspace = true
+async-channel.workspace = true
+chrono.workspace = true
+rusqlite.workspace = true
+rust-stemmers.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlite-vec.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true

@@ -3179,39 +3179,87 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0676bb32a98c1a483ce53e500a81ad9c3d5b3f7c920c28c24e9cb0980d0b5bc8"
 
 [[package]]
-name = "notes-rs"
+name = "notes-ai"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-channel",
  "async-trait",
- "base64 0.22.1",
- "chrono",
- "dotenvy",
  "fastembed",
  "futures",
- "gtk",
  "llm-relay",
+ "notes-core",
  "reqwest 0.13.4",
  "rig-core",
- "rusqlite",
- "rust-stemmers",
  "schemars 1.2.1",
  "serde",
  "serde_json",
  "sha1 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "notes-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "chrono",
+ "rusqlite",
+ "rust-stemmers",
+ "serde",
+ "serde_json",
  "sqlite-vec",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "notes-rs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "dotenvy",
+ "futures",
+ "gtk",
+ "llm-relay",
+ "notes-ai",
+ "notes-core",
+ "notes-sync",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-mcp-bridge",
  "tauri-plugin-opener",
  "tempfile",
- "thiserror 2.0.18",
- "tokio",
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "notes-server"
+version = "0.1.0"
+dependencies = [
+ "notes-ai",
+ "notes-core",
+ "notes-sync",
+]
+
+[[package]]
+name = "notes-sync"
+version = "0.1.0"
+dependencies = [
+ "notes-core",
+ "serde",
 ]
 
 [[package]]

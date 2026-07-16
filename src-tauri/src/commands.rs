@@ -1,10 +1,10 @@
-use crate::agent::{ChatEvent, ChatTurn};
-use crate::db::{self, Node, SearchHit};
-use crate::embed::{EmbedderBackend, RerankBackend};
-use crate::sqlite::Connection;
 use anyhow::Context;
 use base64::Engine;
 use futures::StreamExt;
+use notes_ai::agent::{self, ChatEvent, ChatTurn};
+use notes_ai::embed::{EmbedderBackend, RerankBackend};
+use notes_core::Connection;
+use notes_core::db::{self, Node, SearchHit};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1010,7 +1010,7 @@ fn validate_search_request(query: &str, limit: u32) -> Result<u32, String> {
 
 #[tauri::command]
 pub async fn chat(state: State<'_, AppState>, message: String) -> Result<String, String> {
-    crate::agent::run_chat(
+    agent::run_chat(
         state.conn.clone(),
         state.embedder.clone(),
         state.reranker.clone(),
@@ -1052,7 +1052,7 @@ pub async fn chat_stream(
     let emit = move |ev: ChatEvent| {
         let _ = on_event.send(ev);
     };
-    let result = crate::agent::run_chat_stream(
+    let result = agent::run_chat_stream(
         state.conn.clone(),
         state.embedder.clone(),
         state.reranker.clone(),

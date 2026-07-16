@@ -1,12 +1,8 @@
-mod agent;
 mod commands;
-mod db;
-mod embed;
-mod extract;
 mod settings;
-mod sqlite;
-mod stem;
 
+use notes_ai::{embed, extract};
+use notes_core::db;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 use tauri::{Emitter, Manager};
@@ -88,12 +84,15 @@ pub fn run() {
                             embedder.clone(),
                             background_paused.clone(),
                         );
-                        if settings::entity_extraction_enabled() {
+                        if notes_ai::config::entity_extraction_enabled() {
                             let extractor = Arc::new(extract::EntityExtractor::new());
+                            let event_handle = handle.clone();
                             extract::spawn_worker(
                                 conn.clone(),
                                 extractor,
-                                handle.clone(),
+                                Arc::new(move || {
+                                    let _ = event_handle.emit("entities:changed", ());
+                                }),
                                 background_paused.clone(),
                             );
                         } else {
