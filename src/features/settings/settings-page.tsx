@@ -413,7 +413,7 @@ export function SettingsPage({
             checked={settings.entityExtractionEnabled}
             disabled={settings.localOnly}
             label="Automatic entity extraction"
-            description="Sends changed note text to the configured OpenRouter endpoint to build entity and relation edges."
+            description="Sends changed note text to the configured extraction endpoint to build entity and relation edges."
             onChange={(checked) => update("entityExtractionEnabled", checked)}
           />
           <ToggleField

@@ -109,7 +109,7 @@ pub async fn test_completion_provider(
     )
     .map_err(err)?
     .timeout(std::time::Duration::from_secs(20))
-    .max_tokens(12);
+    .max_tokens(64);
     config.retry_policy.max_retries = 0;
     let client = llm_relay::LlmClient::new(config).map_err(err)?;
     let started = std::time::Instant::now();
