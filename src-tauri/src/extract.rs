@@ -130,15 +130,13 @@ async fn tick(conn: &Connection, extractor: &EntityExtractor, app: &AppHandle) -
         let text = format!("{}\n{content}", title.as_deref().unwrap_or(""));
         match extractor.extract(text).await {
             Ok(result) => {
-                let had_entities = !result.entities.is_empty();
                 match apply(conn, node_id, result).await {
                     Ok(()) => {
                         crate::db::set_last_extracted_hash(conn, node_id, new_hash).await?;
                         crate::db::finish_extraction(conn, node_id).await?;
-                        if had_entities {
-                            // Wake the UI so the entities sidebar refreshes without polling.
-                            let _ = app.emit("entities:changed", ());
-                        }
+                        // A replacement can add or remove the final mention,
+                        // so refresh even when the new result is empty.
+                        let _ = app.emit("entities:changed", ());
                     }
                     Err(e) => {
                         tracing::warn!(node_id, error = ?e, "applying extraction failed");
@@ -156,23 +154,15 @@ async fn tick(conn: &Connection, extractor: &EntityExtractor, app: &AppHandle) -
 }
 
 async fn apply(conn: &Connection, source_id: i64, result: ExtractionResult) -> Result<()> {
-    use std::collections::HashMap;
-    let mut name_to_id: HashMap<String, i64> = HashMap::new();
-
-    for ent in result.entities {
-        let id = crate::db::upsert_entity(conn, ent.name.clone(), ent.description).await?;
-        name_to_id.insert(ent.name.to_lowercase(), id);
-        crate::db::link_nodes(conn, source_id, id, "mentions".into(), 1.0).await?;
-    }
-
-    for rel in result.relations {
-        let src = name_to_id.get(&rel.src.to_lowercase()).copied();
-        let dst = name_to_id.get(&rel.dst.to_lowercase()).copied();
-        if let (Some(s), Some(d)) = (src, dst)
-            && s != d
-        {
-            crate::db::link_nodes(conn, s, d, rel.kind, 1.0).await?;
-        }
-    }
-    Ok(())
+    let entities = result
+        .entities
+        .into_iter()
+        .map(|entity| (entity.name, entity.description))
+        .collect();
+    let relations = result
+        .relations
+        .into_iter()
+        .map(|relation| (relation.src, relation.dst, relation.kind))
+        .collect();
+    crate::db::replace_extracted_edges(conn, source_id, entities, relations).await
 }

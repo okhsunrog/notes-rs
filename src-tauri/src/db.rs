@@ -1,5 +1,6 @@
 use crate::sqlite::Connection;
 use anyhow::{Context, Result};
+use rusqlite::OptionalExtension;
 use rusqlite::ffi::sqlite3_auto_extension;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -38,7 +39,7 @@ pub async fn open(path: impl AsRef<Path>, embedder_id: &str, ndims: usize) -> Re
     Ok(conn)
 }
 
-const CURRENT_SCHEMA_VERSION: i64 = 2;
+const CURRENT_SCHEMA_VERSION: i64 = 3;
 
 async fn migrate(conn: &Connection, ndims: usize) -> Result<()> {
     let schema = SCHEMA_V1.replace("{NDIMS}", &ndims.to_string());
@@ -47,6 +48,11 @@ async fn migrate(conn: &Connection, ndims: usize) -> Result<()> {
         // The complete schema contains indexes and triggers that reference
         // newer columns, so it must only run after the idempotent ALTERs.
         c.execute_batch(NODES_BOOTSTRAP)?;
+        let previous_version = c
+            .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                row.get::<_, Option<i64>>(0)
+            })?
+            .unwrap_or(1);
 
         let has_content_json: bool = c
             .prepare("SELECT 1 FROM pragma_table_info('nodes') WHERE name = 'content_json'")?
@@ -99,6 +105,32 @@ async fn migrate(conn: &Connection, ndims: usize) -> Result<()> {
             c.execute_batch(
                 "ALTER TABLE extract_queue ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;
                  ALTER TABLE extract_queue ADD COLUMN last_attempt INTEGER;",
+            )?;
+        }
+        let embed_has_retry_count: bool = c
+            .prepare("SELECT 1 FROM pragma_table_info('embed_queue') WHERE name = 'retry_count'")?
+            .exists([])?;
+        if !embed_has_retry_count {
+            c.execute_batch(
+                "ALTER TABLE embed_queue ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE embed_queue ADD COLUMN last_attempt INTEGER;",
+            )?;
+        }
+        if previous_version < 3 {
+            // Earlier extraction runs had no provenance, so stale semantic
+            // edges could not be removed safely. Rebuild only generated graph
+            // edges and queue every source for a clean extraction pass.
+            c.execute_batch(
+                "DELETE FROM edges
+                   WHERE kind = 'mentions'
+                      OR (src IN (SELECT id FROM nodes WHERE kind = 'entity')
+                          AND dst IN (SELECT id FROM nodes WHERE kind = 'entity'));
+                 DELETE FROM extracted_edge_sources;
+                 UPDATE nodes SET last_extracted_hash = NULL
+                   WHERE kind IN ('page', 'block');
+                 INSERT OR REPLACE INTO extract_queue(node_id, enqueued_at, retry_count, last_attempt)
+                   SELECT id, unixepoch(), 0, NULL FROM nodes
+                   WHERE kind IN ('page', 'block');",
             )?;
         }
         // Ancestor-aware embedding requires re-embed on parent move; install
@@ -329,6 +361,15 @@ CREATE TABLE IF NOT EXISTS edges (
 CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src, kind);
 CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst, kind);
 
+-- Records which source note caused an extracted edge to exist. Relations
+-- between two entities cannot otherwise be cleaned up when their source note
+-- changes, because the edge itself does not point back to that note.
+CREATE TABLE IF NOT EXISTS extracted_edge_sources (
+  source_node_id INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+  edge_id INTEGER NOT NULL REFERENCES edges(id) ON DELETE CASCADE,
+  PRIMARY KEY(source_node_id, edge_id)
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
   body_stemmed,
   content='nodes', content_rowid='id',
@@ -358,7 +399,9 @@ CREATE TABLE IF NOT EXISTS embed_meta (
 
 CREATE TABLE IF NOT EXISTS embed_queue (
   node_id INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
-  enqueued_at INTEGER NOT NULL
+  enqueued_at INTEGER NOT NULL,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  last_attempt INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS extract_queue (
@@ -523,6 +566,129 @@ pub async fn link_nodes(
         Ok(())
     })
     .await?;
+    Ok(())
+}
+
+/// Atomically replace every entity/relation edge produced from one source
+/// note. `extracted_edge_sources` gives entity-to-entity relations provenance,
+/// allowing later edits to remove relations that are no longer present.
+pub async fn replace_extracted_edges(
+    conn: &Connection,
+    source_id: i64,
+    entities: Vec<(String, Option<String>)>,
+    relations: Vec<(String, String, String)>,
+) -> Result<()> {
+    conn.call(move |c| -> rusqlite::Result<()> {
+        let tx = c.transaction()?;
+
+        let old_edges = {
+            let mut statement =
+                tx.prepare("SELECT edge_id FROM extracted_edge_sources WHERE source_node_id = ?1")?;
+            statement
+                .query_map([source_id], |row| row.get::<_, i64>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        tx.execute(
+            "DELETE FROM extracted_edge_sources WHERE source_node_id = ?1",
+            [source_id],
+        )?;
+        for edge_id in old_edges {
+            tx.execute(
+                "DELETE FROM edges
+                   WHERE id = ?1
+                     AND NOT EXISTS (
+                       SELECT 1 FROM extracted_edge_sources WHERE edge_id = ?1
+                     )",
+                [edge_id],
+            )?;
+        }
+
+        let now = chrono::Utc::now().timestamp();
+        let mut entity_ids = std::collections::HashMap::new();
+        for (raw_name, description) in entities {
+            let name = raw_name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            let existing = tx
+                .query_row(
+                    "SELECT id FROM nodes
+                       WHERE kind = 'entity' AND lower(title) = lower(?1)
+                       LIMIT 1",
+                    [name],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?;
+            let entity_id = if let Some(id) = existing {
+                if let Some(description) = description.as_deref().filter(|value| !value.is_empty())
+                {
+                    let body = crate::stem::stem(&format!("{name}\n{description}"));
+                    tx.execute(
+                        "UPDATE nodes SET content = ?2, body_stemmed = ?3, updated_at = ?4
+                           WHERE id = ?1",
+                        rusqlite::params![id, description, body, now],
+                    )?;
+                }
+                id
+            } else {
+                let uuid = uuid::Uuid::new_v4().to_string();
+                let description = description.unwrap_or_default();
+                let body = crate::stem::stem(&format!("{name}\n{description}"));
+                tx.execute(
+                    "INSERT INTO nodes
+                       (uuid, kind, title, content, body_stemmed, created_at, updated_at)
+                     VALUES (?1, 'entity', ?2, ?3, ?4, ?5, ?5)",
+                    rusqlite::params![uuid, name, description, body, now],
+                )?;
+                tx.last_insert_rowid()
+            };
+            entity_ids.insert(name.to_lowercase(), entity_id);
+            insert_extracted_edge(&tx, source_id, source_id, entity_id, "mentions", now)?;
+        }
+
+        for (raw_src, raw_dst, raw_kind) in relations {
+            let Some(src) = entity_ids.get(&raw_src.trim().to_lowercase()).copied() else {
+                continue;
+            };
+            let Some(dst) = entity_ids.get(&raw_dst.trim().to_lowercase()).copied() else {
+                continue;
+            };
+            let kind = raw_kind.trim();
+            if src != dst && !kind.is_empty() {
+                insert_extracted_edge(&tx, source_id, src, dst, kind, now)?;
+            }
+        }
+
+        tx.commit()?;
+        Ok(())
+    })
+    .await
+}
+
+fn insert_extracted_edge(
+    tx: &rusqlite::Transaction<'_>,
+    source_id: i64,
+    src: i64,
+    dst: i64,
+    kind: &str,
+    now: i64,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO edges (src, dst, kind, weight, created_at)
+         VALUES (?1, ?2, ?3, 1.0, ?4)
+         ON CONFLICT(src, dst, kind) DO UPDATE SET weight = excluded.weight",
+        rusqlite::params![src, dst, kind, now],
+    )?;
+    let edge_id = tx.query_row(
+        "SELECT id FROM edges WHERE src = ?1 AND dst = ?2 AND kind = ?3",
+        rusqlite::params![src, dst, kind],
+        |row| row.get::<_, i64>(0),
+    )?;
+    tx.execute(
+        "INSERT OR IGNORE INTO extracted_edge_sources(source_node_id, edge_id)
+         VALUES (?1, ?2)",
+        rusqlite::params![source_id, edge_id],
+    )?;
     Ok(())
 }
 
@@ -1118,6 +1284,47 @@ pub async fn move_block(
     let now = chrono::Utc::now().timestamp();
     let node = conn
         .call(move |c| -> rusqlite::Result<Node> {
+            let source_kind: String =
+                c.query_row("SELECT kind FROM nodes WHERE id = ?1", [id], |row| {
+                    row.get(0)
+                })?;
+            if source_kind != "block" {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "only block nodes can be moved".into(),
+                ));
+            }
+            if let Some(parent_id) = new_parent_id {
+                if parent_id == id {
+                    return Err(rusqlite::Error::InvalidParameterName(
+                        "a block cannot be its own parent".into(),
+                    ));
+                }
+                let parent_kind: String =
+                    c.query_row("SELECT kind FROM nodes WHERE id = ?1", [parent_id], |row| {
+                        row.get(0)
+                    })?;
+                if !matches!(parent_kind.as_str(), "page" | "block") {
+                    return Err(rusqlite::Error::InvalidParameterName(
+                        "a block parent must be a page or block".into(),
+                    ));
+                }
+                let creates_cycle: bool = c.query_row(
+                    "WITH RECURSIVE descendants(id) AS (
+                       SELECT id FROM nodes WHERE parent_id = ?1
+                       UNION ALL
+                       SELECT n.id FROM nodes n
+                         JOIN descendants d ON n.parent_id = d.id
+                     )
+                     SELECT EXISTS(SELECT 1 FROM descendants WHERE id = ?2)",
+                    rusqlite::params![id, parent_id],
+                    |row| row.get(0),
+                )?;
+                if creates_cycle {
+                    return Err(rusqlite::Error::InvalidParameterName(
+                        "a block cannot be moved under one of its descendants".into(),
+                    ));
+                }
+            }
             let pos: f64 = match new_position {
                 Some(p) => p,
                 None => match new_parent_id {
@@ -1132,6 +1339,18 @@ pub async fn move_block(
             c.execute(
                 "UPDATE nodes SET parent_id = ?2, position = ?3, updated_at = ?4 WHERE id = ?1",
                 rusqlite::params![id, new_parent_id, pos, now],
+            )?;
+            // Embedding text includes the whole ancestor chain, so every
+            // descendant becomes stale when the subtree moves.
+            c.execute(
+                "WITH RECURSIVE subtree(id) AS (
+                   SELECT ?1
+                   UNION ALL
+                   SELECT n.id FROM nodes n JOIN subtree s ON n.parent_id = s.id
+                 )
+                 INSERT OR REPLACE INTO embed_queue(node_id, enqueued_at)
+                   SELECT id, unixepoch() FROM subtree",
+                [id],
             )?;
             let sql = format!("SELECT {NODE_COLUMNS} FROM nodes WHERE id = ?1");
             let mut stmt = c.prepare(&sql)?;
@@ -1247,12 +1466,18 @@ pub async fn get_or_create_page_by_title(conn: &Connection, title: String) -> Re
 /// direct parent's content gives the embedder enough signal to disambiguate.
 type EmbedChainRow = (i64, i32, Option<String>, String);
 
+pub const EMBED_MAX_ATTEMPTS: i64 = 8;
+pub const EMBED_BACKOFF_BASE_SECS: i64 = 5;
+
 pub async fn take_pending_embeddings(conn: &Connection, batch: u32) -> Result<Vec<(i64, String)>> {
     let rows = conn
         .call(move |c| -> rusqlite::Result<Vec<EmbedChainRow>> {
             let mut stmt = c.prepare(
                 "WITH batch(node_id) AS (
                    SELECT node_id FROM embed_queue
+                   WHERE retry_count < ?2
+                     AND (last_attempt IS NULL
+                          OR unixepoch() - last_attempt >= ?3 * (1 << retry_count))
                    ORDER BY enqueued_at ASC LIMIT ?1
                  ),
                  chain(qid, id, parent_id, title, content, depth) AS (
@@ -1266,14 +1491,17 @@ pub async fn take_pending_embeddings(conn: &Connection, batch: u32) -> Result<Ve
                  ORDER BY qid, depth",
             )?;
             let rows = stmt
-                .query_map([batch as i64], |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, i32>(1)?,
-                        r.get::<_, Option<String>>(2)?,
-                        r.get::<_, String>(3)?,
-                    ))
-                })?
+                .query_map(
+                    rusqlite::params![batch as i64, EMBED_MAX_ATTEMPTS, EMBED_BACKOFF_BASE_SECS],
+                    |r| {
+                        Ok((
+                            r.get::<_, i64>(0)?,
+                            r.get::<_, i32>(1)?,
+                            r.get::<_, Option<String>>(2)?,
+                            r.get::<_, String>(3)?,
+                        ))
+                    },
+                )?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
         })
@@ -1297,6 +1525,26 @@ pub async fn take_pending_embeddings(conn: &Connection, batch: u32) -> Result<Ve
         out.push((qid, compose_embed_text(&chain)));
     }
     Ok(out)
+}
+
+pub async fn record_embedding_failure(conn: &Connection, node_ids: Vec<i64>) -> Result<()> {
+    if node_ids.is_empty() {
+        return Ok(());
+    }
+    conn.call(move |c| -> rusqlite::Result<()> {
+        let transaction = c.transaction()?;
+        for node_id in node_ids {
+            transaction.execute(
+                "UPDATE embed_queue
+                   SET retry_count = retry_count + 1, last_attempt = unixepoch()
+                   WHERE node_id = ?1",
+                [node_id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    })
+    .await
 }
 
 /// Compose ancestor-aware embedding text. `chain` is ordered depth-ascending
@@ -1456,40 +1704,6 @@ pub async fn record_extraction_failure(conn: &Connection, node_id: i64) -> Resul
     Ok(())
 }
 
-/// Upsert an entity by (kind='entity', lower(title)). Returns the node id.
-pub async fn upsert_entity(
-    conn: &Connection,
-    title: String,
-    description: Option<String>,
-) -> Result<i64> {
-    let now = chrono::Utc::now().timestamp();
-    let id = conn
-        .call(move |c| -> rusqlite::Result<i64> {
-            let mut stmt = c.prepare(
-                "SELECT id FROM nodes
-                 WHERE kind = 'entity' AND lower(title) = lower(?1)
-                 LIMIT 1",
-            )?;
-            let mut rows = stmt.query([&title])?;
-            if let Some(r) = rows.next()? {
-                return r.get::<_, i64>(0);
-            }
-            drop(rows);
-            drop(stmt);
-            let uuid = uuid::Uuid::new_v4().to_string();
-            let desc = description.as_deref().unwrap_or("");
-            let body = crate::stem::stem(&format!("{title}\n{desc}"));
-            c.execute(
-                "INSERT INTO nodes (uuid, kind, title, content, body_stemmed, created_at, updated_at)
-                 VALUES (?1, 'entity', ?2, ?3, ?4, ?5, ?5)",
-                rusqlite::params![&uuid, &title, desc, &body, now],
-            )?;
-            Ok(c.last_insert_rowid())
-        })
-        .await?;
-    Ok(id)
-}
-
 pub async fn write_embeddings(conn: &Connection, items: Vec<(i64, Vec<f32>)>) -> Result<()> {
     if items.is_empty() {
         return Ok(());
@@ -1515,6 +1729,14 @@ pub async fn write_embeddings(conn: &Connection, items: Vec<(i64, Vec<f32>)>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn temporary_database() -> (tempfile::NamedTempFile, Connection) {
+        let database = tempfile::NamedTempFile::new().expect("create temporary database");
+        let connection = open(database.path(), "test:4d", 4)
+            .await
+            .expect("open temporary database");
+        (database, connection)
+    }
 
     #[tokio::test]
     async fn migrates_legacy_nodes_before_creating_new_indexes_and_triggers() {
@@ -1557,5 +1779,71 @@ mod tests {
         ] {
             assert!(columns.iter().any(|column| column == expected));
         }
+    }
+
+    #[tokio::test]
+    async fn refuses_to_move_a_block_into_its_descendant() {
+        let (_database, connection) = temporary_database().await;
+        let page = create_node(
+            &connection,
+            "page".into(),
+            Some("Page".into()),
+            String::new(),
+            None,
+        )
+        .await
+        .expect("create page");
+        let parent = create_block(&connection, Some(page.id), None, "parent".into(), None)
+            .await
+            .expect("create parent");
+        let child = create_block(&connection, Some(parent.id), None, "child".into(), None)
+            .await
+            .expect("create child");
+
+        let error = move_block(&connection, parent.id, Some(child.id), None)
+            .await
+            .expect_err("cycle must be rejected");
+        assert!(error.to_string().contains("descendants"));
+    }
+
+    #[tokio::test]
+    async fn replacing_extraction_removes_stale_mentions_and_relations() {
+        let (_database, connection) = temporary_database().await;
+        let source = create_node(
+            &connection,
+            "page".into(),
+            Some("Source".into()),
+            String::new(),
+            None,
+        )
+        .await
+        .expect("create source");
+        replace_extracted_edges(
+            &connection,
+            source.id,
+            vec![
+                ("Rust".into(), Some("language".into())),
+                ("Tauri".into(), Some("framework".into())),
+            ],
+            vec![("Tauri".into(), "Rust".into(), "uses".into())],
+        )
+        .await
+        .expect("apply extraction");
+
+        replace_extracted_edges(&connection, source.id, Vec::new(), Vec::new())
+            .await
+            .expect("clear extraction");
+        let generated_edges: i64 = connection
+            .call(|database| {
+                database.query_row(
+                    "SELECT COUNT(*) FROM edges
+                     WHERE kind = 'mentions' OR kind = 'uses'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .expect("count generated edges");
+        assert_eq!(generated_edges, 0);
     }
 }

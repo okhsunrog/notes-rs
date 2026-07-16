@@ -6,8 +6,7 @@ mod extract;
 mod sqlite;
 mod stem;
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 use tauri::{Emitter, Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -51,35 +50,56 @@ pub fn run() {
             // poll/listen instead of invoking commands that would otherwise
             // fail with an opaque "state not managed" error during the
             // (slow, first-run) embedder model download.
-            let ready = Arc::new(AtomicBool::new(false));
+            let startup = Arc::new(RwLock::new(commands::StartupStatus::Starting {
+                message: "Opening database and loading search providers…".into(),
+            }));
             handle.manage(commands::Startup {
-                ready: ready.clone(),
+                status: startup.clone(),
             });
 
             tauri::async_runtime::spawn(async move {
-                let embedder = embed::make_embedder().expect("loading embedder");
-                let id = embedder.id();
-                let ndims = embedder.ndims();
-                tracing::info!(embedder = %id, ndims, "embedder loaded");
-                let conn = db::open(&db_path, &id, ndims).await.expect("opening db");
-                let reranker = embed::make_reranker().expect("loading reranker");
-                embed::spawn_worker(conn.clone(), embedder.clone());
-                let extractor = Arc::new(extract::EntityExtractor::new());
-                extract::spawn_worker(conn.clone(), extractor, handle.clone());
-                handle.manage(commands::AppState {
-                    conn,
-                    embedder,
-                    reranker,
-                });
-                ready.store(true, Ordering::Release);
-                let _ = handle.emit("app:ready", ());
-                tracing::info!(?db_path, "notes-rs ready");
+                let initialize = async {
+                    let embedder = embed::make_embedder()?;
+                    let id = embedder.id();
+                    let ndims = embedder.ndims();
+                    tracing::info!(embedder = %id, ndims, "embedder loaded");
+                    let conn = db::open(&db_path, &id, ndims).await?;
+                    let reranker = embed::make_reranker()?;
+                    anyhow::Ok((conn, embedder, reranker))
+                };
+
+                match initialize.await {
+                    Ok((conn, embedder, reranker)) => {
+                        embed::spawn_worker(conn.clone(), embedder.clone());
+                        let extractor = Arc::new(extract::EntityExtractor::new());
+                        extract::spawn_worker(conn.clone(), extractor, handle.clone());
+                        handle.manage(commands::AppState {
+                            conn,
+                            embedder,
+                            reranker,
+                        });
+                        *startup.write().unwrap_or_else(|e| e.into_inner()) =
+                            commands::StartupStatus::Ready;
+                        let _ = handle.emit("app:ready", ());
+                        tracing::info!(?db_path, "notes-rs ready");
+                    }
+                    Err(error) => {
+                        let message = format!("{error:#}");
+                        tracing::error!(%message, "notes-rs startup failed");
+                        *startup.write().unwrap_or_else(|e| e.into_inner()) =
+                            commands::StartupStatus::Error {
+                                message: message.clone(),
+                            };
+                        let _ = handle.emit("app:startup-error", message);
+                    }
+                }
             });
 
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::is_ready,
+            commands::startup_status,
             commands::create_node,
             commands::update_node,
             commands::link_nodes,

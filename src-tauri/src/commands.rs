@@ -2,8 +2,8 @@ use crate::agent::{ChatEvent, ChatTurn};
 use crate::db::{self, Node, SearchHit};
 use crate::embed::{EmbedderBackend, RerankBackend};
 use crate::sqlite::Connection;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use serde::Serialize;
+use std::sync::{Arc, RwLock};
 use tauri::State;
 use tauri::ipc::Channel;
 
@@ -18,7 +18,15 @@ pub struct AppState {
 /// commands invoked during the ~minutes-long first-run model fetch fail with
 /// an opaque "state not managed" error.
 pub struct Startup {
-    pub ready: Arc<AtomicBool>,
+    pub status: Arc<RwLock<StartupStatus>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum StartupStatus {
+    Starting { message: String },
+    Ready,
+    Error { message: String },
 }
 
 fn err<E: std::fmt::Display>(e: E) -> String {
@@ -27,7 +35,19 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 
 #[tauri::command]
 pub fn is_ready(state: State<'_, Startup>) -> bool {
-    state.ready.load(Ordering::Acquire)
+    matches!(
+        *state.status.read().unwrap_or_else(|e| e.into_inner()),
+        StartupStatus::Ready
+    )
+}
+
+#[tauri::command]
+pub fn startup_status(state: State<'_, Startup>) -> StartupStatus {
+    state
+        .status
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
 }
 
 #[tauri::command]

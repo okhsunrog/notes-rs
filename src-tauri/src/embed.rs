@@ -389,7 +389,26 @@ async fn tick(conn: &Connection, embedder: &dyn EmbedderBackend) -> Result<()> {
         return Ok(());
     }
     let (ids, texts): (Vec<i64>, Vec<String>) = batch.into_iter().unzip();
-    let embs = embedder.embed_passages(texts).await?;
+    let embs = match embedder.embed_passages(texts).await {
+        Ok(embeddings) => embeddings,
+        Err(error) => {
+            crate::db::record_embedding_failure(conn, ids.clone()).await?;
+            return Err(error.context("embedding batch failed; retry scheduled with backoff"));
+        }
+    };
+    let valid = embs.len() == ids.len()
+        && embs
+            .iter()
+            .all(|embedding| embedding.len() == embedder.ndims());
+    if !valid {
+        crate::db::record_embedding_failure(conn, ids.clone()).await?;
+        anyhow::bail!(
+            "embedding provider returned {} vectors for {} nodes or an unexpected dimension (expected {})",
+            embs.len(),
+            ids.len(),
+            embedder.ndims()
+        );
+    }
     let items: Vec<(i64, Vec<f32>)> = ids.into_iter().zip(embs).collect();
     crate::db::write_embeddings(conn, items).await?;
     Ok(())
