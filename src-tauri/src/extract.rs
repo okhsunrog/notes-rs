@@ -71,6 +71,44 @@ pub struct ExtractionResult {
 
 pub struct EntityExtractor;
 
+fn classify_failure(error: &anyhow::Error) -> (&'static str, bool) {
+    if let Some(error) = error.downcast_ref::<llm_relay::LlmError>() {
+        return match error {
+            llm_relay::LlmError::ApiError { status, .. }
+                if matches!(*status, 408 | 429) || *status >= 500 =>
+            {
+                ("transient", false)
+            }
+            llm_relay::LlmError::ApiError {
+                status: 401 | 403, ..
+            } => ("auth", true),
+            llm_relay::LlmError::ApiError { .. } => ("provider_request", true),
+            llm_relay::LlmError::InvalidStructuredOutput { .. }
+            | llm_relay::LlmError::ParseResponse(_) => ("schema", false),
+            llm_relay::LlmError::Config(_) | llm_relay::LlmError::ResponseTooLarge { .. } => {
+                ("configuration", true)
+            }
+            llm_relay::LlmError::Request(request) => {
+                if request.is_timeout() || request.is_connect() {
+                    ("network", false)
+                } else if request
+                    .status()
+                    .is_some_and(|status| status.is_client_error())
+                {
+                    ("provider_request", true)
+                } else {
+                    ("network", false)
+                }
+            }
+            llm_relay::LlmError::Client(_) => ("configuration", true),
+            llm_relay::LlmError::EmptyResponse
+            | llm_relay::LlmError::Conversion(_)
+            | llm_relay::LlmError::Stream(_) => ("provider_response", false),
+        };
+    }
+    ("configuration", true)
+}
+
 impl EntityExtractor {
     pub fn new() -> Self {
         Self
@@ -138,13 +176,26 @@ async fn tick(conn: &Connection, extractor: &EntityExtractor, app: &AppHandle) -
                     }
                     Err(e) => {
                         tracing::warn!(node_id, error = ?e, "applying extraction failed");
-                        crate::db::record_extraction_failure(conn, node_id).await?;
+                        // If the source changed while the request was in flight,
+                        // its update trigger already replaced this queue row.
+                        if !e.to_string().contains("source changed") {
+                            crate::db::record_extraction_failure(
+                                conn,
+                                node_id,
+                                "apply",
+                                &e.to_string(),
+                                true,
+                            )
+                            .await?;
+                        }
                     }
                 }
             }
             Err(e) => {
                 tracing::warn!(node_id, error = ?e, "extraction failed; will retry with backoff");
-                crate::db::record_extraction_failure(conn, node_id).await?;
+                let (kind, terminal) = classify_failure(&e);
+                crate::db::record_extraction_failure(conn, node_id, kind, &e.to_string(), terminal)
+                    .await?;
             }
         }
     }

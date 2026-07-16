@@ -22,6 +22,17 @@ export type BackgroundStatus = {
   embeddingsFailed: number;
   extractionsPending: number;
   extractionsFailed: number;
+  failures: BackgroundFailure[];
+};
+export type BackgroundFailure = {
+  queue: "embedding" | "extraction";
+  nodeId: number;
+  nodeTitle: string | null;
+  retryCount: number;
+  lastAttempt: number | null;
+  failureKind: string;
+  lastError: string;
+  terminal: boolean;
 };
 export type Mode = "fts" | "vec" | "hybrid" | "agentic";
 export type StartupStatus =

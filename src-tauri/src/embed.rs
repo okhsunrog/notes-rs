@@ -584,6 +584,43 @@ impl RerankBackend for OpenRouterReranker {
 
 // ───────────────────────── worker ─────────────────────────
 
+fn classify_embedding_failure(error: &anyhow::Error) -> (&'static str, bool) {
+    for cause in error.chain() {
+        if let Some(request) = cause.downcast_ref::<reqwest::Error>() {
+            if request.is_timeout() || request.is_connect() {
+                return ("network", false);
+            }
+            if let Some(status) = request.status() {
+                return if matches!(status.as_u16(), 408 | 429) || status.is_server_error() {
+                    ("transient", false)
+                } else if matches!(status.as_u16(), 401 | 403) {
+                    ("auth", true)
+                } else {
+                    ("provider_request", true)
+                };
+            }
+        }
+        if let Some(relay) = cause.downcast_ref::<llm_relay::LlmError>() {
+            return match relay {
+                llm_relay::LlmError::ApiError { status, .. }
+                    if matches!(*status, 408 | 429) || *status >= 500 =>
+                {
+                    ("transient", false)
+                }
+                llm_relay::LlmError::ApiError {
+                    status: 401 | 403, ..
+                } => ("auth", true),
+                llm_relay::LlmError::ApiError { .. } => ("provider_request", true),
+                llm_relay::LlmError::Config(_)
+                | llm_relay::LlmError::Client(_)
+                | llm_relay::LlmError::ResponseTooLarge { .. } => ("configuration", true),
+                _ => ("provider_response", false),
+            };
+        }
+    }
+    ("provider_response", false)
+}
+
 pub fn spawn_worker(conn: Connection, embedder: Arc<dyn EmbedderBackend>, paused: Arc<AtomicBool>) {
     tokio::spawn(async move {
         loop {
@@ -610,7 +647,15 @@ async fn tick(conn: &Connection, embedder: &dyn EmbedderBackend) -> Result<()> {
     let embs = match embedder.embed_passages(texts).await {
         Ok(embeddings) => embeddings,
         Err(error) => {
-            crate::db::record_embedding_failure(conn, ids.clone()).await?;
+            let (kind, terminal) = classify_embedding_failure(&error);
+            crate::db::record_embedding_failure(
+                conn,
+                ids.clone(),
+                kind,
+                &error.to_string(),
+                terminal,
+            )
+            .await?;
             return Err(error.context("embedding batch failed; retry scheduled with backoff"));
         }
     };
@@ -619,13 +664,14 @@ async fn tick(conn: &Connection, embedder: &dyn EmbedderBackend) -> Result<()> {
             .iter()
             .all(|embedding| embedding.len() == embedder.ndims());
     if !valid {
-        crate::db::record_embedding_failure(conn, ids.clone()).await?;
-        anyhow::bail!(
+        let error = format!(
             "embedding provider returned {} vectors for {} nodes or an unexpected dimension (expected {})",
             embs.len(),
             ids.len(),
             embedder.ndims()
         );
+        crate::db::record_embedding_failure(conn, ids.clone(), "schema", &error, true).await?;
+        anyhow::bail!(error);
     }
     // A structural Undo/import can replace nodes while a network request is
     // in flight. Only commit vectors whose current composed input is exactly

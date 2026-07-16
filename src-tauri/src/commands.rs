@@ -29,6 +29,7 @@ pub struct BackgroundStatus {
     pub embeddings_failed: i64,
     pub extractions_pending: i64,
     pub extractions_failed: i64,
+    pub failures: Vec<db::BackgroundFailure>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -137,10 +138,11 @@ pub async fn background_status(state: State<'_, AppState>) -> Result<BackgroundS
     let queues = db::queue_status(&state.conn).await.map_err(err)?;
     Ok(BackgroundStatus {
         paused: state.background_paused.load(Ordering::Acquire),
-        embeddings_pending: queues.0,
-        embeddings_failed: queues.1,
-        extractions_pending: queues.2,
-        extractions_failed: queues.3,
+        embeddings_pending: queues.embeddings_pending,
+        embeddings_failed: queues.embeddings_failed,
+        extractions_pending: queues.extractions_pending,
+        extractions_failed: queues.extractions_failed,
+        failures: queues.failures,
     })
 }
 

@@ -39,7 +39,7 @@ pub async fn open(path: impl AsRef<Path>, embedder_id: &str, ndims: usize) -> Re
     Ok(conn)
 }
 
-const CURRENT_SCHEMA_VERSION: i64 = 4;
+const CURRENT_SCHEMA_VERSION: i64 = 5;
 
 async fn migrate(conn: &Connection, ndims: usize) -> Result<()> {
     let schema = SCHEMA_V1.replace("{NDIMS}", &ndims.to_string());
@@ -106,6 +106,20 @@ async fn migrate(conn: &Connection, ndims: usize) -> Result<()> {
                 "ALTER TABLE extract_queue ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;
                  ALTER TABLE extract_queue ADD COLUMN last_attempt INTEGER;",
             )?;
+        }
+        for table in ["extract_queue", "embed_queue"] {
+            let has_last_error: bool = c
+                .prepare(&format!(
+                    "SELECT 1 FROM pragma_table_info('{table}') WHERE name = 'last_error'"
+                ))?
+                .exists([])?;
+            if !has_last_error {
+                c.execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN last_error TEXT;
+                     ALTER TABLE {table} ADD COLUMN failure_kind TEXT;
+                     ALTER TABLE {table} ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0;"
+                ))?;
+            }
         }
         let embed_has_retry_count: bool = c
             .prepare("SELECT 1 FROM pragma_table_info('embed_queue') WHERE name = 'retry_count'")?
@@ -435,14 +449,20 @@ CREATE TABLE IF NOT EXISTS embed_queue (
   node_id INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
   enqueued_at INTEGER NOT NULL,
   retry_count INTEGER NOT NULL DEFAULT 0,
-  last_attempt INTEGER
+  last_attempt INTEGER,
+  last_error TEXT,
+  failure_kind TEXT,
+  terminal INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS extract_queue (
   node_id INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
   enqueued_at INTEGER NOT NULL,
   retry_count INTEGER NOT NULL DEFAULT 0,
-  last_attempt INTEGER
+  last_attempt INTEGER,
+  last_error TEXT,
+  failure_kind TEXT,
+  terminal INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TRIGGER IF NOT EXISTS nodes_ai_extract
@@ -2227,13 +2247,35 @@ type EmbedChainRow = (i64, i32, Option<String>, String);
 pub const EMBED_MAX_ATTEMPTS: i64 = 8;
 pub const EMBED_BACKOFF_BASE_SECS: i64 = 5;
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundFailure {
+    pub queue: String,
+    pub node_id: i64,
+    pub node_title: Option<String>,
+    pub retry_count: i64,
+    pub last_attempt: Option<i64>,
+    pub failure_kind: String,
+    pub last_error: String,
+    pub terminal: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueStatus {
+    pub embeddings_pending: i64,
+    pub embeddings_failed: i64,
+    pub extractions_pending: i64,
+    pub extractions_failed: i64,
+    pub failures: Vec<BackgroundFailure>,
+}
+
 pub async fn take_pending_embeddings(conn: &Connection, batch: u32) -> Result<Vec<(i64, String)>> {
     let rows = conn
         .call(move |c| -> rusqlite::Result<Vec<EmbedChainRow>> {
             let mut stmt = c.prepare(
                 "WITH batch(node_id) AS (
                    SELECT node_id FROM embed_queue
-                   WHERE retry_count < ?2
+                   WHERE terminal = 0 AND retry_count < ?2
                      AND (last_attempt IS NULL
                           OR unixepoch() - last_attempt >= ?3 * (1 << retry_count))
                    ORDER BY enqueued_at ASC LIMIT ?1
@@ -2285,18 +2327,30 @@ pub async fn take_pending_embeddings(conn: &Connection, batch: u32) -> Result<Ve
     Ok(out)
 }
 
-pub async fn record_embedding_failure(conn: &Connection, node_ids: Vec<i64>) -> Result<()> {
+pub async fn record_embedding_failure(
+    conn: &Connection,
+    node_ids: Vec<i64>,
+    failure_kind: &str,
+    error: &str,
+    terminal: bool,
+) -> Result<()> {
     if node_ids.is_empty() {
         return Ok(());
     }
+    let failure_kind = failure_kind.to_string();
+    let error: String = error.chars().take(2_000).collect();
     conn.call(move |c| -> rusqlite::Result<()> {
         let transaction = c.transaction()?;
         for node_id in node_ids {
             transaction.execute(
                 "UPDATE embed_queue
-                   SET retry_count = retry_count + 1, last_attempt = unixepoch()
+                   SET retry_count = retry_count + 1,
+                       last_attempt = unixepoch(),
+                       failure_kind = ?2,
+                       last_error = ?3,
+                       terminal = ?4
                    WHERE node_id = ?1",
-                [node_id],
+                rusqlite::params![node_id, failure_kind, error, terminal],
             )?;
         }
         transaction.commit()?;
@@ -2305,17 +2359,62 @@ pub async fn record_embedding_failure(conn: &Connection, node_ids: Vec<i64>) -> 
     .await
 }
 
-pub async fn queue_status(conn: &Connection) -> Result<(i64, i64, i64, i64)> {
-    conn.call(|database| -> rusqlite::Result<(i64, i64, i64, i64)> {
-        database.query_row(
+pub async fn queue_status(conn: &Connection) -> Result<QueueStatus> {
+    conn.call(|database| -> rusqlite::Result<QueueStatus> {
+        let counts = database.query_row(
             "SELECT
                (SELECT COUNT(*) FROM embed_queue),
                (SELECT COUNT(*) FROM embed_queue WHERE retry_count > 0),
                (SELECT COUNT(*) FROM extract_queue),
                (SELECT COUNT(*) FROM extract_queue WHERE retry_count > 0)",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )?;
+        let mut statement = database.prepare(
+            "SELECT queue, node_id, title, retry_count, last_attempt,
+                    COALESCE(failure_kind, 'unknown'), COALESCE(last_error, ''), terminal
+             FROM (
+               SELECT 'embedding' AS queue, q.node_id, n.title, q.retry_count,
+                      q.last_attempt, q.failure_kind, q.last_error, q.terminal
+                 FROM embed_queue q JOIN nodes n ON n.id = q.node_id
+                WHERE q.retry_count > 0
+               UNION ALL
+               SELECT 'extraction', q.node_id, n.title, q.retry_count,
+                      q.last_attempt, q.failure_kind, q.last_error, q.terminal
+                 FROM extract_queue q JOIN nodes n ON n.id = q.node_id
+                WHERE q.retry_count > 0
+             )
+             ORDER BY terminal DESC, last_attempt DESC, queue, node_id
+             LIMIT 50",
+        )?;
+        let failures = statement
+            .query_map([], |row| {
+                Ok(BackgroundFailure {
+                    queue: row.get(0)?,
+                    node_id: row.get(1)?,
+                    node_title: row.get(2)?,
+                    retry_count: row.get(3)?,
+                    last_attempt: row.get(4)?,
+                    failure_kind: row.get(5)?,
+                    last_error: row.get(6)?,
+                    terminal: row.get::<_, i64>(7)? != 0,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(QueueStatus {
+            embeddings_pending: counts.0,
+            embeddings_failed: counts.1,
+            extractions_pending: counts.2,
+            extractions_failed: counts.3,
+            failures,
+        })
     })
     .await
 }
@@ -2323,8 +2422,12 @@ pub async fn queue_status(conn: &Connection) -> Result<(i64, i64, i64, i64)> {
 pub async fn retry_background_jobs(conn: &Connection) -> Result<()> {
     conn.call(|database| -> rusqlite::Result<()> {
         database.execute_batch(
-            "UPDATE embed_queue SET retry_count = 0, last_attempt = NULL;
-             UPDATE extract_queue SET retry_count = 0, last_attempt = NULL;",
+            "UPDATE embed_queue
+                SET retry_count = 0, last_attempt = NULL, last_error = NULL,
+                    failure_kind = NULL, terminal = 0;
+             UPDATE extract_queue
+                SET retry_count = 0, last_attempt = NULL, last_error = NULL,
+                    failure_kind = NULL, terminal = 0;",
         )
     })
     .await
@@ -2411,7 +2514,7 @@ pub async fn take_pending_extractions(
                 let mut stmt = c.prepare(
                     "SELECT n.id, n.title, n.content
                  FROM extract_queue q JOIN nodes n ON n.id = q.node_id
-                 WHERE q.retry_count < ?2
+                 WHERE q.terminal = 0 AND q.retry_count < ?2
                    AND (q.last_attempt IS NULL
                         OR unixepoch() - q.last_attempt >= ?3 * (1 << q.retry_count))
                  ORDER BY q.enqueued_at ASC
@@ -2480,13 +2583,29 @@ pub async fn set_last_extracted_hash(conn: &Connection, node_id: i64, hash: Stri
 
 /// Mark an extraction attempt as failed: bump retry_count and stamp
 /// last_attempt. The row stays in the queue; backoff governs the next try.
-pub async fn record_extraction_failure(conn: &Connection, node_id: i64) -> Result<()> {
+pub async fn record_extraction_failure(
+    conn: &Connection,
+    node_id: i64,
+    failure_kind: &str,
+    error: &str,
+    terminal: bool,
+) -> Result<()> {
+    let failure_kind = failure_kind.to_string();
+    let error: String = error.chars().take(2_000).collect();
     conn.call(move |c| -> rusqlite::Result<()> {
         c.execute(
             "UPDATE extract_queue
-             SET retry_count = retry_count + 1, last_attempt = unixepoch()
+             SET retry_count = retry_count + 1,
+                 last_attempt = unixepoch(),
+                 failure_kind = ?2,
+                 last_error = ?3,
+                 terminal = CASE
+                   WHEN ?4 THEN 1
+                   WHEN ?2 = 'schema' AND retry_count + 1 >= 2 THEN 1
+                   ELSE 0
+                 END
              WHERE node_id = ?1",
-            [node_id],
+            rusqlite::params![node_id, failure_kind, error, terminal],
         )?;
         Ok(())
     })
@@ -2997,33 +3116,72 @@ mod tests {
         )
         .await
         .expect("create queued page");
-        record_embedding_failure(&connection, vec![page.id])
-            .await
-            .expect("record embedding failure");
-        record_extraction_failure(&connection, page.id)
-            .await
-            .expect("record extraction failure");
+        record_embedding_failure(
+            &connection,
+            vec![page.id],
+            "network",
+            "connection timed out",
+            false,
+        )
+        .await
+        .expect("record embedding failure");
+        record_extraction_failure(
+            &connection,
+            page.id,
+            "provider_request",
+            "model unavailable",
+            true,
+        )
+        .await
+        .expect("record extraction failure");
         let status = queue_status(&connection).await.expect("read queue status");
-        assert_eq!(status, (1, 1, 1, 1));
+        assert_eq!(status.embeddings_pending, 1);
+        assert_eq!(status.embeddings_failed, 1);
+        assert_eq!(status.extractions_pending, 1);
+        assert_eq!(status.extractions_failed, 1);
+        assert_eq!(status.failures.len(), 2);
+        assert!(
+            status
+                .failures
+                .iter()
+                .any(|failure| failure.terminal && failure.last_error == "model unavailable")
+        );
 
         retry_background_jobs(&connection)
             .await
             .expect("retry queues");
-        assert_eq!(
-            queue_status(&connection)
-                .await
-                .expect("read retried queues"),
-            (1, 0, 1, 0)
-        );
+        let status = queue_status(&connection)
+            .await
+            .expect("read retried queues");
+        assert_eq!(status.embeddings_pending, 1);
+        assert_eq!(status.embeddings_failed, 0);
+        assert_eq!(status.extractions_pending, 1);
+        assert_eq!(status.extractions_failed, 0);
+        assert!(status.failures.is_empty());
+
+        record_extraction_failure(&connection, page.id, "schema", "invalid JSON", false)
+            .await
+            .expect("record first schema mismatch");
+        record_extraction_failure(&connection, page.id, "schema", "invalid JSON again", false)
+            .await
+            .expect("record second schema mismatch");
+        let status = queue_status(&connection)
+            .await
+            .expect("read terminal schema failure");
+        assert!(status.failures[0].terminal);
+        assert_eq!(status.failures[0].failure_kind, "schema");
+
         clear_background_jobs(&connection)
             .await
             .expect("clear queues");
-        assert_eq!(
-            queue_status(&connection)
-                .await
-                .expect("read cleared queues"),
-            (0, 0, 0, 0)
-        );
+        let status = queue_status(&connection)
+            .await
+            .expect("read cleared queues");
+        assert_eq!(status.embeddings_pending, 0);
+        assert_eq!(status.embeddings_failed, 0);
+        assert_eq!(status.extractions_pending, 0);
+        assert_eq!(status.extractions_failed, 0);
+        assert!(status.failures.is_empty());
     }
 
     #[tokio::test]
