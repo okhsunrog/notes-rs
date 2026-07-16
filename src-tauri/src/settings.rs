@@ -361,16 +361,26 @@ pub fn save(app: &AppHandle, update: SettingsUpdate) -> Result<SettingsSnapshot>
     load(app)
 }
 
+#[cfg(not(mobile))]
 pub fn apply_saved_window_preferences(app: &AppHandle) -> Result<()> {
     let settings = load(app)?;
     apply_window_decorations(app, &settings.window_decoration_mode)
 }
 
 fn apply_window_decorations(app: &AppHandle, mode: &WindowDecorationMode) -> Result<()> {
-    app.get_webview_window("main")
-        .context("main window is unavailable")?
-        .set_decorations(*mode != WindowDecorationMode::Borderless)
-        .context("applying window decorations")
+    #[cfg(not(mobile))]
+    {
+        app.get_webview_window("main")
+            .context("main window is unavailable")?
+            .set_decorations(*mode != WindowDecorationMode::Borderless)
+            .context("applying window decorations")
+    }
+
+    #[cfg(mobile)]
+    {
+        let _ = (app, mode);
+        Ok(())
+    }
 }
 
 fn validate(update: &SettingsUpdate) -> Result<()> {

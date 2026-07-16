@@ -771,12 +771,24 @@ async fn write_backup(
 #[tauri::command]
 #[specta::specta]
 pub fn choose_sync_directory(app: AppHandle) -> CommandResult<Option<std::path::PathBuf>> {
-    app.dialog()
-        .file()
-        .blocking_pick_folder()
-        .map(|path| path.into_path())
-        .transpose()
-        .map_err(err)
+    #[cfg(not(mobile))]
+    {
+        app.dialog()
+            .file()
+            .blocking_pick_folder()
+            .map(|path| path.into_path())
+            .transpose()
+            .map_err(err)
+    }
+
+    #[cfg(mobile)]
+    {
+        let _ = app;
+        Err(
+            "directory-based sync is unavailable on mobile; configure the sync server instead"
+                .into(),
+        )
+    }
 }
 
 #[tauri::command]

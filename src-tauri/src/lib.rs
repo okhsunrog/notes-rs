@@ -106,7 +106,7 @@ pub fn run() {
 
     // Development-only bridge for MCP-powered UI inspection and automation.
     // Restrict it to localhost; release builds do not register the plugin.
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, not(mobile)))]
     let builder = builder.plugin(
         tauri_plugin_mcp_bridge::Builder::new()
             .bind_address("127.0.0.1")
@@ -129,6 +129,7 @@ pub fn run() {
                 Err(dotenvy::Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => tracing::warn!(?env_path, error = %e, "failed to load .env"),
             }
+            #[cfg(not(mobile))]
             if let Err(error) = settings::apply_saved_window_preferences(&handle) {
                 tracing::warn!(%error, "failed to apply saved window preferences");
             }
