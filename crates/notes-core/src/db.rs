@@ -43,7 +43,7 @@ pub async fn open(path: impl AsRef<Path>, embedder_id: &str, ndims: usize) -> Re
     Ok(conn)
 }
 
-const CURRENT_SCHEMA_VERSION: i64 = 6;
+const CURRENT_SCHEMA_VERSION: i64 = 7;
 
 async fn migrate(conn: &Connection, ndims: usize) -> Result<()> {
     let schema = SCHEMA_V1.replace("{NDIMS}", &ndims.to_string());
@@ -104,10 +104,32 @@ async fn migrate(conn: &Connection, ndims: usize) -> Result<()> {
                 c.execute_batch(&format!("ALTER TABLE nodes ADD COLUMN {column} TEXT;"))?;
             }
         }
+        let tombstones_exist: bool = c
+            .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tombstones'")?
+            .exists([])?;
+        let tombstones_have_root = tombstones_exist
+            && c.prepare("SELECT 1 FROM pragma_table_info('tombstones') WHERE name = 'root_uuid'")?
+                .exists([])?;
+        if tombstones_exist && !tombstones_have_root {
+            c.execute_batch("ALTER TABLE tombstones ADD COLUMN root_uuid TEXT;")?;
+        }
 
         // All referenced node columns now exist, so indexes, triggers, queues,
         // FTS and vector tables can be created safely.
         c.execute_batch(&schema)?;
+
+        if previous_version < 7 {
+            c.execute_batch(
+                "INSERT OR IGNORE INTO edge_lww(src_uuid, dst_uuid, kind, hlc, present, weight)
+                 SELECT src.uuid, dst.uuid, edges.kind,
+                        '0000000000000000-00000000-00000000000000000000000000000000',
+                        1, edges.weight
+                   FROM edges
+                   JOIN nodes src ON src.id = edges.src
+                   JOIN nodes dst ON dst.id = edges.dst
+                  WHERE edges.kind NOT IN ('refs', 'mentions', 'attachment');",
+            )?;
+        }
 
         // Drop dead node_properties (never written to). Reintroduce when we
         // have a real properties write path.
@@ -450,7 +472,27 @@ CREATE TABLE IF NOT EXISTS applied_ops (
 );
 CREATE TABLE IF NOT EXISTS tombstones (
   uuid TEXT PRIMARY KEY,
-  deleted_hlc TEXT NOT NULL
+  deleted_hlc TEXT NOT NULL,
+  root_uuid TEXT
+);
+CREATE TABLE IF NOT EXISTS edge_lww (
+  src_uuid TEXT NOT NULL,
+  dst_uuid TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  hlc TEXT NOT NULL,
+  present INTEGER NOT NULL,
+  weight REAL NOT NULL,
+  PRIMARY KEY(src_uuid, dst_uuid, kind)
+);
+CREATE TABLE IF NOT EXISTS attachment_lww (
+  node_uuid TEXT NOT NULL,
+  blob_hash TEXT NOT NULL,
+  hlc TEXT NOT NULL,
+  present INTEGER NOT NULL,
+  filename TEXT,
+  mime TEXT,
+  size INTEGER,
+  PRIMARY KEY(node_uuid, blob_hash)
 );
 CREATE TABLE IF NOT EXISTS sync_meta (
   key TEXT PRIMARY KEY,
@@ -1145,14 +1187,16 @@ pub(crate) fn replace_block_refs_tx_at(
             Some(id) => id,
             None => {
                 let uuid = page_uuid(title);
+                let id = stable_node_id(&uuid)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
                 tx.execute(
-                    "INSERT INTO nodes (uuid, kind, title, content, content_json,
+                    "INSERT INTO nodes (id, uuid, kind, title, content, content_json,
                                         body_stemmed, parent_id, position,
                                         created_at, updated_at)
-                     VALUES (?1, 'page', ?2, '', NULL, '', NULL, NULL, ?3, ?3)",
-                    rusqlite::params![uuid, title, now],
+                     VALUES (?1, ?2, 'page', ?3, '', NULL, '', NULL, NULL, ?4, ?4)",
+                    rusqlite::params![id, uuid, title, now],
                 )?;
-                tx.last_insert_rowid()
+                id
             }
         };
         if page_id != block_id {
@@ -1196,6 +1240,18 @@ pub(crate) fn page_uuid(title: &str) -> String {
         format!("notes-rs:page:{}", title.trim().to_lowercase()).as_bytes(),
     )
     .to_string()
+}
+
+pub(crate) fn stable_node_id(uuid: &str) -> Result<i64, uuid::Error> {
+    let uuid = uuid::Uuid::parse_str(uuid)?;
+    let mut high = [0_u8; 8];
+    let mut low = [0_u8; 8];
+    high.copy_from_slice(&uuid.as_bytes()[..8]);
+    low.copy_from_slice(&uuid.as_bytes()[8..]);
+    // Tauri sends IDs through JavaScript, so keep them inside Number's exact
+    // integer range while retaining 53 bits of UUID-derived entropy.
+    let value = (u64::from_be_bytes(high) ^ u64::from_be_bytes(low)) & ((1_u64 << 53) - 1);
+    Ok(value.max(1) as i64)
 }
 
 pub async fn get_node(conn: &Connection, id: i64) -> Result<Option<Node>> {
@@ -1641,7 +1697,7 @@ pub async fn list_block_children(conn: &Connection, parent_id: i64) -> Result<Ve
             let sql = format!(
                 "SELECT {NODE_COLUMNS} FROM nodes
                  WHERE parent_id = ?1
-                 ORDER BY position ASC, id ASC"
+                 ORDER BY position ASC, uuid ASC"
             );
             let mut stmt = c.prepare(&sql)?;
             let rows = stmt

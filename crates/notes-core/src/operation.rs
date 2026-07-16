@@ -1,6 +1,6 @@
 //! Versioned, UUID-addressed source operations and the single apply boundary.
 
-use crate::{Connection, db};
+use crate::{Connection, Hlc, db};
 use anyhow::{Context, Result, bail};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -17,7 +17,7 @@ pub enum Origin {
 pub struct Op {
     pub op_id: String,
     pub device_id: String,
-    pub hlc: String,
+    pub hlc: Hlc,
     pub format_version: u32,
     #[serde(flatten)]
     pub kind: OpKind,
@@ -110,6 +110,60 @@ pub struct ApplyOutcome {
     pub affected_uuids: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SyncSnapshot {
+    pub format_version: u32,
+    pub seq: u64,
+    pub nodes: Vec<SnapshotNode>,
+    pub tombstones: Vec<SnapshotTombstone>,
+    pub edges: Vec<SnapshotEdge>,
+    pub attachments: Vec<SnapshotAttachment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SnapshotNode {
+    pub uuid: String,
+    pub kind: String,
+    pub title: Option<String>,
+    pub content: String,
+    pub content_json: Option<String>,
+    pub parent_uuid: Option<String>,
+    pub position: Option<f64>,
+    pub content_hlc: Option<Hlc>,
+    pub title_hlc: Option<Hlc>,
+    pub structure_hlc: Option<Hlc>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SnapshotTombstone {
+    pub uuid: String,
+    pub deleted_hlc: Hlc,
+    pub root_uuid: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SnapshotEdge {
+    pub src_uuid: String,
+    pub dst_uuid: String,
+    pub kind: String,
+    pub hlc: Hlc,
+    pub present: bool,
+    pub weight: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SnapshotAttachment {
+    pub node_uuid: String,
+    pub blob_hash: String,
+    pub hlc: Hlc,
+    pub present: bool,
+    pub filename: Option<String>,
+    pub mime: Option<String>,
+    pub size: Option<u64>,
+}
+
 /// Allocate monotonically increasing local HLCs and wrap operation payloads.
 pub async fn local_ops(conn: &Connection, kinds: Vec<OpKind>) -> Result<Vec<Op>> {
     if kinds.is_empty() {
@@ -125,32 +179,28 @@ pub async fn local_ops(conn: &Connection, kinds: Vec<OpKind>) -> Result<Vec<Op>>
                 |row| row.get::<_, String>(0),
             )
             .optional()?
-            .and_then(|value| parse_hlc(&value).map(|(wall, counter, _)| (wall, counter)));
+            .and_then(|value| value.parse::<Hlc>().ok());
         let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
-        let (wall, mut counter) = previous.map_or((now, 0), |(wall, counter)| {
-            if wall >= now {
-                (wall, counter.saturating_add(1))
-            } else {
-                (now, 0)
-            }
-        });
+        let device_uuid = uuid::Uuid::parse_str(&device_id)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         let mut operations = Vec::with_capacity(kinds.len());
+        let mut clock = previous;
         for kind in kinds {
-            let hlc = format_hlc(wall, counter, &device_id);
+            let hlc = Hlc::send(clock.as_ref(), now, device_uuid);
             operations.push(Op {
                 op_id: uuid::Uuid::new_v4().to_string(),
                 device_id: device_id.clone(),
-                hlc,
+                hlc: hlc.clone(),
                 format_version: FORMAT_VERSION,
                 kind,
             });
-            counter = counter.saturating_add(1);
+            clock = Some(hlc);
         }
         if let Some(last) = operations.last() {
             transaction.execute(
                 "INSERT INTO sync_meta(key, value) VALUES ('last_hlc', ?1)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                [&last.hlc],
+                [&last.hlc.to_string()],
             )?;
         }
         transaction.commit()?;
@@ -162,6 +212,369 @@ pub async fn local_ops(conn: &Connection, kinds: Vec<OpKind>) -> Result<Vec<Op>>
 pub async fn apply(conn: &Connection, op: &Op, origin: Origin) -> Result<ApplyOutcome> {
     let mut outcomes = apply_batch(conn, std::slice::from_ref(op), origin).await?;
     Ok(outcomes.pop().unwrap_or_default())
+}
+
+pub async fn configure_sync(conn: &Connection, server_url: &str) -> Result<()> {
+    let server_url = server_url.trim().to_string();
+    conn.call(move |database| {
+        database.execute(
+            "INSERT INTO sync_meta(key, value) VALUES ('server_url', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [server_url],
+        )?;
+        Ok(())
+    })
+    .await
+}
+
+pub async fn sync_cursor(conn: &Connection) -> Result<u64> {
+    let value = conn
+        .call(|database| {
+            database
+                .query_row(
+                    "SELECT value FROM sync_meta WHERE key = 'last_server_seq'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+        })
+        .await?;
+    value.map_or(Ok(0), |value| {
+        value
+            .parse()
+            .context("invalid last_server_seq in sync_meta")
+    })
+}
+
+pub async fn pending_outbox(conn: &Connection, limit: u32) -> Result<Vec<Op>> {
+    conn.call(move |database| {
+        let mut statement =
+            database.prepare("SELECT envelope FROM sync_outbox ORDER BY rowid LIMIT ?1")?;
+        let envelopes = statement
+            .query_map([limit], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        envelopes
+            .into_iter()
+            .map(|envelope| {
+                serde_json::from_str(&envelope).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            })
+            .collect()
+    })
+    .await
+}
+
+pub async fn apply_sequenced(conn: &Connection, seq: u64, op: &Op) -> Result<ApplyOutcome> {
+    let outcome = apply(conn, op, Origin::Remote).await?;
+    acknowledge_server_op(conn, &op.op_id, seq).await?;
+    advance_sync_cursor(conn, seq).await?;
+    Ok(outcome)
+}
+
+pub async fn acknowledge_server_op(conn: &Connection, op_id: &str, seq: u64) -> Result<()> {
+    let op_id = op_id.to_string();
+    conn.call(move |database| {
+        let transaction = database.transaction()?;
+        transaction.execute(
+            "UPDATE applied_ops SET seq = ?2 WHERE op_id = ?1",
+            rusqlite::params![op_id, seq as i64],
+        )?;
+        transaction.execute("DELETE FROM sync_outbox WHERE op_id = ?1", [&op_id])?;
+        transaction.commit()?;
+        Ok(())
+    })
+    .await
+}
+
+pub async fn export_sync_snapshot(conn: &Connection, seq: u64) -> Result<SyncSnapshot> {
+    conn.call(move |database| {
+        let nodes = {
+            let mut statement = database.prepare(
+                "SELECT n.uuid, n.kind, n.title, n.content, n.content_json, parent.uuid,
+                        n.position, n.content_hlc, n.title_hlc, n.structure_hlc,
+                        n.created_at, n.updated_at
+                   FROM nodes n LEFT JOIN nodes parent ON parent.id = n.parent_id
+                  WHERE n.kind IN ('page', 'block') ORDER BY n.uuid",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok(SnapshotNode {
+                        uuid: row.get(0)?,
+                        kind: row.get(1)?,
+                        title: row.get(2)?,
+                        content: row.get(3)?,
+                        content_json: row.get(4)?,
+                        parent_uuid: row.get(5)?,
+                        position: row.get(6)?,
+                        content_hlc: optional_sql_hlc(row.get(7)?, 7)?,
+                        title_hlc: optional_sql_hlc(row.get(8)?, 8)?,
+                        structure_hlc: optional_sql_hlc(row.get(9)?, 9)?,
+                        created_at: row.get(10)?,
+                        updated_at: row.get(11)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let tombstones = {
+            let mut statement = database
+                .prepare("SELECT uuid, deleted_hlc, root_uuid FROM tombstones ORDER BY uuid")?;
+            statement
+                .query_map([], |row| {
+                    Ok(SnapshotTombstone {
+                        uuid: row.get(0)?,
+                        deleted_hlc: sql_hlc(row.get(1)?, 1)?,
+                        root_uuid: row.get(2)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let edges = {
+            let mut statement = database.prepare(
+                "SELECT src_uuid, dst_uuid, kind, hlc, present, weight
+                   FROM edge_lww ORDER BY src_uuid, dst_uuid, kind",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok(SnapshotEdge {
+                        src_uuid: row.get(0)?,
+                        dst_uuid: row.get(1)?,
+                        kind: row.get(2)?,
+                        hlc: sql_hlc(row.get(3)?, 3)?,
+                        present: row.get(4)?,
+                        weight: row.get(5)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let attachments = {
+            let mut statement = database.prepare(
+                "SELECT node_uuid, blob_hash, hlc, present, filename, mime, size
+                   FROM attachment_lww ORDER BY node_uuid, blob_hash",
+            )?;
+            statement
+                .query_map([], |row| {
+                    let size = row.get::<_, Option<i64>>(6)?;
+                    Ok(SnapshotAttachment {
+                        node_uuid: row.get(0)?,
+                        blob_hash: row.get(1)?,
+                        hlc: sql_hlc(row.get(2)?, 2)?,
+                        present: row.get(3)?,
+                        filename: row.get(4)?,
+                        mime: row.get(5)?,
+                        size: size.and_then(|size| u64::try_from(size).ok()),
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        Ok(SyncSnapshot {
+            format_version: FORMAT_VERSION,
+            seq,
+            nodes,
+            tombstones,
+            edges,
+            attachments,
+        })
+    })
+    .await
+}
+
+pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> Result<()> {
+    if snapshot.format_version != FORMAT_VERSION {
+        bail!(
+            "unsupported snapshot format version {}",
+            snapshot.format_version
+        );
+    }
+    for node in &snapshot.nodes {
+        require_uuid(&node.uuid)?;
+        if let Some(parent_uuid) = &node.parent_uuid {
+            require_uuid(parent_uuid)?;
+        }
+    }
+    let mut clocks = snapshot
+        .nodes
+        .iter()
+        .flat_map(|node| {
+            [
+                node.content_hlc.as_ref(),
+                node.title_hlc.as_ref(),
+                node.structure_hlc.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+        })
+        .chain(snapshot.tombstones.iter().map(|item| &item.deleted_hlc))
+        .chain(snapshot.edges.iter().map(|item| &item.hlc))
+        .chain(snapshot.attachments.iter().map(|item| &item.hlc));
+    let max_hlc = clocks.next().map(|first| {
+        clocks
+            .fold(first, |current, next| current.max(next))
+            .to_string()
+    });
+    conn.call(move |database| {
+        let transaction = database.transaction()?;
+        transaction.execute_batch(
+            "DELETE FROM vec_nodes;
+             DELETE FROM nodes;
+             DELETE FROM tombstones;
+             DELETE FROM edge_lww;
+             DELETE FROM attachment_lww;
+             DELETE FROM applied_ops;
+             DELETE FROM sync_outbox;",
+        )?;
+        for node in &snapshot.nodes {
+            let id = db::stable_node_id(&node.uuid)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            let body = crate::stem::stem(&format!(
+                "{}\n{}",
+                node.title.as_deref().unwrap_or(""),
+                node.content
+            ));
+            transaction.execute(
+                "INSERT INTO nodes
+                   (id, uuid, kind, title, content, content_json, body_stemmed,
+                    parent_id, position, content_hlc, title_hlc, structure_hlc,
+                    created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, ?10, ?11, ?12, ?13)",
+                rusqlite::params![
+                    id,
+                    node.uuid,
+                    node.kind,
+                    node.title,
+                    node.content,
+                    node.content_json,
+                    body,
+                    node.position,
+                    node.content_hlc,
+                    node.title_hlc,
+                    node.structure_hlc,
+                    node.created_at,
+                    node.updated_at,
+                ],
+            )?;
+        }
+        for node in &snapshot.nodes {
+            if let Some(parent_uuid) = &node.parent_uuid {
+                transaction.execute(
+                    "UPDATE nodes SET parent_id = (SELECT id FROM nodes WHERE uuid = ?2)
+                     WHERE uuid = ?1",
+                    rusqlite::params![node.uuid, parent_uuid],
+                )?;
+            }
+        }
+        for node in snapshot.nodes.iter().filter(|node| node.kind == "block") {
+            let id = db::stable_node_id(&node.uuid)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            let (wikilinks, block_refs) = parse_refs(&node.content);
+            db::replace_block_refs_tx_at(
+                &transaction,
+                id,
+                &wikilinks,
+                &block_refs,
+                node.updated_at,
+            )?;
+        }
+        for item in snapshot.tombstones {
+            transaction.execute(
+                "INSERT INTO tombstones(uuid, deleted_hlc, root_uuid) VALUES (?1, ?2, ?3)",
+                rusqlite::params![item.uuid, item.deleted_hlc, item.root_uuid],
+            )?;
+        }
+        for item in snapshot.edges {
+            transaction.execute(
+                "INSERT INTO edge_lww(src_uuid, dst_uuid, kind, hlc, present, weight)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    item.src_uuid,
+                    item.dst_uuid,
+                    item.kind,
+                    item.hlc,
+                    item.present,
+                    item.weight,
+                ],
+            )?;
+            reconcile_edge(&transaction, &item.src_uuid, &item.dst_uuid, &item.kind)?;
+        }
+        for item in snapshot.attachments {
+            transaction.execute(
+                "INSERT INTO attachment_lww
+                   (node_uuid, blob_hash, hlc, present, filename, mime, size)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    item.node_uuid,
+                    item.blob_hash,
+                    item.hlc,
+                    item.present,
+                    item.filename,
+                    item.mime,
+                    item.size.and_then(|size| i64::try_from(size).ok()),
+                ],
+            )?;
+            reconcile_attachment(&transaction, &item.node_uuid, &item.blob_hash)?;
+        }
+        transaction.execute(
+            "INSERT INTO sync_meta(key, value) VALUES ('last_server_seq', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [snapshot.seq.to_string()],
+        )?;
+        if let Some(max_hlc) = max_hlc {
+            transaction.execute(
+                "INSERT INTO sync_meta(key, value) VALUES ('last_hlc', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [max_hlc],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    })
+    .await
+}
+
+fn sql_hlc(value: String, index: usize) -> rusqlite::Result<Hlc> {
+    value.parse::<Hlc>().map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                error.to_string(),
+            )),
+        )
+    })
+}
+
+fn optional_sql_hlc(value: Option<String>, index: usize) -> rusqlite::Result<Option<Hlc>> {
+    value.map(|value| sql_hlc(value, index)).transpose()
+}
+
+async fn advance_sync_cursor(conn: &Connection, seq: u64) -> Result<()> {
+    conn.call(move |database| {
+        let transaction = database.transaction()?;
+        let previous = transaction
+            .query_row(
+                "SELECT value FROM sync_meta WHERE key = 'last_server_seq'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or_default();
+        if seq > previous {
+            transaction.execute(
+                "INSERT INTO sync_meta(key, value) VALUES ('last_server_seq', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [seq.to_string()],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    })
+    .await
 }
 
 /// Apply a logical mutation batch atomically. Redelivery of any already
@@ -228,15 +641,13 @@ fn validate(operation: &Op) -> Result<()> {
     }
     uuid::Uuid::parse_str(&operation.op_id).context("invalid operation ID")?;
     uuid::Uuid::parse_str(&operation.device_id).context("invalid device ID")?;
-    let Some((_, _, suffix)) = parse_hlc(&operation.hlc) else {
-        bail!("invalid hybrid logical clock");
-    };
-    if suffix != operation.device_id.replace('-', "").to_lowercase() {
+    if operation.hlc.device_id().to_string() != operation.device_id {
         bail!("hybrid logical clock device suffix does not match device_id");
     }
     match &operation.kind {
         OpKind::NodeCreate(payload) => {
-            if payload.uuid.trim().is_empty() || payload.node_kind.trim().is_empty() {
+            require_uuid(&payload.uuid)?;
+            if payload.node_kind.trim().is_empty() {
                 bail!("node_create requires uuid and node_kind");
             }
         }
@@ -275,9 +686,7 @@ fn validate(operation: &Op) -> Result<()> {
 }
 
 fn require_uuid(uuid: &str) -> Result<()> {
-    if uuid.trim().is_empty() {
-        bail!("operation requires a node UUID");
-    }
+    uuid::Uuid::parse_str(uuid).context("operation requires a valid node UUID")?;
     Ok(())
 }
 
@@ -375,7 +784,7 @@ fn apply_one(
         }
         OpKind::NodeMove(payload) => {
             let parent_id = resolve_parent(transaction, payload.parent_uuid.as_deref())?;
-            transaction.execute(
+            let changed = transaction.execute(
                 "UPDATE nodes SET parent_id = ?2, position = ?3,
                     structure_hlc = ?4, updated_at = ?5
                  WHERE uuid = ?1 AND kind = 'block'
@@ -389,9 +798,13 @@ fn apply_one(
                     timestamp
                 ],
             )?;
+            if changed > 0 {
+                repair_parent_cycle(transaction, &payload.uuid)?;
+            }
             Ok(vec![payload.uuid.clone()])
         }
         OpKind::NodeDelete(payload) => {
+            let root_uuid = containing_page_uuid(transaction, &payload.uuid)?;
             let previous = transaction
                 .query_row(
                     "SELECT deleted_hlc FROM tombstones WHERE uuid = ?1",
@@ -401,56 +814,72 @@ fn apply_one(
                 .optional()?;
             if previous
                 .as_deref()
-                .is_none_or(|clock| clock < operation.hlc.as_str())
+                .and_then(|clock| clock.parse::<Hlc>().ok())
+                .as_ref()
+                .is_none_or(|clock| clock < &operation.hlc)
             {
+                let deleted_id = transaction
+                    .query_row(
+                        "SELECT id FROM nodes WHERE uuid = ?1",
+                        [&payload.uuid],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()?;
+                if let Some(deleted_id) = deleted_id {
+                    let root_id = root_uuid
+                        .as_deref()
+                        .filter(|root_uuid| *root_uuid != payload.uuid)
+                        .map(|root_uuid| {
+                            transaction
+                                .query_row(
+                                    "SELECT id FROM nodes WHERE uuid = ?1 AND kind = 'page'",
+                                    [root_uuid],
+                                    |row| row.get::<_, i64>(0),
+                                )
+                                .optional()
+                        })
+                        .transpose()?
+                        .flatten();
+                    // A subtree deletion carries one node_delete per existing
+                    // descendant. Reparenting first preserves a concurrently
+                    // created child that has no matching delete operation.
+                    transaction.execute(
+                        "UPDATE nodes SET parent_id = ?2 WHERE parent_id = ?1",
+                        rusqlite::params![deleted_id, root_id],
+                    )?;
+                }
                 transaction.execute("DELETE FROM nodes WHERE uuid = ?1", [&payload.uuid])?;
                 transaction.execute(
-                    "INSERT INTO tombstones(uuid, deleted_hlc) VALUES (?1, ?2)
-                     ON CONFLICT(uuid) DO UPDATE SET deleted_hlc = excluded.deleted_hlc",
-                    rusqlite::params![payload.uuid, operation.hlc],
+                    "INSERT INTO tombstones(uuid, deleted_hlc, root_uuid) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(uuid) DO UPDATE SET
+                       deleted_hlc = excluded.deleted_hlc,
+                       root_uuid = COALESCE(excluded.root_uuid, tombstones.root_uuid)",
+                    rusqlite::params![payload.uuid, operation.hlc, root_uuid],
                 )?;
             }
             Ok(vec![payload.uuid.clone()])
         }
         OpKind::EdgeAdd(payload) => {
-            transaction.execute(
-                "INSERT INTO edges(src, dst, kind, weight, created_at)
-                 SELECT src.id, dst.id, ?3, ?4, ?5
-                   FROM nodes src, nodes dst
-                  WHERE src.uuid = ?1 AND dst.uuid = ?2
-                 ON CONFLICT(src, dst, kind) DO UPDATE SET weight = excluded.weight",
-                rusqlite::params![
-                    payload.src_uuid,
-                    payload.dst_uuid,
-                    payload.edge_kind,
-                    payload.weight,
-                    timestamp,
-                ],
-            )?;
+            write_edge_intent(transaction, payload, &operation.hlc, true)?;
             Ok(vec![payload.src_uuid.clone(), payload.dst_uuid.clone()])
         }
         OpKind::EdgeRemove(payload) => {
-            transaction.execute(
-                "DELETE FROM edges WHERE kind = ?3
-                   AND src = (SELECT id FROM nodes WHERE uuid = ?1)
-                   AND dst = (SELECT id FROM nodes WHERE uuid = ?2)",
-                rusqlite::params![payload.src_uuid, payload.dst_uuid, payload.edge_kind],
+            write_edge_intent(
+                transaction,
+                &EdgeAdd {
+                    src_uuid: payload.src_uuid.clone(),
+                    dst_uuid: payload.dst_uuid.clone(),
+                    edge_kind: payload.edge_kind.clone(),
+                    weight: 0.0,
+                },
+                &operation.hlc,
+                false,
             )?;
             Ok(vec![payload.src_uuid.clone(), payload.dst_uuid.clone()])
         }
-        OpKind::AttachmentAdd(payload) => {
-            apply_attachment_add(transaction, operation, payload, timestamp)
-        }
+        OpKind::AttachmentAdd(payload) => apply_attachment_add(transaction, operation, payload),
         OpKind::AttachmentRemove(payload) => {
-            transaction.execute(
-                "DELETE FROM nodes WHERE kind = 'attachment'
-                   AND json_extract(content_json, '$.blobHash') = ?2
-                   AND id IN (
-                     SELECT e.dst FROM edges e JOIN nodes parent ON parent.id = e.src
-                      WHERE parent.uuid = ?1 AND e.kind = 'attachment'
-                   )",
-                rusqlite::params![payload.node_uuid, payload.blob_hash],
-            )?;
+            write_attachment_intent(transaction, payload, None, &operation.hlc, false)?;
             Ok(vec![payload.node_uuid.clone()])
         }
     }
@@ -469,7 +898,10 @@ fn apply_node_create(
         )
         .optional()?;
     if let Some(deleted_hlc) = tombstone {
-        if operation.hlc <= deleted_hlc {
+        if deleted_hlc
+            .parse::<Hlc>()
+            .is_ok_and(|deleted_hlc| operation.hlc <= deleted_hlc)
+        {
             return Ok(vec![payload.uuid.clone()]);
         }
         // A newer explicit node_create is the inverse operation used by Undo.
@@ -477,6 +909,8 @@ fn apply_node_create(
         transaction.execute("DELETE FROM tombstones WHERE uuid = ?1", [&payload.uuid])?;
     }
     let parent_id = resolve_parent(transaction, payload.parent_uuid.as_deref())?;
+    let node_id = db::stable_node_id(&payload.uuid)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let body = crate::stem::stem(&format!(
         "{}\n{}",
         payload.title.as_deref().unwrap_or(""),
@@ -486,18 +920,15 @@ fn apply_node_create(
         && let Some(title) = payload.title.as_deref()
     {
         let stub_uuid = db::page_uuid(title);
-        transaction.execute(
-            "UPDATE nodes SET uuid = ?2
-             WHERE uuid = ?1 AND kind = 'page' AND lower(title) = lower(?3)",
-            rusqlite::params![stub_uuid, payload.uuid, title],
-        )?;
+        adopt_page_stub(transaction, &stub_uuid, &payload.uuid, title, node_id)?;
     }
     transaction.execute(
         "INSERT OR IGNORE INTO nodes
-           (uuid, kind, title, content, content_json, body_stemmed, parent_id, position,
+           (id, uuid, kind, title, content, content_json, body_stemmed, parent_id, position,
             content_hlc, title_hlc, structure_hlc, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?9, ?10, ?10)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?10, ?11, ?11)",
         rusqlite::params![
+            node_id,
             payload.uuid,
             payload.node_kind,
             payload.title,
@@ -546,40 +977,279 @@ fn apply_node_create(
             operation_timestamp(operation),
         )?;
     }
+    reconcile_deferred_for_node(transaction, &payload.uuid)?;
     Ok(vec![payload.uuid.clone()])
+}
+
+fn adopt_page_stub(
+    transaction: &rusqlite::Transaction<'_>,
+    stub_uuid: &str,
+    canonical_uuid: &str,
+    title: &str,
+    canonical_id: i64,
+) -> rusqlite::Result<()> {
+    let stub_id = transaction
+        .query_row(
+            "SELECT id FROM nodes
+             WHERE uuid = ?1 AND kind = 'page' AND lower(title) = lower(?2)",
+            rusqlite::params![stub_uuid, title],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    let Some(stub_id) = stub_id else {
+        return Ok(());
+    };
+    if stub_id == canonical_id {
+        transaction.execute(
+            "UPDATE nodes SET uuid = ?2 WHERE id = ?1",
+            rusqlite::params![stub_id, canonical_uuid],
+        )?;
+        return Ok(());
+    }
+    // All relevant foreign keys are repaired before commit. Deferral allows
+    // the primary-key change and its references to be updated atomically.
+    transaction.execute_batch("PRAGMA defer_foreign_keys = ON;")?;
+    transaction.execute("DELETE FROM vec_nodes WHERE rowid = ?1", [stub_id])?;
+    transaction.execute(
+        "UPDATE nodes SET id = ?2, uuid = ?3 WHERE id = ?1",
+        rusqlite::params![stub_id, canonical_id, canonical_uuid],
+    )?;
+    for sql in [
+        "UPDATE nodes SET parent_id = ?2 WHERE parent_id = ?1",
+        "UPDATE edges SET src = ?2 WHERE src = ?1",
+        "UPDATE edges SET dst = ?2 WHERE dst = ?1",
+        "UPDATE extracted_edge_sources SET source_node_id = ?2 WHERE source_node_id = ?1",
+        "UPDATE entity_descriptions SET source_node_id = ?2 WHERE source_node_id = ?1",
+        "UPDATE entity_descriptions SET entity_node_id = ?2 WHERE entity_node_id = ?1",
+        "UPDATE embed_queue SET node_id = ?2 WHERE node_id = ?1",
+        "UPDATE extract_queue SET node_id = ?2 WHERE node_id = ?1",
+    ] {
+        transaction.execute(sql, rusqlite::params![stub_id, canonical_id])?;
+    }
+    transaction.execute(
+        "UPDATE edge_lww SET src_uuid = ?2 WHERE src_uuid = ?1",
+        rusqlite::params![stub_uuid, canonical_uuid],
+    )?;
+    transaction.execute(
+        "UPDATE edge_lww SET dst_uuid = ?2 WHERE dst_uuid = ?1",
+        rusqlite::params![stub_uuid, canonical_uuid],
+    )?;
+    transaction.execute(
+        "UPDATE attachment_lww SET node_uuid = ?2 WHERE node_uuid = ?1",
+        rusqlite::params![stub_uuid, canonical_uuid],
+    )?;
+    transaction.execute(
+        "UPDATE tombstones SET root_uuid = ?2 WHERE root_uuid = ?1",
+        rusqlite::params![stub_uuid, canonical_uuid],
+    )?;
+    Ok(())
 }
 
 fn apply_attachment_add(
     transaction: &rusqlite::Transaction<'_>,
     operation: &Op,
     payload: &AttachmentAdd,
-    timestamp: i64,
 ) -> rusqlite::Result<Vec<String>> {
-    let parent_id = transaction.query_row(
-        "SELECT id FROM nodes WHERE uuid = ?1 AND kind IN ('page', 'block')",
-        [&payload.node_uuid],
-        |row| row.get::<_, i64>(0),
-    )?;
     let attachment_uuid = attachment_uuid(&payload.node_uuid, &payload.blob_hash);
-    let relative_path = format!("attachments/{}/{}", payload.blob_hash, payload.filename);
+    write_attachment_intent(
+        transaction,
+        &AttachmentRemove {
+            node_uuid: payload.node_uuid.clone(),
+            blob_hash: payload.blob_hash.clone(),
+        },
+        Some(payload),
+        &operation.hlc,
+        true,
+    )?;
+    Ok(vec![payload.node_uuid.clone(), attachment_uuid])
+}
+
+fn write_edge_intent(
+    transaction: &rusqlite::Transaction<'_>,
+    payload: &EdgeAdd,
+    hlc: &Hlc,
+    present: bool,
+) -> rusqlite::Result<()> {
+    transaction.execute(
+        "INSERT INTO edge_lww(src_uuid, dst_uuid, kind, hlc, present, weight)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(src_uuid, dst_uuid, kind) DO UPDATE SET
+           hlc = excluded.hlc,
+           present = excluded.present,
+           weight = excluded.weight
+         WHERE edge_lww.hlc < excluded.hlc",
+        rusqlite::params![
+            payload.src_uuid,
+            payload.dst_uuid,
+            payload.edge_kind,
+            hlc,
+            present,
+            payload.weight
+        ],
+    )?;
+    reconcile_edge(
+        transaction,
+        &payload.src_uuid,
+        &payload.dst_uuid,
+        &payload.edge_kind,
+    )
+}
+
+fn reconcile_edge(
+    transaction: &rusqlite::Transaction<'_>,
+    src_uuid: &str,
+    dst_uuid: &str,
+    kind: &str,
+) -> rusqlite::Result<()> {
+    let intent = transaction
+        .query_row(
+            "SELECT present, weight, hlc FROM edge_lww
+             WHERE src_uuid = ?1 AND dst_uuid = ?2 AND kind = ?3",
+            rusqlite::params![src_uuid, dst_uuid, kind],
+            |row| {
+                Ok((
+                    row.get::<_, bool>(0)?,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    match intent {
+        Some((true, weight, hlc)) => {
+            let timestamp = hlc
+                .parse::<Hlc>()
+                .map_or(0, |clock| clock.timestamp_seconds());
+            transaction.execute(
+                "INSERT INTO edges(src, dst, kind, weight, created_at)
+                 SELECT src.id, dst.id, ?3, ?4, ?5
+                   FROM nodes src, nodes dst
+                  WHERE src.uuid = ?1 AND dst.uuid = ?2
+                 ON CONFLICT(src, dst, kind) DO UPDATE SET
+                   weight = excluded.weight,
+                   created_at = excluded.created_at",
+                rusqlite::params![src_uuid, dst_uuid, kind, weight, timestamp],
+            )?;
+        }
+        Some((false, _, _)) => {
+            transaction.execute(
+                "DELETE FROM edges WHERE kind = ?3
+                   AND src = (SELECT id FROM nodes WHERE uuid = ?1)
+                   AND dst = (SELECT id FROM nodes WHERE uuid = ?2)",
+                rusqlite::params![src_uuid, dst_uuid, kind],
+            )?;
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+fn write_attachment_intent(
+    transaction: &rusqlite::Transaction<'_>,
+    key: &AttachmentRemove,
+    add: Option<&AttachmentAdd>,
+    hlc: &Hlc,
+    present: bool,
+) -> rusqlite::Result<()> {
+    transaction.execute(
+        "INSERT INTO attachment_lww
+           (node_uuid, blob_hash, hlc, present, filename, mime, size)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(node_uuid, blob_hash) DO UPDATE SET
+           hlc = excluded.hlc,
+           present = excluded.present,
+           filename = COALESCE(excluded.filename, attachment_lww.filename),
+           mime = COALESCE(excluded.mime, attachment_lww.mime),
+           size = COALESCE(excluded.size, attachment_lww.size)
+         WHERE attachment_lww.hlc < excluded.hlc",
+        rusqlite::params![
+            key.node_uuid,
+            key.blob_hash,
+            hlc,
+            present,
+            add.map(|payload| payload.filename.as_str()),
+            add.map(|payload| payload.mime.as_str()),
+            add.map(|payload| payload.size as i64),
+        ],
+    )?;
+    reconcile_attachment(transaction, &key.node_uuid, &key.blob_hash)
+}
+
+fn reconcile_attachment(
+    transaction: &rusqlite::Transaction<'_>,
+    node_uuid: &str,
+    blob_hash: &str,
+) -> rusqlite::Result<()> {
+    let intent = transaction
+        .query_row(
+            "SELECT present, filename, mime, size, hlc FROM attachment_lww
+             WHERE node_uuid = ?1 AND blob_hash = ?2",
+            rusqlite::params![node_uuid, blob_hash],
+            |row| {
+                Ok((
+                    row.get::<_, bool>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let attachment_uuid = attachment_uuid(node_uuid, blob_hash);
+    let attachment_id = db::stable_node_id(&attachment_uuid)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let Some((present, filename, mime, size, hlc)) = intent else {
+        return Ok(());
+    };
+    let timestamp = hlc
+        .parse::<Hlc>()
+        .map_or(0, |clock| clock.timestamp_seconds());
+    if !present {
+        transaction.execute("DELETE FROM nodes WHERE uuid = ?1", [&attachment_uuid])?;
+        return Ok(());
+    }
+    let Some(filename) = filename else {
+        return Ok(());
+    };
+    let Some(parent_id) = transaction
+        .query_row(
+            "SELECT id FROM nodes WHERE uuid = ?1 AND kind IN ('page', 'block')",
+            [node_uuid],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+    else {
+        return Ok(());
+    };
+    let relative_path = format!("attachments/{blob_hash}/{filename}");
     let metadata = serde_json::json!({
-        "blobHash": payload.blob_hash,
-        "mime": payload.mime,
-        "size": payload.size,
+        "blobHash": blob_hash,
+        "mime": mime.unwrap_or_else(|| "application/octet-stream".into()),
+        "size": size.unwrap_or_default(),
     })
     .to_string();
     transaction.execute(
-        "INSERT OR IGNORE INTO nodes
-           (uuid, kind, title, content, content_json, body_stemmed,
+        "INSERT INTO nodes
+           (id, uuid, kind, title, content, content_json, body_stemmed,
             content_hlc, title_hlc, structure_hlc, created_at, updated_at)
-         VALUES (?1, 'attachment', ?2, ?3, ?4, ?5, ?6, ?6, ?6, ?7, ?7)",
+         VALUES (?1, ?2, 'attachment', ?3, ?4, ?5, ?6, ?7, ?7, ?7, ?8, ?8)
+         ON CONFLICT(uuid) DO UPDATE SET
+           title = excluded.title,
+           content = excluded.content,
+           content_json = excluded.content_json,
+           body_stemmed = excluded.body_stemmed,
+           content_hlc = excluded.content_hlc,
+           title_hlc = excluded.title_hlc,
+           updated_at = excluded.updated_at",
         rusqlite::params![
+            attachment_id,
             attachment_uuid,
-            payload.filename,
+            filename,
             relative_path,
             metadata,
-            crate::stem::stem(&payload.filename),
-            operation.hlc,
+            crate::stem::stem(&filename),
+            hlc,
             timestamp,
         ],
     )?;
@@ -588,25 +1258,151 @@ fn apply_attachment_add(
          SELECT ?1, id, 'attachment', 1.0, ?3 FROM nodes WHERE uuid = ?2",
         rusqlite::params![parent_id, attachment_uuid, timestamp],
     )?;
-    Ok(vec![payload.node_uuid.clone(), attachment_uuid])
+    Ok(())
 }
 
 fn resolve_parent(
     transaction: &rusqlite::Transaction<'_>,
     parent_uuid: Option<&str>,
 ) -> rusqlite::Result<Option<i64>> {
-    parent_uuid
-        .map(|uuid| {
+    let Some(parent_uuid) = parent_uuid else {
+        return Ok(None);
+    };
+    if let Some(parent_id) = transaction
+        .query_row(
+            "SELECT id FROM nodes WHERE uuid = ?1 AND kind IN ('page', 'block')",
+            [parent_uuid],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+    {
+        return Ok(Some(parent_id));
+    }
+    let root_uuid = transaction
+        .query_row(
+            "SELECT root_uuid FROM tombstones WHERE uuid = ?1",
+            [parent_uuid],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    root_uuid
+        .map(|root_uuid| {
             transaction
                 .query_row(
-                    "SELECT id FROM nodes WHERE uuid = ?1 AND kind IN ('page', 'block')",
-                    [uuid],
+                    "SELECT id FROM nodes WHERE uuid = ?1 AND kind = 'page'",
+                    [root_uuid],
                     |row| row.get::<_, i64>(0),
                 )
                 .optional()
         })
         .transpose()
         .map(Option::flatten)
+}
+
+fn containing_page_uuid(
+    transaction: &rusqlite::Transaction<'_>,
+    node_uuid: &str,
+) -> rusqlite::Result<Option<String>> {
+    transaction
+        .query_row(
+            "WITH RECURSIVE ancestors(id, uuid, kind, parent_id, depth) AS (
+               SELECT id, uuid, kind, parent_id, 0 FROM nodes WHERE uuid = ?1
+               UNION ALL
+               SELECT n.id, n.uuid, n.kind, n.parent_id, ancestors.depth + 1
+                 FROM nodes n JOIN ancestors ON n.id = ancestors.parent_id
+             )
+             SELECT uuid FROM ancestors WHERE kind = 'page' ORDER BY depth LIMIT 1",
+            [node_uuid],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+}
+
+fn repair_parent_cycle(
+    transaction: &rusqlite::Transaction<'_>,
+    moved_uuid: &str,
+) -> rusqlite::Result<()> {
+    let mut chain = Vec::<(i64, String, String)>::new();
+    let mut next = transaction
+        .query_row(
+            "SELECT id, uuid, COALESCE(structure_hlc, '') FROM nodes WHERE uuid = ?1",
+            [moved_uuid],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    while let Some((id, uuid, clock)) = next {
+        if let Some(start) = chain.iter().position(|(_, seen, _)| seen == &uuid) {
+            let cycle = &chain[start..];
+            let Some((break_id, _, _)) =
+                cycle
+                    .iter()
+                    .min_by(|(_, left_uuid, left_clock), (_, right_uuid, right_clock)| {
+                        (left_clock, left_uuid).cmp(&(right_clock, right_uuid))
+                    })
+            else {
+                return Ok(());
+            };
+            let root_id = transaction
+                .query_row(
+                    "SELECT id FROM nodes WHERE kind = 'page' ORDER BY uuid LIMIT 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?;
+            transaction.execute(
+                "UPDATE nodes SET parent_id = ?2 WHERE id = ?1",
+                rusqlite::params![break_id, root_id],
+            )?;
+            return Ok(());
+        }
+        chain.push((id, uuid, clock));
+        next = transaction
+            .query_row(
+                "SELECT parent.id, parent.uuid, COALESCE(parent.structure_hlc, '')
+                   FROM nodes child JOIN nodes parent ON parent.id = child.parent_id
+                  WHERE child.id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+    }
+    Ok(())
+}
+
+fn reconcile_deferred_for_node(
+    transaction: &rusqlite::Transaction<'_>,
+    uuid: &str,
+) -> rusqlite::Result<()> {
+    let edges = {
+        let mut statement = transaction.prepare(
+            "SELECT src_uuid, dst_uuid, kind FROM edge_lww
+             WHERE src_uuid = ?1 OR dst_uuid = ?1",
+        )?;
+        statement
+            .query_map([uuid], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for (src_uuid, dst_uuid, kind) in edges {
+        reconcile_edge(transaction, &src_uuid, &dst_uuid, &kind)?;
+    }
+    let blobs = {
+        let mut statement =
+            transaction.prepare("SELECT blob_hash FROM attachment_lww WHERE node_uuid = ?1")?;
+        statement
+            .query_map([uuid], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for blob_hash in blobs {
+        reconcile_attachment(transaction, uuid, &blob_hash)?;
+    }
+    Ok(())
 }
 
 fn sync_is_configured(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Result<bool> {
@@ -638,7 +1434,7 @@ fn meta_or_insert_device_id(transaction: &rusqlite::Transaction<'_>) -> rusqlite
     Ok(device_id)
 }
 
-fn observe_hlc(transaction: &rusqlite::Transaction<'_>, incoming: &str) -> rusqlite::Result<()> {
+fn observe_hlc(transaction: &rusqlite::Transaction<'_>, incoming: &Hlc) -> rusqlite::Result<()> {
     let current = transaction
         .query_row(
             "SELECT value FROM sync_meta WHERE key = 'last_hlc'",
@@ -646,38 +1442,34 @@ fn observe_hlc(transaction: &rusqlite::Transaction<'_>, incoming: &str) -> rusql
             |row| row.get::<_, String>(0),
         )
         .optional()?;
-    if current.as_deref().is_none_or(|value| value < incoming) {
+    let current = current.and_then(|value| value.parse::<Hlc>().ok());
+    let device_id = uuid::Uuid::parse_str(&meta_or_insert_device_id(transaction)?)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let observed = if incoming.device_id() == device_id {
+        current
+            .clone()
+            .filter(|clock| clock >= incoming)
+            .unwrap_or_else(|| incoming.clone())
+    } else {
+        Hlc::receive(
+            current.as_ref(),
+            incoming,
+            chrono::Utc::now().timestamp_millis().max(0) as u64,
+            device_id,
+        )
+    };
+    if current.as_ref() != Some(&observed) {
         transaction.execute(
             "INSERT INTO sync_meta(key, value) VALUES ('last_hlc', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [incoming],
+            [observed.to_string()],
         )?;
     }
     Ok(())
 }
 
-fn format_hlc(wall_ms: u64, counter: u32, device_id: &str) -> String {
-    format!(
-        "{wall_ms:016x}-{counter:08x}-{}",
-        device_id.replace('-', "").to_lowercase()
-    )
-}
-
-fn parse_hlc(value: &str) -> Option<(u64, u32, &str)> {
-    let mut parts = value.splitn(3, '-');
-    let wall = u64::from_str_radix(parts.next()?, 16).ok()?;
-    let counter = u32::from_str_radix(parts.next()?, 16).ok()?;
-    let device = parts.next()?;
-    if device.len() != 32 || !device.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return None;
-    }
-    Some((wall, counter, device))
-}
-
 fn operation_timestamp(operation: &Op) -> i64 {
-    parse_hlc(&operation.hlc)
-        .map(|(wall_ms, _, _)| (wall_ms / 1_000).min(i64::MAX as u64) as i64)
-        .unwrap_or_default()
+    operation.hlc.timestamp_seconds()
 }
 
 fn parse_refs(content: &str) -> (Vec<String>, Vec<String>) {
@@ -724,12 +1516,50 @@ mod tests {
         (directory, connection)
     }
 
+    fn remote_op(device: u128, wall_ms: u64, counter: u32, kind: OpKind) -> Op {
+        let device_id = uuid::Uuid::from_u128(device);
+        Op {
+            op_id: uuid::Uuid::new_v4().to_string(),
+            device_id: device_id.to_string(),
+            hlc: Hlc::new(wall_ms, counter, device_id),
+            format_version: FORMAT_VERSION,
+            kind,
+        }
+    }
+
+    fn create_node_op(
+        device: u128,
+        wall_ms: u64,
+        uuid: &str,
+        kind: &str,
+        title: Option<&str>,
+        parent_uuid: Option<&str>,
+        position: Option<f64>,
+    ) -> Op {
+        remote_op(
+            device,
+            wall_ms,
+            0,
+            OpKind::NodeCreate(NodeCreate {
+                uuid: uuid.into(),
+                node_kind: kind.into(),
+                title: title.map(str::to_owned),
+                content: String::new(),
+                content_json: None,
+                parent_uuid: parent_uuid.map(str::to_owned),
+                position,
+                created_at: (wall_ms / 1_000) as i64,
+            }),
+        )
+    }
+
     #[test]
     fn envelope_round_trips_with_flat_kind_and_payload() {
+        let device_id = uuid::Uuid::new_v4();
         let operation = Op {
             op_id: uuid::Uuid::new_v4().to_string(),
-            device_id: uuid::Uuid::new_v4().to_string(),
-            hlc: format_hlc(42, 3, &uuid::Uuid::new_v4().to_string()),
+            device_id: device_id.to_string(),
+            hlc: Hlc::new(42, 3, device_id),
             format_version: FORMAT_VERSION,
             kind: OpKind::NodeDelete(NodeDelete {
                 uuid: "node".into(),
@@ -935,6 +1765,7 @@ mod tests {
     #[tokio::test]
     async fn canonical_page_create_adopts_an_existing_wikilink_stub() {
         let (_directory, connection) = database().await;
+        let (_direct_directory, direct) = database().await;
         let block_uuid = uuid::Uuid::new_v4().to_string();
         let block = local_ops(
             &connection,
@@ -981,12 +1812,23 @@ mod tests {
         apply(&connection, &page, Origin::Remote)
             .await
             .expect("adopt stub");
+        apply(&direct, &page, Origin::Remote)
+            .await
+            .expect("create canonical page first");
+        apply(&direct, &block, Origin::Remote)
+            .await
+            .expect("materialize direct ref");
         let adopted = db::get_page_by_title(&connection, "Roadmap".into())
             .await
             .expect("query adopted page")
             .expect("adopted page");
         assert_ne!(canonical_uuid, stub_uuid);
         assert_eq!(adopted.uuid, canonical_uuid);
+        let direct_page = db::get_page_by_title(&direct, "Roadmap".into())
+            .await
+            .expect("query direct page")
+            .expect("direct page");
+        assert_eq!(adopted.id, direct_page.id);
         let refs: i64 = connection
             .call(move |database| {
                 database.query_row(
@@ -1001,5 +1843,275 @@ mod tests {
             .await
             .expect("count preserved refs");
         assert_eq!(refs, 1);
+    }
+
+    #[tokio::test]
+    async fn edge_add_remove_converges_when_delivered_in_reverse_order() {
+        let (_left_dir, left) = database().await;
+        let (_right_dir, right) = database().await;
+        let src = uuid::Uuid::new_v4().to_string();
+        let dst = uuid::Uuid::new_v4().to_string();
+        let initial = vec![
+            create_node_op(1, 1_000, &src, "page", Some("Source"), None, None),
+            create_node_op(1, 1_001, &dst, "page", Some("Target"), None, None),
+        ];
+        for connection in [&left, &right] {
+            apply_batch(connection, &initial, Origin::Remote)
+                .await
+                .expect("initial nodes");
+        }
+        let add = remote_op(
+            1,
+            2_000,
+            0,
+            OpKind::EdgeAdd(EdgeAdd {
+                src_uuid: src.clone(),
+                dst_uuid: dst.clone(),
+                edge_kind: "relates_to".into(),
+                weight: 0.8,
+            }),
+        );
+        let remove = remote_op(
+            2,
+            2_000,
+            1,
+            OpKind::EdgeRemove(EdgeRemove {
+                src_uuid: src,
+                dst_uuid: dst,
+                edge_kind: "relates_to".into(),
+            }),
+        );
+        apply_batch(&left, &[add.clone(), remove.clone()], Origin::Remote)
+            .await
+            .expect("left delivery");
+        apply_batch(&right, &[remove, add], Origin::Remote)
+            .await
+            .expect("right delivery");
+        for connection in [&left, &right] {
+            let count: i64 = connection
+                .call(|database| {
+                    database.query_row(
+                        "SELECT COUNT(*) FROM edges WHERE kind = 'relates_to'",
+                        [],
+                        |row| row.get(0),
+                    )
+                })
+                .await
+                .expect("edge count");
+            assert_eq!(count, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_moves_forming_a_cycle_break_identically() {
+        let (_left_dir, left) = database().await;
+        let (_right_dir, right) = database().await;
+        let page = uuid::Uuid::new_v4().to_string();
+        let first = uuid::Uuid::new_v4().to_string();
+        let second = uuid::Uuid::new_v4().to_string();
+        let initial = vec![
+            create_node_op(1, 1_000, &page, "page", Some("Root"), None, None),
+            create_node_op(1, 1_001, &first, "block", None, Some(&page), Some(1.0)),
+            create_node_op(1, 1_002, &second, "block", None, Some(&page), Some(2.0)),
+        ];
+        for connection in [&left, &right] {
+            apply_batch(connection, &initial, Origin::Remote)
+                .await
+                .expect("initial tree");
+        }
+        let first_move = remote_op(
+            1,
+            2_000,
+            0,
+            OpKind::NodeMove(NodeMove {
+                uuid: first.clone(),
+                parent_uuid: Some(second.clone()),
+                position: 1.0,
+            }),
+        );
+        let second_move = remote_op(
+            2,
+            2_000,
+            0,
+            OpKind::NodeMove(NodeMove {
+                uuid: second.clone(),
+                parent_uuid: Some(first.clone()),
+                position: 1.0,
+            }),
+        );
+        apply_batch(
+            &left,
+            &[first_move.clone(), second_move.clone()],
+            Origin::Remote,
+        )
+        .await
+        .expect("left moves");
+        apply_batch(&right, &[second_move, first_move], Origin::Remote)
+            .await
+            .expect("right moves");
+        let parents = |connection: &Connection| {
+            let connection = connection.clone();
+            async move {
+                connection
+                    .call(|database| {
+                        let mut statement = database.prepare(
+                            "SELECT child.uuid, parent.uuid FROM nodes child
+                             LEFT JOIN nodes parent ON parent.id = child.parent_id
+                             WHERE child.kind = 'block' ORDER BY child.uuid",
+                        )?;
+                        statement
+                            .query_map([], |row| {
+                                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                            })?
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .await
+                    .expect("parent state")
+            }
+        };
+        assert_eq!(parents(&left).await, parents(&right).await);
+    }
+
+    #[tokio::test]
+    async fn concurrent_child_survives_parent_delete_at_page_root() {
+        let (_left_dir, left) = database().await;
+        let (_right_dir, right) = database().await;
+        let page = uuid::Uuid::new_v4().to_string();
+        let parent = uuid::Uuid::new_v4().to_string();
+        let child = uuid::Uuid::new_v4().to_string();
+        let initial = vec![
+            create_node_op(1, 1_000, &page, "page", Some("Root"), None, None),
+            create_node_op(1, 1_001, &parent, "block", None, Some(&page), Some(1.0)),
+        ];
+        for connection in [&left, &right] {
+            apply_batch(connection, &initial, Origin::Remote)
+                .await
+                .expect("initial parent");
+        }
+        let delete = remote_op(
+            1,
+            2_000,
+            0,
+            OpKind::NodeDelete(NodeDelete {
+                uuid: parent.clone(),
+            }),
+        );
+        let create_child =
+            create_node_op(2, 2_000, &child, "block", None, Some(&parent), Some(1.0));
+        apply_batch(
+            &left,
+            &[delete.clone(), create_child.clone()],
+            Origin::Remote,
+        )
+        .await
+        .expect("delete first");
+        apply_batch(&right, &[create_child, delete], Origin::Remote)
+            .await
+            .expect("create first");
+        for connection in [&left, &right] {
+            let parent_uuid: Option<String> = connection
+                .call({
+                    let child = child.clone();
+                    move |database| {
+                        database.query_row(
+                            "SELECT parent.uuid FROM nodes child
+                             LEFT JOIN nodes parent ON parent.id = child.parent_id
+                             WHERE child.uuid = ?1",
+                            [child],
+                            |row| row.get(0),
+                        )
+                    }
+                })
+                .await
+                .expect("child parent");
+            assert_eq!(parent_uuid.as_deref(), Some(page.as_str()));
+        }
+    }
+
+    #[tokio::test]
+    async fn equal_sibling_positions_are_ordered_by_uuid() {
+        let (_directory, connection) = database().await;
+        let page = uuid::Uuid::new_v4().to_string();
+        let low = uuid::Uuid::from_u128(10).to_string();
+        let high = uuid::Uuid::from_u128(20).to_string();
+        let operations = vec![
+            create_node_op(1, 1_000, &page, "page", Some("Root"), None, None),
+            create_node_op(2, 1_001, &high, "block", None, Some(&page), Some(1.0)),
+            create_node_op(3, 1_002, &low, "block", None, Some(&page), Some(1.0)),
+        ];
+        apply_batch(&connection, &operations, Origin::Remote)
+            .await
+            .expect("equal-position siblings");
+        let page_id = db::get_node_by_uuid(&connection, page)
+            .await
+            .expect("query page")
+            .expect("page")
+            .id;
+        let children = db::list_block_children(&connection, page_id)
+            .await
+            .expect("children");
+        assert_eq!(
+            children
+                .into_iter()
+                .map(|node| node.uuid)
+                .collect::<Vec<_>>(),
+            vec![low, high]
+        );
+    }
+
+    #[tokio::test]
+    async fn attachment_add_remove_is_lww_and_order_independent() {
+        let (_left_dir, left) = database().await;
+        let (_right_dir, right) = database().await;
+        let page = uuid::Uuid::new_v4().to_string();
+        let create_page = create_node_op(1, 1_000, &page, "page", Some("Root"), None, None);
+        for connection in [&left, &right] {
+            apply(connection, &create_page, Origin::Remote)
+                .await
+                .expect("create page");
+        }
+        let add = remote_op(
+            1,
+            2_000,
+            0,
+            OpKind::AttachmentAdd(AttachmentAdd {
+                node_uuid: page.clone(),
+                blob_hash: "abc123".into(),
+                filename: "file.txt".into(),
+                mime: "text/plain".into(),
+                size: 4,
+            }),
+        );
+        let remove = remote_op(
+            2,
+            2_001,
+            0,
+            OpKind::AttachmentRemove(AttachmentRemove {
+                node_uuid: page,
+                blob_hash: "abc123".into(),
+            }),
+        );
+        apply_batch(&left, &[add.clone(), remove.clone()], Origin::Remote)
+            .await
+            .expect("left attachment order");
+        apply_batch(&right, &[remove, add], Origin::Remote)
+            .await
+            .expect("right attachment order");
+        for connection in [&left, &right] {
+            let state: (i64, bool) = connection
+                .call(|database| {
+                    database.query_row(
+                        "SELECT
+                           (SELECT COUNT(*) FROM nodes WHERE kind = 'attachment'),
+                           (SELECT present FROM attachment_lww
+                             WHERE blob_hash = 'abc123')",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                })
+                .await
+                .expect("attachment state");
+            assert_eq!(state, (0, false));
+        }
     }
 }

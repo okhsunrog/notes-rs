@@ -1,9 +1,16 @@
 //! Host-independent notes-rs domain model and SQLite storage engine.
 
 pub mod db;
+pub mod hlc;
 pub mod operation;
 pub mod sqlite;
 pub mod stem;
 
-pub use operation::{ApplyOutcome, Op, OpKind, Origin, apply, apply_batch, local_ops};
+pub use hlc::Hlc;
+pub use operation::{
+    ApplyOutcome, Op, OpKind, Origin, SnapshotAttachment, SnapshotEdge, SnapshotNode,
+    SnapshotTombstone, SyncSnapshot, acknowledge_server_op, apply, apply_batch, apply_sequenced,
+    configure_sync, export_sync_snapshot, import_sync_snapshot, local_ops, pending_outbox,
+    sync_cursor,
+};
 pub use sqlite::Connection;

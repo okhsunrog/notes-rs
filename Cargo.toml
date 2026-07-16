@@ -20,6 +20,7 @@ llm-relay = { path = "../llm-relay", features = ["embeddings", "rig", "streaming
 notes-ai = { path = "crates/notes-ai" }
 notes-core = { path = "crates/notes-core" }
 notes-sync = { path = "crates/notes-sync" }
+proptest = "1.8.0"
 reqwest = { version = "0.13.4", default-features = false }
 rig = { package = "rig-core", version = "0.40.0" }
 rusqlite = { version = "0.40.1", default-features = false, features = [
