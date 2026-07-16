@@ -17,7 +17,7 @@ Durable plan for the per-block outliner that replaces BlockNote. Written before 
 
 ## What we're building
 
-**Model:** every visible bullet is its own `nodes` row with its own `uuid`, `parent_id`, `position`. A page is a root block (`kind='page'`, `parent_id=NULL`). The graph is *bullet-grained*: edges, backlinks, `((uuid))` refs all target individual blocks. `[[Page]]` targets a page row.
+**Model:** every visible bullet is its own `nodes` row with its own `uuid`, `parent_id`, `position`. A page is a root block (`kind='page'`, `parent_id=NULL`). The graph is _bullet-grained_: edges, backlinks, `((uuid))` refs all target individual blocks. `[[Page]]` targets a page row.
 
 **Editor unit:** per-block `<textarea>` (not contenteditable — Tauri's three WebView backends disagree about contenteditable behavior). Two display modes per block:
 
@@ -28,23 +28,23 @@ Durable plan for the per-block outliner that replaces BlockNote. Written before 
 
 ### Keyboard model
 
-| Key | Action |
-|---|---|
-| `Enter` | New sibling below; focus it; position = midpoint between current block and next sibling (or `position + 1.0` at end) |
-| `Shift+Enter` | Insert `\n` within current block (soft break) |
-| `Tab` | Indent: `move_block(id, prev_sibling.id, end-position)` |
-| `Shift+Tab` | Outdent: `move_block(id, parent.parent_id, parent.position + ε)` (place just after old parent) |
-| `Backspace` on empty block | Delete block; focus prev visible block (DFS predecessor) at end of its content |
-| `Ctrl+↑` / `Ctrl+↓` | Reorder among current parent's siblings |
-| `Ctrl+Enter` | Toggle fold (collapse children — UI state only, not persisted in v1) |
-| `[[` | Open inline page-link autocomplete (page titles via `list_pages` or new `search_pages_by_title`) |
-| `((` | Open inline block-ref autocomplete (FTS over block content) |
+| Key                        | Action                                                                                                               |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `Enter`                    | New sibling below; focus it; position = midpoint between current block and next sibling (or `position + 1.0` at end) |
+| `Shift+Enter`              | Insert `\n` within current block (soft break)                                                                        |
+| `Tab`                      | Indent: `move_block(id, prev_sibling.id, end-position)`                                                              |
+| `Shift+Tab`                | Outdent: `move_block(id, parent.parent_id, parent.position + ε)` (place just after old parent)                       |
+| `Backspace` on empty block | Delete block; focus prev visible block (DFS predecessor) at end of its content                                       |
+| `Ctrl+↑` / `Ctrl+↓`        | Reorder among current parent's siblings                                                                              |
+| `Ctrl+Enter`               | Toggle fold (collapse children — UI state only, not persisted in v1)                                                 |
+| `[[`                       | Open inline page-link autocomplete (page titles via `list_pages` or new `search_pages_by_title`)                     |
+| `((`                       | Open inline block-ref autocomplete (FTS over block content)                                                          |
 
 ### Paste, selection, length
 
 - **Multi-paragraph paste:** split on blank lines into N sibling blocks. First paste shows a non-blocking toast: "Each paragraph became a block. You can undo with Ctrl+Z." Subsequent pastes silent.
 - **Selection:** single-block selection only in v1. Native browser select-across-divs is broken; we accept this.
-- **Long-block soft nudge:** at ≥ 600 chars in a block, show an info icon next to it (not modal, not blocking). Click → "Split this block into paragraphs?" → applies the same paste-split logic. *Never* auto-dismissed; user explicitly chooses.
+- **Long-block soft nudge:** at ≥ 600 chars in a block, show an info icon next to it (not modal, not blocking). Click → "Split this block into paragraphs?" → applies the same paste-split logic. _Never_ auto-dismissed; user explicitly chooses.
 
 ### Wikilinks and block-refs
 
@@ -67,19 +67,19 @@ Durable plan for the per-block outliner that replaces BlockNote. Written before 
 
 The cases worth pinning down explicitly so they don't re-derive later:
 
-| Scenario | Decision |
-|---|---|
-| User pastes 10 paragraphs into one block | Split on blank lines → 10 sibling blocks. Cursor lands at end of last new block. First-time toast. |
-| User types `[[Sarah]]` for a page that doesn't exist | On save (blur/idle), `get_or_create_page_by_title("Sarah")` creates the stub page silently. No prompt. The page appears in the sidebar list next time it refreshes. |
-| User edits a block, then clicks another block in the sidebar/page before the 400 ms idle save fires | Blur of the active block triggers immediate save (blur fires before the new block mounts/focuses). No content loss. |
-| User edits a block, then switches active page entirely | Same — blur on the active textarea fires; save flushes before unmount. |
-| User indents a top-level block under no prev sibling | Tab is a no-op (no valid new parent). Optionally show subtle feedback. |
-| User Tab-indents a block with children | Children come along — they stay under their (now-indented) parent. `move_block` is a single-row update; children's `parent_id` doesn't change. |
-| User backspaces an empty block that has children | Refuse (children would be orphaned). Or: promote children to siblings of the deleted block. v1: refuse, ignore the keystroke. |
-| Block content is one continuous 5000-char URL | Saved as-is. Chunker (later) will degrade via the sentence → word → grapheme ladder. UX nudge appears but is harmless. |
-| User pastes BlockNote-style content from clipboard with rich formatting | Strip to markdown. We're markdown-source-of-truth now. |
-| `((nonexistent-uuid))` | Render as a struck-through chip with title "broken reference." No edge created. |
-| `[[Title]]` typed but then deleted before save | The stub page is created on save, not on keystroke. So no-op — no orphan stubs from typos. |
+| Scenario                                                                                            | Decision                                                                                                                                                            |
+| --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| User pastes 10 paragraphs into one block                                                            | Split on blank lines → 10 sibling blocks. Cursor lands at end of last new block. First-time toast.                                                                  |
+| User types `[[Sarah]]` for a page that doesn't exist                                                | On save (blur/idle), `get_or_create_page_by_title("Sarah")` creates the stub page silently. No prompt. The page appears in the sidebar list next time it refreshes. |
+| User edits a block, then clicks another block in the sidebar/page before the 400 ms idle save fires | Blur of the active block triggers immediate save (blur fires before the new block mounts/focuses). No content loss.                                                 |
+| User edits a block, then switches active page entirely                                              | Same — blur on the active textarea fires; save flushes before unmount.                                                                                              |
+| User indents a top-level block under no prev sibling                                                | Tab is a no-op (no valid new parent). Optionally show subtle feedback.                                                                                              |
+| User Tab-indents a block with children                                                              | Children come along — they stay under their (now-indented) parent. `move_block` is a single-row update; children's `parent_id` doesn't change.                      |
+| User backspaces an empty block that has children                                                    | Refuse (children would be orphaned). Or: promote children to siblings of the deleted block. v1: refuse, ignore the keystroke.                                       |
+| Block content is one continuous 5000-char URL                                                       | Saved as-is. Chunker (later) will degrade via the sentence → word → grapheme ladder. UX nudge appears but is harmless.                                              |
+| User pastes BlockNote-style content from clipboard with rich formatting                             | Strip to markdown. We're markdown-source-of-truth now.                                                                                                              |
+| `((nonexistent-uuid))`                                                                              | Render as a struck-through chip with title "broken reference." No edge created.                                                                                     |
+| `[[Title]]` typed but then deleted before save                                                      | The stub page is created on save, not on keystroke. So no-op — no orphan stubs from typos.                                                                          |
 
 ## File layout (proposed)
 
@@ -143,7 +143,7 @@ Steps 1–4 are the load-bearing core. 5–7 are the "feels right" layer. 8–10
 
 ## After the outliner ships
 
-These were deferred *behind* the outliner; revisit after:
+These were deferred _behind_ the outliner; revisit after:
 
 - Better `neighbors` with edge-kind filter + direction.
 - New agent tools: `find_backlinks`, `find_tagged`, `read_subtree`, `read_ancestors`, `read_block`.

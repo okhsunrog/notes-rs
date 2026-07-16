@@ -1,25 +1,26 @@
+use crate::sqlite::Connection;
 use anyhow::{Context, Result};
 use rusqlite::ffi::sqlite3_auto_extension;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Once;
-use tokio_rusqlite::Connection;
 
 static VEC_INIT: Once = Once::new();
 
 fn register_sqlite_vec() {
     VEC_INIT.call_once(|| unsafe {
-        sqlite3_auto_extension(Some(std::mem::transmute(
+        type ExtensionEntry = unsafe extern "C" fn(
+            *mut rusqlite::ffi::sqlite3,
+            *mut *mut std::os::raw::c_char,
+            *const rusqlite::ffi::sqlite3_api_routines,
+        ) -> std::os::raw::c_int;
+        sqlite3_auto_extension(Some(std::mem::transmute::<*const (), ExtensionEntry>(
             sqlite_vec::sqlite3_vec_init as *const (),
         )));
     });
 }
 
-pub async fn open(
-    path: impl AsRef<Path>,
-    embedder_id: &str,
-    ndims: usize,
-) -> Result<Connection> {
+pub async fn open(path: impl AsRef<Path>, embedder_id: &str, ndims: usize) -> Result<Connection> {
     register_sqlite_vec();
     let conn = Connection::open(path.as_ref())
         .await
@@ -42,8 +43,11 @@ const CURRENT_SCHEMA_VERSION: i64 = 2;
 async fn migrate(conn: &Connection, ndims: usize) -> Result<()> {
     let schema = SCHEMA_V1.replace("{NDIMS}", &ndims.to_string());
     conn.call(move |c| -> rusqlite::Result<()> {
-        c.execute_batch(&schema)?;
-        // idempotent ALTERs for in-place upgrades
+        // Bootstrap the two tables needed to inspect and upgrade legacy DBs.
+        // The complete schema contains indexes and triggers that reference
+        // newer columns, so it must only run after the idempotent ALTERs.
+        c.execute_batch(NODES_BOOTSTRAP)?;
+
         let has_content_json: bool = c
             .prepare("SELECT 1 FROM pragma_table_info('nodes') WHERE name = 'content_json'")?
             .exists([])?;
@@ -63,8 +67,7 @@ async fn migrate(conn: &Connection, ndims: usize) -> Result<()> {
             .exists([])?;
         if !has_parent_id {
             c.execute_batch(
-                "ALTER TABLE nodes ADD COLUMN parent_id INTEGER REFERENCES nodes(id) ON DELETE CASCADE;
-                 CREATE INDEX IF NOT EXISTS idx_nodes_parent ON nodes(parent_id, position);",
+                "ALTER TABLE nodes ADD COLUMN parent_id INTEGER REFERENCES nodes(id) ON DELETE CASCADE;",
             )?;
         }
         let has_position: bool = c
@@ -73,6 +76,19 @@ async fn migrate(conn: &Connection, ndims: usize) -> Result<()> {
         if !has_position {
             c.execute_batch("ALTER TABLE nodes ADD COLUMN position REAL;")?;
         }
+        let has_last_extracted_hash: bool = c
+            .prepare(
+                "SELECT 1 FROM pragma_table_info('nodes') WHERE name = 'last_extracted_hash'",
+            )?
+            .exists([])?;
+        if !has_last_extracted_hash {
+            c.execute_batch("ALTER TABLE nodes ADD COLUMN last_extracted_hash TEXT;")?;
+        }
+
+        // All referenced node columns now exist, so indexes, triggers, queues,
+        // FTS and vector tables can be created safely.
+        c.execute_batch(&schema)?;
+
         // Drop dead node_properties (never written to). Reintroduce when we
         // have a real properties write path.
         c.execute_batch("DROP TABLE IF EXISTS node_properties;")?;
@@ -84,14 +100,6 @@ async fn migrate(conn: &Connection, ndims: usize) -> Result<()> {
                 "ALTER TABLE extract_queue ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;
                  ALTER TABLE extract_queue ADD COLUMN last_attempt INTEGER;",
             )?;
-        }
-        let has_last_extracted_hash: bool = c
-            .prepare(
-                "SELECT 1 FROM pragma_table_info('nodes') WHERE name = 'last_extracted_hash'",
-            )?
-            .exists([])?;
-        if !has_last_extracted_hash {
-            c.execute_batch("ALTER TABLE nodes ADD COLUMN last_extracted_hash TEXT;")?;
         }
         // Ancestor-aware embedding requires re-embed on parent move; install
         // the trigger on existing DBs that predated it.
@@ -141,13 +149,30 @@ async fn migrate(conn: &Connection, ndims: usize) -> Result<()> {
     Ok(())
 }
 
+const NODES_BOOTSTRAP: &str = r#"
+CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
+INSERT OR IGNORE INTO schema_version VALUES (1);
+
+CREATE TABLE IF NOT EXISTS nodes (
+  id INTEGER PRIMARY KEY,
+  uuid TEXT UNIQUE NOT NULL,
+  kind TEXT NOT NULL,
+  title TEXT,
+  content TEXT NOT NULL DEFAULT '',
+  content_json TEXT,
+  body_stemmed TEXT NOT NULL DEFAULT '',
+  parent_id INTEGER REFERENCES nodes(id) ON DELETE CASCADE,
+  position REAL,
+  last_extracted_hash TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+"#;
+
 async fn set_schema_version(conn: &Connection, version: i64) -> Result<()> {
     conn.call(move |c| -> rusqlite::Result<()> {
         c.execute("DELETE FROM schema_version", [])?;
-        c.execute(
-            "INSERT INTO schema_version(version) VALUES (?1)",
-            [version],
-        )?;
+        c.execute("INSERT INTO schema_version(version) VALUES (?1)", [version])?;
         Ok(())
     })
     .await?;
@@ -157,22 +182,24 @@ async fn set_schema_version(conn: &Connection, version: i64) -> Result<()> {
 async fn backfill_stemmed(conn: &Connection) -> Result<()> {
     // Stem rows where body_stemmed is empty but content/title isn't.
     let rows = conn
-        .call(|c| -> rusqlite::Result<Vec<(i64, Option<String>, String)>> {
-            let mut stmt = c.prepare(
-                "SELECT id, title, content FROM nodes
+        .call(
+            |c| -> rusqlite::Result<Vec<(i64, Option<String>, String)>> {
+                let mut stmt = c.prepare(
+                    "SELECT id, title, content FROM nodes
                  WHERE body_stemmed = '' AND (content != '' OR title IS NOT NULL)",
-            )?;
-            let rows = stmt
-                .query_map([], |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, Option<String>>(1)?,
-                        r.get::<_, String>(2)?,
-                    ))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
+                )?;
+                let rows = stmt
+                    .query_map([], |r| {
+                        Ok((
+                            r.get::<_, i64>(0)?,
+                            r.get::<_, Option<String>>(1)?,
+                            r.get::<_, String>(2)?,
+                        ))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            },
+        )
         .await?;
     if rows.is_empty() {
         return Ok(());
@@ -431,10 +458,7 @@ pub async fn create_node(
 ) -> Result<Node> {
     let uuid = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp();
-    let body_stemmed = crate::stem::stem(&format!(
-        "{}\n{content}",
-        title.as_deref().unwrap_or("")
-    ));
+    let body_stemmed = crate::stem::stem(&format!("{}\n{content}", title.as_deref().unwrap_or("")));
     let node = conn
         .call(move |c| -> rusqlite::Result<Node> {
             c.execute(
@@ -468,10 +492,7 @@ pub async fn update_node(
     content_json: Option<String>,
 ) -> Result<()> {
     let now = chrono::Utc::now().timestamp();
-    let body_stemmed = crate::stem::stem(&format!(
-        "{}\n{content}",
-        title.as_deref().unwrap_or("")
-    ));
+    let body_stemmed = crate::stem::stem(&format!("{}\n{content}", title.as_deref().unwrap_or("")));
     conn.call(move |c| -> rusqlite::Result<()> {
         c.execute(
             "UPDATE nodes
@@ -576,9 +597,7 @@ pub async fn replace_block_refs(
                     continue;
                 }
                 let target: Option<i64> = tx
-                    .query_row("SELECT id FROM nodes WHERE uuid = ?1", [uuid], |r| {
-                        r.get(0)
-                    })
+                    .query_row("SELECT id FROM nodes WHERE uuid = ?1", [uuid], |r| r.get(0))
                     .ok();
                 match target {
                     Some(target_id) if target_id != block_id => {
@@ -616,11 +635,7 @@ pub async fn get_node(conn: &Connection, id: i64) -> Result<Option<Node>> {
     Ok(node)
 }
 
-pub async fn neighbors(
-    conn: &Connection,
-    node_id: i64,
-    depth: u32,
-) -> Result<Vec<Node>> {
+pub async fn neighbors(conn: &Connection, node_id: i64, depth: u32) -> Result<Vec<Node>> {
     let nodes = conn
         .call(move |c| -> rusqlite::Result<Vec<Node>> {
             let mut stmt = c.prepare(
@@ -720,11 +735,7 @@ pub async fn read_ancestors(conn: &Connection, node_id: i64) -> Result<Vec<Node>
 /// DFS via a lexicographic sort path so the result reads like an outline:
 /// each block immediately followed by its own children. Excludes `node_id`
 /// itself.
-pub async fn read_subtree(
-    conn: &Connection,
-    node_id: i64,
-    depth: u32,
-) -> Result<Vec<Node>> {
+pub async fn read_subtree(conn: &Connection, node_id: i64, depth: u32) -> Result<Vec<Node>> {
     let rows = conn
         .call(move |c| -> rusqlite::Result<Vec<Node>> {
             // sort_path is zero-padded floats joined by '/', so lexicographic
@@ -851,16 +862,11 @@ pub async fn search_pages_by_title(
         Ok(rows)
     })
     .await
-    .map_err(Into::into)
 }
 
 /// FTS5 over blocks only. Used by the `((` autocomplete — no rerank for
 /// keystroke-time speed. Empty query returns nothing.
-pub async fn search_blocks_fts(
-    conn: &Connection,
-    query: String,
-    limit: u32,
-) -> Result<Vec<Node>> {
+pub async fn search_blocks_fts(conn: &Connection, query: String, limit: u32) -> Result<Vec<Node>> {
     if query.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -885,7 +891,6 @@ pub async fn search_blocks_fts(
         Ok(rows)
     })
     .await
-    .map_err(Into::into)
 }
 
 pub async fn search_fts(conn: &Connection, query: String, limit: u32) -> Result<Vec<SearchHit>> {
@@ -998,18 +1003,14 @@ pub async fn search_hybrid(
 /// ~0.009 — roughly equivalent to moving up 30 ranks.
 const BACKLINK_BOOST: f64 = 0.002;
 
-async fn incoming_link_counts(
-    conn: &Connection,
-    ids: &[i64],
-) -> Result<Vec<(i64, i64)>> {
+async fn incoming_link_counts(conn: &Connection, ids: &[i64]) -> Result<Vec<(i64, i64)>> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
     let ids = ids.to_vec();
     let rows = conn
         .call(move |c| -> rusqlite::Result<Vec<(i64, i64)>> {
-            let placeholders = std::iter::repeat("?")
-                .take(ids.len())
+            let placeholders = std::iter::repeat_n("?", ids.len())
                 .collect::<Vec<_>>()
                 .join(",");
             let sql = format!(
@@ -1077,7 +1078,15 @@ pub async fn create_block(
                 "INSERT INTO nodes (uuid, kind, title, content, content_json, body_stemmed,
                                     parent_id, position, created_at, updated_at)
                  VALUES (?1, 'block', NULL, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
-                rusqlite::params![&uuid, &content, &content_json, &body_stemmed, parent_id, pos, now],
+                rusqlite::params![
+                    &uuid,
+                    &content,
+                    &content_json,
+                    &body_stemmed,
+                    parent_id,
+                    pos,
+                    now
+                ],
             )?;
             let id = c.last_insert_rowid();
             Ok(Node {
@@ -1179,7 +1188,6 @@ pub async fn get_page_by_title(conn: &Connection, title: String) -> Result<Optio
         }
     })
     .await
-    .map_err(Into::into)
 }
 
 pub async fn get_node_by_uuid(conn: &Connection, uuid: String) -> Result<Option<Node>> {
@@ -1198,7 +1206,6 @@ pub async fn get_node_by_uuid(conn: &Connection, uuid: String) -> Result<Option<
         }
     })
     .await
-    .map_err(Into::into)
 }
 
 /// Find a page by case-insensitive title or create one. Used to eagerly
@@ -1238,12 +1245,11 @@ pub async fn get_or_create_page_by_title(conn: &Connection, title: String) -> Re
 /// ancestor-chain context. A block embedded in isolation often loses meaning
 /// ("yeah, that fits") — bundling the breadcrumb of ancestor titles plus the
 /// direct parent's content gives the embedder enough signal to disambiguate.
-pub async fn take_pending_embeddings(
-    conn: &Connection,
-    batch: u32,
-) -> Result<Vec<(i64, String)>> {
+type EmbedChainRow = (i64, i32, Option<String>, String);
+
+pub async fn take_pending_embeddings(conn: &Connection, batch: u32) -> Result<Vec<(i64, String)>> {
     let rows = conn
-        .call(move |c| -> rusqlite::Result<Vec<(i64, i32, Option<String>, String)>> {
+        .call(move |c| -> rusqlite::Result<Vec<EmbedChainRow>> {
             let mut stmt = c.prepare(
                 "WITH batch(node_id) AS (
                    SELECT node_id FROM embed_queue
@@ -1315,7 +1321,7 @@ fn compose_embed_text(chain: &[(i32, Option<String>, String)]) -> String {
         .filter(|(d, t, _)| *d > 0 && t.as_deref().is_some_and(|s| !s.trim().is_empty()))
         .map(|(d, t, _)| (*d, t.as_deref().unwrap()))
         .collect();
-    titles.sort_by(|a, b| b.0.cmp(&a.0));
+    titles.sort_by_key(|item| std::cmp::Reverse(item.0));
     if !titles.is_empty() {
         let joined: Vec<&str> = titles.iter().map(|(_, t)| *t).collect();
         parts.push(joined.join(" > "));
@@ -1324,7 +1330,10 @@ fn compose_embed_text(chain: &[(i32, Option<String>, String)]) -> String {
     if let Some((_, _, parent_content)) = chain.iter().find(|(d, _, _)| *d == 1) {
         let trimmed = parent_content.trim();
         if !trimmed.is_empty() {
-            let flat: String = trimmed.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
+            let flat: String = trimmed
+                .chars()
+                .map(|c| if c == '\n' { ' ' } else { c })
+                .collect();
             let cut = flat.char_indices().nth(PARENT_EXCERPT_MAX).map(|(i, _)| i);
             let excerpt = match cut {
                 Some(i) => format!("{}…", &flat[..i]),
@@ -1358,35 +1367,37 @@ pub async fn take_pending_extractions(
     batch: u32,
 ) -> Result<Vec<(i64, Option<String>, String)>> {
     let rows = conn
-        .call(move |c| -> rusqlite::Result<Vec<(i64, Option<String>, String)>> {
-            // Eligible: under retry cap AND (never attempted OR backoff elapsed).
-            let mut stmt = c.prepare(
-                "SELECT n.id, n.title, n.content
+        .call(
+            move |c| -> rusqlite::Result<Vec<(i64, Option<String>, String)>> {
+                // Eligible: under retry cap AND (never attempted OR backoff elapsed).
+                let mut stmt = c.prepare(
+                    "SELECT n.id, n.title, n.content
                  FROM extract_queue q JOIN nodes n ON n.id = q.node_id
                  WHERE q.retry_count < ?2
                    AND (q.last_attempt IS NULL
                         OR unixepoch() - q.last_attempt >= ?3 * (1 << q.retry_count))
                  ORDER BY q.enqueued_at ASC
                  LIMIT ?1",
-            )?;
-            let rows = stmt
-                .query_map(
-                    rusqlite::params![
-                        batch as i64,
-                        EXTRACT_MAX_ATTEMPTS,
-                        EXTRACT_BACKOFF_BASE_SECS,
-                    ],
-                    |r| {
-                        Ok((
-                            r.get::<_, i64>(0)?,
-                            r.get::<_, Option<String>>(1)?,
-                            r.get::<_, String>(2)?,
-                        ))
-                    },
-                )?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
+                )?;
+                let rows = stmt
+                    .query_map(
+                        rusqlite::params![
+                            batch as i64,
+                            EXTRACT_MAX_ATTEMPTS,
+                            EXTRACT_BACKOFF_BASE_SECS,
+                        ],
+                        |r| {
+                            Ok((
+                                r.get::<_, i64>(0)?,
+                                r.get::<_, Option<String>>(1)?,
+                                r.get::<_, String>(2)?,
+                            ))
+                        },
+                    )?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            },
+        )
         .await?;
     Ok(rows)
 }
@@ -1402,10 +1413,7 @@ pub async fn finish_extraction(conn: &Connection, node_id: i64) -> Result<()> {
 
 /// Read the hash recorded at the node's last successful extraction. `None`
 /// when the node has never been extracted or the row is missing.
-pub async fn get_last_extracted_hash(
-    conn: &Connection,
-    node_id: i64,
-) -> Result<Option<String>> {
+pub async fn get_last_extracted_hash(conn: &Connection, node_id: i64) -> Result<Option<String>> {
     let h = conn
         .call(move |c| -> rusqlite::Result<Option<String>> {
             c.query_row(
@@ -1413,7 +1421,6 @@ pub async fn get_last_extracted_hash(
                 [node_id],
                 |r| r.get::<_, Option<String>>(0),
             )
-            .map_err(Into::into)
         })
         .await?;
     Ok(h)
@@ -1421,11 +1428,7 @@ pub async fn get_last_extracted_hash(
 
 /// Stamp the hash that was just successfully extracted, so future queue ticks
 /// can skip identical content.
-pub async fn set_last_extracted_hash(
-    conn: &Connection,
-    node_id: i64,
-    hash: String,
-) -> Result<()> {
+pub async fn set_last_extracted_hash(conn: &Connection, node_id: i64, hash: String) -> Result<()> {
     conn.call(move |c| -> rusqlite::Result<()> {
         c.execute(
             "UPDATE nodes SET last_extracted_hash = ?2 WHERE id = ?1",
@@ -1487,10 +1490,7 @@ pub async fn upsert_entity(
     Ok(id)
 }
 
-pub async fn write_embeddings(
-    conn: &Connection,
-    items: Vec<(i64, Vec<f32>)>,
-) -> Result<()> {
+pub async fn write_embeddings(conn: &Connection, items: Vec<(i64, Vec<f32>)>) -> Result<()> {
     if items.is_empty() {
         return Ok(());
     }
@@ -1510,4 +1510,52 @@ pub async fn write_embeddings(
     })
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn migrates_legacy_nodes_before_creating_new_indexes_and_triggers() {
+        let database = tempfile::NamedTempFile::new().expect("create temporary database");
+        let legacy = rusqlite::Connection::open(database.path()).expect("open legacy database");
+        legacy
+            .execute_batch(
+                "CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+                 INSERT INTO schema_version VALUES (1);
+                 CREATE TABLE nodes (
+                   id INTEGER PRIMARY KEY,
+                   uuid TEXT UNIQUE NOT NULL,
+                   kind TEXT NOT NULL,
+                   title TEXT,
+                   content TEXT NOT NULL DEFAULT '',
+                   created_at INTEGER NOT NULL,
+                   updated_at INTEGER NOT NULL
+                 );",
+            )
+            .expect("create legacy schema");
+        drop(legacy);
+
+        let connection = open(database.path(), "test:4d", 4)
+            .await
+            .expect("migrate legacy database");
+        let columns: Vec<String> = connection
+            .call(|db| {
+                let mut statement = db.prepare("SELECT name FROM pragma_table_info('nodes')")?;
+                statement.query_map([], |row| row.get(0))?.collect()
+            })
+            .await
+            .expect("read migrated columns");
+
+        for expected in [
+            "content_json",
+            "body_stemmed",
+            "parent_id",
+            "position",
+            "last_extracted_hash",
+        ] {
+            assert!(columns.iter().any(|column| column == expected));
+        }
+    }
 }

@@ -20,12 +20,12 @@ export function PagesList({ selectedId, onSelect, onStatus }: Props) {
     try {
       setPages(await listPages());
     } catch (err) {
-      onStatus(`error: ${err}`);
+      onStatus(`error: ${String(err)}`);
     }
   }, [onStatus]);
 
   useEffect(() => {
-    refresh();
+    void refresh();
   }, [refresh]);
 
   async function submit(e: React.FormEvent) {
@@ -40,7 +40,7 @@ export function PagesList({ selectedId, onSelect, onStatus }: Props) {
       onSelect(page);
       onStatus(`created page #${page.id}`);
     } catch (err) {
-      onStatus(`error: ${err}`);
+      onStatus(`error: ${String(err)}`);
     } finally {
       setBusy(false);
     }
@@ -56,7 +56,12 @@ export function PagesList({ selectedId, onSelect, onStatus }: Props) {
           disabled={busy}
           className="h-8"
         />
-        <Button type="submit" size="sm" disabled={busy || !newTitle.trim()}>
+        <Button
+          type="submit"
+          size="sm"
+          aria-label="Create page"
+          disabled={busy || !newTitle.trim()}
+        >
           <Plus className="size-4" />
         </Button>
       </form>

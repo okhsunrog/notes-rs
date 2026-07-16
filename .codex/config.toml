@@ -1,0 +1,9 @@
+[mcp_servers.tauri]
+command = "vp"
+args = ["exec", "mcp-server-tauri"]
+startup_timeout_sec = 30
+tool_timeout_sec = 120
+
+# UI actions can mutate the running development application, so keep approval
+# prompts enabled for tools the server does not mark as read-only.
+default_tools_approval_mode = "writes"

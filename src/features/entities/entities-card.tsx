@@ -20,7 +20,7 @@ export function EntitiesCard({ variant = "card" }: Props = {}) {
   }, []);
 
   useEffect(() => {
-    refresh();
+    void refresh();
     const unlistenPromise = listen("entities:changed", () => {
       void refresh();
     });

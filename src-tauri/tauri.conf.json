@@ -4,17 +4,20 @@
   "version": "0.1.0",
   "identifier": "dev.okhsunrog.notes-rs",
   "build": {
-    "beforeDevCommand": "bun run dev",
+    "beforeDevCommand": "vp dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "bun run build",
+    "beforeBuildCommand": "vp build",
     "frontendDist": "../dist"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "title": "notes-rs",
-        "width": 800,
-        "height": 600
+        "width": 1200,
+        "height": 800,
+        "minWidth": 1100,
+        "minHeight": 650
       }
     ],
     "security": {

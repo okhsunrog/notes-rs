@@ -1,17 +1,17 @@
 use crate::db::{self, Node, SearchHit};
 use crate::embed::{EmbedderBackend, RerankBackend};
+use crate::sqlite::Connection;
 use anyhow::Context;
 use futures::StreamExt;
 use rig::agent::MultiTurnStreamItem;
 use rig::client::{CompletionClient, ProviderClient};
-use rig::completion::{Message, Prompt, ToolDefinition};
+use rig::completion::{Message, Prompt};
 use rig::providers::openrouter;
 use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingPrompt};
 use rig::tool::{Tool, ToolError};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
-use tokio_rusqlite::Connection;
 
 pub const MODEL: &str = "deepseek/deepseek-v4-flash";
 
@@ -114,8 +114,7 @@ impl QueryRewriter {
     }
 
     async fn try_rewrite(&self, query: &str) -> anyhow::Result<String> {
-        let client = openrouter::Client::from_env()
-            .context("OPENROUTER_API_KEY not set")?;
+        let client = openrouter::Client::from_env().context("OPENROUTER_API_KEY not set")?;
         let prompt = format!(
             "Conversation history:\n{history}\nSearch query: {query}\n\n\
              Rewrite the query into a fully standalone form that resolves \
@@ -156,11 +155,27 @@ fn looks_contextual(q: &str) -> bool {
     let lower = q.to_lowercase();
     // English + Russian demonstratives/pronouns commonly used to refer back.
     const CUES: &[&str] = &[
-        " this", " that", " it ", " these", " those", " same",
-        " above", " previous", " former", " latter",
-        " second", " first", " third",
-        "тот", "то ", "эт", "ту ", "те ",
-        "предыдущ", "выше", "ранее",
+        " this",
+        " that",
+        " it ",
+        " these",
+        " those",
+        " same",
+        " above",
+        " previous",
+        " former",
+        " latter",
+        " second",
+        " first",
+        " third",
+        "тот",
+        "то ",
+        "эт",
+        "ту ",
+        "те ",
+        "предыдущ",
+        "выше",
+        "ранее",
     ];
     let padded = format!(" {lower} ");
     CUES.iter().any(|c| padded.contains(c))
@@ -192,19 +207,19 @@ impl Tool for SearchAgentic {
     type Args = SearchArgs;
     type Output = Vec<SearchHit>;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.into(),
-            description: "Hybrid search (BM25 + semantic + BGE rerank) over notes. Returns ranked nodes with scores. Prefer this for most queries.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "Search query in the user's language" },
-                    "limit": { "type": "integer", "description": "Max results to return (default 8)", "default": 8 }
-                },
-                "required": ["query"]
-            }),
-        }
+    fn description(&self) -> String {
+        "Hybrid search (BM25 + semantic + BGE rerank) over notes. Returns ranked nodes with scores. Prefer this for most queries.".into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Search query in the user's language" },
+                "limit": { "type": "integer", "description": "Max results to return (default 8)", "default": 8 }
+            },
+            "required": ["query"]
+        })
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
@@ -282,19 +297,19 @@ impl Tool for SearchAndExpand {
     type Args = SearchArgs;
     type Output = Vec<SearchHit>;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.into(),
-            description: "Hybrid search then walk one graph hop from each seed (refs/mentions/relations) and rerank the merged pool. Prefer this over `search_agentic` for most questions — the extra context usually helps.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "Search query in the user's language" },
-                    "limit": { "type": "integer", "description": "Max results to return (default 8)", "default": 8 }
-                },
-                "required": ["query"]
-            }),
-        }
+    fn description(&self) -> String {
+        "Hybrid search then walk one graph hop from each seed (refs/mentions/relations) and rerank the merged pool. Prefer this over `search_agentic` for most questions — the extra context usually helps.".into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Search query in the user's language" },
+                "limit": { "type": "integer", "description": "Max results to return (default 8)", "default": 8 }
+            },
+            "required": ["query"]
+        })
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
@@ -334,9 +349,7 @@ impl Tool for SearchAndExpand {
         let candidates: Vec<Node> = pool.into_values().collect();
         let docs: Vec<String> = candidates
             .iter()
-            .map(|n| {
-                format!("{}\n{}", n.title.as_deref().unwrap_or(""), n.content)
-            })
+            .map(|n| format!("{}\n{}", n.title.as_deref().unwrap_or(""), n.content))
             .collect();
         let scored = self
             .reranker
@@ -378,19 +391,19 @@ impl Tool for Neighbors {
     type Args = NeighborsArgs;
     type Output = Vec<Node>;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.into(),
-            description: "Return nodes reachable from the given node id within `depth` hops over the graph edges (undirected).".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "id": { "type": "integer", "description": "Source node id" },
-                    "depth": { "type": "integer", "description": "Hop limit (default 1)", "default": 1 }
-                },
-                "required": ["id"]
-            }),
-        }
+    fn description(&self) -> String {
+        "Return nodes reachable from the given node id within `depth` hops over the graph edges (undirected).".into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "integer", "description": "Source node id" },
+                "depth": { "type": "integer", "description": "Hop limit (default 1)", "default": 1 }
+            },
+            "required": ["id"]
+        })
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
@@ -421,19 +434,19 @@ impl Tool for FindBacklinks {
     type Args = FindBacklinksArgs;
     type Output = Vec<Node>;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.into(),
-            description: "Find nodes that link TO the given node (incoming edges only — different from `neighbors`, which is undirected). Optional `kind` filter: 'refs' for wikilinks/block-refs, 'mentions' for entity mentions.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "id": { "type": "integer", "description": "Target node id" },
-                    "kind": { "type": ["string", "null"], "description": "Optional edge-kind filter" }
-                },
-                "required": ["id"]
-            }),
-        }
+    fn description(&self) -> String {
+        "Find nodes that link TO the given node (incoming edges only — different from `neighbors`, which is undirected). Optional `kind` filter: 'refs' for wikilinks/block-refs, 'mentions' for entity mentions.".into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "integer", "description": "Target node id" },
+                "kind": { "type": ["string", "null"], "description": "Optional edge-kind filter" }
+            },
+            "required": ["id"]
+        })
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
@@ -461,16 +474,16 @@ impl Tool for ReadAncestors {
     type Args = ReadAncestorsArgs;
     type Output = Vec<Node>;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.into(),
-            description: "Walk the parent chain from this node up to the page root. Returned root-first; the node itself is the last element. Useful for getting an outline breadcrumb / surrounding context for a block.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": { "id": { "type": "integer" } },
-                "required": ["id"]
-            }),
-        }
+    fn description(&self) -> String {
+        "Walk the parent chain from this node up to the page root. Returned root-first; the node itself is the last element. Useful for getting an outline breadcrumb / surrounding context for a block.".into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": { "id": { "type": "integer" } },
+            "required": ["id"]
+        })
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
@@ -503,19 +516,19 @@ impl Tool for ReadSubtree {
     type Args = ReadSubtreeArgs;
     type Output = Vec<Node>;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.into(),
-            description: "Return all descendants of `id` up to `depth` levels, in outline (DFS pre-order) order. Use this to read the entire subtree below a page or section.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "id": { "type": "integer" },
-                    "depth": { "type": "integer", "description": "Max levels to descend (default 4)", "default": 4 }
-                },
-                "required": ["id"]
-            }),
-        }
+    fn description(&self) -> String {
+        "Return all descendants of `id` up to `depth` levels, in outline (DFS pre-order) order. Use this to read the entire subtree below a page or section.".into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "integer" },
+                "depth": { "type": "integer", "description": "Max levels to descend (default 4)", "default": 4 }
+            },
+            "required": ["id"]
+        })
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
@@ -543,16 +556,16 @@ impl Tool for FindTagged {
     type Args = FindTaggedArgs;
     type Output = Vec<Node>;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.into(),
-            description: "Find blocks/pages that mention an entity or tag with the given title (case-insensitive). Use this when the user asks about a specific person/project/concept and you want everything connected to it.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": { "title": { "type": "string" } },
-                "required": ["title"]
-            }),
-        }
+    fn description(&self) -> String {
+        "Find blocks/pages that mention an entity or tag with the given title (case-insensitive). Use this when the user asks about a specific person/project/concept and you want everything connected to it.".into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": { "title": { "type": "string" } },
+            "required": ["title"]
+        })
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
@@ -580,16 +593,16 @@ impl Tool for GetNode {
     type Args = GetNodeArgs;
     type Output = Option<Node>;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.into(),
-            description: "Fetch a single node by its integer id.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": { "id": { "type": "integer" } },
-                "required": ["id"]
-            }),
-        }
+    fn description(&self) -> String {
+        "Fetch a single node by its integer id.".into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": { "id": { "type": "integer" } },
+            "required": ["id"]
+        })
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
@@ -619,20 +632,20 @@ impl Tool for CreateNode {
     type Args = CreateNodeArgs;
     type Output = Node;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.into(),
-            description: "Create a new node. Use kind 'block' for note content, 'page' for named pages, 'tag' for tags. Only call when the user explicitly asks to record something.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "kind": { "type": "string", "enum": ["block", "page", "tag", "entity"] },
-                    "title": { "type": ["string", "null"] },
-                    "content": { "type": "string" }
-                },
-                "required": ["kind", "content"]
-            }),
-        }
+    fn description(&self) -> String {
+        "Create a new node. Use kind 'block' for note content, 'page' for named pages, 'tag' for tags. Only call when the user explicitly asks to record something.".into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "kind": { "type": "string", "enum": ["block", "page", "tag", "entity"] },
+                "title": { "type": ["string", "null"] },
+                "content": { "type": "string" }
+            },
+            "required": ["kind", "content"]
+        })
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
@@ -672,21 +685,21 @@ impl Tool for LinkNodes {
     type Args = LinkArgs;
     type Output = LinkOk;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.into(),
-            description: "Create a typed edge between two nodes. Common kinds: 'refs', 'mentions', 'relates_to', 'contains'.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "src": { "type": "integer" },
-                    "dst": { "type": "integer" },
-                    "kind": { "type": "string" },
-                    "weight": { "type": "number", "default": 1.0 }
-                },
-                "required": ["src", "dst", "kind"]
-            }),
-        }
+    fn description(&self) -> String {
+        "Create a typed edge between two nodes. Common kinds: 'refs', 'mentions', 'relates_to', 'contains'.".into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "src": { "type": "integer" },
+                "dst": { "type": "integer" },
+                "kind": { "type": "string" },
+                "weight": { "type": "number", "default": 1.0 }
+            },
+            "required": ["src", "dst", "kind"]
+        })
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
@@ -769,12 +782,27 @@ impl From<ChatTurn> for Message {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ChatEvent {
-    TextDelta { text: String },
-    Reasoning { text: String },
-    ToolStart { id: String, name: String, args: serde_json::Value },
-    ToolEnd { id: String, result: String },
-    Done { text: String },
-    Error { message: String },
+    TextDelta {
+        text: String,
+    },
+    Reasoning {
+        text: String,
+    },
+    ToolStart {
+        id: String,
+        name: String,
+        args: serde_json::Value,
+    },
+    ToolEnd {
+        id: String,
+        result: String,
+    },
+    Done {
+        text: String,
+    },
+    Error {
+        message: String,
+    },
 }
 
 pub async fn run_chat_stream(
@@ -791,8 +819,8 @@ pub async fn run_chat_stream(
 
     let mut stream = agent
         .stream_prompt(message)
-        .with_history(history)
-        .multi_turn(8)
+        .history(history)
+        .max_turns(8)
         .await;
 
     let mut full = String::new();
@@ -829,6 +857,7 @@ pub async fn run_chat_stream(
                 }
                 StreamedAssistantContent::ToolCallDelta { .. } => {}
                 StreamedAssistantContent::Final(_) => {}
+                StreamedAssistantContent::Unknown(_) => {}
             },
             Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
                 tool_result,

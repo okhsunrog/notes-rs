@@ -3,6 +3,7 @@ mod commands;
 mod db;
 mod embed;
 mod extract;
+mod sqlite;
 mod stem;
 
 use std::sync::Arc;
@@ -15,8 +16,20 @@ pub fn run() {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
+    let mut builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+
+    // Development-only bridge for MCP-powered UI inspection and automation.
+    // Restrict it to localhost; release builds do not register the plugin.
+    #[cfg(debug_assertions)]
+    {
+        builder = builder.plugin(
+            tauri_plugin_mcp_bridge::Builder::new()
+                .bind_address("127.0.0.1")
+                .build(),
+        );
+    }
+
+    builder
         .setup(|app| {
             let handle = app.handle().clone();
             let data_dir = app.path().app_data_dir().expect("resolving app data dir");

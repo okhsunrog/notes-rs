@@ -1,3 +1,4 @@
+use crate::sqlite::Connection;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 #[cfg(feature = "local-models")]
@@ -12,7 +13,6 @@ use std::sync::Arc;
 #[cfg(feature = "local-models")]
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
-use tokio_rusqlite::Connection;
 
 // ───────────────────────── embedder: trait + factory ─────────────────────────
 
@@ -78,8 +78,7 @@ pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
                          set it explicitly (e.g. 4096 for qwen/qwen3-embedding-8b)"
                     )
                 })?;
-            let client =
-                openrouter::Client::from_env().context("OPENROUTER_API_KEY not set")?;
+            let client = openrouter::Client::from_env().context("OPENROUTER_API_KEY not set")?;
             let m = <openrouter::EmbeddingModel as EmbeddingModel>::make(
                 &client,
                 model.clone(),
@@ -218,7 +217,11 @@ where
             .collect())
     }
     async fn embed_query(&self, text: String) -> Result<Vec<f32>> {
-        let out = self.model.embed_text(&text).await.context("rig embed_text")?;
+        let out = self
+            .model
+            .embed_text(&text)
+            .await
+            .context("rig embed_text")?;
         Ok(out.vec.into_iter().map(|x| x as f32).collect())
     }
 }
@@ -307,8 +310,7 @@ pub struct OpenRouterReranker {
 
 impl OpenRouterReranker {
     pub fn new(model: String) -> Result<Self> {
-        let api_key =
-            std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set")?;
+        let api_key = std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set")?;
         let base = std::env::var("OPENROUTER_BASE_URL")
             .unwrap_or_else(|_| "https://openrouter.ai/api/v1".into());
         Ok(Self {

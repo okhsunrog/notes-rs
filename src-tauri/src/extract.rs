@@ -1,3 +1,4 @@
+use crate::sqlite::Connection;
 use anyhow::{Context, Result};
 use rig::client::{CompletionClient, ProviderClient};
 use rig::extractor::Extractor;
@@ -9,7 +10,6 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::OnceCell;
 use tokio::time::{Duration, sleep};
-use tokio_rusqlite::Connection;
 
 /// Stable change-detection hash of (title, content). Sha1 is fine here —
 /// we're not protecting against adversarial collisions, just detecting
@@ -86,8 +86,8 @@ impl EntityExtractor {
     async fn get(&self) -> Result<&Extractor<openrouter::CompletionModel, ExtractionResult>> {
         self.inner
             .get_or_try_init(|| async {
-                let client = openrouter::Client::from_env()
-                    .context("OPENROUTER_API_KEY not set")?;
+                let client =
+                    openrouter::Client::from_env().context("OPENROUTER_API_KEY not set")?;
                 let extractor = client
                     .extractor::<ExtractionResult>(EXTRACT_MODEL)
                     .preamble(PREAMBLE)
@@ -155,11 +155,7 @@ async fn tick(conn: &Connection, extractor: &EntityExtractor, app: &AppHandle) -
     Ok(())
 }
 
-async fn apply(
-    conn: &Connection,
-    source_id: i64,
-    result: ExtractionResult,
-) -> Result<()> {
+async fn apply(conn: &Connection, source_id: i64, result: ExtractionResult) -> Result<()> {
     use std::collections::HashMap;
     let mut name_to_id: HashMap<String, i64> = HashMap::new();
 
@@ -172,10 +168,10 @@ async fn apply(
     for rel in result.relations {
         let src = name_to_id.get(&rel.src.to_lowercase()).copied();
         let dst = name_to_id.get(&rel.dst.to_lowercase()).copied();
-        if let (Some(s), Some(d)) = (src, dst) {
-            if s != d {
-                crate::db::link_nodes(conn, s, d, rel.kind, 1.0).await?;
-            }
+        if let (Some(s), Some(d)) = (src, dst)
+            && s != d
+        {
+            crate::db::link_nodes(conn, s, d, rel.kind, 1.0).await?;
         }
     }
     Ok(())

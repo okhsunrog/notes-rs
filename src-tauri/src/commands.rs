@@ -1,11 +1,11 @@
 use crate::agent::{ChatEvent, ChatTurn};
 use crate::db::{self, Node, SearchHit};
 use crate::embed::{EmbedderBackend, RerankBackend};
+use crate::sqlite::Connection;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::State;
 use tauri::ipc::Channel;
-use tokio_rusqlite::Connection;
 
 pub struct AppState {
     pub conn: Connection,

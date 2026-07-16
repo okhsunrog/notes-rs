@@ -55,7 +55,7 @@ export function PageView({ node, onSaved, onStatus, onClose }: Props) {
       setSaveState("saved");
     } catch (err) {
       setSaveState("error");
-      onStatusRef.current(`save error: ${err}`);
+      onStatusRef.current(`save error: ${String(err)}`);
     }
   }, []);
 

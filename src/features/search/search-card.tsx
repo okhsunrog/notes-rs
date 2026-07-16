@@ -33,7 +33,7 @@ export function SearchCard({ hits, setHits, onOpenNode, onStatus }: Props) {
       setHits(out);
       onStatus(`${out.length} hits (${mode})`);
     } catch (err) {
-      onStatus(`error: ${err}`);
+      onStatus(`error: ${String(err)}`);
     } finally {
       setBusy(false);
     }

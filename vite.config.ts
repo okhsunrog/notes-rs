@@ -1,17 +1,19 @@
-import { defineConfig } from "vite-plus";
-import react from "@vitejs/plugin-react";
-import tailwindcss from "@tailwindcss/vite";
+import { defineConfig, lazyPlugins } from "vite-plus";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 
-// https://vite.dev/config/
-export default defineConfig(async () => ({
-  plugins: [react(), tailwindcss()],
+export default defineConfig({
+  plugins: lazyPlugins(async () => {
+    const [{ default: react }, { default: tailwindcss }] = await Promise.all([
+      import("@vitejs/plugin-react"),
+      import("@tailwindcss/vite"),
+    ]);
+    return [react(), tailwindcss()];
+  }),
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
@@ -40,7 +42,19 @@ export default defineConfig(async () => ({
     },
   },
 
-  staged: {
-    "*.{js,ts,tsx,jsx}": "vp check --fix",
+  lint: {
+    ignorePatterns: ["dist/**", "src-tauri/**"],
+    options: {
+      typeAware: true,
+      typeCheck: true,
+    },
   },
-}));
+
+  test: {
+    include: ["src/**/*.test.{ts,tsx}"],
+  },
+
+  staged: {
+    "*": "vp check --fix",
+  },
+});

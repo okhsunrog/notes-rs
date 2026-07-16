@@ -17,19 +17,19 @@ export function AppLayout({ status, sidebar, center, right }: Props) {
       </header>
 
       <Group orientation="horizontal" className="flex-1">
-        <Panel defaultSize={20} minSize={12} maxSize={35}>
+        <Panel defaultSize="20%" minSize="12%" maxSize="35%">
           <aside className="h-full overflow-y-auto border-r p-3">{sidebar}</aside>
         </Panel>
 
         <Separator className="w-px bg-border transition hover:bg-accent" />
 
-        <Panel defaultSize={55} minSize={30}>
+        <Panel defaultSize="55%" minSize="30%">
           <main className="h-full overflow-y-auto p-4">{center}</main>
         </Panel>
 
         <Separator className="w-px bg-border transition hover:bg-accent" />
 
-        <Panel defaultSize={25} minSize={15} maxSize={45} collapsible>
+        <Panel defaultSize="25%" minSize="15%" maxSize="45%" collapsible>
           <section className="h-full overflow-hidden border-l p-3">{right}</section>
         </Panel>
       </Group>

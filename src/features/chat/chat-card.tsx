@@ -58,7 +58,7 @@ export function ChatCard() {
     } catch (err) {
       setChatLog((l) => {
         const next = [...l];
-        next[next.length - 1] = { role: "assistant", text: `error: ${err}` };
+        next[next.length - 1] = { role: "assistant", text: `error: ${String(err)}` };
         return next;
       });
     } finally {
@@ -122,7 +122,7 @@ export function ChatCard() {
             disabled={chatBusy}
             className="flex-1"
           />
-          <Button type="submit" disabled={chatBusy}>
+          <Button type="submit" aria-label="Send message" disabled={chatBusy}>
             <Send className="size-4" />
           </Button>
         </form>

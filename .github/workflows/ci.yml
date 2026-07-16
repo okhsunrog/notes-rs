@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version: "24"
+          cache: true
+      - run: vp install --frozen-lockfile
+      - run: vp check
+      - run: vp test
+      - run: vp build
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
