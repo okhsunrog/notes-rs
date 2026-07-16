@@ -38,6 +38,9 @@ pub trait EmbedderBackend: Send + Sync {
 ///                   specific defaults for the known ones (OpenAI / Qwen).
 pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
     let provider = std::env::var("EMBED_PROVIDER").unwrap_or_else(|_| "openrouter".into());
+    if crate::settings::local_only() && !matches!(provider.as_str(), "local" | "fastembed") {
+        bail!("AI_LOCAL_ONLY requires EMBED_PROVIDER=local");
+    }
     let model_env = std::env::var("EMBED_MODEL").ok();
     let ndims_env = std::env::var("EMBED_NDIMS")
         .ok()
@@ -384,6 +387,9 @@ pub trait RerankBackend: Send + Sync {
 
 pub fn make_reranker() -> Result<Arc<dyn RerankBackend>> {
     let provider = std::env::var("RERANK_PROVIDER").unwrap_or_else(|_| "openrouter".into());
+    if crate::settings::local_only() && !matches!(provider.as_str(), "local" | "fastembed") {
+        bail!("AI_LOCAL_ONLY requires RERANK_PROVIDER=local");
+    }
     let model_env = std::env::var("RERANK_MODEL").ok();
 
     match provider.as_str() {

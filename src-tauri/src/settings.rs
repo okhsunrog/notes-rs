@@ -17,6 +17,11 @@ const SECRET_KEYS: &[&str] = &[
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsSnapshot {
+    pub local_only: bool,
+    pub entity_extraction_enabled: bool,
+    pub query_rewriting_enabled: bool,
+    pub chat_model: String,
+    pub extraction_model: String,
     pub embedding_provider: String,
     pub embedding_model: String,
     pub embedding_ndims: String,
@@ -34,6 +39,11 @@ pub struct SettingsSnapshot {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsUpdate {
+    pub local_only: bool,
+    pub entity_extraction_enabled: bool,
+    pub query_rewriting_enabled: bool,
+    pub chat_model: String,
+    pub extraction_model: String,
     pub embedding_provider: String,
     pub embedding_model: String,
     pub embedding_ndims: String,
@@ -77,6 +87,11 @@ pub fn load(app: &AppHandle) -> Result<SettingsSnapshot> {
         .map(|key| (*key).to_string())
         .collect();
     Ok(SettingsSnapshot {
+        local_only: value("AI_LOCAL_ONLY", "false") == "true",
+        entity_extraction_enabled: value("ENTITY_EXTRACTION_ENABLED", "true") == "true",
+        query_rewriting_enabled: value("QUERY_REWRITING_ENABLED", "true") == "true",
+        chat_model: value("CHAT_MODEL", "deepseek/deepseek-v4-flash"),
+        extraction_model: value("EXTRACT_MODEL", "deepseek/deepseek-v4-flash"),
         embedding_provider: value("EMBED_PROVIDER", "openrouter"),
         embedding_model: value("EMBED_MODEL", "qwen/qwen3-embedding-8b"),
         embedding_ndims: value("EMBED_NDIMS", "4096"),
@@ -106,6 +121,17 @@ pub fn save(app: &AppHandle, update: SettingsUpdate) -> Result<SettingsSnapshot>
     validate(&update)?;
     let path = config_path(app)?;
     let mut values = read_env(&path)?;
+    values.insert("AI_LOCAL_ONLY".into(), update.local_only.to_string());
+    values.insert(
+        "ENTITY_EXTRACTION_ENABLED".into(),
+        update.entity_extraction_enabled.to_string(),
+    );
+    values.insert(
+        "QUERY_REWRITING_ENABLED".into(),
+        update.query_rewriting_enabled.to_string(),
+    );
+    set_or_remove(&mut values, "CHAT_MODEL", update.chat_model);
+    set_or_remove(&mut values, "EXTRACT_MODEL", update.extraction_model);
     set_or_remove(&mut values, "EMBED_PROVIDER", update.embedding_provider);
     set_or_remove(&mut values, "EMBED_MODEL", update.embedding_model);
     set_or_remove(&mut values, "EMBED_NDIMS", update.embedding_ndims);
@@ -219,6 +245,22 @@ fn validate(update: &SettingsUpdate) -> Result<()> {
     {
         bail!("this build does not include the local-models feature");
     }
+    if update.local_only {
+        if !cfg!(feature = "local-models") {
+            bail!("local-only mode requires a build with the local-models feature");
+        }
+        if update.embedding_provider != "local" || update.rerank_provider != "local" {
+            bail!("local-only mode requires local embeddings and local reranking");
+        }
+        if update.entity_extraction_enabled {
+            bail!(
+                "entity extraction is cloud-only for now and must be disabled in local-only mode"
+            );
+        }
+    }
+    if update.chat_model.trim().is_empty() || update.extraction_model.trim().is_empty() {
+        bail!("chat and extraction model IDs cannot be empty");
+    }
     if !update.embedding_ndims.trim().is_empty() {
         let dimensions = update
             .embedding_ndims
@@ -254,6 +296,40 @@ pub fn openrouter_client() -> Result<rig::providers::openrouter::Client> {
         .api_key(api_key)
         .build()
         .context("building OpenRouter client")
+}
+
+fn env_flag(key: &str, default: bool) -> bool {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.eq_ignore_ascii_case("true") || value == "1")
+        .unwrap_or(default)
+}
+
+pub fn local_only() -> bool {
+    env_flag("AI_LOCAL_ONLY", false)
+}
+
+pub fn entity_extraction_enabled() -> bool {
+    env_flag("ENTITY_EXTRACTION_ENABLED", true) && !local_only()
+}
+
+pub fn query_rewriting_enabled() -> bool {
+    env_flag("QUERY_REWRITING_ENABLED", true) && !local_only()
+}
+
+pub fn chat_model() -> String {
+    std::env::var("CHAT_MODEL").unwrap_or_else(|_| "deepseek/deepseek-v4-flash".into())
+}
+
+pub fn extraction_model() -> String {
+    std::env::var("EXTRACT_MODEL").unwrap_or_else(|_| "deepseek/deepseek-v4-flash".into())
+}
+
+pub fn ensure_cloud_ai_allowed(feature: &str) -> Result<()> {
+    if local_only() {
+        bail!("{feature} is disabled in local-only mode because no local chat model is configured")
+    }
+    Ok(())
 }
 
 fn set_or_remove(values: &mut BTreeMap<String, String>, key: &str, value: String) {

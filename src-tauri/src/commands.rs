@@ -5,6 +5,7 @@ use crate::sqlite::Connection;
 use anyhow::Context;
 use base64::Engine;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use tauri::ipc::Channel;
@@ -17,6 +18,7 @@ pub struct AppState {
     pub embedder: Arc<dyn EmbedderBackend>,
     pub reranker: Arc<dyn RerankBackend>,
     pub background_paused: Arc<AtomicBool>,
+    pub chat_cancellations: Arc<std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -747,6 +749,7 @@ pub async fn search_fts(
     query: String,
     limit: u32,
 ) -> Result<Vec<SearchHit>, String> {
+    let limit = validate_search_request(&query, limit)?;
     db::search_fts(&state.conn, query, limit).await.map_err(err)
 }
 
@@ -756,6 +759,7 @@ pub async fn search_vec(
     query: String,
     limit: u32,
 ) -> Result<Vec<SearchHit>, String> {
+    let limit = validate_search_request(&query, limit)?;
     let emb = state.embedder.embed_query(query).await.map_err(err)?;
     db::search_vec(&state.conn, emb, limit).await.map_err(err)
 }
@@ -766,6 +770,7 @@ pub async fn search_hybrid(
     query: String,
     limit: u32,
 ) -> Result<Vec<SearchHit>, String> {
+    let limit = validate_search_request(&query, limit)?;
     let emb = state
         .embedder
         .embed_query(query.clone())
@@ -783,6 +788,7 @@ pub async fn search_agentic(
     query: String,
     limit: u32,
 ) -> Result<Vec<SearchHit>, String> {
+    let limit = validate_search_request(&query, limit)?;
     let emb = state
         .embedder
         .embed_query(query.clone())
@@ -791,7 +797,7 @@ pub async fn search_agentic(
     // See SearchAgentic for rationale; widening the rerank pool matters even
     // more here because the UI can ask for `limit = 3` and starve the
     // reranker otherwise.
-    let pool = (limit * 4).max(32);
+    let pool = limit.saturating_mul(4).max(32);
     let candidates = db::search_hybrid(&state.conn, query.clone(), emb, pool)
         .await
         .map_err(err)?;
@@ -809,9 +815,11 @@ pub async fn search_agentic(
     let mut out: Vec<SearchHit> = scored
         .into_iter()
         .take(limit as usize)
-        .map(|(idx, score)| SearchHit {
-            node: candidates[idx].node.clone(),
-            score: score as f64,
+        .filter_map(|(idx, score)| {
+            candidates.get(idx).map(|candidate| SearchHit {
+                node: candidate.node.clone(),
+                score: score as f64,
+            })
         })
         .collect();
     out.truncate(limit as usize);
@@ -824,7 +832,23 @@ pub async fn rerank(
     query: String,
     documents: Vec<String>,
 ) -> Result<Vec<(usize, f32)>, String> {
+    if query.trim().is_empty() || query.chars().count() > 4_096 {
+        return Err("query must contain 1 to 4096 characters".into());
+    }
+    if documents.len() > 128 || documents.iter().any(|document| document.len() > 100_000) {
+        return Err("reranking accepts at most 128 documents of at most 100000 bytes each".into());
+    }
     state.reranker.rerank(query, documents).await.map_err(err)
+}
+
+fn validate_search_request(query: &str, limit: u32) -> Result<u32, String> {
+    if query.trim().is_empty() || query.chars().count() > 4_096 {
+        return Err("query must contain 1 to 4096 characters".into());
+    }
+    if !(1..=100).contains(&limit) {
+        return Err("limit must be between 1 and 100".into());
+    }
+    Ok(limit)
 }
 
 #[tauri::command]
@@ -844,20 +868,61 @@ pub async fn chat_stream(
     state: State<'_, AppState>,
     history: Vec<ChatTurn>,
     message: String,
+    allow_writes: bool,
+    active_node_id: Option<i64>,
+    request_id: String,
     on_event: Channel<ChatEvent>,
 ) -> Result<String, String> {
+    if request_id.len() > 128 || request_id.trim().is_empty() {
+        return Err("invalid chat request ID".into());
+    }
+    let cancellation = Arc::new(AtomicBool::new(false));
+    {
+        let mut active = state
+            .chat_cancellations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if active
+            .insert(request_id.clone(), cancellation.clone())
+            .is_some()
+        {
+            return Err("a chat request with this ID is already active".into());
+        }
+    }
     let on_event = Arc::new(on_event);
     let emit = move |ev: ChatEvent| {
         let _ = on_event.send(ev);
     };
-    crate::agent::run_chat_stream(
+    let result = crate::agent::run_chat_stream(
         state.conn.clone(),
         state.embedder.clone(),
         state.reranker.clone(),
         history,
         message,
+        allow_writes,
+        active_node_id,
+        cancellation,
         emit,
     )
-    .await
-    .map_err(|e| e.to_string())
+    .await;
+    state
+        .chat_cancellations
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(&request_id);
+    result.map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn cancel_chat(state: State<'_, AppState>, request_id: String) -> bool {
+    let active = state
+        .chat_cancellations
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some(cancellation) = active.get(&request_id) {
+        cancellation.store(true, Ordering::Release);
+        true
+    } else {
+        false
+    }
 }

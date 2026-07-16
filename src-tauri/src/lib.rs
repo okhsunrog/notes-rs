@@ -88,18 +88,25 @@ pub fn run() {
                             embedder.clone(),
                             background_paused.clone(),
                         );
-                        let extractor = Arc::new(extract::EntityExtractor::new());
-                        extract::spawn_worker(
-                            conn.clone(),
-                            extractor,
-                            handle.clone(),
-                            background_paused.clone(),
-                        );
+                        if settings::entity_extraction_enabled() {
+                            let extractor = Arc::new(extract::EntityExtractor::new());
+                            extract::spawn_worker(
+                                conn.clone(),
+                                extractor,
+                                handle.clone(),
+                                background_paused.clone(),
+                            );
+                        } else {
+                            tracing::info!("automatic entity extraction is disabled");
+                        }
                         handle.manage(commands::AppState {
                             conn,
                             embedder,
                             reranker,
                             background_paused,
+                            chat_cancellations: Arc::new(std::sync::Mutex::new(
+                                std::collections::HashMap::new(),
+                            )),
                         });
                         *startup.write().unwrap_or_else(|e| e.into_inner()) =
                             commands::StartupStatus::Ready;
@@ -148,6 +155,7 @@ pub fn run() {
             commands::rerank,
             commands::chat,
             commands::chat_stream,
+            commands::cancel_chat,
             commands::list_entities,
             commands::list_pages,
             commands::delete_page,

@@ -11,8 +11,7 @@ use rig::tool::{Tool, ToolError};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
-
-pub const MODEL: &str = "deepseek/deepseek-v4-flash";
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const SYSTEM_PROMPT: &str = r#"
 You are an assistant embedded in a personal knowledge graph (notes-rs).
@@ -34,9 +33,6 @@ Workflow:
    - `get_node` for a single row.
 4. Cite node IDs (e.g. "see node #42") in your final answer.
 5. If nothing relevant found, say so plainly. Do not fabricate.
-
-You may create new nodes (`create_node`) and link them (`link_nodes`) when the user explicitly asks
-to record something. Never modify existing nodes without asking.
 
 When calling a search tool, always write a fully self-contained query that resolves any references
 from the chat so far ("that one", "the second", "те", etc.) — the search index does not see the
@@ -99,7 +95,10 @@ impl QueryRewriter {
     }
 
     pub async fn rewrite(&self, query: &str) -> String {
-        if self.history_text.is_empty() || !looks_contextual(query) {
+        if self.history_text.is_empty()
+            || !looks_contextual(query)
+            || !crate::settings::query_rewriting_enabled()
+        {
             return query.to_string();
         }
         match self.try_rewrite(query).await {
@@ -113,6 +112,7 @@ impl QueryRewriter {
     }
 
     async fn try_rewrite(&self, query: &str) -> anyhow::Result<String> {
+        crate::settings::ensure_cloud_ai_allowed("query rewriting")?;
         let client = crate::settings::openrouter_client()?;
         let prompt = format!(
             "Conversation history:\n{history}\nSearch query: {query}\n\n\
@@ -126,7 +126,7 @@ impl QueryRewriter {
             query = query,
         );
         let agent = client
-            .agent(MODEL)
+            .agent(crate::settings::chat_model())
             .preamble("You rewrite search queries to be self-contained.")
             .max_tokens(120)
             .build();
@@ -200,6 +200,23 @@ fn default_limit() -> u32 {
     8
 }
 
+const MAX_SEARCH_LIMIT: u32 = 32;
+const MAX_QUERY_CHARS: usize = 4_096;
+
+fn validate_search_args(args: &SearchArgs) -> Result<(), ToolError> {
+    if args.query.trim().is_empty() || args.query.chars().count() > MAX_QUERY_CHARS {
+        return Err(ToolError::ToolCallError(
+            format!("query must contain 1 to {MAX_QUERY_CHARS} characters").into(),
+        ));
+    }
+    if args.limit == 0 || args.limit > MAX_SEARCH_LIMIT {
+        return Err(ToolError::ToolCallError(
+            format!("limit must be between 1 and {MAX_SEARCH_LIMIT}").into(),
+        ));
+    }
+    Ok(())
+}
+
 impl Tool for SearchAgentic {
     const NAME: &'static str = "search_agentic";
     type Error = ToolError;
@@ -214,14 +231,15 @@ impl Tool for SearchAgentic {
         json!({
             "type": "object",
             "properties": {
-                "query": { "type": "string", "description": "Search query in the user's language" },
-                "limit": { "type": "integer", "description": "Max results to return (default 8)", "default": 8 }
+                "query": { "type": "string", "minLength": 1, "maxLength": MAX_QUERY_CHARS, "description": "Search query in the user's language" },
+                "limit": { "type": "integer", "minimum": 1, "maximum": MAX_SEARCH_LIMIT, "description": "Max results to return (default 8)", "default": 8 }
             },
             "required": ["query"]
         })
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        validate_search_args(&args)?;
         let query = self.rewriter.rewrite(&args.query).await;
         let emb = self
             .embedder
@@ -231,7 +249,7 @@ impl Tool for SearchAgentic {
         // Pool floor: at low `limit` (e.g. 3) the default `limit*4 = 12` is
         // too narrow when BM25 and vector channels disagree. Widen the rerank
         // input so we don't starve the reranker of plausible candidates.
-        let pool = (args.limit * 4).max(RERANK_POOL_MIN);
+        let pool = args.limit.saturating_mul(4).max(RERANK_POOL_MIN);
         let candidates = db::search_hybrid(&self.conn, query.clone(), emb, pool)
             .await
             .map_err(into_tool_err)?;
@@ -261,9 +279,11 @@ impl Tool for SearchAgentic {
             .into_iter()
             .filter(|(_, s)| *s as f64 >= RELEVANCE_FLOOR)
             .take(args.limit as usize)
-            .map(|(idx, score)| SearchHit {
-                node: candidates[idx].node.clone(),
-                score: score as f64,
+            .filter_map(|(idx, score)| {
+                candidates.get(idx).map(|candidate| SearchHit {
+                    node: candidate.node.clone(),
+                    score: score as f64,
+                })
             })
             .collect())
     }
@@ -304,21 +324,22 @@ impl Tool for SearchAndExpand {
         json!({
             "type": "object",
             "properties": {
-                "query": { "type": "string", "description": "Search query in the user's language" },
-                "limit": { "type": "integer", "description": "Max results to return (default 8)", "default": 8 }
+                "query": { "type": "string", "minLength": 1, "maxLength": MAX_QUERY_CHARS, "description": "Search query in the user's language" },
+                "limit": { "type": "integer", "minimum": 1, "maximum": MAX_SEARCH_LIMIT, "description": "Max results to return (default 8)", "default": 8 }
             },
             "required": ["query"]
         })
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        validate_search_args(&args)?;
         let query = self.rewriter.rewrite(&args.query).await;
         let emb = self
             .embedder
             .embed_query(query.clone())
             .await
             .map_err(into_tool_err)?;
-        let seed_pool = (args.limit * 4).max(RERANK_POOL_MIN);
+        let seed_pool = args.limit.saturating_mul(4).max(RERANK_POOL_MIN);
         let seeds = db::search_hybrid(&self.conn, query.clone(), emb, seed_pool)
             .await
             .map_err(into_tool_err)?;
@@ -359,9 +380,11 @@ impl Tool for SearchAndExpand {
             .into_iter()
             .filter(|(_, s)| *s as f64 >= RELEVANCE_FLOOR)
             .take(args.limit as usize)
-            .map(|(idx, score)| SearchHit {
-                node: candidates[idx].clone(),
-                score: score as f64,
+            .filter_map(|(idx, score)| {
+                candidates.get(idx).cloned().map(|node| SearchHit {
+                    node,
+                    score: score as f64,
+                })
             })
             .collect())
     }
@@ -383,6 +406,7 @@ pub struct NeighborsArgs {
 fn default_depth() -> u32 {
     1
 }
+const MAX_GRAPH_DEPTH: u32 = 6;
 
 impl Tool for Neighbors {
     const NAME: &'static str = "neighbors";
@@ -399,13 +423,18 @@ impl Tool for Neighbors {
             "type": "object",
             "properties": {
                 "id": { "type": "integer", "description": "Source node id" },
-                "depth": { "type": "integer", "description": "Hop limit (default 1)", "default": 1 }
+                "depth": { "type": "integer", "minimum": 1, "maximum": MAX_GRAPH_DEPTH, "description": "Hop limit (default 1)", "default": 1 }
             },
             "required": ["id"]
         })
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        if args.depth == 0 || args.depth > MAX_GRAPH_DEPTH {
+            return Err(ToolError::ToolCallError(
+                format!("depth must be between 1 and {MAX_GRAPH_DEPTH}").into(),
+            ));
+        }
         db::neighbors(&self.conn, args.id, args.depth)
             .await
             .map_err(into_tool_err)
@@ -508,6 +537,7 @@ pub struct ReadSubtreeArgs {
 fn default_subtree_depth() -> u32 {
     4
 }
+const MAX_SUBTREE_DEPTH: u32 = 12;
 
 impl Tool for ReadSubtree {
     const NAME: &'static str = "read_subtree";
@@ -524,13 +554,18 @@ impl Tool for ReadSubtree {
             "type": "object",
             "properties": {
                 "id": { "type": "integer" },
-                "depth": { "type": "integer", "description": "Max levels to descend (default 4)", "default": 4 }
+                "depth": { "type": "integer", "minimum": 1, "maximum": MAX_SUBTREE_DEPTH, "description": "Max levels to descend (default 4)", "default": 4 }
             },
             "required": ["id"]
         })
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        if args.depth == 0 || args.depth > MAX_SUBTREE_DEPTH {
+            return Err(ToolError::ToolCallError(
+                format!("depth must be between 1 and {MAX_SUBTREE_DEPTH}").into(),
+            ));
+        }
         db::read_subtree(&self.conn, args.id, args.depth)
             .await
             .map_err(into_tool_err)
@@ -648,6 +683,31 @@ impl Tool for CreateNode {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        if args.content.len() > 100_000
+            || args.title.as_ref().is_some_and(|title| title.len() > 500)
+        {
+            return Err(ToolError::ToolCallError(
+                "node title or content exceeds the allowed size".into(),
+            ));
+        }
+        if args.kind == "block" {
+            return Err(ToolError::ToolCallError(
+                "orphan blocks cannot be created; create a page instead".into(),
+            ));
+        }
+        if args.kind == "page"
+            && args
+                .title
+                .as_ref()
+                .is_none_or(|title| title.trim().is_empty())
+        {
+            return Err(ToolError::ToolCallError(
+                "pages require a non-empty title".into(),
+            ));
+        }
+        db::checkpoint_history(&self.conn, "AI create node")
+            .await
+            .map_err(into_tool_err)?;
         db::create_node(&self.conn, args.kind, args.title, args.content, None)
             .await
             .map_err(into_tool_err)
@@ -702,6 +762,20 @@ impl Tool for LinkNodes {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        if args.src == args.dst
+            || args.kind.trim().is_empty()
+            || args.kind.len() > 64
+            || !args.weight.is_finite()
+            || !(0.0..=10.0).contains(&args.weight)
+        {
+            return Err(ToolError::ToolCallError(
+                "invalid edge: use distinct nodes, a short kind, and weight between 0 and 10"
+                    .into(),
+            ));
+        }
+        db::checkpoint_history(&self.conn, "AI link nodes")
+            .await
+            .map_err(into_tool_err)?;
         db::link_nodes(&self.conn, args.src, args.dst, args.kind, args.weight)
             .await
             .map_err(into_tool_err)?;
@@ -716,11 +790,23 @@ fn build_agent(
     embedder: Arc<dyn EmbedderBackend>,
     reranker: Arc<dyn RerankBackend>,
     rewriter: QueryRewriter,
+    allow_writes: bool,
+    active_node_id: Option<i64>,
 ) -> Result<rig::agent::Agent<openrouter::CompletionModel>, AgentError> {
+    crate::settings::ensure_cloud_ai_allowed("chat").map_err(AgentError::from)?;
     let client = crate::settings::openrouter_client().map_err(AgentError::from)?;
-    Ok(client
-        .agent(MODEL)
-        .preamble(SYSTEM_PROMPT)
+    let preamble = active_node_id.map_or_else(
+        || SYSTEM_PROMPT.to_string(),
+        |id| {
+            format!(
+                "{SYSTEM_PROMPT}\nThe note currently open in the UI is node #{id}. When the user says \
+                 'this note', inspect that node and its subtree instead of guessing from search."
+            )
+        },
+    );
+    let mut builder = client
+        .agent(crate::settings::chat_model())
+        .preamble(&preamble)
         .max_tokens(2048)
         .tool(SearchAndExpand {
             conn: conn.clone(),
@@ -739,10 +825,13 @@ fn build_agent(
         .tool(ReadAncestors { conn: conn.clone() })
         .tool(ReadSubtree { conn: conn.clone() })
         .tool(FindTagged { conn: conn.clone() })
-        .tool(GetNode { conn: conn.clone() })
-        .tool(CreateNode { conn: conn.clone() })
-        .tool(LinkNodes { conn })
-        .build())
+        .tool(GetNode { conn: conn.clone() });
+    if allow_writes {
+        builder = builder
+            .tool(CreateNode { conn: conn.clone() })
+            .tool(LinkNodes { conn });
+    }
+    Ok(builder.build())
 }
 
 pub async fn run_chat(
@@ -752,7 +841,14 @@ pub async fn run_chat(
     message: String,
 ) -> Result<String, AgentError> {
     // Single-shot chat — no prior turns to resolve references against.
-    let agent = build_agent(conn, embedder, reranker, QueryRewriter::empty())?;
+    let agent = build_agent(
+        conn,
+        embedder,
+        reranker,
+        QueryRewriter::empty(),
+        false,
+        None,
+    )?;
     agent
         .prompt(message)
         .max_turns(8)
@@ -800,6 +896,15 @@ pub enum ChatEvent {
     Error {
         message: String,
     },
+    Usage {
+        #[serde(rename = "inputTokens")]
+        input_tokens: u64,
+        #[serde(rename = "outputTokens")]
+        output_tokens: u64,
+        #[serde(rename = "totalTokens")]
+        total_tokens: u64,
+    },
+    Cancelled,
 }
 
 pub async fn run_chat_stream(
@@ -808,10 +913,36 @@ pub async fn run_chat_stream(
     reranker: Arc<dyn RerankBackend>,
     history: Vec<ChatTurn>,
     message: String,
+    allow_writes: bool,
+    active_node_id: Option<i64>,
+    cancelled: Arc<AtomicBool>,
     emit: impl Fn(ChatEvent) + Send + Sync + 'static,
 ) -> Result<String, AgentError> {
+    if message.trim().is_empty() || message.chars().count() > 16_000 {
+        return Err(AgentError(
+            "message must contain 1 to 16000 characters".into(),
+        ));
+    }
+    let history_chars = history
+        .iter()
+        .map(|turn| match turn {
+            ChatTurn::User { text } | ChatTurn::Assistant { text } => text.chars().count(),
+        })
+        .sum::<usize>();
+    if history.len() > 24 || history_chars > 32_000 {
+        return Err(AgentError(
+            "chat history exceeds the 24-turn or 32000-character budget".into(),
+        ));
+    }
     let rewriter = QueryRewriter::new(&history);
-    let agent = build_agent(conn, embedder, reranker, rewriter)?;
+    let agent = build_agent(
+        conn,
+        embedder,
+        reranker,
+        rewriter,
+        allow_writes,
+        active_node_id,
+    )?;
     let history: Vec<Message> = history.into_iter().map(Into::into).collect();
 
     let mut stream = agent
@@ -822,7 +953,20 @@ pub async fn run_chat_stream(
 
     let mut full = String::new();
 
-    while let Some(item) = stream.next().await {
+    loop {
+        let item = tokio::select! {
+            item = stream.next() => item,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                if cancelled.load(Ordering::Acquire) {
+                    emit(ChatEvent::Cancelled);
+                    return Ok(full);
+                }
+                continue;
+            }
+        };
+        let Some(item) = item else {
+            break;
+        };
         match item {
             Ok(MultiTurnStreamItem::StreamAssistantItem(content)) => match content {
                 StreamedAssistantContent::Text(t) => {
@@ -866,7 +1010,14 @@ pub async fn run_chat_stream(
                     result,
                 });
             }
-            Ok(MultiTurnStreamItem::FinalResponse(_)) => {}
+            Ok(MultiTurnStreamItem::FinalResponse(response)) => {
+                let usage = response.usage;
+                emit(ChatEvent::Usage {
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    total_tokens: usage.total_tokens,
+                });
+            }
             Ok(_) => {}
             Err(e) => {
                 let msg = format!("{e:#}");

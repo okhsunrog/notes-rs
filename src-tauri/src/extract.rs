@@ -29,9 +29,6 @@ fn content_hash(title: Option<&str>, content: &str) -> String {
     out
 }
 
-/// Lighter, cheaper model is fine for structured extraction.
-const EXTRACT_MODEL: &str = "deepseek/deepseek-v4-flash";
-
 const PREAMBLE: &str = r#"
 Extract named entities and their relations from the user's note.
 
@@ -89,7 +86,7 @@ impl EntityExtractor {
             .get_or_try_init(|| async {
                 let client = crate::settings::openrouter_client()?;
                 let extractor = client
-                    .extractor::<ExtractionResult>(EXTRACT_MODEL)
+                    .extractor::<ExtractionResult>(crate::settings::extraction_model())
                     .preamble(PREAMBLE)
                     .retries(2)
                     .build();
@@ -125,6 +122,11 @@ pub fn spawn_worker(
 async fn tick(conn: &Connection, extractor: &EntityExtractor, app: &AppHandle) -> Result<()> {
     let batch = crate::db::take_pending_extractions(conn, 1).await?;
     for (node_id, title, content) in batch {
+        let meaningful_text = format!("{}\n{content}", title.as_deref().unwrap_or(""));
+        if meaningful_text.trim().chars().count() < 3 {
+            crate::db::finish_extraction(conn, node_id).await?;
+            continue;
+        }
         let new_hash = content_hash(title.as_deref(), &content);
         // Skip the LLM call if (title, content) is identical to the last
         // successful extraction — typo-fix cycles re-fire the update trigger
@@ -134,8 +136,7 @@ async fn tick(conn: &Connection, extractor: &EntityExtractor, app: &AppHandle) -
             crate::db::finish_extraction(conn, node_id).await?;
             continue;
         }
-        let text = format!("{}\n{content}", title.as_deref().unwrap_or(""));
-        match extractor.extract(text).await {
+        match extractor.extract(meaningful_text).await {
             Ok(result) => {
                 match apply(conn, node_id, title.clone(), content.clone(), result).await {
                     Ok(()) => {

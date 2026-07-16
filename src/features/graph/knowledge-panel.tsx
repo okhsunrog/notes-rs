@@ -31,7 +31,7 @@ export function KnowledgePanel({ node, onOpenNode }: Props) {
         </TabButton>
       </div>
       <div className={tab === "chat" ? "min-h-0 flex-1 pt-1" : "hidden"}>
-        <ChatCard />
+        <ChatCard node={node} />
       </div>
       {tab === "graph" && (
         <div className="min-h-0 flex-1 overflow-y-auto">

@@ -112,6 +112,11 @@ export function SettingsPage({
     setError("");
     try {
       const saved = await saveSettings({
+        localOnly: settings.localOnly,
+        entityExtractionEnabled: settings.entityExtractionEnabled,
+        queryRewritingEnabled: settings.queryRewritingEnabled,
+        chatModel: settings.chatModel,
+        extractionModel: settings.extractionModel,
         embeddingProvider: settings.embeddingProvider,
         embeddingModel: settings.embeddingModel,
         embeddingNdims: settings.embeddingNdims,
@@ -190,6 +195,11 @@ export function SettingsPage({
     try {
       // Persist a newly selected directory before using it.
       await saveSettings({
+        localOnly: current.localOnly,
+        entityExtractionEnabled: current.entityExtractionEnabled,
+        queryRewritingEnabled: current.queryRewritingEnabled,
+        chatModel: current.chatModel,
+        extractionModel: current.extractionModel,
         embeddingProvider: current.embeddingProvider,
         embeddingModel: current.embeddingModel,
         embeddingNdims: current.embeddingNdims,
@@ -329,6 +339,70 @@ export function SettingsPage({
         </SettingsSection>
 
         <SettingsSection
+          title="AI & privacy"
+          description="Control which note contents may leave this device. Provider changes apply after restart."
+        >
+          <ToggleField
+            checked={settings.localOnly}
+            disabled={!settings.localModelsAvailable}
+            label="Local-only mode"
+            description={
+              settings.localModelsAvailable
+                ? "Forces local embeddings and reranking, and disables cloud chat, rewriting, and extraction."
+                : "This build does not include local models. Rebuild with the local-models feature to enable it."
+            }
+            onChange={(checked) =>
+              setSettings((current) =>
+                current
+                  ? {
+                      ...current,
+                      localOnly: checked,
+                      ...(checked
+                        ? {
+                            entityExtractionEnabled: false,
+                            embeddingProvider: "local",
+                            embeddingModel: "bge-m3",
+                            embeddingNdims: "1024",
+                            rerankProvider: "local",
+                            rerankModel: "bge-reranker-v2-m3",
+                          }
+                        : {}),
+                    }
+                  : current,
+              )
+            }
+          />
+          <ToggleField
+            checked={settings.entityExtractionEnabled}
+            disabled={settings.localOnly}
+            label="Automatic entity extraction"
+            description="Sends changed note text to the configured OpenRouter endpoint to build entity and relation edges."
+            onChange={(checked) => update("entityExtractionEnabled", checked)}
+          />
+          <ToggleField
+            checked={settings.queryRewritingEnabled}
+            disabled={settings.localOnly}
+            label="Conversational query rewriting"
+            description="May make an extra model call when a short search query refers to earlier chat messages."
+            onChange={(checked) => update("queryRewritingEnabled", checked)}
+          />
+          <Field label="Chat model" hint="Used by Chat and query rewriting.">
+            <Input
+              value={settings.chatModel}
+              disabled={settings.localOnly}
+              onChange={(event) => update("chatModel", event.currentTarget.value)}
+            />
+          </Field>
+          <Field label="Extraction model">
+            <Input
+              value={settings.extractionModel}
+              disabled={settings.localOnly || !settings.entityExtractionEnabled}
+              onChange={(event) => update("extractionModel", event.currentTarget.value)}
+            />
+          </Field>
+        </SettingsSection>
+
+        <SettingsSection
           title="Window"
           description="Choose the native GTK frame, a borderless notes-rs frame, or KWin's server-side decoration on native Wayland."
         >
@@ -364,7 +438,29 @@ export function SettingsPage({
           <Field label="Provider">
             <select
               value={settings.embeddingProvider}
-              onChange={(event) => update("embeddingProvider", event.currentTarget.value)}
+              disabled={settings.localOnly}
+              onChange={(event) => {
+                const provider = event.currentTarget.value;
+                const defaults: Record<string, [string, string]> = {
+                  openrouter: ["qwen/qwen3-embedding-8b", "4096"],
+                  openai: ["text-embedding-3-small", "1536"],
+                  cohere: ["embed-multilingual-v3.0", "1024"],
+                  voyageai: ["voyage-3-large", "1024"],
+                  gemini: ["gemini-embedding-2", "3072"],
+                  local: ["bge-m3", "1024"],
+                };
+                const [model, dimensions] = defaults[provider] ?? ["", ""];
+                setSettings((current) =>
+                  current
+                    ? {
+                        ...current,
+                        embeddingProvider: provider,
+                        embeddingModel: model,
+                        embeddingNdims: dimensions,
+                      }
+                    : current,
+                );
+              }}
               className="h-10 w-full rounded-xl border border-border/70 bg-background/70 px-3 text-sm shadow-none"
             >
               <option value="openrouter">OpenRouter</option>
@@ -404,6 +500,7 @@ export function SettingsPage({
           <Field label="Provider">
             <select
               value={settings.rerankProvider}
+              disabled={settings.localOnly}
               onChange={(event) => update("rerankProvider", event.currentTarget.value)}
               className="h-10 w-full rounded-xl border border-border/70 bg-background/70 px-3 text-sm shadow-none"
             >
@@ -420,7 +517,10 @@ export function SettingsPage({
               onChange={(event) => update("rerankModel", event.currentTarget.value)}
             />
           </Field>
-          <Field label="OpenRouter base URL">
+          <Field
+            label="OpenRouter base URL"
+            hint="Used consistently by Chat, extraction, embeddings, and reranking."
+          >
             <Input
               value={settings.openrouterBaseUrl}
               onChange={(event) => update("openrouterBaseUrl", event.currentTarget.value)}
@@ -430,7 +530,7 @@ export function SettingsPage({
 
         <SettingsSection
           title="API keys"
-          description="Secrets are written to the app-data .env with owner-only permissions and are never returned to the webview. OpenRouter is also used by Chat and entity extraction."
+          description="Secrets are written to the app-data .env with owner-only permissions and are never returned to the webview."
         >
           {API_KEYS.map(([key, label]) => {
             const configured = settings.configuredKeys.includes(key) && !clearKeys.includes(key);
@@ -639,6 +739,7 @@ function SettingsSection({
     {
       Appearance: Palette,
       Window: AppWindow,
+      "AI & privacy": BrainCircuit,
       Embeddings: BrainCircuit,
       Reranking: BrainCircuit,
       "API keys": KeyRound,
@@ -659,6 +760,43 @@ function SettingsSection({
       </div>
       <div className="grid gap-4">{children}</div>
     </section>
+  );
+}
+
+function ToggleField({
+  checked,
+  disabled,
+  label,
+  description,
+  onChange,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  label: string;
+  description: string;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label
+      className={cn(
+        "flex items-start justify-between gap-4 rounded-2xl border border-border/60 bg-background/55 p-4",
+        disabled && "opacity-55",
+      )}
+    >
+      <span>
+        <span className="block text-sm font-medium">{label}</span>
+        <span className="mt-1 block text-xs leading-relaxed text-muted-foreground">
+          {description}
+        </span>
+      </span>
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(event) => onChange(event.currentTarget.checked)}
+        className="mt-1 size-4 shrink-0 accent-primary"
+      />
+    </label>
   );
 }
 

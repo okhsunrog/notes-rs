@@ -30,6 +30,11 @@ export type StartupStatus =
   | { state: "error"; message: string };
 
 export type SettingsSnapshot = {
+  localOnly: boolean;
+  entityExtractionEnabled: boolean;
+  queryRewritingEnabled: boolean;
+  chatModel: string;
+  extractionModel: string;
   embeddingProvider: string;
   embeddingModel: string;
   embeddingNdims: string;
@@ -57,6 +62,8 @@ export type ChatEvent =
   | { kind: "reasoning"; text: string }
   | { kind: "tool_start"; id: string; name: string; args: unknown }
   | { kind: "tool_end"; id: string; result: string }
+  | { kind: "usage"; inputTokens: number; outputTokens: number; totalTokens: number }
+  | { kind: "cancelled" }
   | { kind: "done"; text: string }
   | { kind: "error"; message: string };
 
@@ -71,6 +78,7 @@ export type ChatTurn = {
   role: "user" | "assistant";
   text: string;
   tools?: ToolCallView[];
+  usage?: { inputTokens: number; outputTokens: number; totalTokens: number };
 };
 
 const SEARCH_CMD: Record<Mode, string> = {
