@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { GitFork, Loader2, Redo2, Search, Settings, Undo2 } from "lucide-react";
 import { AppLayout } from "@/app/layout";
@@ -10,7 +10,6 @@ import { HomeView } from "@/features/home/home-view";
 import { SearchCard } from "@/features/search/search-card";
 import { PagesList } from "@/features/pages/pages-list";
 import { PageView } from "@/features/pages/page-view";
-import { SettingsPage } from "@/features/settings/settings-page";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import {
@@ -27,6 +26,12 @@ import {
   type Node,
   type SearchHit,
 } from "@/lib/api";
+
+const SettingsPage = lazy(() =>
+  import("@/features/settings/settings-page").then((module) => ({
+    default: module.SettingsPage,
+  })),
+);
 
 function App() {
   const [ready, setReady] = useState(false);
@@ -218,16 +223,24 @@ function App() {
 
   if (settingsOpen) {
     return (
-      <SettingsPage
-        onBack={() => setSettingsOpen(false)}
-        onDecorationModeChanged={setWindowDecorationMode}
-        dataAvailable={ready}
-        onDataChanged={() => {
-          setActiveNode(null);
-          setHits([]);
-          setStatus("Imported archive.");
-        }}
-      />
+      <Suspense
+        fallback={
+          <div className="flex h-screen items-center justify-center bg-background">
+            <Loader2 className="size-5 animate-spin text-muted-foreground" />
+          </div>
+        }
+      >
+        <SettingsPage
+          onBack={() => setSettingsOpen(false)}
+          onDecorationModeChanged={setWindowDecorationMode}
+          dataAvailable={ready}
+          onDataChanged={() => {
+            setActiveNode(null);
+            setHits([]);
+            setStatus("Imported archive.");
+          }}
+        />
+      </Suspense>
     );
   }
 

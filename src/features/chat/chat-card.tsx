@@ -1,12 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { ArrowUp, CheckCircle2, PencilLine, Sparkles, Square, Trash2, Wrench } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import type { ChatEvent, ChatTurn, Node } from "@/lib/api";
 
 const CHAT_STORAGE_KEY = "notes-rs.chat.v1";
+const MarkdownResponse = lazy(() => import("@/features/chat/markdown-response"));
 
 function loadStoredChat(): ChatTurn[] {
   try {
@@ -35,6 +35,19 @@ export function ChatCard({ node }: { node: Node | null }) {
   const [chatBusy, setChatBusy] = useState(false);
   const [allowWrites, setAllowWrites] = useState(false);
   const activeRequest = useRef<string | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const endRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const textarea = inputRef.current;
+    if (!textarea) return;
+    textarea.style.height = "0px";
+    textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, 72), 240)}px`;
+  }, [chatInput]);
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ block: "end", behavior: chatBusy ? "smooth" : "auto" });
+  }, [chatLog, chatBusy]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -194,7 +207,7 @@ export function ChatCard({ node }: { node: Node | null }) {
                       ) : (
                         <Wrench className="mt-0.5 size-3 shrink-0 animate-pulse" />
                       )}
-                      <span className="font-mono">
+                      <span className="min-w-0 break-all font-mono">
                         {tool.name}(
                         <span className="text-muted-foreground">{JSON.stringify(tool.args)}</span>)
                       </span>
@@ -202,7 +215,17 @@ export function ChatCard({ node }: { node: Node | null }) {
                   ))}
                 </ul>
               )}
-              <p className="whitespace-pre-wrap text-[13px] leading-relaxed">{t.text}</p>
+              {t.role === "assistant" ? (
+                <Suspense
+                  fallback={
+                    <p className="whitespace-pre-wrap text-[13px] leading-relaxed">{t.text}</p>
+                  }
+                >
+                  <MarkdownResponse>{t.text}</MarkdownResponse>
+                </Suspense>
+              ) : (
+                <p className="whitespace-pre-wrap text-[13px] leading-relaxed">{t.text}</p>
+              )}
               {t.role === "assistant" && t.usage && t.usage.totalTokens > 0 && (
                 <p className="mt-2 text-[10px] text-muted-foreground">
                   {t.usage.inputTokens.toLocaleString()} in ·{" "}
@@ -214,60 +237,78 @@ export function ChatCard({ node }: { node: Node | null }) {
             </div>
           ))}
           {chatBusy && <p className="text-sm italic text-muted-foreground">thinking…</p>}
+          <div ref={endRef} />
         </div>
       </ScrollArea>
 
       <form
         onSubmit={sendChat}
-        className="mt-2 flex gap-2 rounded-2xl border border-border/70 bg-card/75 p-1.5 shadow-sm focus-within:border-primary/30 focus-within:ring-3 focus-within:ring-primary/10"
+        className="mt-2 rounded-2xl border border-border/70 bg-card/85 p-2 shadow-sm focus-within:border-primary/30 focus-within:ring-3 focus-within:ring-primary/10"
       >
-        <Button
-          type="button"
-          size="icon-sm"
-          variant={allowWrites ? "default" : "ghost"}
-          aria-label="Allow AI writes for the next request"
-          aria-pressed={allowWrites}
-          disabled={chatBusy}
-          title="Allow create/link tools for the next request only"
-          onClick={() => {
-            if (allowWrites) {
-              setAllowWrites(false);
-              return;
-            }
-            if (
-              window.confirm(
-                "Allow the AI to create notes and links during the next request? The changes will be added to Undo history.",
-              )
-            )
-              setAllowWrites(true);
-          }}
-          className="size-9 rounded-xl"
-        >
-          <PencilLine className="size-4" />
-        </Button>
-        <Input
+        <textarea
+          ref={inputRef}
+          rows={3}
           placeholder="Ask about your notes…"
           value={chatInput}
-          onChange={(e) => setChatInput(e.currentTarget.value)}
+          onChange={(event) => setChatInput(event.currentTarget.value)}
           disabled={chatBusy}
-          className="h-9 flex-1 border-0 bg-transparent shadow-none focus-visible:ring-0"
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              event.currentTarget.form?.requestSubmit();
+            }
+          }}
+          className="block max-h-60 min-h-[4.5rem] w-full resize-none overflow-y-auto bg-transparent px-2 py-1.5 text-sm leading-relaxed outline-none placeholder:text-muted-foreground/70 disabled:opacity-60"
         />
-        <Button
-          type={chatBusy ? "button" : "submit"}
-          size="icon-sm"
-          aria-label={chatBusy ? "Stop response" : "Send message"}
-          onClick={
-            chatBusy
-              ? () => {
-                  if (activeRequest.current)
-                    void invoke("cancel_chat", { requestId: activeRequest.current });
-                }
-              : undefined
-          }
-          className="size-9 rounded-xl"
-        >
-          {chatBusy ? <Square className="size-3.5 fill-current" /> : <ArrowUp className="size-4" />}
-        </Button>
+        <div className="mt-1 flex items-center gap-2">
+          <Button
+            type="button"
+            size="sm"
+            variant={allowWrites ? "default" : "ghost"}
+            aria-label="Allow AI writes for the next request"
+            aria-pressed={allowWrites}
+            disabled={chatBusy}
+            title="Allow create/link tools for the next request only"
+            onClick={() => {
+              if (allowWrites) {
+                setAllowWrites(false);
+                return;
+              }
+              if (
+                window.confirm(
+                  "Allow the AI to create notes and links during the next request? The changes will be added to Undo history.",
+                )
+              )
+                setAllowWrites(true);
+            }}
+            className="h-8 rounded-xl px-2.5"
+          >
+            <PencilLine className="size-3.5" />
+            <span className="text-[10px]">{allowWrites ? "Writes allowed" : "Allow writes"}</span>
+          </Button>
+          <span className="text-[10px] text-muted-foreground">Shift Enter for a new line</span>
+          <Button
+            type={chatBusy ? "button" : "submit"}
+            size="icon-sm"
+            aria-label={chatBusy ? "Stop response" : "Send message"}
+            disabled={!chatBusy && !chatInput.trim()}
+            onClick={
+              chatBusy
+                ? () => {
+                    if (activeRequest.current)
+                      void invoke("cancel_chat", { requestId: activeRequest.current });
+                  }
+                : undefined
+            }
+            className="ml-auto size-9 rounded-xl"
+          >
+            {chatBusy ? (
+              <Square className="size-3.5 fill-current" />
+            ) : (
+              <ArrowUp className="size-4" />
+            )}
+          </Button>
+        </div>
       </form>
     </div>
   );
