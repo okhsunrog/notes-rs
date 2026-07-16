@@ -1,13 +1,13 @@
 # notes-rs
 
-A graph-native personal knowledge app built with Tauri, React, TypeScript, SQLite/FTS5, and vector search. Notes are stored as an outline of addressable blocks with wikilinks, block references, backlinks, hybrid retrieval, and an OpenRouter-backed agent.
+A graph-native personal knowledge app built with Tauri, React, TypeScript, SQLite/FTS5, and vector search. Notes are stored as an outline of addressable blocks with wikilinks, block references, backlinks, hybrid retrieval, and a provider-neutral graph agent.
 
 The right-hand Graph tab visualizes the selected page's local knowledge neighborhood and backlinks. Pages can contain file attachments copied into app data and embedded in portable archives. Settings includes JSON export/import, timestamped local backups, and explicit push/pull folder sync suitable for Syncthing, Nextcloud, or similar tools; pull, import, attachment deletion, and page deletion create a recovery backup automatically.
 
 ## Features
 
 - Hierarchical block outliner with autosave, wikilinks, block references, autocomplete, persisted folding, structural undo/redo, atomic paragraph splitting, attachments, and keyboard navigation.
-- SQLite/FTS5 search with English/Russian stemming, `sqlite-vec` semantic retrieval, reciprocal-rank fusion, backlink boost, configurable reranking, and an OpenRouter-backed graph agent.
+- SQLite/FTS5 search with English/Russian stemming, `sqlite-vec` semantic retrieval, reciprocal-rank fusion, backlink boost, configurable reranking, and an OpenAI/Anthropic-compatible graph agent powered by `llm-relay` and Rig.
 - Background embeddings and entity extraction with exponential backoff, stale-result protection, queue status, pause/resume, retry, and cancellation controls.
 - Local graph/backlinks explorer, six configurable color atmospheres with tuned light/dark variants, responsive narrow-window tabs, import/export, backups, and manual conflict-safe folder sync.
 - Debug-only, localhost-bound Tauri MCP bridge for accessibility snapshots, screenshots, interaction, logs, and IPC inspection.
@@ -93,12 +93,20 @@ Release webviews use a restrictive Content Security Policy and do not expose the
 
 ## Configuration
 
-Open **Settings** from the title bar to configure embedding and reranking providers, API keys, model dimensions, and window decorations. Linux offers the native GTK header, a borderless notes-rs frame, and native-Wayland KWin server decorations. The KWin mode removes Tao's custom GTK header and lets GTK negotiate the KDE server-decoration protocol; it does not use XWayland. Secrets are stored in the platform-specific Tauri app-data `.env` with owner-only permissions and existing values are never returned to the webview. Provider and window-backend changes take effect after using **Restart app**.
+Open **Settings** from the title bar to configure Chat, extraction, embedding and reranking providers, API keys, model dimensions, privacy controls, and window decorations. Chat and extraction accept either the OpenAI Chat Completions or Anthropic Messages protocol with any custom HTTP(S) API base. A connection probe validates unsaved Chat settings with one short request. Linux offers the native GTK header, a borderless notes-rs frame, and native-Wayland KWin server decorations. The KWin mode removes Tao's custom GTK header and lets GTK negotiate the KDE server-decoration protocol; it does not use XWayland. Secrets are stored in the platform-specific Tauri app-data `.env` with owner-only permissions and existing values are never returned to the webview. Provider and window-backend changes take effect after using **Restart app**.
 
-The same file can be managed manually. The default cloud setup requires:
+The same file can be managed manually. Existing OpenRouter installations remain compatible. A provider-neutral Chat configuration looks like:
 
 ```dotenv
-OPENROUTER_API_KEY=your-key
+CHAT_PROTOCOL=openai
+CHAT_BASE_URL=http://localhost:11434/v1
+CHAT_MODEL=qwen3
+# CHAT_API_KEY is optional for no-auth local servers
+
+EXTRACT_PROTOCOL=inherit
+EXTRACT_MODEL=qwen3
 ```
 
-Optional embedding settings include `EMBED_PROVIDER`, `EMBED_MODEL`, and `EMBED_NDIMS`; reranking can be configured with `RERANK_PROVIDER` and `RERANK_MODEL`. The supported default path uses OpenRouter. Offline embedding and reranking are available in builds made with the Rust `local-models` feature.
+Use `CHAT_PROTOCOL=anthropic` with a compatible Messages endpoint when appropriate. Extraction can inherit Chat or use a separate protocol, URL, key, and model. Optional embedding settings include `EMBED_PROVIDER`, `EMBED_MODEL`, `EMBED_NDIMS`, and `OPENAI_BASE_URL`; reranking can be configured with `RERANK_PROVIDER` and `RERANK_MODEL`. OpenRouter remains the migration-compatible default, not a requirement.
+
+The privacy controls can disable extraction and conversational query rewriting independently. Builds made with the Rust `local-models` feature can enable strict local-only mode, which forces local embeddings/reranking and disables cloud Chat, extraction, and rewriting. AI write tools are read-only by default and become available for one request only after an explicit confirmation in Chat.
