@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
+#[cfg(not(target_os = "android"))]
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tauri_specta::Event;
@@ -693,25 +694,47 @@ pub async fn graph_snapshot(
 pub async fn export_data(
     app: AppHandle,
     state: State<'_, AppState>,
-) -> CommandResult<Option<std::path::PathBuf>> {
-    let Some(path) = app
-        .dialog()
-        .file()
-        .add_filter("notes-rs archive", &["json"])
-        .set_file_name(format!(
-            "notes-rs-{}.json",
-            chrono::Utc::now().format("%Y%m%d-%H%M%S")
-        ))
-        .blocking_save_file()
-    else {
-        return Ok(None);
-    };
-    let path = path.into_path().map_err(err)?;
+) -> CommandResult<Option<String>> {
+    let filename = format!(
+        "notes-rs-{}.json",
+        chrono::Utc::now().format("%Y%m%d-%H%M%S")
+    );
     let mut archive = db::export_archive(&state.conn).await.map_err(err)?;
     add_archive_files(&app, &mut archive).map_err(err)?;
     let json = serde_json::to_string_pretty(&archive).map_err(err)?;
-    std::fs::write(&path, json).map_err(err)?;
-    Ok(Some(path))
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let Some(path) = app
+            .dialog()
+            .file()
+            .add_filter("notes-rs archive", &["json"])
+            .set_file_name(filename)
+            .blocking_save_file()
+        else {
+            return Ok(None);
+        };
+        let path = path.into_path().map_err(err)?;
+        std::fs::write(&path, json).map_err(err)?;
+        Ok(Some(path.to_string_lossy().into_owned()))
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        use tauri_plugin_android_fs::AndroidFsExt;
+
+        let api = app.android_fs_async();
+        let Some(uri) = api
+            .picker()
+            .save_file(None, filename, Some("application/json"), false)
+            .await
+            .map_err(err)?
+        else {
+            return Ok(None);
+        };
+        api.write(&uri, json.as_bytes()).await.map_err(err)?;
+        Ok(Some(uri.uri))
+    }
 }
 
 #[tauri::command]
@@ -719,17 +742,39 @@ pub async fn export_data(
 pub async fn import_data(
     app: AppHandle,
     state: State<'_, AppState>,
-) -> CommandResult<Option<std::path::PathBuf>> {
-    let Some(path) = app
-        .dialog()
-        .file()
-        .add_filter("notes-rs archive", &["json"])
-        .blocking_pick_file()
-    else {
-        return Ok(None);
+) -> CommandResult<Option<String>> {
+    #[cfg(not(target_os = "android"))]
+    let (source, json) = {
+        let Some(path) = app
+            .dialog()
+            .file()
+            .add_filter("notes-rs archive", &["json"])
+            .blocking_pick_file()
+        else {
+            return Ok(None);
+        };
+        let path = path.into_path().map_err(err)?;
+        let json = std::fs::read_to_string(&path).map_err(err)?;
+        (path.to_string_lossy().into_owned(), json)
     };
-    let path = path.into_path().map_err(err)?;
-    let json = std::fs::read_to_string(&path).map_err(err)?;
+
+    #[cfg(target_os = "android")]
+    let (source, json) = {
+        use tauri_plugin_android_fs::AndroidFsExt;
+
+        let api = app.android_fs_async();
+        let Some(uri) = api
+            .picker()
+            .pick_file(None, &["application/json"], false)
+            .await
+            .map_err(err)?
+        else {
+            return Ok(None);
+        };
+        let json = api.read_to_string(&uri).await.map_err(err)?;
+        (uri.uri, json)
+    };
+
     let archive: db::DataArchive = serde_json::from_str(&json).map_err(err)?;
     write_backup(&app, &state.conn, "before-import")
         .await
@@ -739,7 +784,7 @@ pub async fn import_data(
         .map_err(err)?;
     emit_domain(&app, DomainEvent::WorkspaceChanged);
     emit_domain(&app, DomainEvent::HistoryChanged);
-    Ok(Some(path))
+    Ok(Some(source))
 }
 
 #[tauri::command]
@@ -849,39 +894,63 @@ pub async fn attach_file(
     state: State<'_, AppState>,
     parent_id: i64,
 ) -> CommandResult<Option<Node>> {
-    let Some(source) = app.dialog().file().blocking_pick_file() else {
-        return Ok(None);
+    #[cfg(not(target_os = "android"))]
+    let (title, mime_type, bytes) = {
+        let Some(source) = app.dialog().file().blocking_pick_file() else {
+            return Ok(None);
+        };
+        let source = source.into_path().map_err(err)?;
+        let metadata = source.metadata().map_err(err)?;
+        if !metadata.is_file() {
+            return Err("attachments must be regular files".into());
+        }
+        if metadata.len() > 100 * 1024 * 1024 {
+            return Err("attachments are limited to 100 MiB".into());
+        }
+        let title = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "attachment filename is not valid UTF-8".to_string())?
+            .to_string();
+        let bytes = std::fs::read(&source).map_err(err)?;
+        (title, "application/octet-stream".to_string(), bytes)
     };
-    let source = source.into_path().map_err(err)?;
-    let metadata = source.metadata().map_err(err)?;
-    if !metadata.is_file() {
-        return Err("attachments must be regular files".into());
-    }
-    if metadata.len() > 100 * 1024 * 1024 {
-        return Err("attachments are limited to 100 MiB".into());
-    }
-    let title = source
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| "attachment filename is not valid UTF-8".to_string())?
-        .to_string();
-    let blob_hash = format!("{:x}", Sha256::digest(std::fs::read(&source).map_err(err)?));
+
+    #[cfg(target_os = "android")]
+    let (title, mime_type, bytes) = {
+        use tauri_plugin_android_fs::AndroidFsExt;
+
+        let api = app.android_fs_async();
+        let Some(uri) = api
+            .picker()
+            .pick_file(None, &[], false)
+            .await
+            .map_err(err)?
+        else {
+            return Ok(None);
+        };
+        let size = api.get_len(&uri).await.map_err(err)?;
+        if size > 100 * 1024 * 1024 {
+            return Err("attachments are limited to 100 MiB".into());
+        }
+        let title = api.get_name(&uri).await.map_err(err)?;
+        let mime_type = api
+            .get_mime_type(&uri)
+            .await
+            .unwrap_or_else(|_| "application/octet-stream".into());
+        let bytes = api.read(&uri).await.map_err(err)?;
+        (title, mime_type, bytes)
+    };
+
+    let size = bytes.len() as u64;
+    let blob_hash = format!("{:x}", Sha256::digest(&bytes));
     let relative = std::path::PathBuf::from("attachments")
         .join(&blob_hash)
         .join(&title);
     let destination = app.path().app_data_dir().map_err(err)?.join(&relative);
     std::fs::create_dir_all(destination.parent().expect("attachment has parent")).map_err(err)?;
-    std::fs::copy(&source, &destination).map_err(err)?;
-    match db::create_attachment(
-        &state.conn,
-        parent_id,
-        blob_hash,
-        title,
-        "application/octet-stream".into(),
-        metadata.len(),
-    )
-    .await
-    {
+    std::fs::write(&destination, bytes).map_err(err)?;
+    match db::create_attachment(&state.conn, parent_id, blob_hash, title, mime_type, size).await {
         Ok(node) => Ok(Some(node)),
         Err(error) => {
             let _ = std::fs::remove_file(destination);

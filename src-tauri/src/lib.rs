@@ -90,9 +90,7 @@ pub fn export_bindings(path: impl AsRef<std::path::Path>) -> Result<(), String> 
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .init();
+    init_tracing();
 
     let specta_builder = specta_builder();
 
@@ -100,9 +98,13 @@ pub fn run() {
     export_bindings("../src/lib/bindings.ts").expect("exporting TypeScript bindings");
 
     let invoke_handler = specta_builder.invoke_handler();
-    let builder = tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init());
+    let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+
+    #[cfg(not(target_os = "android"))]
+    let builder = builder.plugin(tauri_plugin_dialog::init());
+
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(tauri_plugin_android_fs::init());
 
     // Development-only bridge for MCP-powered UI inspection and automation.
     // Restrict it to localhost; release builds do not register the plugin.
@@ -299,4 +301,25 @@ pub fn run() {
         .invoke_handler(invoke_handler)
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(not(target_os = "android"))]
+fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
+}
+
+#[cfg(target_os = "android")]
+fn init_tracing() {
+    use tracing_logcat::{LogcatMakeWriter, LogcatTag};
+
+    let writer = LogcatMakeWriter::new(LogcatTag::Fixed("notes-rs".into()))
+        .expect("creating Android logcat writer");
+    tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_target(true)
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(writer)
+        .init();
 }
