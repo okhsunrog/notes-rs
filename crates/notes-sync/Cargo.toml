@@ -11,6 +11,7 @@ description = "Synchronization protocol and state machine for notes-rs"
 anyhow.workspace = true
 notes-core.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
