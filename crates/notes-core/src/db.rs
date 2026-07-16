@@ -1,3 +1,7 @@
+use crate::operation::{
+    self, AttachmentAdd, AttachmentRemove, EdgeAdd, NodeCreate, NodeDelete, NodeMove,
+    NodeSetContent, NodeSetTitle, OpKind, Origin,
+};
 use crate::sqlite::Connection;
 use anyhow::{Context, Result};
 use rusqlite::OptionalExtension;
@@ -39,7 +43,7 @@ pub async fn open(path: impl AsRef<Path>, embedder_id: &str, ndims: usize) -> Re
     Ok(conn)
 }
 
-const CURRENT_SCHEMA_VERSION: i64 = 5;
+const CURRENT_SCHEMA_VERSION: i64 = 6;
 
 async fn migrate(conn: &Connection, ndims: usize) -> Result<()> {
     let schema = SCHEMA_V1.replace("{NDIMS}", &ndims.to_string());
@@ -89,6 +93,16 @@ async fn migrate(conn: &Connection, ndims: usize) -> Result<()> {
             .exists([])?;
         if !has_last_extracted_hash {
             c.execute_batch("ALTER TABLE nodes ADD COLUMN last_extracted_hash TEXT;")?;
+        }
+        for column in ["content_hlc", "title_hlc", "structure_hlc"] {
+            let exists: bool = c
+                .prepare(&format!(
+                    "SELECT 1 FROM pragma_table_info('nodes') WHERE name = '{column}'"
+                ))?
+                .exists([])?;
+            if !exists {
+                c.execute_batch(&format!("ALTER TABLE nodes ADD COLUMN {column} TEXT;"))?;
+            }
         }
 
         // All referenced node columns now exist, so indexes, triggers, queues,
@@ -219,6 +233,9 @@ CREATE TABLE IF NOT EXISTS nodes (
   parent_id INTEGER REFERENCES nodes(id) ON DELETE CASCADE,
   position REAL,
   last_extracted_hash TEXT,
+  content_hlc TEXT,
+  title_hlc TEXT,
+  structure_hlc TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -366,6 +383,9 @@ CREATE TABLE IF NOT EXISTS nodes (
   -- worker compares the current hash against this before invoking the LLM,
   -- so cosmetic re-saves (typo fixes, indent changes) don't burn credits.
   last_extracted_hash TEXT,
+  content_hlc TEXT,
+  title_hlc TEXT,
+  structure_hlc TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -416,6 +436,25 @@ CREATE TABLE IF NOT EXISTS history_redo (
   action TEXT NOT NULL,
   archive_json TEXT NOT NULL,
   created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sync_outbox (
+  rowid INTEGER PRIMARY KEY,
+  op_id TEXT NOT NULL UNIQUE,
+  envelope TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS applied_ops (
+  op_id TEXT PRIMARY KEY,
+  seq INTEGER
+);
+CREATE TABLE IF NOT EXISTS tombstones (
+  uuid TEXT PRIMARY KEY,
+  deleted_hlc TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sync_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
@@ -541,6 +580,61 @@ fn row_to_node(r: &rusqlite::Row<'_>) -> rusqlite::Result<Node> {
     })
 }
 
+async fn apply_local(conn: &Connection, kinds: Vec<OpKind>) -> Result<()> {
+    let operations = operation::local_ops(conn, kinds).await?;
+    operation::apply_batch(conn, &operations, Origin::Local).await?;
+    Ok(())
+}
+
+async fn require_node_uuid(conn: &Connection, id: i64) -> Result<String> {
+    conn.call(move |database| {
+        database.query_row("SELECT uuid FROM nodes WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })
+    })
+    .await
+    .with_context(|| format!("node {id} not found"))
+}
+
+async fn require_node_uuids(
+    conn: &Connection,
+    first: i64,
+    second: i64,
+) -> Result<(String, String)> {
+    conn.call(move |database| {
+        let first_uuid =
+            database.query_row("SELECT uuid FROM nodes WHERE id = ?1", [first], |row| {
+                row.get(0)
+            })?;
+        let second_uuid =
+            database.query_row("SELECT uuid FROM nodes WHERE id = ?1", [second], |row| {
+                row.get(0)
+            })?;
+        Ok((first_uuid, second_uuid))
+    })
+    .await
+}
+
+async fn count_missing_block_refs(conn: &Connection, block_uuids: Vec<String>) -> Result<u32> {
+    conn.call(move |database| {
+        let mut broken = 0;
+        for uuid in block_uuids {
+            if uuid.trim().is_empty() {
+                continue;
+            }
+            let exists = database
+                .query_row("SELECT 1 FROM nodes WHERE uuid = ?1", [&uuid], |_| Ok(()))
+                .optional()?
+                .is_some();
+            if !exists {
+                broken += 1;
+            }
+        }
+        Ok(broken)
+    })
+    .await
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchHit {
     pub node: Node,
@@ -583,6 +677,9 @@ pub struct GraphSnapshot {
     pub edges: Vec<Edge>,
 }
 
+type AttachmentDeleteRecord = (Node, Option<String>, Option<String>);
+type ReorderPlan = (String, Option<String>, Vec<(String, f64)>);
+
 pub async fn create_node(
     conn: &Connection,
     kind: String,
@@ -590,32 +687,31 @@ pub async fn create_node(
     content: String,
     content_json: Option<String>,
 ) -> Result<Node> {
+    if kind == "page"
+        && let Some(title) = title.as_deref()
+        && let Some(existing) = get_page_by_title(conn, title.to_string()).await?
+    {
+        return Ok(existing);
+    }
     let uuid = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp();
-    let body_stemmed = crate::stem::stem(&format!("{}\n{content}", title.as_deref().unwrap_or("")));
-    let node = conn
-        .call(move |c| -> rusqlite::Result<Node> {
-            c.execute(
-                "INSERT INTO nodes (uuid, kind, title, content, content_json, body_stemmed, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
-                rusqlite::params![&uuid, &kind, &title, &content, &content_json, &body_stemmed, now],
-            )?;
-            let id = c.last_insert_rowid();
-            Ok(Node {
-                id,
-                uuid,
-                kind,
-                title,
-                content,
-                content_json,
-                parent_id: None,
-                position: None,
-                created_at: now,
-                updated_at: now,
-            })
-        })
-        .await?;
-    Ok(node)
+    apply_local(
+        conn,
+        vec![OpKind::NodeCreate(NodeCreate {
+            uuid: uuid.clone(),
+            node_kind: kind,
+            title,
+            content,
+            content_json,
+            parent_uuid: None,
+            position: None,
+            created_at: now,
+        })],
+    )
+    .await?;
+    get_node_by_uuid(conn, uuid)
+        .await?
+        .context("created node was not materialized")
 }
 
 pub async fn update_node(
@@ -625,17 +721,21 @@ pub async fn update_node(
     content: String,
     content_json: Option<String>,
 ) -> Result<()> {
-    let now = chrono::Utc::now().timestamp();
-    let body_stemmed = crate::stem::stem(&format!("{}\n{content}", title.as_deref().unwrap_or("")));
-    conn.call(move |c| -> rusqlite::Result<()> {
-        c.execute(
-            "UPDATE nodes
-             SET title = ?2, content = ?3, content_json = ?4, body_stemmed = ?5, updated_at = ?6
-             WHERE id = ?1",
-            rusqlite::params![id, &title, &content, &content_json, &body_stemmed, now],
-        )?;
-        Ok(())
-    })
+    let uuid = require_node_uuid(conn, id).await?;
+    apply_local(
+        conn,
+        vec![
+            OpKind::NodeSetTitle(NodeSetTitle {
+                uuid: uuid.clone(),
+                title,
+            }),
+            OpKind::NodeSetContent(NodeSetContent {
+                uuid,
+                content,
+                content_json,
+            }),
+        ],
+    )
     .await?;
     Ok(())
 }
@@ -653,33 +753,24 @@ pub async fn update_block_with_refs(
     id: i64,
     block: BlockContent,
 ) -> Result<(Node, u32)> {
-    conn.call(move |database| -> rusqlite::Result<(Node, u32)> {
-        let transaction = database.transaction()?;
-        let kind: String =
-            transaction.query_row("SELECT kind FROM nodes WHERE id = ?1", [id], |row| {
-                row.get(0)
-            })?;
-        if kind != "block" {
-            return Err(rusqlite::Error::InvalidParameterName(
-                "atomic block save requires a block node".into(),
-            ));
-        }
-        let now = chrono::Utc::now().timestamp();
-        let body_stemmed = crate::stem::stem(&block.content);
-        transaction.execute(
-            "UPDATE nodes
-             SET content = ?2, content_json = NULL, body_stemmed = ?3, updated_at = ?4
-             WHERE id = ?1",
-            rusqlite::params![id, block.content, body_stemmed, now],
-        )?;
-        let broken =
-            replace_block_refs_tx(&transaction, id, &block.wikilink_titles, &block.block_uuids)?;
-        let sql = format!("SELECT {NODE_COLUMNS} FROM nodes WHERE id = ?1");
-        let node = transaction.query_row(&sql, [id], row_to_node)?;
-        transaction.commit()?;
-        Ok((node, broken))
-    })
-    .await
+    let node = get_node(conn, id)
+        .await?
+        .filter(|node| node.kind == "block")
+        .context("atomic block save requires a block node")?;
+    apply_local(
+        conn,
+        vec![OpKind::NodeSetContent(NodeSetContent {
+            uuid: node.uuid.clone(),
+            content: block.content,
+            content_json: None,
+        })],
+    )
+    .await?;
+    let broken = count_missing_block_refs(conn, block.block_uuids).await?;
+    let updated = get_node_by_uuid(conn, node.uuid)
+        .await?
+        .context("updated block disappeared")?;
+    Ok((updated, broken))
 }
 
 /// Split one block into ordered siblings as a single transaction. Sibling
@@ -693,84 +784,82 @@ pub async fn split_block(
     if parts.is_empty() {
         anyhow::bail!("split requires at least one part");
     }
-    conn.call(move |database| -> rusqlite::Result<Vec<Node>> {
-        let transaction = database.transaction()?;
-        let (parent_id, kind): (i64, String) = transaction.query_row(
-            "SELECT parent_id, kind FROM nodes WHERE id = ?1",
-            [id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        if kind != "block" {
-            return Err(rusqlite::Error::InvalidParameterName(
-                "only a block can be split".into(),
-            ));
-        }
-        let mut sibling_ids = {
-            let mut statement = transaction
-                .prepare("SELECT id FROM nodes WHERE parent_id = ?1 ORDER BY position, id")?;
-            statement
-                .query_map([parent_id], |row| row.get::<_, i64>(0))?
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        let insertion_index = sibling_ids
-            .iter()
-            .position(|sibling_id| *sibling_id == id)
-            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-        let now = chrono::Utc::now().timestamp();
-        let first = &parts[0];
-        transaction.execute(
-            "UPDATE nodes
-             SET content = ?2, content_json = NULL, body_stemmed = ?3, updated_at = ?4
-             WHERE id = ?1",
-            rusqlite::params![id, first.content, crate::stem::stem(&first.content), now],
-        )?;
-        replace_block_refs_tx(&transaction, id, &first.wikilink_titles, &first.block_uuids)?;
-
-        let mut result_ids = vec![id];
-        for part in parts.into_iter().skip(1) {
-            let uuid = uuid::Uuid::new_v4().to_string();
-            transaction.execute(
-                "INSERT INTO nodes
-                   (uuid, kind, content, content_json, body_stemmed, parent_id, position,
-                    created_at, updated_at)
-                 VALUES (?1, 'block', ?2, NULL, ?3, ?4, 0, ?5, ?5)",
-                rusqlite::params![
-                    uuid,
-                    part.content,
-                    crate::stem::stem(&part.content),
-                    parent_id,
-                    now
-                ],
-            )?;
-            let new_id = transaction.last_insert_rowid();
-            replace_block_refs_tx(
-                &transaction,
-                new_id,
-                &part.wikilink_titles,
-                &part.block_uuids,
-            )?;
-            result_ids.push(new_id);
-        }
-        sibling_ids.splice(
-            insertion_index + 1..insertion_index + 1,
-            result_ids[1..].iter().copied(),
+    let (source_uuid, parent_uuid, mut siblings) = conn
+        .call(
+            move |database| -> rusqlite::Result<(String, String, Vec<String>)> {
+                let (source_uuid, parent_id, kind): (String, i64, String) = database.query_row(
+                    "SELECT uuid, parent_id, kind FROM nodes WHERE id = ?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?;
+                if kind != "block" {
+                    return Err(rusqlite::Error::InvalidParameterName(
+                        "only a block can be split".into(),
+                    ));
+                }
+                let parent_uuid = database.query_row(
+                    "SELECT uuid FROM nodes WHERE id = ?1",
+                    [parent_id],
+                    |row| row.get(0),
+                )?;
+                let siblings = {
+                    let mut statement = database.prepare(
+                        "SELECT uuid FROM nodes WHERE parent_id = ?1 ORDER BY position, uuid",
+                    )?;
+                    statement
+                        .query_map([parent_id], |row| row.get::<_, String>(0))?
+                        .collect::<Result<Vec<_>, _>>()?
+                };
+                Ok((source_uuid, parent_uuid, siblings))
+            },
+        )
+        .await?;
+    let insertion_index = siblings
+        .iter()
+        .position(|uuid| uuid == &source_uuid)
+        .context("split source is missing from its siblings")?;
+    let now = chrono::Utc::now().timestamp();
+    let mut result_uuids = vec![source_uuid.clone()];
+    let mut kinds = vec![OpKind::NodeSetContent(NodeSetContent {
+        uuid: source_uuid,
+        content: parts[0].content.clone(),
+        content_json: None,
+    })];
+    for part in parts.into_iter().skip(1) {
+        let uuid = uuid::Uuid::new_v4().to_string();
+        result_uuids.push(uuid.clone());
+        kinds.push(OpKind::NodeCreate(NodeCreate {
+            uuid,
+            node_kind: "block".into(),
+            title: None,
+            content: part.content,
+            content_json: None,
+            parent_uuid: Some(parent_uuid.clone()),
+            position: Some(0.0),
+            created_at: now,
+        }));
+    }
+    siblings.splice(
+        insertion_index + 1..insertion_index + 1,
+        result_uuids[1..].iter().cloned(),
+    );
+    kinds.extend(siblings.into_iter().enumerate().map(|(index, uuid)| {
+        OpKind::NodeMove(NodeMove {
+            uuid,
+            parent_uuid: Some(parent_uuid.clone()),
+            position: (index as f64 + 1.0) * 1024.0,
+        })
+    }));
+    apply_local(conn, kinds).await?;
+    let mut nodes = Vec::with_capacity(result_uuids.len());
+    for uuid in result_uuids {
+        nodes.push(
+            get_node_by_uuid(conn, uuid)
+                .await?
+                .context("split result disappeared")?,
         );
-        for (index, sibling_id) in sibling_ids.into_iter().enumerate() {
-            transaction.execute(
-                "UPDATE nodes SET position = ?2 WHERE id = ?1",
-                rusqlite::params![sibling_id, (index as f64 + 1.0) * 1024.0],
-            )?;
-        }
-
-        let sql = format!("SELECT {NODE_COLUMNS} FROM nodes WHERE id = ?1");
-        let mut nodes = Vec::with_capacity(result_ids.len());
-        for result_id in result_ids {
-            nodes.push(transaction.query_row(&sql, [result_id], row_to_node)?);
-        }
-        transaction.commit()?;
-        Ok(nodes)
-    })
-    .await
+    }
+    Ok(nodes)
 }
 
 pub async fn link_nodes(
@@ -780,15 +869,16 @@ pub async fn link_nodes(
     kind: String,
     weight: f64,
 ) -> Result<()> {
-    let now = chrono::Utc::now().timestamp();
-    conn.call(move |c| -> rusqlite::Result<()> {
-        c.execute(
-            "INSERT OR IGNORE INTO edges (src, dst, kind, weight, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![src, dst, &kind, weight, now],
-        )?;
-        Ok(())
-    })
+    let (src_uuid, dst_uuid) = require_node_uuids(conn, src, dst).await?;
+    apply_local(
+        conn,
+        vec![OpKind::EdgeAdd(EdgeAdd {
+            src_uuid,
+            dst_uuid,
+            edge_kind: kind,
+            weight,
+        })],
+    )
     .await?;
     Ok(())
 }
@@ -1011,18 +1101,32 @@ pub async fn replace_block_refs(
     Ok(broken)
 }
 
-fn replace_block_refs_tx(
+pub(crate) fn replace_block_refs_tx(
     tx: &rusqlite::Transaction<'_>,
     block_id: i64,
     wikilink_titles: &[String],
     block_uuids: &[String],
 ) -> rusqlite::Result<u32> {
+    replace_block_refs_tx_at(
+        tx,
+        block_id,
+        wikilink_titles,
+        block_uuids,
+        chrono::Utc::now().timestamp(),
+    )
+}
+
+pub(crate) fn replace_block_refs_tx_at(
+    tx: &rusqlite::Transaction<'_>,
+    block_id: i64,
+    wikilink_titles: &[String],
+    block_uuids: &[String],
+    now: i64,
+) -> rusqlite::Result<u32> {
     tx.execute(
         "DELETE FROM edges WHERE src = ?1 AND kind = 'refs'",
         [block_id],
     )?;
-    let now = chrono::Utc::now().timestamp();
-
     for raw_title in wikilink_titles {
         let title = raw_title.trim();
         if title.is_empty() {
@@ -1040,7 +1144,7 @@ fn replace_block_refs_tx(
         let page_id = match existing {
             Some(id) => id,
             None => {
-                let uuid = uuid::Uuid::new_v4().to_string();
+                let uuid = page_uuid(title);
                 tx.execute(
                     "INSERT INTO nodes (uuid, kind, title, content, content_json,
                                         body_stemmed, parent_id, position,
@@ -1084,6 +1188,14 @@ fn replace_block_refs_tx(
         }
     }
     Ok(broken)
+}
+
+pub(crate) fn page_uuid(title: &str) -> String {
+    uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_OID,
+        format!("notes-rs:page:{}", title.trim().to_lowercase()).as_bytes(),
+    )
+    .to_string()
 }
 
 pub async fn get_node(conn: &Connection, id: i64) -> Result<Option<Node>> {
@@ -1542,43 +1654,72 @@ pub async fn list_block_children(conn: &Connection, parent_id: i64) -> Result<Ve
 }
 
 pub async fn delete_page(conn: &Connection, id: i64) -> Result<Option<Vec<Node>>> {
-    conn.call(move |database| -> rusqlite::Result<Option<Vec<Node>>> {
-        let transaction = database.transaction()?;
-        let exists = transaction
-            .query_row(
-                "SELECT 1 FROM nodes WHERE id = ?1 AND kind = 'page'",
-                [id],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        if !exists {
-            return Ok(None);
-        }
-        let attachments = {
-            let sql = format!(
-                "WITH RECURSIVE subtree(id) AS (
-                   SELECT ?1
-                   UNION ALL
-                   SELECT n.id FROM nodes n JOIN subtree s ON n.parent_id = s.id
-                 )
-                 SELECT DISTINCT {NODE_COLUMNS_N} FROM nodes n
-                 JOIN edges e ON e.dst = n.id
-                 WHERE e.kind = 'attachment' AND e.src IN (SELECT id FROM subtree)"
-            );
-            let mut statement = transaction.prepare(&sql)?;
-            statement
-                .query_map([id], row_to_node)?
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        for attachment in &attachments {
-            transaction.execute("DELETE FROM nodes WHERE id = ?1", [attachment.id])?;
-        }
-        transaction.execute("DELETE FROM nodes WHERE id = ?1", [id])?;
-        transaction.commit()?;
-        Ok(Some(attachments))
-    })
-    .await
+    let Some((uuids, attachments)) = conn
+        .call(
+            move |database| -> rusqlite::Result<Option<(Vec<String>, Vec<Node>)>> {
+                let exists = database
+                    .query_row(
+                        "SELECT 1 FROM nodes WHERE id = ?1 AND kind = 'page'",
+                        [id],
+                        |_| Ok(()),
+                    )
+                    .optional()?
+                    .is_some();
+                if !exists {
+                    return Ok(None);
+                }
+                let uuids = {
+                    let mut statement = database.prepare(
+                        "WITH RECURSIVE subtree(id) AS (
+                       SELECT ?1
+                       UNION ALL
+                       SELECT n.id FROM nodes n JOIN subtree s ON n.parent_id = s.id
+                     )
+                     SELECT uuid FROM nodes WHERE id IN (SELECT id FROM subtree)
+                     ORDER BY id DESC",
+                    )?;
+                    statement
+                        .query_map([id], |row| row.get::<_, String>(0))?
+                        .collect::<Result<Vec<_>, _>>()?
+                };
+                let attachments = {
+                    let sql = format!(
+                        "WITH RECURSIVE subtree(id) AS (
+                       SELECT ?1
+                       UNION ALL
+                       SELECT n.id FROM nodes n JOIN subtree s ON n.parent_id = s.id
+                     )
+                     SELECT DISTINCT {NODE_COLUMNS_N} FROM nodes n
+                     JOIN edges e ON e.dst = n.id
+                     WHERE e.kind = 'attachment' AND e.src IN (SELECT id FROM subtree)"
+                    );
+                    let mut statement = database.prepare(&sql)?;
+                    statement
+                        .query_map([id], row_to_node)?
+                        .collect::<Result<Vec<_>, _>>()?
+                };
+                Ok(Some((uuids, attachments)))
+            },
+        )
+        .await?
+    else {
+        return Ok(None);
+    };
+    let mut kinds = attachments
+        .iter()
+        .map(|attachment| {
+            OpKind::NodeDelete(NodeDelete {
+                uuid: attachment.uuid.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    kinds.extend(
+        uuids
+            .into_iter()
+            .map(|uuid| OpKind::NodeDelete(NodeDelete { uuid })),
+    );
+    apply_local(conn, kinds).await?;
+    Ok(Some(attachments))
 }
 
 pub async fn graph_snapshot(conn: &Connection, focus_id: Option<i64>) -> Result<GraphSnapshot> {
@@ -1697,42 +1838,30 @@ pub async fn export_archive(conn: &Connection) -> Result<DataArchive> {
 pub async fn create_attachment(
     conn: &Connection,
     parent_id: i64,
-    uuid: String,
+    blob_hash: String,
     title: String,
-    relative_path: String,
-    metadata: String,
+    mime: String,
+    size: u64,
 ) -> Result<Node> {
-    let now = chrono::Utc::now().timestamp();
-    conn.call(move |database| -> rusqlite::Result<Node> {
-        let transaction = database.transaction()?;
-        transaction.query_row(
-            "SELECT 1 FROM nodes WHERE id = ?1 AND kind IN ('page', 'block')",
-            [parent_id],
-            |_| Ok(()),
-        )?;
-        transaction.execute(
-            "INSERT INTO nodes
-               (uuid, kind, title, content, content_json, body_stemmed, created_at, updated_at)
-             VALUES (?1, 'attachment', ?2, ?3, ?4, ?5, ?6, ?6)",
-            rusqlite::params![
-                uuid,
-                title,
-                relative_path,
-                metadata,
-                crate::stem::stem(&title),
-                now
-            ],
-        )?;
-        let id = transaction.last_insert_rowid();
-        transaction.execute(
-            "INSERT INTO edges(src, dst, kind, weight, created_at)
-             VALUES (?1, ?2, 'attachment', 1.0, ?3)",
-            rusqlite::params![parent_id, id, now],
-        )?;
-        let sql = format!("SELECT {NODE_COLUMNS} FROM nodes WHERE id = ?1");
-        let node = transaction.query_row(&sql, [id], row_to_node)?;
-        transaction.commit()?;
-        Ok(node)
+    let parent_uuid = require_node_uuid(conn, parent_id).await?;
+    apply_local(
+        conn,
+        vec![OpKind::AttachmentAdd(AttachmentAdd {
+            node_uuid: parent_uuid,
+            blob_hash: blob_hash.clone(),
+            filename: title,
+            mime,
+            size,
+        })],
+    )
+    .await?;
+    conn.call(move |database| {
+        let sql = format!(
+            "SELECT {NODE_COLUMNS} FROM nodes
+             WHERE kind = 'attachment'
+               AND json_extract(content_json, '$.blobHash') = ?1"
+        );
+        database.query_row(&sql, [&blob_hash], row_to_node)
     })
     .await
 }
@@ -1753,80 +1882,101 @@ pub async fn list_attachments(conn: &Connection, parent_id: i64) -> Result<Vec<N
     .await
 }
 
-pub async fn delete_attachment(conn: &Connection, id: i64) -> Result<Option<Node>> {
-    conn.call(move |database| -> rusqlite::Result<Option<Node>> {
-        let transaction = database.transaction()?;
-        let sql = format!("SELECT {NODE_COLUMNS} FROM nodes WHERE id = ?1 AND kind = 'attachment'");
-        let node = transaction.query_row(&sql, [id], row_to_node).optional()?;
-        if node.is_some() {
-            transaction.execute("DELETE FROM nodes WHERE id = ?1", [id])?;
-        }
-        transaction.commit()?;
-        Ok(node)
+pub async fn attachment_path_ref_count(conn: &Connection, relative_path: String) -> Result<i64> {
+    conn.call(move |database| {
+        database.query_row(
+            "SELECT COUNT(*) FROM nodes WHERE kind = 'attachment' AND content = ?1",
+            [relative_path],
+            |row| row.get(0),
+        )
     })
     .await
+}
+
+pub async fn delete_attachment(conn: &Connection, id: i64) -> Result<Option<Node>> {
+    let record = conn
+        .call(
+            move |database| -> rusqlite::Result<Option<AttachmentDeleteRecord>> {
+                let sql = format!(
+                    "SELECT {NODE_COLUMNS} FROM nodes WHERE id = ?1 AND kind = 'attachment'"
+                );
+                let Some(node) = database.query_row(&sql, [id], row_to_node).optional()? else {
+                    return Ok(None);
+                };
+                let parent_uuid = database
+                    .query_row(
+                        "SELECT parent.uuid FROM edges e JOIN nodes parent ON parent.id = e.src
+             WHERE e.dst = ?1 AND e.kind = 'attachment' LIMIT 1",
+                        [id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?;
+                let blob_hash = node
+                    .content_json
+                    .as_deref()
+                    .and_then(|metadata| serde_json::from_str::<serde_json::Value>(metadata).ok())
+                    .and_then(|metadata| {
+                        metadata
+                            .get("blobHash")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_owned)
+                    });
+                Ok(Some((node, parent_uuid, blob_hash)))
+            },
+        )
+        .await?;
+    let Some((node, parent_uuid, blob_hash)) = record else {
+        return Ok(None);
+    };
+    let kind = if let (Some(node_uuid), Some(blob_hash)) = (parent_uuid, blob_hash) {
+        OpKind::AttachmentRemove(AttachmentRemove {
+            node_uuid,
+            blob_hash,
+        })
+    } else {
+        OpKind::NodeDelete(NodeDelete {
+            uuid: node.uuid.clone(),
+        })
+    };
+    apply_local(conn, vec![kind]).await?;
+    Ok(Some(node))
 }
 
 pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<()> {
     if archive.format != "notes-rs" || archive.version != 1 {
         anyhow::bail!("unsupported notes-rs archive format or version");
     }
+    let current = export_archive(conn).await?;
+    let kinds = archive_transition_kinds(&current, &archive)?;
+    apply_local(conn, kinds).await?;
+
+    let target_nodes = archive
+        .nodes
+        .iter()
+        .map(|node| (node.id, node.uuid.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+    let descriptions = archive
+        .entity_descriptions
+        .into_iter()
+        .filter_map(|description| {
+            Some((
+                target_nodes.get(&description.source_node_id)?.clone(),
+                target_nodes.get(&description.entity_node_id)?.clone(),
+                description.description,
+                description.created_at,
+            ))
+        })
+        .collect::<Vec<_>>();
     conn.call(move |database| -> rusqlite::Result<()> {
         let transaction = database.transaction()?;
-        transaction.execute("DELETE FROM vec_nodes", [])?;
-        transaction.execute("DELETE FROM nodes", [])?;
-
-        for node in &archive.nodes {
-            let body = crate::stem::stem(&format!(
-                "{}\n{}",
-                node.title.as_deref().unwrap_or(""),
-                node.content
-            ));
-            transaction.execute(
-                "INSERT INTO nodes
-                   (id, uuid, kind, title, content, content_json, body_stemmed,
-                    parent_id, position, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, ?10)",
-                rusqlite::params![
-                    node.id,
-                    node.uuid,
-                    node.kind,
-                    node.title,
-                    node.content,
-                    node.content_json,
-                    body,
-                    node.position,
-                    node.created_at,
-                    node.updated_at
-                ],
-            )?;
-        }
-        for node in &archive.nodes {
-            if let Some(parent_id) = node.parent_id {
-                transaction.execute(
-                    "UPDATE nodes SET parent_id = ?2 WHERE id = ?1",
-                    rusqlite::params![node.id, parent_id],
-                )?;
-            }
-        }
-        for edge in archive.edges {
-            transaction.execute(
-                "INSERT OR IGNORE INTO edges(src, dst, kind, weight, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![edge.src, edge.dst, edge.kind, edge.weight, edge.created_at],
-            )?;
-        }
-        for description in archive.entity_descriptions {
+        transaction.execute("DELETE FROM entity_descriptions", [])?;
+        for (source_uuid, entity_uuid, description, created_at) in descriptions {
             transaction.execute(
                 "INSERT OR IGNORE INTO entity_descriptions
                    (source_node_id, entity_node_id, description, created_at)
-                 VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![
-                    description.source_node_id,
-                    description.entity_node_id,
-                    description.description,
-                    description.created_at
-                ],
+                 SELECT source.id, entity.id, ?3, ?4 FROM nodes source, nodes entity
+                  WHERE source.uuid = ?1 AND entity.uuid = ?2",
+                rusqlite::params![source_uuid, entity_uuid, description, created_at],
             )?;
         }
         transaction.execute_batch(
@@ -1842,6 +1992,132 @@ pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<(
         Ok(())
     })
     .await
+}
+
+fn archive_transition_kinds(current: &DataArchive, target: &DataArchive) -> Result<Vec<OpKind>> {
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+    let current_by_uuid = current
+        .nodes
+        .iter()
+        .map(|node| (node.uuid.as_str(), node))
+        .collect::<BTreeMap<_, _>>();
+    let target_by_uuid = target
+        .nodes
+        .iter()
+        .map(|node| (node.uuid.as_str(), node))
+        .collect::<BTreeMap<_, _>>();
+    let target_id_to_uuid = target
+        .nodes
+        .iter()
+        .map(|node| (node.id, node.uuid.as_str()))
+        .collect::<HashMap<_, _>>();
+    let current_id_to_uuid = current
+        .nodes
+        .iter()
+        .map(|node| (node.id, node.uuid.as_str()))
+        .collect::<HashMap<_, _>>();
+    let mut kinds = Vec::new();
+
+    for uuid in current_by_uuid.keys().rev() {
+        if !target_by_uuid.contains_key(uuid) {
+            kinds.push(OpKind::NodeDelete(NodeDelete {
+                uuid: (*uuid).to_string(),
+            }));
+        }
+    }
+    for (uuid, target_node) in &target_by_uuid {
+        match current_by_uuid.get(uuid) {
+            None => kinds.push(OpKind::NodeCreate(NodeCreate {
+                uuid: (*uuid).to_string(),
+                node_kind: target_node.kind.clone(),
+                title: target_node.title.clone(),
+                content: target_node.content.clone(),
+                content_json: target_node.content_json.clone(),
+                parent_uuid: None,
+                position: target_node.position,
+                created_at: target_node.created_at,
+            })),
+            Some(current_node) => {
+                if current_node.title != target_node.title {
+                    kinds.push(OpKind::NodeSetTitle(NodeSetTitle {
+                        uuid: (*uuid).to_string(),
+                        title: target_node.title.clone(),
+                    }));
+                }
+                if current_node.content != target_node.content
+                    || current_node.content_json != target_node.content_json
+                {
+                    kinds.push(OpKind::NodeSetContent(NodeSetContent {
+                        uuid: (*uuid).to_string(),
+                        content: target_node.content.clone(),
+                        content_json: target_node.content_json.clone(),
+                    }));
+                }
+            }
+        }
+    }
+    for (uuid, target_node) in &target_by_uuid {
+        if target_node.kind != "block" {
+            continue;
+        }
+        let parent_uuid = target_node
+            .parent_id
+            .and_then(|parent_id| target_id_to_uuid.get(&parent_id))
+            .map(|uuid| (*uuid).to_string());
+        let current_structure = current_by_uuid.get(uuid).map(|node| {
+            (
+                node.parent_id
+                    .and_then(|parent_id| current_id_to_uuid.get(&parent_id))
+                    .copied(),
+                node.position,
+            )
+        });
+        if current_structure != Some((parent_uuid.as_deref(), target_node.position)) {
+            kinds.push(OpKind::NodeMove(NodeMove {
+                uuid: (*uuid).to_string(),
+                parent_uuid,
+                position: target_node.position.unwrap_or(1024.0),
+            }));
+        }
+    }
+
+    let edge_map = |archive: &DataArchive, ids: &HashMap<i64, &str>| {
+        archive
+            .edges
+            .iter()
+            .filter_map(|edge| {
+                Some((
+                    (
+                        (*ids.get(&edge.src)?).to_string(),
+                        (*ids.get(&edge.dst)?).to_string(),
+                        edge.kind.clone(),
+                    ),
+                    edge.weight,
+                ))
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let current_edges = edge_map(current, &current_id_to_uuid);
+    let target_edges = edge_map(target, &target_id_to_uuid);
+    let current_keys = current_edges.keys().cloned().collect::<BTreeSet<_>>();
+    let target_keys = target_edges.keys().cloned().collect::<BTreeSet<_>>();
+    for (src_uuid, dst_uuid, edge_kind) in current_keys.difference(&target_keys) {
+        kinds.push(OpKind::EdgeRemove(operation::EdgeRemove {
+            src_uuid: src_uuid.clone(),
+            dst_uuid: dst_uuid.clone(),
+            edge_kind: edge_kind.clone(),
+        }));
+    }
+    for (src_uuid, dst_uuid, edge_kind) in target_keys.difference(&current_keys) {
+        kinds.push(OpKind::EdgeAdd(EdgeAdd {
+            src_uuid: src_uuid.clone(),
+            dst_uuid: dst_uuid.clone(),
+            edge_kind: edge_kind.clone(),
+            weight: target_edges[&(src_uuid.clone(), dst_uuid.clone(), edge_kind.clone())],
+        }));
+    }
+    Ok(kinds)
 }
 
 pub async fn checkpoint_history(conn: &Connection, action: &str) -> Result<()> {
@@ -1940,64 +2216,49 @@ pub async fn create_block(
 ) -> Result<Node> {
     let uuid = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp();
-    let body_stemmed = crate::stem::stem(&content);
-    let node = conn
-        .call(move |c| -> rusqlite::Result<Node> {
-            let transaction = c.transaction()?;
-            let pos: f64 = match position {
-                Some(p) => p,
+    let (parent_uuid, position) = conn
+        .call(move |database| -> rusqlite::Result<(Option<String>, f64)> {
+            let parent_uuid = parent_id
+                .map(|parent_id| {
+                    database.query_row(
+                        "SELECT uuid FROM nodes WHERE id = ?1 AND kind IN ('page', 'block')",
+                        [parent_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                })
+                .transpose()?;
+            let position = match position {
+                Some(position) => position,
                 None => match parent_id {
-                    Some(pid) => transaction.query_row(
-                        "SELECT COALESCE(MAX(position), 0.0) + 1.0 FROM nodes WHERE parent_id = ?1",
-                        [pid],
-                        |r| r.get::<_, f64>(0),
+                    Some(parent_id) => database.query_row(
+                        "SELECT COALESCE(MAX(position), 0.0) + 1024.0
+                         FROM nodes WHERE parent_id = ?1",
+                        [parent_id],
+                        |row| row.get(0),
                     )?,
-                    None => 1.0,
+                    None => 1024.0,
                 },
             };
-            transaction.execute(
-                "INSERT INTO nodes (uuid, kind, title, content, content_json, body_stemmed,
-                                    parent_id, position, created_at, updated_at)
-                 VALUES (?1, 'block', NULL, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
-                rusqlite::params![
-                    &uuid,
-                    &content,
-                    &content_json,
-                    &body_stemmed,
-                    parent_id,
-                    pos,
-                    now
-                ],
-            )?;
-            let id = transaction.last_insert_rowid();
-            normalize_sibling_positions(&transaction, parent_id)?;
-            let sql = format!("SELECT {NODE_COLUMNS} FROM nodes WHERE id = ?1");
-            let node = transaction.query_row(&sql, [id], row_to_node)?;
-            transaction.commit()?;
-            Ok(node)
+            Ok((parent_uuid, position))
         })
         .await?;
-    Ok(node)
-}
-
-fn normalize_sibling_positions(
-    transaction: &rusqlite::Transaction<'_>,
-    parent_id: Option<i64>,
-) -> rusqlite::Result<()> {
-    let sibling_ids = {
-        let mut statement = transaction
-            .prepare("SELECT id FROM nodes WHERE parent_id IS ?1 ORDER BY position, id")?;
-        statement
-            .query_map([parent_id], |row| row.get::<_, i64>(0))?
-            .collect::<Result<Vec<_>, _>>()?
-    };
-    for (index, sibling_id) in sibling_ids.into_iter().enumerate() {
-        transaction.execute(
-            "UPDATE nodes SET position = ?2 WHERE id = ?1",
-            rusqlite::params![sibling_id, (index as f64 + 1.0) * 1024.0],
-        )?;
-    }
-    Ok(())
+    apply_local(
+        conn,
+        vec![OpKind::NodeCreate(NodeCreate {
+            uuid: uuid.clone(),
+            node_kind: "block".into(),
+            title: None,
+            content,
+            content_json,
+            parent_uuid,
+            position: Some(position),
+            created_at: now,
+        })],
+    )
+    .await?;
+    get_node_by_uuid(conn, uuid)
+        .await?
+        .context("created block was not materialized")
 }
 
 /// Move a block under a new parent. If `new_position` is `None`, appends to
@@ -2009,115 +2270,100 @@ pub async fn move_block(
     new_parent_id: Option<i64>,
     new_position: Option<f64>,
 ) -> Result<Node> {
-    let now = chrono::Utc::now().timestamp();
-    let node = conn
-        .call(move |c| -> rusqlite::Result<Node> {
-            let transaction = c.transaction()?;
-            let (source_kind, old_parent_id): (String, Option<i64>) = transaction.query_row(
-                "SELECT kind, parent_id FROM nodes WHERE id = ?1",
-                [id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
-            if source_kind != "block" {
-                return Err(rusqlite::Error::InvalidParameterName(
-                    "only block nodes can be moved".into(),
-                ));
-            }
-            if let Some(parent_id) = new_parent_id {
-                if parent_id == id {
+    let (uuid, parent_uuid, position) = conn
+        .call(
+            move |database| -> rusqlite::Result<(String, Option<String>, f64)> {
+                let (uuid, kind): (String, String) = database.query_row(
+                    "SELECT uuid, kind FROM nodes WHERE id = ?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                if kind != "block" {
+                    return Err(rusqlite::Error::InvalidParameterName(
+                        "only block nodes can be moved".into(),
+                    ));
+                }
+                if new_parent_id == Some(id) {
                     return Err(rusqlite::Error::InvalidParameterName(
                         "a block cannot be its own parent".into(),
                     ));
                 }
-                let parent_kind: String = transaction.query_row(
-                    "SELECT kind FROM nodes WHERE id = ?1",
-                    [parent_id],
-                    |row| row.get(0),
-                )?;
-                if !matches!(parent_kind.as_str(), "page" | "block") {
-                    return Err(rusqlite::Error::InvalidParameterName(
-                        "a block parent must be a page or block".into(),
-                    ));
-                }
-                let creates_cycle: bool = transaction.query_row(
-                    "WITH RECURSIVE descendants(id) AS (
-                       SELECT id FROM nodes WHERE parent_id = ?1
-                       UNION ALL
-                       SELECT n.id FROM nodes n
-                         JOIN descendants d ON n.parent_id = d.id
-                     )
-                     SELECT EXISTS(SELECT 1 FROM descendants WHERE id = ?2)",
-                    rusqlite::params![id, parent_id],
-                    |row| row.get(0),
-                )?;
-                if creates_cycle {
-                    return Err(rusqlite::Error::InvalidParameterName(
-                        "a block cannot be moved under one of its descendants".into(),
-                    ));
-                }
-            }
-            let pos: f64 = match new_position {
-                Some(p) => p,
-                None => match new_parent_id {
-                    Some(pid) => transaction.query_row(
-                        "SELECT COALESCE(MAX(position), 0.0) + 1.0 FROM nodes WHERE parent_id = ?1",
-                        [pid],
-                        |r| r.get::<_, f64>(0),
-                    )?,
-                    None => 1.0,
-                },
-            };
-            transaction.execute(
-                "UPDATE nodes SET parent_id = ?2, position = ?3, updated_at = ?4 WHERE id = ?1",
-                rusqlite::params![id, new_parent_id, pos, now],
-            )?;
-            // Embedding text includes the whole ancestor chain, so every
-            // descendant becomes stale when the subtree moves.
-            transaction.execute(
-                "WITH RECURSIVE subtree(id) AS (
-                   SELECT ?1
-                   UNION ALL
-                   SELECT n.id FROM nodes n JOIN subtree s ON n.parent_id = s.id
-                 )
-                 INSERT OR REPLACE INTO embed_queue(node_id, enqueued_at)
-                   SELECT id, unixepoch() FROM subtree",
-                [id],
-            )?;
-            normalize_sibling_positions(&transaction, old_parent_id)?;
-            if new_parent_id != old_parent_id {
-                normalize_sibling_positions(&transaction, new_parent_id)?;
-            }
-            let sql = format!("SELECT {NODE_COLUMNS} FROM nodes WHERE id = ?1");
-            let node = transaction.query_row(&sql, [id], row_to_node)?;
-            transaction.commit()?;
-            Ok(node)
-        })
+                let parent_uuid = new_parent_id
+                    .map(|parent_id| {
+                        let creates_cycle: bool = database.query_row(
+                            "WITH RECURSIVE descendants(id) AS (
+                           SELECT id FROM nodes WHERE parent_id = ?1
+                           UNION ALL
+                           SELECT n.id FROM nodes n JOIN descendants d ON n.parent_id = d.id
+                         )
+                         SELECT EXISTS(SELECT 1 FROM descendants WHERE id = ?2)",
+                            rusqlite::params![id, parent_id],
+                            |row| row.get(0),
+                        )?;
+                        if creates_cycle {
+                            return Err(rusqlite::Error::InvalidParameterName(
+                                "a block cannot be moved under one of its descendants".into(),
+                            ));
+                        }
+                        database.query_row(
+                            "SELECT uuid FROM nodes WHERE id = ?1 AND kind IN ('page', 'block')",
+                            [parent_id],
+                            |row| row.get::<_, String>(0),
+                        )
+                    })
+                    .transpose()?;
+                let position = match new_position {
+                    Some(position) => position,
+                    None => match new_parent_id {
+                        Some(parent_id) => database.query_row(
+                            "SELECT COALESCE(MAX(position), 0.0) + 1024.0
+                         FROM nodes WHERE parent_id = ?1",
+                            [parent_id],
+                            |row| row.get(0),
+                        )?,
+                        None => 1024.0,
+                    },
+                };
+                Ok((uuid, parent_uuid, position))
+            },
+        )
         .await?;
-    Ok(node)
+    apply_local(
+        conn,
+        vec![OpKind::NodeMove(NodeMove {
+            uuid: uuid.clone(),
+            parent_uuid,
+            position,
+        })],
+    )
+    .await?;
+    get_node_by_uuid(conn, uuid)
+        .await?
+        .context("moved block disappeared")
 }
 
 pub async fn reorder_block(conn: &Connection, id: i64, direction: String) -> Result<Node> {
-    conn.call(move |database| -> rusqlite::Result<Node> {
-        let transaction = database.transaction()?;
-        let parent_id: Option<i64> = transaction.query_row(
+    let (uuid, parent_uuid, moves) = conn.call(move |database| -> rusqlite::Result<ReorderPlan> {
+        let parent_id: Option<i64> = database.query_row(
             "SELECT parent_id FROM nodes WHERE id = ?1 AND kind = 'block'",
             [id],
             |row| row.get(0),
         )?;
-        let mut sibling_ids = {
-            let mut statement = transaction
-                .prepare("SELECT id FROM nodes WHERE parent_id IS ?1 ORDER BY position, id")?;
+        let mut siblings = {
+            let mut statement = database
+                .prepare("SELECT uuid, position FROM nodes WHERE parent_id IS ?1 ORDER BY position, uuid")?;
             statement
-                .query_map([parent_id], |row| row.get::<_, i64>(0))?
+                .query_map([parent_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)))?
                 .collect::<Result<Vec<_>, _>>()?
         };
-        let index = sibling_ids
+        let uuid: String = database.query_row("SELECT uuid FROM nodes WHERE id = ?1", [id], |row| row.get(0))?;
+        let index = siblings
             .iter()
-            .position(|sibling_id| *sibling_id == id)
+            .position(|(sibling_uuid, _)| *sibling_uuid == uuid)
             .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
         let target = match direction.as_str() {
             "up" if index > 0 => Some(index - 1),
-            "down" if index + 1 < sibling_ids.len() => Some(index + 1),
+            "down" if index + 1 < siblings.len() => Some(index + 1),
             "up" | "down" => None,
             _ => {
                 return Err(rusqlite::Error::InvalidParameterName(
@@ -2125,42 +2371,59 @@ pub async fn reorder_block(conn: &Connection, id: i64, direction: String) -> Res
                 ));
             }
         };
+        let mut moves = Vec::new();
         if let Some(target) = target {
-            sibling_ids.swap(index, target);
-            for (new_index, sibling_id) in sibling_ids.into_iter().enumerate() {
-                transaction.execute(
-                    "UPDATE nodes SET position = ?2 WHERE id = ?1",
-                    rusqlite::params![sibling_id, (new_index as f64 + 1.0) * 1024.0],
-                )?;
+            siblings.swap(index, target);
+            for (new_index, (sibling_uuid, _)) in siblings.into_iter().enumerate() {
+                moves.push((sibling_uuid, (new_index as f64 + 1.0) * 1024.0));
             }
         }
-        let sql = format!("SELECT {NODE_COLUMNS} FROM nodes WHERE id = ?1");
-        let node = transaction.query_row(&sql, [id], row_to_node)?;
-        transaction.commit()?;
-        Ok(node)
-    })
-    .await
+        let parent_uuid = parent_id.map(|parent_id| database.query_row("SELECT uuid FROM nodes WHERE id = ?1", [parent_id], |row| row.get::<_, String>(0))).transpose()?;
+        Ok((uuid, parent_uuid, moves))
+    }).await?;
+    let kinds = moves
+        .into_iter()
+        .map(|(uuid, position)| {
+            OpKind::NodeMove(NodeMove {
+                uuid,
+                parent_uuid: parent_uuid.clone(),
+                position,
+            })
+        })
+        .collect();
+    apply_local(conn, kinds).await?;
+    get_node_by_uuid(conn, uuid)
+        .await?
+        .context("reordered block disappeared")
 }
 
 /// Delete a block. Refuses (returns `false`) if the block has children, so
 /// callers can show feedback instead of silently cascading. Returns `true` on
 /// successful delete.
 pub async fn delete_block(conn: &Connection, id: i64) -> Result<bool> {
-    let deleted = conn
-        .call(move |c| -> rusqlite::Result<bool> {
+    let uuid = conn
+        .call(move |c| -> rusqlite::Result<Option<String>> {
             let kids: i64 = c.query_row(
                 "SELECT COUNT(*) FROM nodes WHERE parent_id = ?1",
                 [id],
                 |r| r.get(0),
             )?;
             if kids > 0 {
-                return Ok(false);
+                return Ok(None);
             }
-            c.execute("DELETE FROM nodes WHERE id = ?1", [id])?;
-            Ok(true)
+            c.query_row(
+                "SELECT uuid FROM nodes WHERE id = ?1 AND kind = 'block'",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
         })
         .await?;
-    Ok(deleted)
+    let Some(uuid) = uuid else {
+        return Ok(false);
+    };
+    apply_local(conn, vec![OpKind::NodeDelete(NodeDelete { uuid })]).await?;
+    Ok(true)
 }
 
 /// Find a page by case-insensitive title without creating one. Used by hover
@@ -3044,11 +3307,15 @@ mod tests {
             .await
             .expect("restore archive");
 
-        let restored = get_node(&connection, block.id)
+        let restored = get_node_by_uuid(&connection, block.uuid.clone())
             .await
             .expect("query block")
             .expect("restored block");
-        assert_eq!(restored.parent_id, Some(page.id));
+        let restored_page = get_node_by_uuid(&connection, page.uuid)
+            .await
+            .expect("query restored page")
+            .expect("restored page");
+        assert_eq!(restored.parent_id, Some(restored_page.id));
         let linked = get_page_by_title(&connection, "Linked".into())
             .await
             .expect("query linked page")
@@ -3057,7 +3324,84 @@ mod tests {
             .await
             .expect("query backlinks");
         assert_eq!(backlinks.len(), 1);
-        assert_eq!(backlinks[0].id, block.id);
+        assert_eq!(backlinks[0].uuid, block.uuid);
+    }
+
+    #[tokio::test]
+    async fn explicit_page_creation_reuses_wikilink_stub_identity() {
+        let (_database, connection) = temporary_database().await;
+        let page = create_node(
+            &connection,
+            "page".into(),
+            Some("Source".into()),
+            String::new(),
+            None,
+        )
+        .await
+        .expect("create source page");
+        let block = create_block(
+            &connection,
+            Some(page.id),
+            None,
+            "See [[Roadmap]]".into(),
+            None,
+        )
+        .await
+        .expect("create linked block");
+        let stub = get_page_by_title(&connection, "Roadmap".into())
+            .await
+            .expect("query stub")
+            .expect("stub page");
+        let explicit = create_node(
+            &connection,
+            "page".into(),
+            Some("Roadmap".into()),
+            String::new(),
+            None,
+        )
+        .await
+        .expect("materialize explicit page");
+        assert_eq!(explicit.uuid, stub.uuid);
+        assert_eq!(
+            find_backlinks(&connection, explicit.id, Some("refs".into()))
+                .await
+                .expect("backlinks")[0]
+                .uuid,
+            block.uuid
+        );
+    }
+
+    #[tokio::test]
+    async fn renamed_page_does_not_reserve_its_old_title_identity() {
+        let (_database, connection) = temporary_database().await;
+        let original = create_node(
+            &connection,
+            "page".into(),
+            Some("Old title".into()),
+            String::new(),
+            None,
+        )
+        .await
+        .expect("create original page");
+        update_node(
+            &connection,
+            original.id,
+            Some("New title".into()),
+            String::new(),
+            None,
+        )
+        .await
+        .expect("rename page");
+        let replacement = create_node(
+            &connection,
+            "page".into(),
+            Some("Old title".into()),
+            String::new(),
+            None,
+        )
+        .await
+        .expect("reuse old title");
+        assert_ne!(replacement.uuid, original.uuid);
     }
 
     #[tokio::test]
@@ -3075,10 +3419,10 @@ mod tests {
         let attachment = create_attachment(
             &connection,
             page.id,
-            "attachment-uuid".into(),
+            "attachment-hash".into(),
             "photo.png".into(),
-            "attachments/attachment-uuid/photo.png".into(),
-            "{\"size\":4}".into(),
+            "image/png".into(),
+            4,
         )
         .await
         .expect("create attachment");
@@ -3208,8 +3552,24 @@ mod tests {
         )
         .await
         .expect("create second page");
+        let before_undo: i64 = connection
+            .call(|database| {
+                database.query_row("SELECT COUNT(*) FROM applied_ops", [], |row| row.get(0))
+            })
+            .await
+            .expect("count operations before undo");
 
         assert!(undo_history(&connection).await.expect("undo"));
+        let after_undo: i64 = connection
+            .call(|database| {
+                database.query_row("SELECT COUNT(*) FROM applied_ops", [], |row| row.get(0))
+            })
+            .await
+            .expect("count operations after undo");
+        assert!(
+            after_undo > before_undo,
+            "undo must apply inverse operations"
+        );
         assert!(
             get_node(&connection, first.id)
                 .await
@@ -3228,6 +3588,16 @@ mod tests {
         );
 
         assert!(redo_history(&connection).await.expect("redo"));
+        let after_redo: i64 = connection
+            .call(|database| {
+                database.query_row("SELECT COUNT(*) FROM applied_ops", [], |row| row.get(0))
+            })
+            .await
+            .expect("count operations after redo");
+        assert!(
+            after_redo > after_undo,
+            "redo must apply inverse operations"
+        );
         assert!(
             get_node(&connection, second.id)
                 .await

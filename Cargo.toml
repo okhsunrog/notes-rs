@@ -31,9 +31,10 @@ schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sha1 = "0.11.0"
+sha2 = "0.10.9"
 sqlite-vec = "0.1.9"
 tempfile = "3.27.0"
 thiserror = "2.0.18"
 tokio = { version = "1.52.4", features = ["full"] }
 tracing = "0.1.44"
-uuid = { version = "1.24.0", features = ["v4", "serde"] }
+uuid = { version = "1.24.0", features = ["v4", "v5", "serde"] }

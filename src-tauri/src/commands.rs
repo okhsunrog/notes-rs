@@ -6,6 +6,7 @@ use notes_ai::embed::{EmbedderBackend, RerankBackend};
 use notes_core::Connection;
 use notes_core::db::{self, Node, SearchHit};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -568,21 +569,20 @@ pub async fn attach_file(
         .and_then(|name| name.to_str())
         .ok_or_else(|| "attachment filename is not valid UTF-8".to_string())?
         .to_string();
-    let uuid = uuid::Uuid::new_v4().to_string();
+    let blob_hash = format!("{:x}", Sha256::digest(std::fs::read(&source).map_err(err)?));
     let relative = std::path::PathBuf::from("attachments")
-        .join(&uuid)
+        .join(&blob_hash)
         .join(&title);
     let destination = app.path().app_data_dir().map_err(err)?.join(&relative);
     std::fs::create_dir_all(destination.parent().expect("attachment has parent")).map_err(err)?;
     std::fs::copy(&source, &destination).map_err(err)?;
-    let metadata_json = serde_json::json!({ "size": metadata.len() }).to_string();
     match db::create_attachment(
         &state.conn,
         parent_id,
-        uuid,
+        blob_hash,
         title,
-        relative.to_string_lossy().into_owned(),
-        metadata_json,
+        "application/octet-stream".into(),
+        metadata.len(),
     )
     .await
     {
@@ -634,7 +634,11 @@ pub async fn delete_attachment(
         return Ok(false);
     };
     let path = safe_app_data_path(&app, &node.content).map_err(err)?;
-    if path.exists() {
+    let still_referenced = db::attachment_path_ref_count(&state.conn, node.content)
+        .await
+        .map_err(err)?
+        > 0;
+    if !still_referenced && path.exists() {
         std::fs::remove_file(&path).map_err(err)?;
     }
     Ok(true)
