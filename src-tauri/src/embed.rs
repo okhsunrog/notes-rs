@@ -79,7 +79,7 @@ pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
                          set it explicitly (e.g. 4096 for qwen/qwen3-embedding-8b)"
                     )
                 })?;
-            let client = openrouter::Client::from_env().context("OPENROUTER_API_KEY not set")?;
+            let client = crate::settings::openrouter_client()?;
             let m = <openrouter::EmbeddingModel as EmbeddingModel>::make(
                 &client,
                 model.clone(),
@@ -94,29 +94,26 @@ pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
             use rig::providers::cohere;
             let model = model_env.unwrap_or_else(|| "embed-multilingual-v3.0".into());
             let client = cohere::Client::from_env().context("COHERE_API_KEY not set")?;
-            let m = client.embedding_model(&model, "search_document");
-            Ok(Arc::new(RigEmbedder {
-                model: m,
+            let passages = client.embedding_model(&model, "search_document");
+            let query = client.embedding_model(&model, "search_query");
+            Ok(Arc::new(AsymmetricRigEmbedder {
+                passages,
+                query,
                 id: format!("cohere:{model}"),
             }))
         }
         "voyageai" => {
             use rig::providers::voyageai;
             let model = model_env.unwrap_or_else(|| "voyage-3-large".into());
-            let client = voyageai::Client::from_env().context("VOYAGE_API_KEY not set")?;
-            let m = <voyageai::EmbeddingModel<reqwest::Client> as EmbeddingModel>::make(
-                &client,
-                model.clone(),
-                ndims_env,
-            );
-            Ok(Arc::new(RigEmbedder {
-                model: m,
-                id: format!("voyageai:{model}"),
-            }))
+            let api_key = std::env::var("VOYAGE_API_KEY").context("VOYAGE_API_KEY not set")?;
+            let ndims = ndims_env
+                .or_else(|| voyageai::model_dimensions_from_identifier(&model))
+                .with_context(|| format!("EMBED_NDIMS required for Voyage model {model}"))?;
+            Ok(Arc::new(VoyageEmbedder::new(api_key, model, ndims)?))
         }
         "gemini" => {
             use rig::providers::gemini;
-            let model = model_env.unwrap_or_else(|| "text-embedding-004".into());
+            let model = model_env.unwrap_or_else(|| "gemini-embedding-2".into());
             let client = gemini::Client::from_env().context("GEMINI_API_KEY not set")?;
             let m = <gemini::embedding::EmbeddingModel as EmbeddingModel>::make(
                 &client,
@@ -193,6 +190,156 @@ impl EmbedderBackend for LocalBgeM3 {
 pub struct RigEmbedder<M: EmbeddingModel> {
     model: M,
     id: String,
+}
+
+pub struct AsymmetricRigEmbedder<M: EmbeddingModel> {
+    passages: M,
+    query: M,
+    id: String,
+}
+
+#[async_trait]
+impl<M> EmbedderBackend for AsymmetricRigEmbedder<M>
+where
+    M: EmbeddingModel + Send + Sync + 'static,
+{
+    fn ndims(&self) -> usize {
+        self.passages.ndims()
+    }
+
+    fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    async fn embed_passages(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
+        embeddings_to_f32(
+            self.passages
+                .embed_texts(texts)
+                .await
+                .context("rig embed_texts")?,
+        )
+    }
+
+    async fn embed_query(&self, text: String) -> Result<Vec<f32>> {
+        let embedding = self
+            .query
+            .embed_text(&text)
+            .await
+            .context("rig embed_text")?;
+        Ok(embedding
+            .vec
+            .into_iter()
+            .map(|value| value as f32)
+            .collect())
+    }
+}
+
+fn embeddings_to_f32(embeddings: Vec<rig::embeddings::Embedding>) -> Result<Vec<Vec<f32>>> {
+    Ok(embeddings
+        .into_iter()
+        .map(|embedding| {
+            embedding
+                .vec
+                .into_iter()
+                .map(|value| value as f32)
+                .collect()
+        })
+        .collect())
+}
+
+pub struct VoyageEmbedder {
+    client: reqwest::Client,
+    api_key: String,
+    model: String,
+    ndims: usize,
+}
+
+impl VoyageEmbedder {
+    fn new(api_key: String, model: String, ndims: usize) -> Result<Self> {
+        Ok(Self {
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(60))
+                .build()
+                .context("building Voyage HTTP client")?,
+            api_key,
+            model,
+            ndims,
+        })
+    }
+
+    async fn embed(&self, texts: Vec<String>, input_type: &str) -> Result<Vec<Vec<f32>>> {
+        #[derive(Deserialize)]
+        struct Item {
+            embedding: Vec<f32>,
+            index: usize,
+        }
+        #[derive(Deserialize)]
+        struct Response {
+            data: Vec<Item>,
+        }
+
+        let expected = texts.len();
+        let response = self
+            .client
+            .post("https://api.voyageai.com/v1/embeddings")
+            .bearer_auth(&self.api_key)
+            .json(&serde_json::json!({
+                "input": texts,
+                "model": self.model,
+                "input_type": input_type,
+                "output_dimension": self.ndims,
+            }))
+            .send()
+            .await
+            .context("Voyage embedding request failed")?
+            .error_for_status()
+            .context("Voyage embeddings returned non-2xx")?
+            .json::<Response>()
+            .await
+            .context("decoding Voyage embedding response")?;
+        if response.data.len() != expected {
+            bail!(
+                "Voyage returned {} embeddings for {expected} inputs",
+                response.data.len()
+            );
+        }
+        let mut ordered: Vec<Option<Vec<f32>>> = vec![None; expected];
+        for item in response.data {
+            if item.index >= expected || ordered[item.index].is_some() {
+                bail!("Voyage returned an invalid or duplicate embedding index");
+            }
+            if item.embedding.len() != self.ndims {
+                bail!("Voyage returned an unexpected embedding dimension");
+            }
+            ordered[item.index] = Some(item.embedding);
+        }
+        ordered
+            .into_iter()
+            .map(|item| item.context("Voyage omitted an embedding index"))
+            .collect()
+    }
+}
+
+#[async_trait]
+impl EmbedderBackend for VoyageEmbedder {
+    fn ndims(&self) -> usize {
+        self.ndims
+    }
+
+    fn id(&self) -> String {
+        format!("voyageai:{}", self.model)
+    }
+
+    async fn embed_passages(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
+        self.embed(texts, "document").await
+    }
+
+    async fn embed_query(&self, text: String) -> Result<Vec<f32>> {
+        self.embed(vec![text], "query")
+            .await?
+            .pop()
+            .context("Voyage returned no query embedding")
+    }
 }
 
 #[async_trait]
@@ -313,12 +460,12 @@ impl OpenRouterReranker {
     pub fn new(model: String) -> Result<Self> {
         let api_key = std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set")?;
         let base = std::env::var("OPENROUTER_BASE_URL")
-            .unwrap_or_else(|_| "https://openrouter.ai/api/v1".into());
+            .unwrap_or_else(|_| crate::settings::DEFAULT_OPENROUTER_BASE_URL.into());
         Ok(Self {
             client: reqwest::Client::new(),
             api_key,
             model,
-            url: format!("{base}/rerank"),
+            url: format!("{}/rerank", base.trim_end_matches('/')),
         })
     }
 }
@@ -359,10 +506,16 @@ impl RerankBackend for OpenRouterReranker {
             .json()
             .await
             .context("decoding openrouter rerank response")?;
+        let mut seen = std::collections::HashSet::new();
         let mut scored: Vec<(usize, f32)> = parsed
             .results
             .into_iter()
-            .map(|r| (r.index, r.relevance_score))
+            .filter(|result| {
+                result.index < docs.len()
+                    && result.relevance_score.is_finite()
+                    && seen.insert(result.index)
+            })
+            .map(|result| (result.index, result.relevance_score))
             .collect();
         // OpenRouter/Cohere returns sorted by relevance_score desc; resort
         // defensively in case a provider variant ever differs.

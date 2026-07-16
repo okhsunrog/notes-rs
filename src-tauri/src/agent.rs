@@ -1,10 +1,9 @@
 use crate::db::{self, Node, SearchHit};
 use crate::embed::{EmbedderBackend, RerankBackend};
 use crate::sqlite::Connection;
-use anyhow::Context;
 use futures::StreamExt;
 use rig::agent::MultiTurnStreamItem;
-use rig::client::{CompletionClient, ProviderClient};
+use rig::client::CompletionClient;
 use rig::completion::{Message, Prompt};
 use rig::providers::openrouter;
 use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingPrompt};
@@ -114,7 +113,7 @@ impl QueryRewriter {
     }
 
     async fn try_rewrite(&self, query: &str) -> anyhow::Result<String> {
-        let client = openrouter::Client::from_env().context("OPENROUTER_API_KEY not set")?;
+        let client = crate::settings::openrouter_client()?;
         let prompt = format!(
             "Conversation history:\n{history}\nSearch query: {query}\n\n\
              Rewrite the query into a fully standalone form that resolves \
@@ -718,9 +717,7 @@ fn build_agent(
     reranker: Arc<dyn RerankBackend>,
     rewriter: QueryRewriter,
 ) -> Result<rig::agent::Agent<openrouter::CompletionModel>, AgentError> {
-    let client = openrouter::Client::from_env()
-        .context("OPENROUTER_API_KEY not set")
-        .map_err(AgentError::from)?;
+    let client = crate::settings::openrouter_client().map_err(AgentError::from)?;
     Ok(client
         .agent(MODEL)
         .preamble(SYSTEM_PROMPT)

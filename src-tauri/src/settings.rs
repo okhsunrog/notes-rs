@@ -4,6 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 
+pub const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+
 const SECRET_KEYS: &[&str] = &[
     "OPENROUTER_API_KEY",
     "OPENAI_API_KEY",
@@ -80,7 +82,7 @@ pub fn load(app: &AppHandle) -> Result<SettingsSnapshot> {
         embedding_ndims: value("EMBED_NDIMS", "4096"),
         rerank_provider: value("RERANK_PROVIDER", "openrouter"),
         rerank_model: value("RERANK_MODEL", "cohere/rerank-v3.5"),
-        openrouter_base_url: value("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+        openrouter_base_url: value("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_BASE_URL),
         window_decoration_mode: values
             .get("WINDOW_DECORATION_MODE")
             .cloned()
@@ -227,7 +229,31 @@ fn validate(update: &SettingsUpdate) -> Result<()> {
             bail!("embedding dimensions must be between 1 and 65536");
         }
     }
+    validate_http_base_url(&update.openrouter_base_url)?;
     Ok(())
+}
+
+fn validate_http_base_url(value: &str) -> Result<()> {
+    let url = reqwest::Url::parse(value.trim()).context("base URL must be a valid URL")?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        bail!("base URL must use http or https and include a host");
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        bail!("base URL cannot contain a query string or fragment");
+    }
+    Ok(())
+}
+
+pub fn openrouter_client() -> Result<rig::providers::openrouter::Client> {
+    let api_key = std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set")?;
+    let base_url =
+        std::env::var("OPENROUTER_BASE_URL").unwrap_or_else(|_| DEFAULT_OPENROUTER_BASE_URL.into());
+    validate_http_base_url(&base_url)?;
+    rig::providers::openrouter::Client::builder()
+        .base_url(base_url.trim_end_matches('/'))
+        .api_key(api_key)
+        .build()
+        .context("building OpenRouter client")
 }
 
 fn set_or_remove(values: &mut BTreeMap<String, String>, key: &str, value: String) {

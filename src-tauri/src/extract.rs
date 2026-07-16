@@ -1,6 +1,6 @@
 use crate::sqlite::Connection;
-use anyhow::{Context, Result};
-use rig::client::{CompletionClient, ProviderClient};
+use anyhow::Result;
+use rig::client::CompletionClient;
 use rig::extractor::Extractor;
 use rig::providers::openrouter;
 use schemars::JsonSchema;
@@ -87,8 +87,7 @@ impl EntityExtractor {
     async fn get(&self) -> Result<&Extractor<openrouter::CompletionModel, ExtractionResult>> {
         self.inner
             .get_or_try_init(|| async {
-                let client =
-                    openrouter::Client::from_env().context("OPENROUTER_API_KEY not set")?;
+                let client = crate::settings::openrouter_client()?;
                 let extractor = client
                     .extractor::<ExtractionResult>(EXTRACT_MODEL)
                     .preamble(PREAMBLE)
