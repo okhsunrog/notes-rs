@@ -6,6 +6,8 @@ import {
   Download,
   FolderOpen,
   Loader2,
+  Pause,
+  Play,
   RotateCcw,
   Save,
   Trash2,
@@ -17,14 +19,19 @@ import { WindowControls } from "@/app/window-controls";
 import {
   createBackup,
   chooseSyncDirectory,
+  clearBackgroundJobs,
   exportData,
   importData,
+  getBackgroundStatus,
   loadSettings,
   restartApp,
+  retryBackgroundJobs,
   saveSettings,
+  setBackgroundPaused,
   syncPull,
   syncPush,
   type SettingsSnapshot,
+  type BackgroundStatus,
 } from "@/lib/api";
 
 type Props = {
@@ -54,12 +61,28 @@ export function SettingsPage({
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [background, setBackground] = useState<BackgroundStatus | null>(null);
 
   useEffect(() => {
     loadSettings()
       .then(setSettings)
       .catch((reason) => setError(String(reason)));
   }, []);
+
+  useEffect(() => {
+    if (!dataAvailable) return;
+    let active = true;
+    const refresh = () =>
+      getBackgroundStatus()
+        .then((status) => active && setBackground(status))
+        .catch(() => undefined);
+    void refresh();
+    const timer = window.setInterval(refresh, 1500);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [dataAvailable]);
 
   const update = <Key extends keyof SettingsSnapshot>(key: Key, value: SettingsSnapshot[Key]) => {
     setSettings((current) => (current ? { ...current, [key]: value } : current));
@@ -172,6 +195,24 @@ export function SettingsPage({
     }
   }
 
+  async function backgroundAction(action: "pause" | "retry" | "clear") {
+    if (!background) return;
+    try {
+      if (action === "pause") await setBackgroundPaused(!background.paused);
+      if (action === "retry") await retryBackgroundJobs();
+      if (
+        action === "clear" &&
+        window.confirm(
+          "Cancel every pending embedding and entity-extraction job? Future note edits will enqueue fresh work.",
+        )
+      )
+        await clearBackgroundJobs();
+      setBackground(await getBackgroundStatus());
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
   if (!settings) {
     return (
       <div className="flex h-screen items-center justify-center bg-background text-foreground">
@@ -230,7 +271,7 @@ export function SettingsPage({
           </Field>
           <p className="text-xs text-muted-foreground">
             Borderless applies immediately. Switching to or from KDE/KWin requires an app restart
-            because GTK chooses Wayland or X11 before creating the window.
+            because GTK negotiates its decoration strategy before creating the Wayland surface.
           </p>
         </SettingsSection>
 
@@ -353,7 +394,7 @@ export function SettingsPage({
 
         <SettingsSection
           title="Data"
-          description="Portable JSON archives include every note and graph edge. Destructive operations automatically create a timestamped recovery backup in app data."
+          description="Portable JSON archives include every note, graph edge, and attachment. Destructive operations automatically create a timestamped recovery backup in app data."
         >
           <div className="flex flex-wrap gap-2">
             <Button
@@ -429,6 +470,50 @@ export function SettingsPage({
           </div>
         </SettingsSection>
 
+        <SettingsSection
+          title="Background indexing"
+          description="Embedding and entity-extraction queues run after saves. Failed jobs use exponential backoff instead of retrying continuously."
+        >
+          {background ? (
+            <>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <QueueMetric label="Embeddings" value={background.embeddingsPending} />
+                <QueueMetric label="Embedding retries" value={background.embeddingsFailed} />
+                <QueueMetric label="Extractions" value={background.extractionsPending} />
+                <QueueMetric label="Extraction retries" value={background.extractionsFailed} />
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => void backgroundAction("pause")}
+                >
+                  {background.paused ? <Play className="size-4" /> : <Pause className="size-4" />}
+                  {background.paused ? "Resume" : "Pause"}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => void backgroundAction("retry")}
+                >
+                  <RotateCcw className="size-4" /> Retry failed
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => void backgroundAction("clear")}
+                >
+                  <Trash2 className="size-4" /> Cancel pending
+                </Button>
+              </div>
+            </>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              Indexing status is available after startup.
+            </p>
+          )}
+        </SettingsSection>
+
         {error && (
           <p
             role="alert"
@@ -494,5 +579,14 @@ function Field({
       {children}
       {hint && <span className="text-xs text-muted-foreground">{hint}</span>}
     </label>
+  );
+}
+
+function QueueMetric({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-md border bg-background p-3">
+      <div className="text-lg font-semibold tabular-nums">{value}</div>
+      <div className="text-xs text-muted-foreground">{label}</div>
+    </div>
   );
 }

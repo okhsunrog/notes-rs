@@ -76,6 +76,7 @@ function App() {
         return;
       }
       setActiveNode(page);
+      window.dispatchEvent(new Event("notes-rs:show-main"));
       if (page.id !== node.id) {
         setStatus(`Opened ${page.title ?? "page"} containing #${node.id}`);
       }
@@ -171,7 +172,10 @@ function App() {
           <div className="flex h-full flex-col gap-4">
             <PagesList
               selectedId={activeNode?.id ?? null}
-              onSelect={setActiveNode}
+              onSelect={(page) => {
+                setActiveNode(page);
+                window.dispatchEvent(new Event("notes-rs:show-main"));
+              }}
               onStatus={setStatus}
             />
             <EntitiesCard variant="compact" />

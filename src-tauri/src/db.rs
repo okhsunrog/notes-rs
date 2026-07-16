@@ -2071,6 +2071,38 @@ pub async fn record_embedding_failure(conn: &Connection, node_ids: Vec<i64>) -> 
     .await
 }
 
+pub async fn queue_status(conn: &Connection) -> Result<(i64, i64, i64, i64)> {
+    conn.call(|database| -> rusqlite::Result<(i64, i64, i64, i64)> {
+        database.query_row(
+            "SELECT
+               (SELECT COUNT(*) FROM embed_queue),
+               (SELECT COUNT(*) FROM embed_queue WHERE retry_count > 0),
+               (SELECT COUNT(*) FROM extract_queue),
+               (SELECT COUNT(*) FROM extract_queue WHERE retry_count > 0)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+    })
+    .await
+}
+
+pub async fn retry_background_jobs(conn: &Connection) -> Result<()> {
+    conn.call(|database| -> rusqlite::Result<()> {
+        database.execute_batch(
+            "UPDATE embed_queue SET retry_count = 0, last_attempt = NULL;
+             UPDATE extract_queue SET retry_count = 0, last_attempt = NULL;",
+        )
+    })
+    .await
+}
+
+pub async fn clear_background_jobs(conn: &Connection) -> Result<()> {
+    conn.call(|database| -> rusqlite::Result<()> {
+        database.execute_batch("DELETE FROM embed_queue; DELETE FROM extract_queue;")
+    })
+    .await
+}
+
 /// Compose ancestor-aware embedding text. `chain` is ordered depth-ascending
 /// (depth=0 is the node itself). Layout:
 ///
@@ -2543,6 +2575,47 @@ mod tests {
                 .await
                 .expect("query attachment")
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn background_queue_controls_report_retry_and_clear_work() {
+        let (_database, connection) = temporary_database().await;
+        let page = create_node(
+            &connection,
+            "page".into(),
+            Some("Queued".into()),
+            "content".into(),
+            None,
+        )
+        .await
+        .expect("create queued page");
+        record_embedding_failure(&connection, vec![page.id])
+            .await
+            .expect("record embedding failure");
+        record_extraction_failure(&connection, page.id)
+            .await
+            .expect("record extraction failure");
+        let status = queue_status(&connection).await.expect("read queue status");
+        assert_eq!(status, (1, 1, 1, 1));
+
+        retry_background_jobs(&connection)
+            .await
+            .expect("retry queues");
+        assert_eq!(
+            queue_status(&connection)
+                .await
+                .expect("read retried queues"),
+            (1, 0, 1, 0)
+        );
+        clear_background_jobs(&connection)
+            .await
+            .expect("clear queues");
+        assert_eq!(
+            queue_status(&connection)
+                .await
+                .expect("read cleared queues"),
+            (0, 0, 0, 0)
         );
     }
 }

@@ -10,6 +10,7 @@ use rig::client::{EmbeddingsClient, ProviderClient};
 use rig::embeddings::EmbeddingModel;
 use serde::Deserialize;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "local-models")]
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
@@ -372,10 +373,12 @@ impl RerankBackend for OpenRouterReranker {
 
 // ───────────────────────── worker ─────────────────────────
 
-pub fn spawn_worker(conn: Connection, embedder: Arc<dyn EmbedderBackend>) {
+pub fn spawn_worker(conn: Connection, embedder: Arc<dyn EmbedderBackend>, paused: Arc<AtomicBool>) {
     tokio::spawn(async move {
         loop {
-            if let Err(e) = tick(&conn, embedder.as_ref()).await {
+            if !paused.load(Ordering::Acquire)
+                && let Err(e) = tick(&conn, embedder.as_ref()).await
+            {
                 tracing::warn!(error = ?e, "embed worker tick failed");
             }
             sleep(Duration::from_millis(500)).await;

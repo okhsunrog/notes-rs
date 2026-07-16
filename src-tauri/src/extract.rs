@@ -7,6 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::OnceCell;
 use tokio::time::{Duration, sleep};
@@ -104,10 +105,17 @@ impl EntityExtractor {
     }
 }
 
-pub fn spawn_worker(conn: Connection, extractor: Arc<EntityExtractor>, app: AppHandle) {
+pub fn spawn_worker(
+    conn: Connection,
+    extractor: Arc<EntityExtractor>,
+    app: AppHandle,
+    paused: Arc<AtomicBool>,
+) {
     tokio::spawn(async move {
         loop {
-            if let Err(e) = tick(&conn, &extractor, &app).await {
+            if !paused.load(Ordering::Acquire)
+                && let Err(e) = tick(&conn, &extractor, &app).await
+            {
                 tracing::warn!(error = ?e, "extract worker tick failed");
             }
             sleep(Duration::from_secs(2)).await;

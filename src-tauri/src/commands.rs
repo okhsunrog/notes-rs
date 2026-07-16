@@ -5,6 +5,7 @@ use crate::sqlite::Connection;
 use anyhow::Context;
 use base64::Engine;
 use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -15,6 +16,17 @@ pub struct AppState {
     pub conn: Connection,
     pub embedder: Arc<dyn EmbedderBackend>,
     pub reranker: Arc<dyn RerankBackend>,
+    pub background_paused: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundStatus {
+    pub paused: bool,
+    pub embeddings_pending: i64,
+    pub embeddings_failed: i64,
+    pub extractions_pending: i64,
+    pub extractions_failed: i64,
 }
 
 /// Registered immediately in setup so the frontend can ask whether the heavy
@@ -70,6 +82,33 @@ pub fn save_settings(
 #[tauri::command]
 pub fn restart_app(app: AppHandle) {
     app.restart()
+}
+
+#[tauri::command]
+pub async fn background_status(state: State<'_, AppState>) -> Result<BackgroundStatus, String> {
+    let queues = db::queue_status(&state.conn).await.map_err(err)?;
+    Ok(BackgroundStatus {
+        paused: state.background_paused.load(Ordering::Acquire),
+        embeddings_pending: queues.0,
+        embeddings_failed: queues.1,
+        extractions_pending: queues.2,
+        extractions_failed: queues.3,
+    })
+}
+
+#[tauri::command]
+pub fn set_background_paused(state: State<'_, AppState>, paused: bool) {
+    state.background_paused.store(paused, Ordering::Release);
+}
+
+#[tauri::command]
+pub async fn retry_background_jobs(state: State<'_, AppState>) -> Result<(), String> {
+    db::retry_background_jobs(&state.conn).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn clear_background_jobs(state: State<'_, AppState>) -> Result<(), String> {
+    db::clear_background_jobs(&state.conn).await.map_err(err)
 }
 
 #[tauri::command]
@@ -693,7 +732,7 @@ pub async fn search_hybrid(
         .map_err(err)
 }
 
-/// Retrieve via hybrid RRF, then rerank with BGE-Reranker-v2-M3.
+/// Retrieve via hybrid RRF, then rerank with the configured provider.
 #[tauri::command]
 pub async fn search_agentic(
     state: State<'_, AppState>,

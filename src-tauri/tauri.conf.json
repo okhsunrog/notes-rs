@@ -16,8 +16,8 @@
         "title": "notes-rs",
         "width": 1200,
         "height": 800,
-        "minWidth": 1100,
-        "minHeight": 650
+        "minWidth": 760,
+        "minHeight": 560
       }
     ],
     "security": {

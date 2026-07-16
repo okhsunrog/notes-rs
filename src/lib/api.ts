@@ -16,6 +16,13 @@ export type Node = {
 export type SearchHit = { node: Node; score: number };
 export type Edge = { src: number; dst: number; kind: string; weight: number; created_at: number };
 export type GraphSnapshot = { nodes: Node[]; edges: Edge[] };
+export type BackgroundStatus = {
+  paused: boolean;
+  embeddingsPending: number;
+  embeddingsFailed: number;
+  extractionsPending: number;
+  extractionsFailed: number;
+};
 export type Mode = "fts" | "vec" | "hybrid" | "agentic";
 export type StartupStatus =
   | { state: "starting"; message: string }
@@ -123,6 +130,22 @@ export function saveSettings(update: SettingsUpdate) {
 
 export function restartApp() {
   return invoke<void>("restart_app");
+}
+
+export function getBackgroundStatus() {
+  return invoke<BackgroundStatus>("background_status");
+}
+
+export function setBackgroundPaused(paused: boolean) {
+  return invoke<void>("set_background_paused", { paused });
+}
+
+export function retryBackgroundJobs() {
+  return invoke<void>("retry_background_jobs");
+}
+
+export function clearBackgroundJobs() {
+  return invoke<void>("clear_background_jobs");
 }
 
 export function listEntities(limit = 30) {

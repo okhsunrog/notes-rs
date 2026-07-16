@@ -7,6 +7,7 @@ mod settings;
 mod sqlite;
 mod stem;
 
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 use tauri::{Emitter, Manager};
 
@@ -83,13 +84,24 @@ pub fn run() {
 
                 match initialize.await {
                     Ok((conn, embedder, reranker)) => {
-                        embed::spawn_worker(conn.clone(), embedder.clone());
+                        let background_paused = Arc::new(AtomicBool::new(false));
+                        embed::spawn_worker(
+                            conn.clone(),
+                            embedder.clone(),
+                            background_paused.clone(),
+                        );
                         let extractor = Arc::new(extract::EntityExtractor::new());
-                        extract::spawn_worker(conn.clone(), extractor, handle.clone());
+                        extract::spawn_worker(
+                            conn.clone(),
+                            extractor,
+                            handle.clone(),
+                            background_paused.clone(),
+                        );
                         handle.manage(commands::AppState {
                             conn,
                             embedder,
                             reranker,
+                            background_paused,
                         });
                         *startup.write().unwrap_or_else(|e| e.into_inner()) =
                             commands::StartupStatus::Ready;
@@ -116,6 +128,10 @@ pub fn run() {
             commands::load_settings,
             commands::save_settings,
             commands::restart_app,
+            commands::background_status,
+            commands::set_background_paused,
+            commands::retry_background_jobs,
+            commands::clear_background_jobs,
             commands::create_node,
             commands::update_node,
             commands::update_block_with_refs,

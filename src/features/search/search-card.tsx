@@ -43,10 +43,12 @@ export function SearchCard({ hits, setHits, onOpenNode, onStatus }: Props) {
     <Card>
       <CardHeader>
         <CardTitle>Search</CardTitle>
-        <CardDescription>Hybrid retrieval with optional BGE reranker.</CardDescription>
+        <CardDescription>
+          Lexical and semantic retrieval with optional provider reranking.
+        </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        <form onSubmit={submit} className="flex gap-2">
+        <form onSubmit={submit} className="flex flex-col gap-2 sm:flex-row">
           <Input
             placeholder="query"
             value={query}
@@ -54,7 +56,7 @@ export function SearchCard({ hits, setHits, onOpenNode, onStatus }: Props) {
             className="flex-1"
           />
           <Select value={mode} onValueChange={(v) => setMode(v as Mode)}>
-            <SelectTrigger className="w-48">
+            <SelectTrigger className="w-full sm:w-48">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
