@@ -30,6 +30,7 @@ export type SettingsSnapshot = {
   rerankModel: string;
   openrouterBaseUrl: string;
   windowDecorationMode: "native" | "borderless" | "kde";
+  syncDirectory: string;
   kdeDecorationsAvailable: boolean;
   configuredKeys: string[];
   localModelsAvailable: boolean;
@@ -158,6 +159,34 @@ export function importData() {
 
 export function createBackup() {
   return invoke<string>("create_backup");
+}
+
+export function chooseSyncDirectory() {
+  return invoke<string | null>("choose_sync_directory");
+}
+
+export function syncPush() {
+  return invoke<string>("sync_push");
+}
+
+export function syncPull() {
+  return invoke<string>("sync_pull");
+}
+
+export function attachFile(parentId: number) {
+  return invoke<Node | null>("attach_file", { parentId });
+}
+
+export function listAttachments(parentId: number) {
+  return invoke<Node[]>("list_attachments", { parentId });
+}
+
+export function openAttachment(id: number) {
+  return invoke<void>("open_attachment", { id });
+}
+
+export function deleteAttachment(id: number) {
+  return invoke<boolean>("delete_attachment", { id });
 }
 
 export function getNode(id: number) {

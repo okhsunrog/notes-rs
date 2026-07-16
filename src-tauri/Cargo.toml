@@ -46,6 +46,7 @@ schemars = "1.2.1"
 rust-stemmers = "1.2.0"
 dotenvy = "0.15.7"
 sha1 = "0.11.0"
+base64 = "0.22.1"
 
 [features]
 default = []

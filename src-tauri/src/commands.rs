@@ -2,11 +2,14 @@ use crate::agent::{ChatEvent, ChatTurn};
 use crate::db::{self, Node, SearchHit};
 use crate::embed::{EmbedderBackend, RerankBackend};
 use crate::sqlite::Connection;
+use anyhow::Context;
+use base64::Engine;
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_opener::OpenerExt;
 
 pub struct AppState {
     pub conn: Connection,
@@ -180,12 +183,18 @@ pub async fn delete_page(
     write_backup(&app, &state.conn, "before-delete")
         .await
         .map_err(err)?;
-    let deleted = db::delete_page(&state.conn, id).await.map_err(err)?;
-    if deleted {
+    let attachments = db::delete_page(&state.conn, id).await.map_err(err)?;
+    if let Some(attachments) = &attachments {
+        for attachment in attachments {
+            let path = safe_app_data_path(&app, &attachment.content).map_err(err)?;
+            if path.exists() {
+                std::fs::remove_file(path).map_err(err)?;
+            }
+        }
         let _ = app.emit("pages:changed", ());
         let _ = app.emit("entities:changed", ());
     }
-    Ok(deleted)
+    Ok(attachments.is_some())
 }
 
 #[tauri::command]
@@ -223,7 +232,8 @@ pub async fn export_data(
         return Ok(None);
     };
     let path = path.into_path().map_err(err)?;
-    let archive = db::export_archive(&state.conn).await.map_err(err)?;
+    let mut archive = db::export_archive(&state.conn).await.map_err(err)?;
+    add_archive_files(&app, &mut archive).map_err(err)?;
     let json = serde_json::to_string_pretty(&archive).map_err(err)?;
     std::fs::write(&path, json).map_err(err)?;
     Ok(Some(path.display().to_string()))
@@ -248,7 +258,7 @@ pub async fn import_data(
     write_backup(&app, &state.conn, "before-import")
         .await
         .map_err(err)?;
-    db::import_archive(&state.conn, archive)
+    restore_archive(&app, &state.conn, archive)
         .await
         .map_err(err)?;
     let _ = app.emit("pages:changed", ());
@@ -275,9 +285,235 @@ async fn write_backup(
         "notes-rs-{reason}-{}.json",
         chrono::Utc::now().format("%Y%m%d-%H%M%S")
     ));
-    let archive = db::export_archive(connection).await?;
+    let mut archive = db::export_archive(connection).await?;
+    add_archive_files(app, &mut archive)?;
     std::fs::write(&path, serde_json::to_string_pretty(&archive)?)?;
     Ok(path)
+}
+
+#[tauri::command]
+pub fn choose_sync_directory(app: AppHandle) -> Result<Option<String>, String> {
+    app.dialog()
+        .file()
+        .blocking_pick_folder()
+        .map(|path| path.into_path().map(|path| path.display().to_string()))
+        .transpose()
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn sync_push(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+    let settings = crate::settings::load(&app).map_err(err)?;
+    let directory = sync_directory(&settings.sync_directory).map_err(err)?;
+    std::fs::create_dir_all(&directory).map_err(err)?;
+    let mut archive = db::export_archive(&state.conn).await.map_err(err)?;
+    add_archive_files(&app, &mut archive).map_err(err)?;
+    let path = directory.join("notes-rs-sync.json");
+    let temporary = directory.join("notes-rs-sync.json.tmp");
+    std::fs::write(
+        &temporary,
+        serde_json::to_string_pretty(&archive).map_err(err)?,
+    )
+    .map_err(err)?;
+    std::fs::rename(&temporary, &path).map_err(err)?;
+    Ok(path.display().to_string())
+}
+
+#[tauri::command]
+pub async fn sync_pull(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+    let settings = crate::settings::load(&app).map_err(err)?;
+    let path = sync_directory(&settings.sync_directory)
+        .map_err(err)?
+        .join("notes-rs-sync.json");
+    let archive =
+        serde_json::from_str(&std::fs::read_to_string(&path).map_err(err)?).map_err(err)?;
+    write_backup(&app, &state.conn, "before-sync-pull")
+        .await
+        .map_err(err)?;
+    restore_archive(&app, &state.conn, archive)
+        .await
+        .map_err(err)?;
+    let _ = app.emit("pages:changed", ());
+    let _ = app.emit("entities:changed", ());
+    Ok(path.display().to_string())
+}
+
+fn sync_directory(value: &str) -> anyhow::Result<std::path::PathBuf> {
+    let value = value.trim();
+    if value.is_empty() {
+        anyhow::bail!("choose a sync directory in Settings first");
+    }
+    Ok(std::path::PathBuf::from(value))
+}
+
+#[tauri::command]
+pub async fn attach_file(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    parent_id: i64,
+) -> Result<Option<Node>, String> {
+    let Some(source) = app.dialog().file().blocking_pick_file() else {
+        return Ok(None);
+    };
+    let source = source.into_path().map_err(err)?;
+    let metadata = source.metadata().map_err(err)?;
+    if !metadata.is_file() {
+        return Err("attachments must be regular files".into());
+    }
+    if metadata.len() > 100 * 1024 * 1024 {
+        return Err("attachments are limited to 100 MiB".into());
+    }
+    let title = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "attachment filename is not valid UTF-8".to_string())?
+        .to_string();
+    let uuid = uuid::Uuid::new_v4().to_string();
+    let relative = std::path::PathBuf::from("attachments")
+        .join(&uuid)
+        .join(&title);
+    let destination = app.path().app_data_dir().map_err(err)?.join(&relative);
+    std::fs::create_dir_all(destination.parent().expect("attachment has parent")).map_err(err)?;
+    std::fs::copy(&source, &destination).map_err(err)?;
+    let metadata_json = serde_json::json!({ "size": metadata.len() }).to_string();
+    match db::create_attachment(
+        &state.conn,
+        parent_id,
+        uuid,
+        title,
+        relative.to_string_lossy().into_owned(),
+        metadata_json,
+    )
+    .await
+    {
+        Ok(node) => Ok(Some(node)),
+        Err(error) => {
+            let _ = std::fs::remove_file(destination);
+            Err(err(error))
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn list_attachments(
+    state: State<'_, AppState>,
+    parent_id: i64,
+) -> Result<Vec<Node>, String> {
+    db::list_attachments(&state.conn, parent_id)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn open_attachment(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<(), String> {
+    let node = db::get_node(&state.conn, id)
+        .await
+        .map_err(err)?
+        .filter(|node| node.kind == "attachment")
+        .ok_or_else(|| "attachment not found".to_string())?;
+    let path = safe_app_data_path(&app, &node.content).map_err(err)?;
+    app.opener()
+        .open_path(path.to_string_lossy(), None::<&str>)
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn delete_attachment(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<bool, String> {
+    write_backup(&app, &state.conn, "before-attachment-delete")
+        .await
+        .map_err(err)?;
+    let Some(node) = db::delete_attachment(&state.conn, id).await.map_err(err)? else {
+        return Ok(false);
+    };
+    let path = safe_app_data_path(&app, &node.content).map_err(err)?;
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(err)?;
+    }
+    Ok(true)
+}
+
+fn add_archive_files(app: &AppHandle, archive: &mut db::DataArchive) -> anyhow::Result<()> {
+    for node in archive
+        .nodes
+        .iter()
+        .filter(|node| node.kind == "attachment")
+    {
+        let path = safe_app_data_path(app, &node.content)?;
+        let bytes = std::fs::read(&path)
+            .with_context(|| format!("reading attachment {}", path.display()))?;
+        archive.files.insert(
+            node.content.clone(),
+            base64::engine::general_purpose::STANDARD.encode(bytes),
+        );
+    }
+    Ok(())
+}
+
+async fn restore_archive(
+    app: &AppHandle,
+    connection: &Connection,
+    archive: db::DataArchive,
+) -> anyhow::Result<()> {
+    let data_dir = app.path().app_data_dir()?;
+    let staging = data_dir.join(format!("attachments-import-{}", uuid::Uuid::new_v4()));
+    for (relative, encoded) in &archive.files {
+        let relative = safe_relative_path(relative)?;
+        let destination = staging.join(relative.strip_prefix("attachments").unwrap_or(&relative));
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(
+            destination,
+            base64::engine::general_purpose::STANDARD.decode(encoded)?,
+        )?;
+    }
+    if let Err(error) = db::import_archive(connection, archive).await {
+        let _ = std::fs::remove_dir_all(staging);
+        return Err(error);
+    }
+    let attachments = data_dir.join("attachments");
+    if attachments.exists() {
+        std::fs::remove_dir_all(&attachments)?;
+    }
+    if staging.exists() {
+        std::fs::rename(staging, attachments)?;
+    }
+    Ok(())
+}
+
+fn safe_app_data_path(app: &AppHandle, relative: &str) -> anyhow::Result<std::path::PathBuf> {
+    Ok(app
+        .path()
+        .app_data_dir()?
+        .join(safe_relative_path(relative)?))
+}
+
+fn safe_relative_path(value: &str) -> anyhow::Result<std::path::PathBuf> {
+    let path = std::path::Path::new(value);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        anyhow::bail!("archive contains an unsafe attachment path");
+    }
+    if !path.starts_with("attachments") {
+        anyhow::bail!("attachment paths must be below the attachments directory");
+    }
+    Ok(path.to_path_buf())
 }
 
 #[tauri::command]

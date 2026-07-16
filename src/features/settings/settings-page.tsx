@@ -4,6 +4,7 @@ import {
   Check,
   DatabaseBackup,
   Download,
+  FolderOpen,
   Loader2,
   RotateCcw,
   Save,
@@ -15,11 +16,14 @@ import { Input } from "@/components/ui/input";
 import { WindowControls } from "@/app/window-controls";
 import {
   createBackup,
+  chooseSyncDirectory,
   exportData,
   importData,
   loadSettings,
   restartApp,
   saveSettings,
+  syncPull,
+  syncPush,
   type SettingsSnapshot,
 } from "@/lib/api";
 
@@ -76,6 +80,7 @@ export function SettingsPage({
         rerankModel: settings.rerankModel,
         openrouterBaseUrl: settings.openrouterBaseUrl,
         windowDecorationMode: settings.windowDecorationMode,
+        syncDirectory: settings.syncDirectory,
         apiKeys: secrets,
         clearKeys,
       });
@@ -115,6 +120,51 @@ export function SettingsPage({
         );
         if (action === "import") onDataChanged();
       }
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function chooseSync() {
+    try {
+      const directory = await chooseSyncDirectory();
+      if (directory) update("syncDirectory", directory);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  async function runSync(direction: "push" | "pull") {
+    const current = settings;
+    if (!dataAvailable || !current) return;
+    if (
+      direction === "pull" &&
+      !window.confirm(
+        "Replace local data from the sync snapshot? A local backup will be created first.",
+      )
+    )
+      return;
+    setBusy(true);
+    setError("");
+    try {
+      // Persist a newly selected directory before using it.
+      await saveSettings({
+        embeddingProvider: current.embeddingProvider,
+        embeddingModel: current.embeddingModel,
+        embeddingNdims: current.embeddingNdims,
+        rerankProvider: current.rerankProvider,
+        rerankModel: current.rerankModel,
+        openrouterBaseUrl: current.openrouterBaseUrl,
+        windowDecorationMode: current.windowDecorationMode,
+        syncDirectory: current.syncDirectory,
+        apiKeys: {},
+        clearKeys: [],
+      });
+      const path = direction === "push" ? await syncPush() : await syncPull();
+      setMessage(`${direction === "push" ? "Pushed" : "Pulled"} sync snapshot: ${path}`);
+      if (direction === "pull") onDataChanged();
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -336,6 +386,47 @@ export function SettingsPage({
               Data tools become available after the database starts successfully.
             </p>
           )}
+        </SettingsSection>
+
+        <SettingsSection
+          title="Folder sync"
+          description="Manual, conflict-safe sync through a folder managed by Syncthing, Nextcloud, Dropbox, or another file synchronizer. Push writes one atomic snapshot; pull always creates a local recovery backup first."
+        >
+          <Field label="Sync directory">
+            <div className="flex gap-2">
+              <Input
+                value={settings.syncDirectory}
+                onChange={(event) => update("syncDirectory", event.currentTarget.value)}
+                placeholder="Choose a directory…"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                aria-label="Choose sync directory"
+                onClick={() => void chooseSync()}
+              >
+                <FolderOpen className="size-4" />
+              </Button>
+            </div>
+          </Field>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!dataAvailable || busy || !settings.syncDirectory.trim()}
+              onClick={() => void runSync("push")}
+            >
+              <Upload className="size-4" /> Push snapshot
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!dataAvailable || busy || !settings.syncDirectory.trim()}
+              onClick={() => void runSync("pull")}
+            >
+              <Download className="size-4" /> Pull snapshot
+            </Button>
+          </div>
         </SettingsSection>
 
         {error && (

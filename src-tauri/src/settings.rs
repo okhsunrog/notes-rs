@@ -22,6 +22,7 @@ pub struct SettingsSnapshot {
     pub rerank_model: String,
     pub openrouter_base_url: String,
     pub window_decoration_mode: String,
+    pub sync_directory: String,
     pub kde_decorations_available: bool,
     pub configured_keys: Vec<String>,
     pub local_models_available: bool,
@@ -38,6 +39,7 @@ pub struct SettingsUpdate {
     pub rerank_model: String,
     pub openrouter_base_url: String,
     pub window_decoration_mode: String,
+    pub sync_directory: String,
     #[serde(default)]
     pub api_keys: BTreeMap<String, String>,
     #[serde(default)]
@@ -89,6 +91,7 @@ pub fn load(app: &AppHandle) -> Result<SettingsSnapshot> {
                     "native".into()
                 }
             }),
+        sync_directory: value("SYNC_DIRECTORY", ""),
         kde_decorations_available: cfg!(target_os = "linux")
             && std::env::var_os("WAYLAND_DISPLAY").is_some(),
         configured_keys,
@@ -116,6 +119,7 @@ pub fn save(app: &AppHandle, update: SettingsUpdate) -> Result<SettingsSnapshot>
         "WINDOW_DECORATION_MODE".into(),
         update.window_decoration_mode.clone(),
     );
+    set_or_remove(&mut values, "SYNC_DIRECTORY", update.sync_directory);
 
     let allowed: BTreeSet<&str> = SECRET_KEYS.iter().copied().collect();
     for key in update.clear_keys {

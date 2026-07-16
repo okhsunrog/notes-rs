@@ -3,6 +3,7 @@ import { ArrowLeft, Check, Loader2, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Outliner } from "@/features/outliner/outliner";
+import { AttachmentsCard } from "@/features/attachments/attachments-card";
 import { updateNode, type Node } from "@/lib/api";
 
 type Props = {
@@ -122,6 +123,7 @@ export function PageView({ node, onSaved, onStatus, onClose, onDelete }: Props) 
       </div>
 
       <Outliner key={node.id} page={node} />
+      <AttachmentsCard parentId={node.id} onStatus={onStatus} />
     </div>
   );
 }

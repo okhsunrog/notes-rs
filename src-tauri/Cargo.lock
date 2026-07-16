@@ -3167,6 +3167,7 @@ dependencies = [
  "anyhow",
  "async-channel",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "dotenvy",
  "fastembed",

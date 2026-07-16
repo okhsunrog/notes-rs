@@ -509,6 +509,8 @@ pub struct DataArchive {
     pub exported_at: i64,
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
+    #[serde(default)]
+    pub files: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1400,11 +1402,42 @@ pub async fn list_block_children(conn: &Connection, parent_id: i64) -> Result<Ve
     Ok(rows)
 }
 
-pub async fn delete_page(conn: &Connection, id: i64) -> Result<bool> {
-    conn.call(move |database| -> rusqlite::Result<bool> {
-        let deleted =
-            database.execute("DELETE FROM nodes WHERE id = ?1 AND kind = 'page'", [id])?;
-        Ok(deleted == 1)
+pub async fn delete_page(conn: &Connection, id: i64) -> Result<Option<Vec<Node>>> {
+    conn.call(move |database| -> rusqlite::Result<Option<Vec<Node>>> {
+        let transaction = database.transaction()?;
+        let exists = transaction
+            .query_row(
+                "SELECT 1 FROM nodes WHERE id = ?1 AND kind = 'page'",
+                [id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !exists {
+            return Ok(None);
+        }
+        let attachments = {
+            let sql = format!(
+                "WITH RECURSIVE subtree(id) AS (
+                   SELECT ?1
+                   UNION ALL
+                   SELECT n.id FROM nodes n JOIN subtree s ON n.parent_id = s.id
+                 )
+                 SELECT DISTINCT {NODE_COLUMNS_N} FROM nodes n
+                 JOIN edges e ON e.dst = n.id
+                 WHERE e.kind = 'attachment' AND e.src IN (SELECT id FROM subtree)"
+            );
+            let mut statement = transaction.prepare(&sql)?;
+            statement
+                .query_map([id], row_to_node)?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for attachment in &attachments {
+            transaction.execute("DELETE FROM nodes WHERE id = ?1", [attachment.id])?;
+        }
+        transaction.execute("DELETE FROM nodes WHERE id = ?1", [id])?;
+        transaction.commit()?;
+        Ok(Some(attachments))
     })
     .await
 }
@@ -1498,7 +1531,81 @@ pub async fn export_archive(conn: &Connection) -> Result<DataArchive> {
             exported_at: chrono::Utc::now().timestamp(),
             nodes,
             edges,
+            files: std::collections::BTreeMap::new(),
         })
+    })
+    .await
+}
+
+pub async fn create_attachment(
+    conn: &Connection,
+    parent_id: i64,
+    uuid: String,
+    title: String,
+    relative_path: String,
+    metadata: String,
+) -> Result<Node> {
+    let now = chrono::Utc::now().timestamp();
+    conn.call(move |database| -> rusqlite::Result<Node> {
+        let transaction = database.transaction()?;
+        transaction.query_row(
+            "SELECT 1 FROM nodes WHERE id = ?1 AND kind IN ('page', 'block')",
+            [parent_id],
+            |_| Ok(()),
+        )?;
+        transaction.execute(
+            "INSERT INTO nodes
+               (uuid, kind, title, content, content_json, body_stemmed, created_at, updated_at)
+             VALUES (?1, 'attachment', ?2, ?3, ?4, ?5, ?6, ?6)",
+            rusqlite::params![
+                uuid,
+                title,
+                relative_path,
+                metadata,
+                crate::stem::stem(&title),
+                now
+            ],
+        )?;
+        let id = transaction.last_insert_rowid();
+        transaction.execute(
+            "INSERT INTO edges(src, dst, kind, weight, created_at)
+             VALUES (?1, ?2, 'attachment', 1.0, ?3)",
+            rusqlite::params![parent_id, id, now],
+        )?;
+        let sql = format!("SELECT {NODE_COLUMNS} FROM nodes WHERE id = ?1");
+        let node = transaction.query_row(&sql, [id], row_to_node)?;
+        transaction.commit()?;
+        Ok(node)
+    })
+    .await
+}
+
+pub async fn list_attachments(conn: &Connection, parent_id: i64) -> Result<Vec<Node>> {
+    conn.call(move |database| -> rusqlite::Result<Vec<Node>> {
+        let sql = format!(
+            "SELECT {NODE_COLUMNS_N} FROM nodes n
+             JOIN edges e ON e.dst = n.id
+             WHERE e.src = ?1 AND e.kind = 'attachment' AND n.kind = 'attachment'
+             ORDER BY n.created_at, n.id"
+        );
+        let mut statement = database.prepare(&sql)?;
+        statement
+            .query_map([parent_id], row_to_node)?
+            .collect::<Result<Vec<_>, _>>()
+    })
+    .await
+}
+
+pub async fn delete_attachment(conn: &Connection, id: i64) -> Result<Option<Node>> {
+    conn.call(move |database| -> rusqlite::Result<Option<Node>> {
+        let transaction = database.transaction()?;
+        let sql = format!("SELECT {NODE_COLUMNS} FROM nodes WHERE id = ?1 AND kind = 'attachment'");
+        let node = transaction.query_row(&sql, [id], row_to_node).optional()?;
+        if node.is_some() {
+            transaction.execute("DELETE FROM nodes WHERE id = ?1", [id])?;
+        }
+        transaction.commit()?;
+        Ok(node)
     })
     .await
 }
@@ -2393,5 +2500,49 @@ mod tests {
             .expect("query backlinks");
         assert_eq!(backlinks.len(), 1);
         assert_eq!(backlinks[0].id, block.id);
+    }
+
+    #[tokio::test]
+    async fn attachments_follow_their_page_into_deletion() {
+        let (_database, connection) = temporary_database().await;
+        let page = create_node(
+            &connection,
+            "page".into(),
+            Some("Page".into()),
+            String::new(),
+            None,
+        )
+        .await
+        .expect("create page");
+        let attachment = create_attachment(
+            &connection,
+            page.id,
+            "attachment-uuid".into(),
+            "photo.png".into(),
+            "attachments/attachment-uuid/photo.png".into(),
+            "{\"size\":4}".into(),
+        )
+        .await
+        .expect("create attachment");
+        assert_eq!(
+            list_attachments(&connection, page.id)
+                .await
+                .expect("list attachments")
+                .len(),
+            1
+        );
+
+        let removed = delete_page(&connection, page.id)
+            .await
+            .expect("delete page")
+            .expect("page existed");
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].id, attachment.id);
+        assert!(
+            get_node(&connection, attachment.id)
+                .await
+                .expect("query attachment")
+                .is_none()
+        );
     }
 }
