@@ -1337,7 +1337,10 @@ pub async fn search_blocks_fts(conn: &Connection, query: String, limit: u32) -> 
     if query.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let stemmed_query = crate::stem::stem_query(&query);
+    let stemmed_query = crate::stem::stem_search_query(&query);
+    if stemmed_query.is_empty() {
+        return Ok(Vec::new());
+    }
     conn.call(move |c| -> rusqlite::Result<Vec<Node>> {
         let sql = format!(
             "SELECT {} FROM nodes_fts
@@ -1361,8 +1364,11 @@ pub async fn search_blocks_fts(conn: &Connection, query: String, limit: u32) -> 
 }
 
 pub async fn search_fts(conn: &Connection, query: String, limit: u32) -> Result<Vec<SearchHit>> {
-    // Stem each term; preserve FTS5 operators (AND/OR/NOT/NEAR) and metacharacters.
-    let stemmed_query = crate::stem::stem_query(&query);
+    // The UI supplies natural language, so never interpret it as FTS5 syntax.
+    let stemmed_query = crate::stem::stem_search_query(&query);
+    if stemmed_query.is_empty() {
+        return Ok(Vec::new());
+    }
     let hits = conn
         .call(move |c| -> rusqlite::Result<Vec<SearchHit>> {
             let mut stmt = c.prepare(
@@ -2600,6 +2606,32 @@ mod tests {
             .await
             .expect_err("cycle must be rejected");
         assert!(error.to_string().contains("descendants"));
+    }
+
+    #[tokio::test]
+    async fn natural_language_fts_search_treats_punctuation_as_text() {
+        let (_database, connection) = temporary_database().await;
+        let block = create_node(
+            &connection,
+            "block".into(),
+            None,
+            "Offline-first Rust notebook".into(),
+            None,
+        )
+        .await
+        .expect("create searchable block");
+
+        let hits = search_fts(&connection, "offline-first? Rust".into(), 10)
+            .await
+            .expect("punctuation must not become FTS syntax");
+        assert!(hits.iter().any(|hit| hit.node.id == block.id));
+
+        assert!(
+            search_fts(&connection, "???".into(), 10)
+                .await
+                .expect("punctuation-only search")
+                .is_empty()
+        );
     }
 
     #[tokio::test]

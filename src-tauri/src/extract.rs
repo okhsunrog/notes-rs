@@ -96,7 +96,10 @@ async fn extract_with_model<M: CompletionModel + 'static>(
 ) -> Result<ExtractionResult> {
     let extractor = ExtractorBuilder::new(model)
         .preamble(PREAMBLE)
-        .retries(2)
+        // The durable extraction queue already retries with exponential
+        // backoff. Retrying inside one tick multiplies permanent 4xx failures
+        // and can burn through a provider quota without improving recovery.
+        .retries(0)
         .build();
     Ok(extractor.extract(text).await?)
 }
