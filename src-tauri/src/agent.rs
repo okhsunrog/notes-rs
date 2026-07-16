@@ -19,20 +19,23 @@ The user's notes are stored as nodes (blocks, pages, entities, tags) connected b
 You answer questions by retrieving from the graph using tools — never invent facts.
 
 Workflow:
-1. Use `search_and_expand` for most questions: it does hybrid retrieval, then
+1. Use `list_pages` for inventory questions such as "what notes do I have?",
+   "list all notes", or requests for a notebook-wide overview. Then use
+   `read_subtree` on the returned page ids when their contents are needed.
+2. Use `search_and_expand` for relevance questions: it does hybrid retrieval, then
    walks the graph one hop from each seed and reranks the merged set. This is
    the default because the graph almost always adds useful context.
-2. Use `search_agentic` only when you want plain text-relevance with no graph
+3. Use `search_agentic` only when you want plain text-relevance with no graph
    expansion (e.g. you're looking for exact wording).
-3. Drill into specific nodes once you have ids:
+4. Drill into specific nodes once you have ids:
    - `read_ancestors` for the outline breadcrumb above a block,
    - `read_subtree` to read everything under a page or section,
    - `find_backlinks` for "who points at this?",
    - `find_tagged` for "what mentions entity/tag X?",
    - `neighbors` for undirected graph walks,
    - `get_node` for a single row.
-4. Cite node IDs (e.g. "see node #42") in your final answer.
-5. If nothing relevant found, say so plainly. Do not fabricate.
+5. Cite node IDs (e.g. "see node #42") in your final answer.
+6. If nothing relevant found, say so plainly. Do not fabricate.
 
 When calling a search tool, always write a fully self-contained query that resolves any references
 from the chat so far ("that one", "the second", "те", etc.) — the search index does not see the
@@ -307,6 +310,43 @@ const RELEVANCE_FLOOR: f64 = 0.30;
 /// Cap on the merged seeds+neighbors pool before reranking. The reranker is
 /// the per-query cost bottleneck; ~64 docs is fine, ~512 is sluggish.
 const EXPAND_POOL_MAX: usize = 64;
+const LOW_CONFIDENCE_FALLBACK_LIMIT: usize = 4;
+
+fn select_reranked_hits(
+    scored: Vec<(usize, f32)>,
+    candidates: &[Node],
+    limit: usize,
+) -> Vec<SearchHit> {
+    let confident: Vec<SearchHit> = scored
+        .iter()
+        .filter(|(_, score)| *score as f64 >= RELEVANCE_FLOOR)
+        .take(limit)
+        .filter_map(|(index, score)| {
+            candidates.get(*index).cloned().map(|node| SearchHit {
+                node,
+                score: *score as f64,
+            })
+        })
+        .collect();
+    if !confident.is_empty() {
+        return confident;
+    }
+
+    // Cross-language and broad inventory-like queries can produce uniformly
+    // low reranker scores even when semantic retrieval found the right notes.
+    // Returning a small, explicitly low-scored fallback lets the agent inspect
+    // real content instead of falsely claiming that the notebook is empty.
+    scored
+        .into_iter()
+        .take(limit.min(LOW_CONFIDENCE_FALLBACK_LIMIT))
+        .filter_map(|(index, score)| {
+            candidates.get(index).cloned().map(|node| SearchHit {
+                node,
+                score: score as f64,
+            })
+        })
+        .collect()
+}
 
 // ───────────────────────── search_and_expand ─────────────────────────
 
@@ -389,17 +429,59 @@ impl Tool for SearchAndExpand {
             .rerank(query, docs)
             .await
             .map_err(into_tool_err)?;
-        Ok(scored
-            .into_iter()
-            .filter(|(_, s)| *s as f64 >= RELEVANCE_FLOOR)
-            .take(args.limit as usize)
-            .filter_map(|(idx, score)| {
-                candidates.get(idx).cloned().map(|node| SearchHit {
-                    node,
-                    score: score as f64,
-                })
-            })
-            .collect())
+        Ok(select_reranked_hits(
+            scored,
+            &candidates,
+            args.limit as usize,
+        ))
+    }
+}
+
+// ───────────────────────── list_pages ─────────────────────────
+
+#[derive(Clone)]
+pub struct ListPages {
+    pub conn: Connection,
+}
+
+#[derive(Deserialize)]
+pub struct ListPagesArgs {
+    #[serde(default = "default_page_limit")]
+    pub limit: u32,
+}
+
+fn default_page_limit() -> u32 {
+    100
+}
+
+impl Tool for ListPages {
+    const NAME: &'static str = "list_pages";
+    type Error = ToolError;
+    type Args = ListPagesArgs;
+    type Output = Vec<Node>;
+
+    fn description(&self) -> String {
+        "List notebook pages without semantic filtering. Use for inventory questions such as 'what notes do I have?' before reading page subtrees.".into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 100 }
+            }
+        })
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        if !(1..=200).contains(&args.limit) {
+            return Err(ToolError::ToolCallError(
+                "limit must be between 1 and 200".into(),
+            ));
+        }
+        db::list_pages(&self.conn, args.limit)
+            .await
+            .map_err(into_tool_err)
     }
 }
 
@@ -832,6 +914,7 @@ fn build_agent<M: CompletionModel + 'static>(
             reranker,
             rewriter,
         })
+        .tool(ListPages { conn: conn.clone() })
         .tool(Neighbors { conn: conn.clone() })
         .tool(FindBacklinks { conn: conn.clone() })
         .tool(ReadAncestors { conn: conn.clone() })
@@ -1170,5 +1253,39 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn rerank_fallback_keeps_real_candidates_for_low_confidence_queries() {
+        let candidates = vec![
+            Node {
+                id: 1,
+                uuid: "one".into(),
+                kind: "page".into(),
+                title: Some("First note".into()),
+                content: String::new(),
+                content_json: None,
+                parent_id: None,
+                position: None,
+                created_at: 0,
+                updated_at: 0,
+            },
+            Node {
+                id: 2,
+                uuid: "two".into(),
+                kind: "page".into(),
+                title: Some("Second note".into()),
+                content: String::new(),
+                content_json: None,
+                parent_id: None,
+                position: None,
+                created_at: 0,
+                updated_at: 0,
+            },
+        ];
+        let hits = select_reranked_hits(vec![(1, 0.02), (0, 0.01)], &candidates, 8);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].node.id, 2);
+        assert!(hits[0].score < RELEVANCE_FLOOR);
     }
 }
