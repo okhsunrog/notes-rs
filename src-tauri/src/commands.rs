@@ -119,6 +119,7 @@ pub enum DomainEvent {
     HistoryChanged,
     BackgroundStatusChanged,
     SettingsChanged,
+    SyncStatusChanged,
     WorkspaceChanged,
 }
 
@@ -272,6 +273,16 @@ pub fn startup_status(state: State<'_, Startup>) -> StartupStatus {
         .status
         .read()
         .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn sync_status(state: State<'_, crate::sync::SyncRuntime>) -> crate::sync::SyncStatus {
+    state
+        .status
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
         .clone()
 }
 

@@ -20,6 +20,7 @@ export const queryKeys = {
   history: [...root, "history"] as const,
   backgroundStatus: [...root, "background-status"] as const,
   settings: [...root, "settings"] as const,
+  syncStatus: [...root, "sync-status"] as const,
 };
 
 export function createAppQueryClient() {
@@ -73,6 +74,9 @@ export async function applyDomainEvent(queryClient: QueryClient, event: DomainEv
       return;
     case "settings_changed":
       await invalidate(queryKeys.settings);
+      return;
+    case "sync_status_changed":
+      await invalidate(queryKeys.syncStatus);
       return;
     case "workspace_changed":
       await invalidate(queryKeys.root);

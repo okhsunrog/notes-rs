@@ -653,15 +653,29 @@ fn validate(operation: &Op) -> Result<()> {
             require_edge(&payload.src_uuid, &payload.dst_uuid, &payload.edge_kind)?;
         }
         OpKind::AttachmentAdd(payload) => {
-            if payload.blob_hash.trim().is_empty() || payload.filename.trim().is_empty() {
-                bail!("attachment_add requires blob_hash and filename");
+            validate_blob_hash(&payload.blob_hash)?;
+            let mut components = std::path::Path::new(&payload.filename).components();
+            if payload.filename.trim().is_empty()
+                || !matches!(components.next(), Some(std::path::Component::Normal(_)))
+                || components.next().is_some()
+            {
+                bail!("attachment filename must be one safe path component");
             }
         }
         OpKind::AttachmentRemove(payload) => {
-            if payload.blob_hash.trim().is_empty() {
-                bail!("attachment_remove requires blob_hash");
-            }
+            validate_blob_hash(&payload.blob_hash)?;
         }
+    }
+    Ok(())
+}
+
+fn validate_blob_hash(hash: &str) -> Result<()> {
+    if hash.len() != 64
+        || !hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        bail!("attachment blob hash must be 64 lowercase hexadecimal characters");
     }
     Ok(())
 }
@@ -2105,7 +2119,8 @@ mod tests {
             0,
             OpKind::AttachmentAdd(AttachmentAdd {
                 node_uuid: page,
-                blob_hash: "abc123".into(),
+                blob_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .into(),
                 filename: "file.txt".into(),
                 mime: "text/plain".into(),
                 size: 4,
@@ -2117,7 +2132,8 @@ mod tests {
             0,
             OpKind::AttachmentRemove(AttachmentRemove {
                 node_uuid: page,
-                blob_hash: "abc123".into(),
+                blob_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .into(),
             }),
         );
         apply_batch(&left, &[add.clone(), remove.clone()], Origin::Remote)
@@ -2133,7 +2149,7 @@ mod tests {
                         "SELECT
                            (SELECT COUNT(*) FROM nodes WHERE kind = 'attachment'),
                            (SELECT present FROM attachment_lww
-                             WHERE blob_hash = 'abc123')",
+                             WHERE blob_hash = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')",
                         [],
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )

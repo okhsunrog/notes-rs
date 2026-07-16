@@ -30,4 +30,6 @@ uuid.workspace = true
 [dev-dependencies]
 http-body-util = "0.1.4"
 tempfile.workspace = true
+tokio-tungstenite.workspace = true
 tower.workspace = true
+url.workspace = true

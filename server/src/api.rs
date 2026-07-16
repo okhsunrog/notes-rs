@@ -8,9 +8,9 @@ use axum::http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, WWW_AUTHEN
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, put};
+use axum::routing::{get, post, put};
 use futures::{SinkExt, StreamExt};
-use notes_sync::{AcceptedOps, ClientMessage, OpsBatch, PushOps, ServerMessage};
+use notes_sync::{AcceptedOps, BootstrapRequest, ClientMessage, OpsBatch, PushOps, ServerMessage};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path as FilePath, PathBuf};
@@ -96,6 +96,14 @@ impl ApiError {
         }
     }
 
+    fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "conflict",
+            message: message.into(),
+        }
+    }
+
     fn too_large(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::PAYLOAD_TOO_LARGE,
@@ -140,6 +148,7 @@ pub fn router(state: AppState) -> Router {
     let json_routes = Router::new()
         .route("/v1/ops", get(get_ops).post(push_ops))
         .route("/v1/snapshot", get(get_snapshot))
+        .route("/v1/bootstrap", post(bootstrap))
         .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT));
     let stream_routes = Router::new()
         .route("/v1/sync", get(sync_socket))
@@ -224,6 +233,23 @@ async fn get_snapshot(
         .await
         .map(Json)
         .map_err(ApiError::internal)
+}
+
+async fn bootstrap(
+    Extension(user): Extension<AuthenticatedUser>,
+    Json(request): Json<BootstrapRequest>,
+) -> Result<Json<notes_sync::SyncSnapshot>, ApiError> {
+    user.0
+        .bootstrap(request.snapshot)
+        .await
+        .map(Json)
+        .map_err(|error| {
+            if error.to_string().contains("not empty") {
+                ApiError::conflict("server workspace has already been initialized")
+            } else {
+                ApiError::bad_request(error.to_string())
+            }
+        })
 }
 
 async fn sync_socket(

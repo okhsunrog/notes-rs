@@ -26,6 +26,7 @@ import {
   exportData,
   importData,
   getBackgroundStatus,
+  getSyncStatus,
   loadSettings,
   restartApp,
   retryBackgroundJobs,
@@ -89,6 +90,10 @@ export function SettingsPage({
     queryKey: queryKeys.backgroundStatus,
     queryFn: getBackgroundStatus,
     enabled: dataAvailable,
+  });
+  const syncQuery = useQuery({
+    queryKey: queryKeys.syncStatus,
+    queryFn: getSyncStatus,
   });
   const background = backgroundQuery.data ?? null;
 
@@ -686,6 +691,88 @@ export function SettingsPage({
               onChange={(event) => update("openrouterBaseUrl", event.currentTarget.value)}
             />
           </Field>
+        </SettingsSection>
+
+        <SettingsSection
+          title="Realtime sync"
+          description="Keep this workspace synchronized through your self-hosted notes-rs server. Changes apply after restart."
+        >
+          <Field
+            label="Server URL"
+            hint="Leave empty to keep this device standalone. Use the public HTTPS origin without an API path."
+          >
+            <Input
+              value={settings.syncServerUrl ?? ""}
+              onChange={(event) => update("syncServerUrl", event.currentTarget.value || null)}
+              placeholder="https://notes.okhsunrog.ru"
+            />
+          </Field>
+          <Field
+            label="Device token"
+            hint={
+              settings.configuredKeys.includes("SYNC_TOKEN") && !clearKeys.includes("SYNC_TOKEN")
+                ? "A token is configured; leave empty to keep it."
+                : "Paste the bearer token assigned to this device."
+            }
+          >
+            <div className="flex gap-2">
+              <Input
+                type="password"
+                autoComplete="off"
+                value={secrets.SYNC_TOKEN ?? ""}
+                placeholder={
+                  settings.configuredKeys.includes("SYNC_TOKEN") &&
+                  !clearKeys.includes("SYNC_TOKEN")
+                    ? "configured"
+                    : "not configured"
+                }
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  setSecrets((current) => ({ ...current, SYNC_TOKEN: value }));
+                  if (value)
+                    setClearKeys((current) => current.filter((item) => item !== "SYNC_TOKEN"));
+                }}
+              />
+              {settings.configuredKeys.includes("SYNC_TOKEN") &&
+                !clearKeys.includes("SYNC_TOKEN") && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    aria-label="Clear sync token"
+                    onClick={() =>
+                      setClearKeys((current) =>
+                        current.includes("SYNC_TOKEN") ? current : [...current, "SYNC_TOKEN"],
+                      )
+                    }
+                  >
+                    <Trash2 className="size-4" />
+                  </Button>
+                )}
+            </div>
+          </Field>
+          <div className="rounded-xl border border-border/60 bg-background/60 p-3 text-xs">
+            <div className="flex items-center justify-between gap-3">
+              <span className="font-medium">Current state</span>
+              <span
+                className={cn(
+                  syncQuery.data?.state === "online"
+                    ? "text-emerald-600"
+                    : syncQuery.data?.state === "error"
+                      ? "text-destructive"
+                      : "text-muted-foreground",
+                )}
+              >
+                {(syncQuery.data?.state ?? "disabled").replace(/_/g, " ")}
+              </span>
+            </div>
+            {syncQuery.data && (
+              <p className="mt-1 text-muted-foreground">
+                seq {syncQuery.data.lastServerSeq} · {syncQuery.data.pendingOperations} pending
+                {syncQuery.data.message ? ` · ${syncQuery.data.message}` : ""}
+              </p>
+            )}
+          </div>
         </SettingsSection>
 
         <SettingsSection

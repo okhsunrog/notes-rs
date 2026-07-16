@@ -23,6 +23,7 @@ describe("settings update mapping", () => {
       openaiBaseUrl: "https://api.openai.com/v1",
       windowDecorationMode: "native",
       syncDirectory: null,
+      syncServerUrl: "https://notes.example.test",
       configuredKeys: [],
       localModelsAvailable: false,
       configPath: "/tmp/settings",
@@ -35,5 +36,6 @@ describe("settings update mapping", () => {
     expect(update.apiKeys).toEqual({ CHAT_API_KEY: "secret" });
     expect(update.clearKeys).toEqual(["OPENAI_API_KEY"]);
     expect(update.chatBaseUrl).toBe(snapshot.chatBaseUrl);
+    expect(update.syncServerUrl).toBe(snapshot.syncServerUrl);
   });
 });

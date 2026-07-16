@@ -1,7 +1,9 @@
 use crate::config::{ServerConfig, UserConfig};
 use crate::oplog::Oplog;
 use anyhow::{Context, Result, bail};
-use notes_core::{Connection, Origin, acknowledge_server_op, apply, export_sync_snapshot};
+use notes_core::{
+    Connection, Origin, acknowledge_server_op, apply, export_sync_snapshot, import_sync_snapshot,
+};
 use notes_sync::{Op, SequencedOp, SyncSnapshot};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -30,6 +32,10 @@ enum UserCommand {
         response: oneshot::Sender<Result<Vec<SequencedOp>>>,
     },
     Snapshot {
+        response: oneshot::Sender<Result<SyncSnapshot>>,
+    },
+    Bootstrap {
+        snapshot: SyncSnapshot,
         response: oneshot::Sender<Result<SyncSnapshot>>,
     },
 }
@@ -139,6 +145,17 @@ impl UserState {
             .context("user snapshot actor dropped response")?
     }
 
+    pub async fn bootstrap(&self, snapshot: SyncSnapshot) -> Result<SyncSnapshot> {
+        let (response, receiver) = oneshot::channel();
+        self.command_tx
+            .send(UserCommand::Bootstrap { snapshot, response })
+            .await
+            .context("user bootstrap actor stopped")?;
+        receiver
+            .await
+            .context("user bootstrap actor dropped response")?
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<SequencedOp> {
         self.operations_tx.subscribe()
     }
@@ -190,8 +207,37 @@ async fn run_user_actor(
                 let result = write_current_snapshot(&notes, &oplog, &snapshot_dir).await;
                 let _ = response.send(result);
             }
+            UserCommand::Bootstrap { snapshot, response } => {
+                let result = bootstrap_replica(&notes, &oplog, &snapshot_dir, snapshot).await;
+                let _ = response.send(result);
+            }
         }
     }
+}
+
+async fn bootstrap_replica(
+    notes: &Connection,
+    oplog: &Oplog,
+    snapshot_dir: &Path,
+    mut snapshot: SyncSnapshot,
+) -> Result<SyncSnapshot> {
+    if snapshot.seq != 0 {
+        bail!("bootstrap snapshot sequence must be zero");
+    }
+    if oplog.latest_seq().await? != 0 {
+        bail!("server workspace is not empty");
+    }
+    let current = export_sync_snapshot(notes, 0).await?;
+    if !current.nodes.is_empty()
+        || !current.tombstones.is_empty()
+        || !current.edges.is_empty()
+        || !current.attachments.is_empty()
+    {
+        bail!("server workspace is not empty");
+    }
+    snapshot.seq = 0;
+    import_sync_snapshot(notes, snapshot).await?;
+    write_snapshot_at(notes, snapshot_dir, 0).await
 }
 
 async fn ingest_operations(

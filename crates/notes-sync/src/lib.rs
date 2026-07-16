@@ -4,8 +4,10 @@
 //! client state machine shared by desktop and the future server host.
 
 mod machine;
+mod transport;
 
 pub use machine::{LoopbackServer, SequencedOp, SyncClient, SyncStats};
+pub use transport::{HttpTransport, SyncSocket};
 
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +37,11 @@ pub struct PushOps {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AcceptedOps {
     pub ops: Vec<SequencedOp>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BootstrapRequest {
+    pub snapshot: SyncSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

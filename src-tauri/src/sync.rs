@@ -1,0 +1,488 @@
+use anyhow::{Context, Result, bail};
+use futures::{SinkExt, StreamExt};
+use notes_core::{Connection, acknowledge_server_op, apply_sequenced, export_sync_snapshot};
+use notes_sync::{ClientMessage, HttpTransport, ServerMessage, SyncSnapshot};
+use serde::Serialize;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
+use tauri::AppHandle;
+use tokio_tungstenite::tungstenite::Message;
+
+const SYNC_BATCH_SIZE: u32 = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncConnectionState {
+    Disabled,
+    Connecting,
+    Syncing,
+    Online,
+    Offline,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncStatus {
+    pub state: SyncConnectionState,
+    pub server_url: Option<url::Url>,
+    pub last_server_seq: u64,
+    pub pending_operations: u32,
+    pub message: Option<String>,
+}
+
+pub struct SyncRuntime {
+    pub status: Arc<RwLock<SyncStatus>>,
+}
+
+impl SyncRuntime {
+    pub fn disabled() -> Self {
+        Self {
+            status: Arc::new(RwLock::new(SyncStatus {
+                state: SyncConnectionState::Disabled,
+                server_url: None,
+                last_server_seq: 0,
+                pending_operations: 0,
+                message: None,
+            })),
+        }
+    }
+}
+
+pub fn spawn_worker(
+    app: AppHandle,
+    connection: Connection,
+    server_url: url::Url,
+    token: String,
+    data_dir: PathBuf,
+    status: Arc<RwLock<SyncStatus>>,
+) {
+    tauri::async_runtime::spawn(async move {
+        let transport = match HttpTransport::new(server_url.clone(), token) {
+            Ok(transport) => transport,
+            Err(error) => {
+                replace_status(
+                    &app,
+                    &status,
+                    SyncStatus {
+                        state: SyncConnectionState::Error,
+                        server_url: Some(server_url),
+                        last_server_seq: 0,
+                        pending_operations: 0,
+                        message: Some(error.to_string()),
+                    },
+                );
+                return;
+            }
+        };
+        if let Err(error) =
+            notes_core::configure_sync(&connection, transport.base_url().as_str()).await
+        {
+            replace_status(
+                &app,
+                &status,
+                SyncStatus {
+                    state: SyncConnectionState::Error,
+                    server_url: Some(server_url),
+                    last_server_seq: 0,
+                    pending_operations: 0,
+                    message: Some(error.to_string()),
+                },
+            );
+            return;
+        }
+
+        let mut delay = Duration::from_secs(1);
+        loop {
+            set_connection_state(
+                &app,
+                &status,
+                &connection,
+                &server_url,
+                SyncConnectionState::Connecting,
+                None,
+            )
+            .await;
+            let result = synchronize_session(
+                &app,
+                &connection,
+                &transport,
+                &status,
+                &server_url,
+                &data_dir,
+            )
+            .await;
+            let message = result
+                .as_ref()
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| "sync connection closed".into());
+            let permanent = message.contains("authentication failed")
+                || message.contains("sync conflict")
+                || message.contains("workspace contains different data");
+            set_connection_state(
+                &app,
+                &status,
+                &connection,
+                &server_url,
+                if permanent {
+                    SyncConnectionState::Error
+                } else {
+                    SyncConnectionState::Offline
+                },
+                Some(message),
+            )
+            .await;
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(Duration::from_secs(30));
+        }
+    });
+}
+
+async fn synchronize_session(
+    app: &AppHandle,
+    connection: &Connection,
+    transport: &HttpTransport,
+    status: &Arc<RwLock<SyncStatus>>,
+    server_url: &url::Url,
+    data_dir: &Path,
+) -> Result<()> {
+    transport.health().await?;
+    initialize_replica(app, connection, transport, data_dir).await?;
+    set_connection_state(
+        app,
+        status,
+        connection,
+        server_url,
+        SyncConnectionState::Syncing,
+        None,
+    )
+    .await;
+    synchronize_http(app, connection, transport, data_dir).await?;
+    let cursor = notes_core::sync_cursor(connection).await?;
+    let mut socket = transport.connect(cursor).await?;
+    set_connection_state(
+        app,
+        status,
+        connection,
+        server_url,
+        SyncConnectionState::Online,
+        None,
+    )
+    .await;
+    let mut drain = tokio::time::interval(Duration::from_millis(400));
+    drain.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            incoming = socket.next() => {
+                let Some(incoming) = incoming else { bail!("sync websocket closed"); };
+                match incoming? {
+                    Message::Text(text) => {
+                        let message: ServerMessage = serde_json::from_str(&text)
+                            .context("decoding sync websocket message")?;
+                        handle_server_message(app, connection, transport, data_dir, message).await?;
+                        set_connection_state(
+                            app,
+                            status,
+                            connection,
+                            server_url,
+                            SyncConnectionState::Online,
+                            None,
+                        ).await;
+                    }
+                    Message::Ping(payload) => socket.send(Message::Pong(payload)).await?,
+                    Message::Close(_) => bail!("sync websocket closed"),
+                    _ => {}
+                }
+            }
+            _ = drain.tick() => {
+                let pending = notes_core::pending_outbox(connection, SYNC_BATCH_SIZE).await?;
+                if !pending.is_empty() {
+                    upload_operation_blobs(transport, data_dir, &pending).await?;
+                    let message = serde_json::to_string(&ClientMessage::Push { ops: pending })?;
+                    socket.send(Message::Text(message.into())).await?;
+                }
+            }
+        }
+    }
+}
+
+async fn initialize_replica(
+    app: &AppHandle,
+    connection: &Connection,
+    transport: &HttpTransport,
+    data_dir: &Path,
+) -> Result<()> {
+    if notes_core::sync_cursor(connection).await? != 0 {
+        return Ok(());
+    }
+    let server = transport.snapshot().await?;
+    let mut local = export_sync_snapshot(connection, 0).await?;
+    let server_empty = snapshot_is_empty(&server);
+    let local_empty = snapshot_is_empty(&local);
+    match (server_empty, local_empty) {
+        (true, false) => {
+            transport.bootstrap(local.clone()).await?;
+            upload_snapshot_blobs(transport, data_dir, &local).await?;
+        }
+        (false, true) => {
+            notes_core::import_sync_snapshot(connection, server.clone()).await?;
+            download_snapshot_blobs(transport, data_dir, &server).await?;
+            emit_workspace_changed(app);
+        }
+        (false, false) => {
+            local.seq = server.seq;
+            if local != server {
+                bail!(
+                    "local and server workspace contains different data; export one workspace and reset the other before enabling sync"
+                );
+            }
+            notes_core::import_sync_snapshot(connection, server.clone()).await?;
+            download_snapshot_blobs(transport, data_dir, &server).await?;
+        }
+        (true, true) => {}
+    }
+    Ok(())
+}
+
+fn snapshot_is_empty(snapshot: &SyncSnapshot) -> bool {
+    snapshot.nodes.is_empty()
+        && snapshot.tombstones.is_empty()
+        && snapshot.edges.is_empty()
+        && snapshot.attachments.is_empty()
+}
+
+async fn synchronize_http(
+    app: &AppHandle,
+    connection: &Connection,
+    transport: &HttpTransport,
+    data_dir: &Path,
+) -> Result<()> {
+    catch_up(app, connection, transport, data_dir).await?;
+    loop {
+        let pending = notes_core::pending_outbox(connection, SYNC_BATCH_SIZE).await?;
+        if pending.is_empty() {
+            break;
+        }
+        let full_batch = pending.len() == SYNC_BATCH_SIZE as usize;
+        upload_operation_blobs(transport, data_dir, &pending).await?;
+        for accepted in transport.push(pending).await? {
+            acknowledge_server_op(connection, accepted.envelope.op_id, accepted.seq).await?;
+        }
+        if !full_batch {
+            break;
+        }
+    }
+    catch_up(app, connection, transport, data_dir).await
+}
+
+async fn catch_up(
+    app: &AppHandle,
+    connection: &Connection,
+    transport: &HttpTransport,
+    data_dir: &Path,
+) -> Result<()> {
+    loop {
+        let cursor = notes_core::sync_cursor(connection).await?;
+        let operations = transport
+            .ops_since(cursor, SYNC_BATCH_SIZE as usize)
+            .await?;
+        if operations.is_empty() {
+            return Ok(());
+        }
+        let full_batch = operations.len() == SYNC_BATCH_SIZE as usize;
+        apply_server_operations(app, connection, transport, data_dir, operations).await?;
+        if !full_batch {
+            return Ok(());
+        }
+    }
+}
+
+async fn handle_server_message(
+    app: &AppHandle,
+    connection: &Connection,
+    transport: &HttpTransport,
+    data_dir: &Path,
+    message: ServerMessage,
+) -> Result<()> {
+    match message {
+        ServerMessage::Ops { ops } => {
+            apply_server_operations(app, connection, transport, data_dir, ops).await
+        }
+        ServerMessage::Ack { ops } => {
+            for operation in ops {
+                acknowledge_server_op(connection, operation.envelope.op_id, operation.seq).await?;
+            }
+            Ok(())
+        }
+        ServerMessage::Pong => Ok(()),
+        ServerMessage::Error { code, message } => bail!("sync server error {code}: {message}"),
+    }
+}
+
+async fn apply_server_operations(
+    app: &AppHandle,
+    connection: &Connection,
+    transport: &HttpTransport,
+    data_dir: &Path,
+    operations: Vec<notes_sync::SequencedOp>,
+) -> Result<()> {
+    let mut changed = false;
+    for operation in operations {
+        let cursor = notes_core::sync_cursor(connection).await?;
+        if operation.seq > cursor.saturating_add(1) {
+            bail!(
+                "sync sequence gap: expected {}, received {}",
+                cursor.saturating_add(1),
+                operation.seq
+            );
+        }
+        let outcome = apply_sequenced(connection, operation.seq, &operation.envelope).await?;
+        download_operation_blob(transport, data_dir, &operation.envelope).await?;
+        changed |= outcome.applied;
+    }
+    if changed {
+        emit_workspace_changed(app);
+    }
+    Ok(())
+}
+
+async fn upload_operation_blobs(
+    transport: &HttpTransport,
+    data_dir: &Path,
+    operations: &[notes_core::Op],
+) -> Result<()> {
+    for operation in operations {
+        if let notes_core::OpKind::AttachmentAdd(attachment) = &operation.kind {
+            let path = attachment_path(data_dir, &attachment.blob_hash, &attachment.filename)?;
+            transport.upload_blob(&attachment.blob_hash, &path).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn download_operation_blob(
+    transport: &HttpTransport,
+    data_dir: &Path,
+    operation: &notes_core::Op,
+) -> Result<()> {
+    if let notes_core::OpKind::AttachmentAdd(attachment) = &operation.kind {
+        let path = attachment_path(data_dir, &attachment.blob_hash, &attachment.filename)?;
+        if !tokio::fs::try_exists(&path).await? {
+            transport
+                .download_blob(&attachment.blob_hash, &path, 100 * 1024 * 1024)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn upload_snapshot_blobs(
+    transport: &HttpTransport,
+    data_dir: &Path,
+    snapshot: &SyncSnapshot,
+) -> Result<()> {
+    for attachment in snapshot
+        .attachments
+        .iter()
+        .filter(|attachment| attachment.present)
+    {
+        let filename = attachment
+            .filename
+            .as_deref()
+            .context("snapshot attachment is missing its filename")?;
+        let path = attachment_path(data_dir, &attachment.blob_hash, filename)?;
+        transport.upload_blob(&attachment.blob_hash, &path).await?;
+    }
+    Ok(())
+}
+
+async fn download_snapshot_blobs(
+    transport: &HttpTransport,
+    data_dir: &Path,
+    snapshot: &SyncSnapshot,
+) -> Result<()> {
+    for attachment in snapshot
+        .attachments
+        .iter()
+        .filter(|attachment| attachment.present)
+    {
+        let filename = attachment
+            .filename
+            .as_deref()
+            .context("snapshot attachment is missing its filename")?;
+        let path = attachment_path(data_dir, &attachment.blob_hash, filename)?;
+        if !tokio::fs::try_exists(&path).await? {
+            transport
+                .download_blob(&attachment.blob_hash, &path, 100 * 1024 * 1024)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+fn attachment_path(data_dir: &Path, hash: &str, filename: &str) -> Result<PathBuf> {
+    let mut components = Path::new(filename).components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        bail!("attachment filename is not a safe path component");
+    }
+    Ok(data_dir.join("attachments").join(hash).join(filename))
+}
+
+async fn set_connection_state(
+    app: &AppHandle,
+    status: &Arc<RwLock<SyncStatus>>,
+    connection: &Connection,
+    server_url: &url::Url,
+    state: SyncConnectionState,
+    message: Option<String>,
+) {
+    let cursor = notes_core::sync_cursor(connection)
+        .await
+        .unwrap_or_default();
+    let pending = notes_core::pending_outbox(connection, u32::MAX)
+        .await
+        .map(|operations| operations.len().try_into().unwrap_or(u32::MAX))
+        .unwrap_or_default();
+    replace_status(
+        app,
+        status,
+        SyncStatus {
+            state,
+            server_url: Some(server_url.clone()),
+            last_server_seq: cursor,
+            pending_operations: pending,
+            message,
+        },
+    );
+}
+
+fn replace_status(app: &AppHandle, status: &Arc<RwLock<SyncStatus>>, next: SyncStatus) {
+    *status.write().unwrap_or_else(|error| error.into_inner()) = next;
+    crate::commands::emit_domain(app, crate::commands::DomainEvent::SyncStatusChanged);
+}
+
+fn emit_workspace_changed(app: &AppHandle) {
+    crate::commands::emit_domain(app, crate::commands::DomainEvent::WorkspaceChanged);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_snapshot_has_no_source_records() {
+        assert!(snapshot_is_empty(&SyncSnapshot {
+            format_version: notes_sync::FORMAT_VERSION,
+            seq: 0,
+            nodes: Vec::new(),
+            tombstones: Vec::new(),
+            edges: Vec::new(),
+            attachments: Vec::new(),
+        }));
+    }
+}

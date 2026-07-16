@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { GitFork, Loader2, Redo2, Search, Settings, Undo2 } from "lucide-react";
+import { Cloud, CloudOff, GitFork, Loader2, Redo2, Search, Settings, Undo2 } from "lucide-react";
 import { AppLayout } from "@/app/layout";
 import { WindowControls } from "@/app/window-controls";
 import { Toaster } from "@/components/ui/sonner";
@@ -12,7 +12,7 @@ import { PagesList } from "@/features/pages/pages-list";
 import { PageView } from "@/features/pages/page-view";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import { loadSettings, type Node } from "@/lib/api";
+import { getSyncStatus, loadSettings, type Node } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
 import { useAppShortcuts } from "@/app/use-app-shortcuts";
 import { useStartupState } from "@/app/use-startup-state";
@@ -38,6 +38,11 @@ function App() {
   const settingsQuery = useQuery({
     queryKey: queryKeys.settings,
     queryFn: loadSettings,
+  });
+  const syncQuery = useQuery({
+    queryKey: queryKeys.syncStatus,
+    queryFn: getSyncStatus,
+    enabled: ready,
   });
   const createNewNote = useCallback(async () => {
     setGraphOpen(false);
@@ -127,6 +132,28 @@ function App() {
         status={status}
         headerActions={
           <>
+            {syncQuery.data?.state !== "disabled" && (
+              <span
+                title={syncQuery.data?.message ?? `Sync ${syncQuery.data?.state}`}
+                className={`mr-1 flex h-8 items-center gap-1.5 rounded-xl border px-2.5 text-xs ${
+                  syncQuery.data?.state === "online"
+                    ? "border-emerald-500/20 bg-emerald-500/8 text-emerald-600"
+                    : syncQuery.data?.state === "error"
+                      ? "border-destructive/20 bg-destructive/5 text-destructive"
+                      : "border-border/60 bg-card/55 text-muted-foreground"
+                }`}
+              >
+                {syncQuery.data?.state === "online" ? (
+                  <Cloud className="size-3.5" />
+                ) : (
+                  <CloudOff className="size-3.5" />
+                )}
+                <span className="hidden lg:inline">{syncQuery.data?.state}</span>
+                {!!syncQuery.data?.pendingOperations && (
+                  <span className="tabular-nums">{syncQuery.data.pendingOperations}</span>
+                )}
+              </span>
+            )}
             <Button
               variant={graphOpen ? "secondary" : "ghost"}
               size="sm"

@@ -24,6 +24,7 @@ export function toSettingsUpdate(
     openaiBaseUrl: settings.openaiBaseUrl,
     windowDecorationMode: settings.windowDecorationMode,
     syncDirectory: settings.syncDirectory,
+    syncServerUrl: settings.syncServerUrl,
     apiKeys,
     clearKeys,
   };

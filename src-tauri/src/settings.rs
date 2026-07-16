@@ -75,10 +75,12 @@ pub enum SecretKey {
     Voyage,
     #[serde(rename = "GEMINI_API_KEY")]
     Gemini,
+    #[serde(rename = "SYNC_TOKEN")]
+    SyncToken,
 }
 
 impl SecretKey {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Chat,
         Self::Extraction,
         Self::OpenRouter,
@@ -86,6 +88,7 @@ impl SecretKey {
         Self::Cohere,
         Self::Voyage,
         Self::Gemini,
+        Self::SyncToken,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -97,6 +100,7 @@ impl SecretKey {
             Self::Cohere => "COHERE_API_KEY",
             Self::Voyage => "VOYAGE_API_KEY",
             Self::Gemini => "GEMINI_API_KEY",
+            Self::SyncToken => "SYNC_TOKEN",
         }
     }
 }
@@ -122,6 +126,7 @@ pub struct SettingsSnapshot {
     pub openai_base_url: url::Url,
     pub window_decoration_mode: WindowDecorationMode,
     pub sync_directory: Option<PathBuf>,
+    pub sync_server_url: Option<url::Url>,
     pub configured_keys: Vec<SecretKey>,
     pub local_models_available: bool,
     pub config_path: PathBuf,
@@ -148,6 +153,7 @@ pub struct SettingsUpdate {
     pub openai_base_url: url::Url,
     pub window_decoration_mode: WindowDecorationMode,
     pub sync_directory: Option<PathBuf>,
+    pub sync_server_url: Option<url::Url>,
     #[serde(default)]
     pub api_keys: BTreeMap<SecretKey, String>,
     #[serde(default)]
@@ -232,6 +238,10 @@ pub fn load(app: &AppHandle) -> Result<SettingsSnapshot> {
             other => other.parse()?,
         },
         sync_directory: non_empty(&value("SYNC_DIRECTORY", "")).map(PathBuf::from),
+        sync_server_url: non_empty(&value("SYNC_SERVER_URL", ""))
+            .map(str::parse)
+            .transpose()
+            .context("SYNC_SERVER_URL must be an absolute URL")?,
         configured_keys,
         local_models_available: cfg!(feature = "local-models"),
         config_path: path,
@@ -321,6 +331,15 @@ pub fn save(app: &AppHandle, update: SettingsUpdate) -> Result<SettingsSnapshot>
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default(),
     );
+    set_or_remove(
+        &mut values,
+        "SYNC_SERVER_URL",
+        update
+            .sync_server_url
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default(),
+    );
 
     for key in update.clear_keys {
         values.remove(key.as_str());
@@ -329,6 +348,13 @@ pub fn save(app: &AppHandle, update: SettingsUpdate) -> Result<SettingsSnapshot>
         if !secret.trim().is_empty() {
             values.insert(key.as_str().into(), secret.trim().to_string());
         }
+    }
+    if update.sync_server_url.is_some()
+        && values
+            .get(SecretKey::SyncToken.as_str())
+            .is_none_or(|token| token.trim().is_empty())
+    {
+        bail!("a sync token is required when a sync server is configured");
     }
     write_env(&path, &values)?;
     apply_window_decorations(app, &update.window_decoration_mode)?;
@@ -387,7 +413,30 @@ fn validate(update: &SettingsUpdate) -> Result<()> {
     }
     notes_ai::config::validate_http_base_url(update.openrouter_base_url.as_str())?;
     notes_ai::config::validate_http_base_url(update.openai_base_url.as_str())?;
+    if let Some(server_url) = &update.sync_server_url {
+        notes_ai::config::validate_http_base_url(server_url.as_str())?;
+    }
     Ok(())
+}
+
+pub fn sync_credentials(app: &AppHandle) -> Result<Option<(url::Url, String)>> {
+    let values = read_env(&config_path(app)?)?;
+    let Some(server_url) = values
+        .get("SYNC_SERVER_URL")
+        .filter(|url| !url.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    let server_url = server_url
+        .parse::<url::Url>()
+        .context("SYNC_SERVER_URL must be an absolute URL")?;
+    notes_ai::config::validate_http_base_url(server_url.as_str())?;
+    let token = values
+        .get(SecretKey::SyncToken.as_str())
+        .filter(|token| !token.trim().is_empty())
+        .cloned()
+        .context("a sync token is required when a sync server is configured")?;
+    Ok(Some((server_url, token)))
 }
 
 pub(crate) fn completion_config_for_probe(

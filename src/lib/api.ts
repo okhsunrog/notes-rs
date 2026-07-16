@@ -15,6 +15,7 @@ import type {
   SettingsSnapshot,
   SettingsUpdate,
   StartupStatus,
+  SyncStatus,
 } from "@/lib/bindings";
 
 export type {
@@ -32,6 +33,7 @@ export type {
   SettingsSnapshot,
   SettingsUpdate,
   StartupStatus,
+  SyncStatus,
 };
 
 type CommandOutcome<T> = { status: "ok"; data: T } | { status: "error"; error: CommandError };
@@ -124,6 +126,7 @@ export const restartApp = commands.restartApp;
 export const chatStream = checkedCommand(commands.chatStream);
 export const cancelChat = commands.cancelChat;
 export const getBackgroundStatus = checkedCommand(commands.backgroundStatus);
+export const getSyncStatus = commands.syncStatus;
 export const setBackgroundPaused = commands.setBackgroundPaused;
 export const retryBackgroundJobs = checkedCommand(commands.retryBackgroundJobs);
 export const clearBackgroundJobs = checkedCommand(commands.clearBackgroundJobs);

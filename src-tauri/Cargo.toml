@@ -46,6 +46,8 @@ llm-relay.workspace = true
 futures.workspace = true
 schemars.workspace = true
 sha2.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
 dotenvy = "0.15.7"
 base64 = "0.22.1"
 

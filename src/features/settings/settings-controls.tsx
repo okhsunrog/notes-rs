@@ -5,6 +5,7 @@ import {
   BrainCircuit,
   Database,
   FolderSync,
+  Cloud,
   KeyRound,
   Palette,
 } from "lucide-react";
@@ -29,6 +30,7 @@ export function SettingsSection({
       "API keys": KeyRound,
       Data: Database,
       "Folder sync": FolderSync,
+      "Realtime sync": Cloud,
       "Background indexing": Activity,
     }[title] ?? Palette;
   return (

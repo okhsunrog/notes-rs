@@ -889,7 +889,7 @@ mod tests {
         let attachment = create_attachment(
             &connection,
             page.id,
-            "attachment-hash".into(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             "photo.png".into(),
             "image/png".into(),
             4,

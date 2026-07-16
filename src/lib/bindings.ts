@@ -10,6 +10,7 @@ import * as __TAURI_EVENT from "@tauri-apps/api/event";
 export const commands = {
 	isReady: () => __TAURI_INVOKE<boolean>("is_ready"),
 	startupStatus: () => __TAURI_INVOKE<StartupStatus>("startup_status"),
+	syncStatus: () => __TAURI_INVOKE<SyncStatus>("sync_status"),
 	loadSettings: () => typedError<SettingsSnapshot, CommandError>(__TAURI_INVOKE("load_settings")),
 	saveSettings: (update: SettingsUpdate) => typedError<SettingsSnapshot, CommandError>(__TAURI_INVOKE("save_settings", { update })),
 	testCompletionProvider: (request: ProviderProbeRequest) => typedError<ProviderProbeResult, CommandError>(__TAURI_INVOKE("test_completion_provider", { request })),
@@ -191,7 +192,7 @@ export type CreatedNote = {
  *  Payloads carry affected IDs when a command can identify them; whole-workspace
  *  replacements (import/sync) deliberately request a full cache refresh.
  */
-export type DomainEvent = { kind: "node_changed"; node_uuids: string[]; parent_uuids: string[] } | { kind: "node_deleted"; node_uuids: string[]; parent_uuids: string[] } | { kind: "graph_changed"; node_uuids: string[] } | { kind: "history_changed" } | { kind: "background_status_changed" } | { kind: "settings_changed" } | { kind: "workspace_changed" };
+export type DomainEvent = { kind: "node_changed"; node_uuids: string[]; parent_uuids: string[] } | { kind: "node_deleted"; node_uuids: string[]; parent_uuids: string[] } | { kind: "graph_changed"; node_uuids: string[] } | { kind: "history_changed" } | { kind: "background_status_changed" } | { kind: "settings_changed" } | { kind: "sync_status_changed" } | { kind: "workspace_changed" };
 
 export type DomainEventMessage = DomainEvent;
 
@@ -253,7 +254,7 @@ export type SearchHit = {
 	score: number | null,
 };
 
-export type SecretKey = "CHAT_API_KEY" | "EXTRACT_API_KEY" | "OPENROUTER_API_KEY" | "OPENAI_API_KEY" | "COHERE_API_KEY" | "VOYAGE_API_KEY" | "GEMINI_API_KEY";
+export type SecretKey = "CHAT_API_KEY" | "EXTRACT_API_KEY" | "OPENROUTER_API_KEY" | "OPENAI_API_KEY" | "COHERE_API_KEY" | "VOYAGE_API_KEY" | "GEMINI_API_KEY" | "SYNC_TOKEN";
 
 export type SettingsSnapshot = {
 	localOnly: boolean,
@@ -274,6 +275,7 @@ export type SettingsSnapshot = {
 	openaiBaseUrl: string,
 	windowDecorationMode: WindowDecorationMode,
 	syncDirectory: string | null,
+	syncServerUrl: string | null,
 	configuredKeys: SecretKey[],
 	localModelsAvailable: boolean,
 	configPath: string,
@@ -298,11 +300,22 @@ export type SettingsUpdate = {
 	openaiBaseUrl: string,
 	windowDecorationMode: WindowDecorationMode,
 	syncDirectory: string | null,
+	syncServerUrl: string | null,
 	apiKeys?: Partial<{ [key in SecretKey]: string }>,
 	clearKeys?: SecretKey[],
 };
 
 export type StartupStatus = { state: "starting"; message: string } | { state: "ready" } | { state: "error"; message: string };
+
+export type SyncConnectionState = "disabled" | "connecting" | "syncing" | "online" | "offline" | "error";
+
+export type SyncStatus = {
+	state: SyncConnectionState,
+	serverUrl: string | null,
+	lastServerSeq: number,
+	pendingOperations: number,
+	message: string | null,
+};
 
 export type WindowDecorationMode = "native" | "borderless";
 

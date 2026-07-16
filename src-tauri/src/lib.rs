@@ -1,5 +1,6 @@
 mod commands;
 mod settings;
+mod sync;
 
 use notes_ai::{embed, extract};
 use notes_core::db;
@@ -12,6 +13,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         .commands(tauri_specta::collect_commands![
             commands::is_ready,
             commands::startup_status,
+            commands::sync_status,
             commands::load_settings,
             commands::save_settings,
             commands::test_completion_provider,
@@ -131,6 +133,9 @@ pub fn run() {
             }
 
             let db_path = data_dir.join("notes.db");
+            let sync_runtime = sync::SyncRuntime::disabled();
+            let sync_status = sync_runtime.status.clone();
+            app.manage(sync_runtime);
 
             // Register the readiness flag immediately so the frontend can
             // poll/listen instead of invoking commands that would otherwise
@@ -196,7 +201,7 @@ pub fn run() {
                             tracing::info!("automatic entity extraction is disabled");
                         }
                         handle.manage(commands::AppState {
-                            conn,
+                            conn: conn.clone(),
                             embedder,
                             reranker,
                             background_paused,
@@ -204,6 +209,28 @@ pub fn run() {
                                 std::collections::HashMap::new(),
                             )),
                         });
+                        match settings::sync_credentials(&handle) {
+                            Ok(Some((server_url, token))) => sync::spawn_worker(
+                                handle.clone(),
+                                conn.clone(),
+                                server_url,
+                                token,
+                                data_dir.clone(),
+                                sync_status,
+                            ),
+                            Ok(None) => {}
+                            Err(error) => {
+                                tracing::error!(%error, "sync configuration is invalid");
+                                *sync_status.write().unwrap_or_else(|e| e.into_inner()) =
+                                    sync::SyncStatus {
+                                        state: sync::SyncConnectionState::Error,
+                                        server_url: None,
+                                        last_server_seq: 0,
+                                        pending_operations: 0,
+                                        message: Some(error.to_string()),
+                                    };
+                            }
+                        }
                         *startup.write().unwrap_or_else(|e| e.into_inner()) =
                             commands::StartupStatus::Ready;
                         let _ = handle.emit("app:ready", ());
