@@ -487,7 +487,7 @@ export function BlockNode({ block, parent, depth }: Props) {
               {block.content ? (
                 renderMarkdown(block.content)
               ) : (
-                <span className="text-muted-foreground/40">empty</span>
+                <span className="text-muted-foreground/45">Start writing…</span>
               )}
             </div>
           )}

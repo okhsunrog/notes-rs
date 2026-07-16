@@ -1,4 +1,4 @@
-import { createContext, useContext, useMemo, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { listBlockChildren, type Node } from "@/lib/api";
 
 type ChildrenMap = Map<number, Node[]>;
@@ -26,13 +26,23 @@ export function useOutliner() {
   return ctx;
 }
 
-export function OutlinerProvider({ children }: { children: React.ReactNode }) {
+export function OutlinerProvider({
+  children,
+  initialEditingId = null,
+}: {
+  children: React.ReactNode;
+  initialEditingId?: number | null;
+}) {
   const [version, setVersion] = useState(0);
   const bump = () => setVersion((v) => v + 1);
   const childrenMap = useRef<ChildrenMap>(new Map());
   const loadingSet = useRef<Set<number>>(new Set());
   const errorMap = useRef<Map<number, string>>(new Map());
-  const [editingId, setEditing] = useState<number | null>(null);
+  const [editingId, setEditing] = useState<number | null>(initialEditingId);
+
+  useEffect(() => {
+    if (initialEditingId !== null) setEditing(initialEditingId);
+  }, [initialEditingId]);
 
   const store = useMemo<Store>(() => {
     const getChildren = (parentId: number) => childrenMap.current.get(parentId);

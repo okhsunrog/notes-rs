@@ -1,20 +1,21 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { Plus, FileText } from "lucide-react";
+import { FileText, Plus, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { createPage, listPages, type Node } from "@/lib/api";
+import { listPages, type Node } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 type Props = {
   selectedId: number | null;
   onSelect: (page: Node) => void;
+  onCreate: () => void | Promise<void>;
   onStatus: (s: string) => void;
 };
 
-export function PagesList({ selectedId, onSelect, onStatus }: Props) {
+export function PagesList({ selectedId, onSelect, onCreate, onStatus }: Props) {
   const [pages, setPages] = useState<Node[]>([]);
-  const [newTitle, setNewTitle] = useState("");
+  const [query, setQuery] = useState("");
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -34,17 +35,12 @@ export function PagesList({ selectedId, onSelect, onStatus }: Props) {
     return () => void unlisten.then((stop) => stop());
   }, [refresh]);
 
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    const title = newTitle.trim();
-    if (!title || busy) return;
+  async function create() {
+    if (busy) return;
     setBusy(true);
     try {
-      const page = await createPage(title);
-      setNewTitle("");
+      await onCreate();
       await refresh();
-      onSelect(page);
-      onStatus(`created page #${page.id}`);
     } catch (err) {
       onStatus(`error: ${String(err)}`);
     } finally {
@@ -52,50 +48,98 @@ export function PagesList({ selectedId, onSelect, onStatus }: Props) {
     }
   }
 
-  return (
-    <div className="flex h-full flex-col gap-3">
-      <form onSubmit={submit} className="flex gap-1">
-        <Input
-          placeholder="new page title…"
-          value={newTitle}
-          onChange={(e) => setNewTitle(e.currentTarget.value)}
-          disabled={busy}
-          className="h-8"
-        />
-        <Button
-          type="submit"
-          size="sm"
-          aria-label="Create page"
-          disabled={busy || !newTitle.trim()}
-        >
-          <Plus className="size-4" />
-        </Button>
-      </form>
+  const visiblePages = pages.filter((page) =>
+    (page.title ?? "Untitled").toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
+  );
 
-      <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-        Pages
+  return (
+    <div className="flex h-full min-h-[22rem] flex-col gap-3">
+      <Button
+        type="button"
+        onClick={() => void create()}
+        disabled={busy}
+        className="brand-button h-10 w-full justify-between rounded-xl px-3 shadow-md shadow-primary/15"
+      >
+        <span className="flex items-center gap-2">
+          <Plus className="size-4" />
+          New note
+        </span>
+        <kbd className="rounded-md bg-primary-foreground/15 px-1.5 py-0.5 text-[10px] font-medium">
+          Ctrl N
+        </kbd>
+      </Button>
+
+      <div className="relative">
+        <Search className="pointer-events-none absolute top-1/2 left-3 size-3.5 -translate-y-1/2 text-muted-foreground" />
+        <Input
+          aria-label="Filter notes"
+          placeholder="Filter notes…"
+          value={query}
+          onChange={(event) => setQuery(event.currentTarget.value)}
+          className="h-9 rounded-xl border-transparent bg-sidebar-accent pl-9 shadow-none focus-visible:border-primary/30 focus-visible:ring-primary/15"
+        />
       </div>
 
-      <ul className="flex flex-1 flex-col gap-0.5 overflow-y-auto">
+      <div className="flex items-center justify-between px-1 pt-1">
+        <span className="text-[11px] font-semibold tracking-wide text-muted-foreground">NOTES</span>
+        <span className="rounded-full bg-sidebar-accent px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+          {pages.length}
+        </span>
+      </div>
+
+      <ul className="flex flex-1 flex-col gap-1 overflow-y-auto">
         {pages.length === 0 && (
-          <li className="px-2 py-1 text-sm italic text-muted-foreground">no pages yet</li>
+          <li className="rounded-xl border border-dashed border-border/70 px-3 py-5 text-center">
+            <FileText className="mx-auto mb-2 size-5 text-muted-foreground/60" />
+            <p className="text-xs font-medium">Your notes will live here</p>
+            <p className="mt-1 text-[11px] text-muted-foreground">Create one to begin.</p>
+          </li>
         )}
-        {pages.map((p) => (
+        {pages.length > 0 && visiblePages.length === 0 && (
+          <li className="px-3 py-5 text-center text-xs text-muted-foreground">No matching notes</li>
+        )}
+        {visiblePages.map((p) => (
           <li key={p.id}>
             <button
               type="button"
               onClick={() => onSelect(p)}
               className={cn(
-                "flex w-full items-center gap-2 rounded-sm px-2 py-1 text-left text-sm transition hover:bg-accent",
-                selectedId === p.id && "bg-accent font-medium",
+                "group flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition hover:bg-sidebar-accent",
+                selectedId === p.id && "bg-sidebar-accent text-sidebar-accent-foreground shadow-sm",
               )}
             >
-              <FileText className="size-3.5 shrink-0 text-muted-foreground" />
-              <span className="truncate">{p.title ?? "untitled"}</span>
+              <span
+                className={cn(
+                  "flex size-7 shrink-0 items-center justify-center rounded-lg bg-background/60 text-muted-foreground shadow-sm",
+                  selectedId === p.id && "bg-primary/12 text-primary",
+                )}
+              >
+                <FileText className="size-3.5" />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[13px] font-medium">
+                  {p.title ?? "Untitled"}
+                </span>
+                <span className="mt-0.5 block text-[10px] text-muted-foreground">
+                  {formatRelativeDate(p.updated_at)}
+                </span>
+              </span>
             </button>
           </li>
         ))}
       </ul>
     </div>
   );
+}
+
+function formatRelativeDate(timestamp: number) {
+  const seconds = Math.max(0, Math.floor(Date.now() / 1000) - timestamp);
+  if (seconds < 60) return "just now";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  if (seconds < 604800) return `${Math.floor(seconds / 86400)}d ago`;
+  return new Date(timestamp * 1000).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
 }

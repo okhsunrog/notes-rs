@@ -4,11 +4,12 @@ import { OutlinerProvider } from "./outliner-store";
 
 type Props = {
   page: Node;
+  initialEditingId?: number | null;
 };
 
-export function Outliner({ page }: Props) {
+export function Outliner({ page, initialEditingId }: Props) {
   return (
-    <OutlinerProvider>
+    <OutlinerProvider initialEditingId={initialEditingId}>
       <BlockChildren parent={page} depth={0} />
     </OutlinerProvider>
   );

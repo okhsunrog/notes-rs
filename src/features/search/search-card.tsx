@@ -13,13 +13,14 @@ import {
 import { search, type Mode, type Node, type SearchHit } from "@/lib/api";
 
 type Props = {
+  variant?: "card" | "inline";
   hits: SearchHit[];
   setHits: React.Dispatch<React.SetStateAction<SearchHit[]>>;
   onOpenNode: (n: Node) => void | Promise<void>;
   onStatus: (s: string) => void;
 };
 
-export function SearchCard({ hits, setHits, onOpenNode, onStatus }: Props) {
+export function SearchCard({ variant = "card", hits, setHits, onOpenNode, onStatus }: Props) {
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<Mode>("agentic");
   const [busy, setBusy] = useState(false);
@@ -39,18 +40,20 @@ export function SearchCard({ hits, setHits, onOpenNode, onStatus }: Props) {
     }
   }
 
-  return (
-    <Card>
+  const content = (
+    <>
       <CardHeader>
-        <CardTitle>Search</CardTitle>
+        <CardTitle>{variant === "inline" ? "Find something you wrote" : "Search"}</CardTitle>
         <CardDescription>
-          Lexical and semantic retrieval with optional provider reranking.
+          {variant === "inline"
+            ? "Search across titles, blocks, and meaning."
+            : "Lexical and semantic retrieval with optional provider reranking."}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         <form onSubmit={submit} className="flex flex-col gap-2 sm:flex-row">
           <Input
-            placeholder="query"
+            placeholder="Search your knowledge…"
             value={query}
             onChange={(e) => setQuery(e.currentTarget.value)}
             className="flex-1"
@@ -66,7 +69,7 @@ export function SearchCard({ hits, setHits, onOpenNode, onStatus }: Props) {
               <SelectItem value="vec">vec (semantic)</SelectItem>
             </SelectContent>
           </Select>
-          <Button type="submit" disabled={busy}>
+          <Button type="submit" disabled={busy} className="rounded-xl">
             Search
           </Button>
         </form>
@@ -95,6 +98,15 @@ export function SearchCard({ hits, setHits, onOpenNode, onStatus }: Props) {
           </div>
         )}
       </CardContent>
-    </Card>
+    </>
   );
+
+  if (variant === "inline") {
+    return (
+      <Card className="gap-4 rounded-2xl border-border/60 bg-card/65 py-5 shadow-sm backdrop-blur [&_[data-slot=card-header]]:px-5 [&_[data-slot=card-content]]:px-5">
+        {content}
+      </Card>
+    );
+  }
+  return <Card>{content}</Card>;
 }

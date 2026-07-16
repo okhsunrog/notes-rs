@@ -24,6 +24,11 @@
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
+  --sidebar: oklch(0.975 0.008 275);
+  --sidebar-accent: oklch(0.94 0.018 275);
+  --sidebar-accent-foreground: oklch(0.22 0.03 275);
+  --canvas: oklch(0.995 0.004 275);
+  --inspector: oklch(0.98 0.008 275);
 }
 
 .dark {
@@ -46,6 +51,11 @@
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
   --ring: oklch(0.556 0 0);
+  --sidebar: oklch(0.17 0.016 275);
+  --sidebar-accent: oklch(0.23 0.025 275);
+  --sidebar-accent-foreground: oklch(0.96 0.01 275);
+  --canvas: oklch(0.135 0.012 275);
+  --inspector: oklch(0.16 0.016 275);
 }
 
 @theme inline {
@@ -72,6 +82,11 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-canvas: var(--canvas);
+  --color-inspector: var(--inspector);
 }
 
 @layer base {
@@ -80,5 +95,67 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-family:
+      Inter,
+      "SF Pro Text",
+      "Segoe UI Variable",
+      "Segoe UI",
+      system-ui,
+      -apple-system,
+      sans-serif;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+}
+
+@layer components {
+  .app-shell {
+    background:
+      radial-gradient(
+        circle at 15% -20%,
+        color-mix(in oklch, var(--primary) 13%, transparent),
+        transparent 38%
+      ),
+      var(--background);
+  }
+
+  .workspace-frame {
+    background: var(--canvas);
+  }
+
+  .sidebar-surface {
+    background: var(--sidebar);
+  }
+
+  .canvas-surface {
+    background:
+      radial-gradient(
+        circle at 75% 0%,
+        color-mix(in oklch, var(--primary) 4%, transparent),
+        transparent 30%
+      ),
+      var(--canvas);
+  }
+
+  .inspector-surface {
+    background: var(--inspector);
+  }
+
+  .brand-mark,
+  .brand-button {
+    background: linear-gradient(
+      135deg,
+      color-mix(in oklch, var(--primary) 82%, white),
+      var(--primary)
+    );
+  }
+
+  .editor-page {
+    text-wrap: pretty;
+  }
+
+  .editor-body textarea,
+  .editor-body [class*="cursor-text"] {
+    font-size: 1rem;
+    line-height: 1.8;
   }
 }

@@ -4,9 +4,9 @@ import { Loader2, Redo2, Settings, Undo2 } from "lucide-react";
 import { AppLayout } from "@/app/layout";
 import { WindowControls } from "@/app/window-controls";
 import { Toaster } from "@/components/ui/sonner";
-import { SearchCard } from "@/features/search/search-card";
 import { EntitiesCard } from "@/features/entities/entities-card";
 import { KnowledgePanel } from "@/features/graph/knowledge-panel";
+import { HomeView } from "@/features/home/home-view";
 import { PagesList } from "@/features/pages/pages-list";
 import { PageView } from "@/features/pages/page-view";
 import { SettingsPage } from "@/features/settings/settings-page";
@@ -16,7 +16,10 @@ import {
   getHistoryStatus,
   getStartupStatus,
   loadSettings,
+  createBlock,
+  createPage,
   deletePage,
+  listPages,
   redo,
   undo,
   type Node,
@@ -34,6 +37,42 @@ function App() {
     "native",
   );
   const [history, setHistory] = useState<[number, number]>([0, 0]);
+  const [creatingNote, setCreatingNote] = useState(false);
+  const [newNote, setNewNote] = useState<{ pageId: number; blockId: number | null } | null>(null);
+
+  const createNewNote = useCallback(async () => {
+    if (creatingNote) return;
+    setCreatingNote(true);
+    try {
+      const pages = await listPages();
+      const titles = new Set(pages.map((page) => page.title));
+      let title = "Untitled note";
+      let suffix = 2;
+      while (titles.has(title)) title = `Untitled note ${suffix++}`;
+      const page = await createPage(title);
+      let blockId: number | null = null;
+      try {
+        const block = await createBlock({
+          parentId: page.id,
+          position: null,
+          content: "",
+          contentJson: null,
+        });
+        blockId = block.id;
+      } catch (error) {
+        setStatus(`Note created, but its first block failed: ${String(error)}`);
+      }
+      setNewNote({ pageId: page.id, blockId });
+      setActiveNode(page);
+      setHits([]);
+      setStatus("New note ready — name it, then press Enter to write.");
+      window.dispatchEvent(new Event("notes-rs:show-main"));
+    } catch (error) {
+      setStatus(`create error: ${String(error)}`);
+    } finally {
+      setCreatingNote(false);
+    }
+  }, [creatingNote]);
 
   const moveHistory = useCallback(async (direction: "undo" | "redo") => {
     try {
@@ -83,6 +122,18 @@ function App() {
     window.addEventListener("keydown", keydown);
     return () => window.removeEventListener("keydown", keydown);
   }, [ready, moveHistory]);
+
+  useEffect(() => {
+    if (!ready) return;
+    const keydown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        void createNewNote();
+      }
+    };
+    window.addEventListener("keydown", keydown);
+    return () => window.removeEventListener("keydown", keydown);
+  }, [ready, createNewNote]);
 
   useEffect(() => {
     let cancelled = false;
@@ -237,7 +288,9 @@ function App() {
           <div className="flex h-full flex-col gap-4">
             <PagesList
               selectedId={activeNode?.id ?? null}
+              onCreate={createNewNote}
               onSelect={(page) => {
+                setNewNote(null);
                 setActiveNode(page);
                 window.dispatchEvent(new Event("notes-rs:show-main"));
               }}
@@ -251,23 +304,22 @@ function App() {
             <PageView
               key={activeNode.id}
               node={activeNode}
+              initialBlockId={newNote?.pageId === activeNode.id ? newNote.blockId : null}
+              autoFocusTitle={newNote?.pageId === activeNode.id}
               onSaved={applyUpdated}
               onStatus={setStatus}
               onClose={() => setActiveNode(null)}
               onDelete={removePage}
             />
           ) : (
-            <div className="mx-auto max-w-3xl space-y-4">
-              <div className="rounded-md border border-dashed bg-card/50 p-8 text-center text-sm text-muted-foreground">
-                Select a page on the left, or create one — then start writing.
-              </div>
-              <SearchCard
-                hits={hits}
-                setHits={setHits}
-                onOpenNode={openSearchResult}
-                onStatus={setStatus}
-              />
-            </div>
+            <HomeView
+              creating={creatingNote}
+              hits={hits}
+              setHits={setHits}
+              onCreate={createNewNote}
+              onOpenNode={openSearchResult}
+              onStatus={setStatus}
+            />
           )
         }
         right={<KnowledgePanel node={activeNode} onOpenNode={openSearchResult} />}
