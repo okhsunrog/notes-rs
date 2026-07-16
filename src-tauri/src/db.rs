@@ -39,7 +39,7 @@ pub async fn open(path: impl AsRef<Path>, embedder_id: &str, ndims: usize) -> Re
     Ok(conn)
 }
 
-const CURRENT_SCHEMA_VERSION: i64 = 3;
+const CURRENT_SCHEMA_VERSION: i64 = 4;
 
 async fn migrate(conn: &Connection, ndims: usize) -> Result<()> {
     let schema = SCHEMA_V1.replace("{NDIMS}", &ndims.to_string());
@@ -127,6 +127,15 @@ async fn migrate(conn: &Connection, ndims: usize) -> Result<()> {
                           AND dst IN (SELECT id FROM nodes WHERE kind = 'entity'));
                  DELETE FROM extracted_edge_sources;
                  UPDATE nodes SET last_extracted_hash = NULL
+                   WHERE kind IN ('page', 'block');
+                 INSERT OR REPLACE INTO extract_queue(node_id, enqueued_at, retry_count, last_attempt)
+                   SELECT id, unixepoch(), 0, NULL FROM nodes
+                   WHERE kind IN ('page', 'block');",
+            )?;
+        }
+        if previous_version < 4 {
+            c.execute_batch(
+                "UPDATE nodes SET last_extracted_hash = NULL
                    WHERE kind IN ('page', 'block');
                  INSERT OR REPLACE INTO extract_queue(node_id, enqueued_at, retry_count, last_attempt)
                    SELECT id, unixepoch(), 0, NULL FROM nodes
@@ -370,6 +379,18 @@ CREATE TABLE IF NOT EXISTS extracted_edge_sources (
   PRIMARY KEY(source_node_id, edge_id)
 );
 
+-- Entity descriptions are source-specific. Keeping provenance prevents the
+-- last extracted note from silently overwriting every other description.
+CREATE TABLE IF NOT EXISTS entity_descriptions (
+  source_node_id INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+  entity_node_id INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+  description TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(source_node_id, entity_node_id)
+);
+CREATE INDEX IF NOT EXISTS idx_entity_descriptions_entity
+  ON entity_descriptions(entity_node_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS history_undo (
   id INTEGER PRIMARY KEY,
   action TEXT NOT NULL,
@@ -523,7 +544,17 @@ pub struct DataArchive {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
     #[serde(default)]
+    pub entity_descriptions: Vec<EntityDescriptionRecord>,
+    #[serde(default)]
     pub files: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityDescriptionRecord {
+    pub source_node_id: i64,
+    pub entity_node_id: i64,
+    pub description: String,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -772,6 +803,17 @@ pub async fn replace_extracted_edges(
             ));
         }
 
+        let mut affected_entity_ids = {
+            let mut statement = tx.prepare(
+                "SELECT DISTINCT e.dst
+                   FROM extracted_edge_sources provenance
+                   JOIN edges e ON e.id = provenance.edge_id
+                  WHERE provenance.source_node_id = ?1 AND e.kind = 'mentions'",
+            )?;
+            statement
+                .query_map([source_id], |row| row.get::<_, i64>(0))?
+                .collect::<Result<std::collections::HashSet<_>, _>>()?
+        };
         let old_edges = {
             let mut statement =
                 tx.prepare("SELECT edge_id FROM extracted_edge_sources WHERE source_node_id = ?1")?;
@@ -781,6 +823,10 @@ pub async fn replace_extracted_edges(
         };
         tx.execute(
             "DELETE FROM extracted_edge_sources WHERE source_node_id = ?1",
+            [source_id],
+        )?;
+        tx.execute(
+            "DELETE FROM entity_descriptions WHERE source_node_id = ?1",
             [source_id],
         )?;
         for edge_id in old_edges {
@@ -811,28 +857,34 @@ pub async fn replace_extracted_edges(
                 )
                 .optional()?;
             let entity_id = if let Some(id) = existing {
-                if let Some(description) = description.as_deref().filter(|value| !value.is_empty())
-                {
-                    let body = crate::stem::stem(&format!("{name}\n{description}"));
-                    tx.execute(
-                        "UPDATE nodes SET content = ?2, body_stemmed = ?3, updated_at = ?4
-                           WHERE id = ?1",
-                        rusqlite::params![id, description, body, now],
-                    )?;
-                }
                 id
             } else {
                 let uuid = uuid::Uuid::new_v4().to_string();
-                let description = description.unwrap_or_default();
-                let body = crate::stem::stem(&format!("{name}\n{description}"));
+                let body = crate::stem::stem(name);
                 tx.execute(
                     "INSERT INTO nodes
                        (uuid, kind, title, content, body_stemmed, created_at, updated_at)
-                     VALUES (?1, 'entity', ?2, ?3, ?4, ?5, ?5)",
-                    rusqlite::params![uuid, name, description, body, now],
+                     VALUES (?1, 'entity', ?2, '', ?3, ?4, ?4)",
+                    rusqlite::params![uuid, name, body, now],
                 )?;
                 tx.last_insert_rowid()
             };
+            affected_entity_ids.insert(entity_id);
+            if let Some(description) = description
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                tx.execute(
+                    "INSERT INTO entity_descriptions
+                       (source_node_id, entity_node_id, description, created_at)
+                     VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(source_node_id, entity_node_id) DO UPDATE SET
+                       description = excluded.description,
+                       created_at = excluded.created_at",
+                    rusqlite::params![source_id, entity_id, description, now],
+                )?;
+            }
             entity_ids.insert(name.to_lowercase(), entity_id);
             insert_extracted_edge(&tx, source_id, source_id, entity_id, "mentions", now)?;
         }
@@ -848,6 +900,36 @@ pub async fn replace_extracted_edges(
             if src != dst && !kind.is_empty() {
                 insert_extracted_edge(&tx, source_id, src, dst, kind, now)?;
             }
+        }
+
+        for entity_id in affected_entity_ids {
+            let title = tx.query_row(
+                "SELECT title FROM nodes WHERE id = ?1",
+                [entity_id],
+                |row| row.get::<_, Option<String>>(0),
+            )?;
+            let description = tx
+                .query_row(
+                    "SELECT group_concat(description, '\n\n')
+                       FROM (
+                         SELECT description FROM entity_descriptions
+                          WHERE entity_node_id = ?1
+                          ORDER BY created_at DESC, source_node_id DESC
+                          LIMIT 5
+                       )",
+                    [entity_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )?
+                .unwrap_or_default();
+            let body = crate::stem::stem(&format!(
+                "{}\n{description}",
+                title.as_deref().unwrap_or("")
+            ));
+            tx.execute(
+                "UPDATE nodes SET content = ?2, body_stemmed = ?3, updated_at = ?4
+                   WHERE id = ?1",
+                rusqlite::params![entity_id, description, body, now],
+            )?;
         }
 
         tx.commit()?;
@@ -1556,12 +1638,30 @@ pub async fn export_archive(conn: &Connection) -> Result<DataArchive> {
                 })?
                 .collect::<Result<Vec<_>, _>>()?
         };
+        let entity_descriptions = {
+            let mut statement = database.prepare(
+                "SELECT source_node_id, entity_node_id, description, created_at
+                   FROM entity_descriptions
+                  ORDER BY source_node_id, entity_node_id",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok(EntityDescriptionRecord {
+                        source_node_id: row.get(0)?,
+                        entity_node_id: row.get(1)?,
+                        description: row.get(2)?,
+                        created_at: row.get(3)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
         Ok(DataArchive {
             format: "notes-rs".into(),
             version: 1,
             exported_at: chrono::Utc::now().timestamp(),
             nodes,
             edges,
+            entity_descriptions,
             files: std::collections::BTreeMap::new(),
         })
     })
@@ -1688,6 +1788,19 @@ pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<(
                 "INSERT OR IGNORE INTO edges(src, dst, kind, weight, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 rusqlite::params![edge.src, edge.dst, edge.kind, edge.weight, edge.created_at],
+            )?;
+        }
+        for description in archive.entity_descriptions {
+            transaction.execute(
+                "INSERT OR IGNORE INTO entity_descriptions
+                   (source_node_id, entity_node_id, description, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    description.source_node_id,
+                    description.entity_node_id,
+                    description.description,
+                    description.created_at
+                ],
             )?;
         }
         transaction.execute_batch(
@@ -2537,6 +2650,80 @@ mod tests {
             .await
             .expect("count generated edges");
         assert_eq!(generated_edges, 0);
+    }
+
+    #[tokio::test]
+    async fn entity_descriptions_keep_source_provenance() {
+        let (_database, connection) = temporary_database().await;
+        let first = create_node(
+            &connection,
+            "page".into(),
+            Some("First".into()),
+            "Rust note".into(),
+            None,
+        )
+        .await
+        .expect("create first source");
+        let second = create_node(
+            &connection,
+            "page".into(),
+            Some("Second".into()),
+            "Another Rust note".into(),
+            None,
+        )
+        .await
+        .expect("create second source");
+
+        for (source, description) in [
+            (&first, "A systems language"),
+            (&second, "A memory-safe language"),
+        ] {
+            replace_extracted_edges(
+                &connection,
+                source.id,
+                source.title.clone(),
+                source.content.clone(),
+                vec![("Rust".into(), Some(description.into()))],
+                Vec::new(),
+            )
+            .await
+            .expect("apply extraction");
+        }
+
+        let content = connection
+            .call(|database| {
+                database.query_row(
+                    "SELECT content FROM nodes WHERE kind = 'entity' AND title = 'Rust'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+            })
+            .await
+            .expect("read merged entity description");
+        assert!(content.contains("A systems language"));
+        assert!(content.contains("A memory-safe language"));
+
+        replace_extracted_edges(
+            &connection,
+            second.id,
+            second.title.clone(),
+            second.content.clone(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .await
+        .expect("clear second extraction");
+        let content = connection
+            .call(|database| {
+                database.query_row(
+                    "SELECT content FROM nodes WHERE kind = 'entity' AND title = 'Rust'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+            })
+            .await
+            .expect("read remaining entity description");
+        assert_eq!(content, "A systems language");
     }
 
     #[tokio::test]

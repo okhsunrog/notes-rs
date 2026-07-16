@@ -76,7 +76,7 @@ export function SearchCard({ variant = "card", hits, setHits, onOpenNode, onStat
 
         {hits.length > 0 && (
           <div className="space-y-2">
-            {hits.map((h) => (
+            {hits.map((h, index) => (
               <button
                 key={h.node.id}
                 type="button"
@@ -86,8 +86,8 @@ export function SearchCard({ variant = "card", hits, setHits, onOpenNode, onStat
                 <div className="flex items-center gap-2">
                   <Badge variant="secondary">#{h.node.id}</Badge>
                   {h.node.title && <span className="font-medium">{h.node.title}</span>}
-                  <span className="ml-auto font-mono text-xs text-muted-foreground">
-                    {h.score.toFixed(4)}
+                  <span className="ml-auto text-xs text-muted-foreground">
+                    #{index + 1} · {mode === "agentic" ? "reranked" : mode}
                   </span>
                 </div>
                 <p className="mt-1 line-clamp-3 text-muted-foreground whitespace-pre-wrap">
