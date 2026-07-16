@@ -476,7 +476,7 @@ impl OpenRouterReranker {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct CohereRerankResult {
     index: usize,
     relevance_score: f32,
@@ -485,6 +485,31 @@ struct CohereRerankResult {
 #[derive(Deserialize)]
 struct CohereRerankResponse {
     results: Vec<CohereRerankResult>,
+}
+
+fn validate_rerank_results(
+    results: Vec<CohereRerankResult>,
+    document_count: usize,
+) -> Result<Vec<(usize, f32)>> {
+    let mut seen = std::collections::HashSet::new();
+    let mut scored = Vec::with_capacity(results.len());
+    for result in results {
+        if result.index >= document_count {
+            bail!(
+                "reranker returned index {} for {document_count} documents",
+                result.index
+            );
+        }
+        if !result.relevance_score.is_finite() {
+            bail!("reranker returned a non-finite score");
+        }
+        if !seen.insert(result.index) {
+            bail!("reranker returned duplicate index {}", result.index);
+        }
+        scored.push((result.index, result.relevance_score));
+    }
+    scored.sort_by(|left, right| right.1.total_cmp(&left.1));
+    Ok(scored)
 }
 
 #[async_trait]
@@ -512,21 +537,7 @@ impl RerankBackend for OpenRouterReranker {
             .json()
             .await
             .context("decoding openrouter rerank response")?;
-        let mut seen = std::collections::HashSet::new();
-        let mut scored: Vec<(usize, f32)> = parsed
-            .results
-            .into_iter()
-            .filter(|result| {
-                result.index < docs.len()
-                    && result.relevance_score.is_finite()
-                    && seen.insert(result.index)
-            })
-            .map(|result| (result.index, result.relevance_score))
-            .collect();
-        // OpenRouter/Cohere returns sorted by relevance_score desc; resort
-        // defensively in case a provider variant ever differs.
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        Ok(scored)
+        validate_rerank_results(parsed.results, docs.len())
     }
 }
 
@@ -589,4 +600,68 @@ async fn tick(conn: &Connection, embedder: &dyn EmbedderBackend) -> Result<()> {
         .collect();
     crate::db::write_embeddings(conn, items).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_malformed_rerank_indices_and_scores() {
+        assert!(
+            validate_rerank_results(
+                vec![CohereRerankResult {
+                    index: 2,
+                    relevance_score: 0.9,
+                }],
+                2,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_rerank_results(
+                vec![
+                    CohereRerankResult {
+                        index: 0,
+                        relevance_score: 0.9,
+                    },
+                    CohereRerankResult {
+                        index: 0,
+                        relevance_score: 0.8,
+                    },
+                ],
+                2,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_rerank_results(
+                vec![CohereRerankResult {
+                    index: 0,
+                    relevance_score: f32::NAN,
+                }],
+                1,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn sorts_valid_rerank_results_by_score() {
+        let results = validate_rerank_results(
+            vec![
+                CohereRerankResult {
+                    index: 0,
+                    relevance_score: 0.2,
+                },
+                CohereRerankResult {
+                    index: 1,
+                    relevance_score: 0.8,
+                },
+            ],
+            2,
+        )
+        .expect("valid results");
+        assert_eq!(results, vec![(1, 0.8), (0, 0.2)]);
+    }
 }

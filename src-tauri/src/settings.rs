@@ -290,6 +290,13 @@ pub fn openrouter_client() -> Result<rig::providers::openrouter::Client> {
     let api_key = std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set")?;
     let base_url =
         std::env::var("OPENROUTER_BASE_URL").unwrap_or_else(|_| DEFAULT_OPENROUTER_BASE_URL.into());
+    openrouter_client_from(api_key, &base_url)
+}
+
+fn openrouter_client_from(
+    api_key: String,
+    base_url: &str,
+) -> Result<rig::providers::openrouter::Client> {
     validate_http_base_url(&base_url)?;
     rig::providers::openrouter::Client::builder()
         .base_url(base_url.trim_end_matches('/'))
@@ -394,5 +401,20 @@ mod tests {
         values.insert("OPENROUTER_API_KEY".into(), "secret with \"quotes\"".into());
         write_env(&path, &values).expect("write environment");
         assert_eq!(read_env(&path).expect("read environment"), values);
+    }
+
+    #[test]
+    fn validates_provider_base_urls() {
+        assert!(validate_http_base_url("https://proxy.example/v1/").is_ok());
+        assert!(validate_http_base_url("http://127.0.0.1:11434/v1").is_ok());
+        assert!(validate_http_base_url("file:///tmp/api").is_err());
+        assert!(validate_http_base_url("https://proxy.example/v1?token=secret").is_err());
+    }
+
+    #[test]
+    fn openrouter_client_honors_custom_base_url() {
+        let client = openrouter_client_from("test-key".into(), "http://127.0.0.1:11434/custom/v1/")
+            .expect("build custom client");
+        assert_eq!(client.base_url(), "http://127.0.0.1:11434/custom/v1");
     }
 }

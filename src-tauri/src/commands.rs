@@ -865,6 +865,7 @@ pub async fn chat(state: State<'_, AppState>, message: String) -> Result<String,
 
 #[tauri::command]
 pub async fn chat_stream(
+    app: AppHandle,
     state: State<'_, AppState>,
     history: Vec<ChatTurn>,
     message: String,
@@ -910,6 +911,11 @@ pub async fn chat_stream(
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .remove(&request_id);
+    if allow_writes && result.is_ok() {
+        let _ = app.emit("pages:changed", ());
+        let _ = app.emit("entities:changed", ());
+        let _ = app.emit("history:changed", ());
+    }
     result.map_err(|error| error.to_string())
 }
 

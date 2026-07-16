@@ -1032,3 +1032,40 @@ pub async fn run_chat_stream(
     emit(ChatEvent::Done { text: full.clone() });
     Ok(full)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contextual_query_heuristic_avoids_unneeded_calls() {
+        assert!(looks_contextual("and the second one?"));
+        assert!(looks_contextual("а этот?"));
+        assert!(!looks_contextual("PostgreSQL transaction isolation levels"));
+    }
+
+    #[test]
+    fn search_tool_arguments_are_bounded() {
+        assert!(
+            validate_search_args(&SearchArgs {
+                query: "rust".into(),
+                limit: 8,
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_search_args(&SearchArgs {
+                query: String::new(),
+                limit: 8,
+            })
+            .is_err()
+        );
+        assert!(
+            validate_search_args(&SearchArgs {
+                query: "rust".into(),
+                limit: MAX_SEARCH_LIMIT + 1,
+            })
+            .is_err()
+        );
+    }
+}
