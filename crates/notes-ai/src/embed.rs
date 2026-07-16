@@ -1,3 +1,4 @@
+use crate::config::{EmbeddingProvider, RerankProvider};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 #[cfg(feature = "local-models")]
@@ -5,7 +6,7 @@ use fastembed::{
     EmbeddingModel as FeModel, InitOptions, RerankInitOptions, RerankerModel, TextEmbedding,
     TextRerank,
 };
-use notes_core::{Connection, db};
+use notes_core::{Connection, FailureKind, db};
 use rig::client::ProviderClient;
 use rig::embeddings::EmbeddingModel;
 use serde::Deserialize;
@@ -37,8 +38,10 @@ pub trait EmbedderBackend: Send + Sync {
 /// `EMBED_NDIMS`    — ndims override; required for some providers, has model-
 ///                   specific defaults for the known ones (OpenAI / Qwen).
 pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
-    let provider = std::env::var("EMBED_PROVIDER").unwrap_or_else(|_| "openrouter".into());
-    if crate::config::local_only() && !matches!(provider.as_str(), "local" | "fastembed") {
+    let provider = std::env::var("EMBED_PROVIDER")
+        .unwrap_or_else(|_| "openrouter".into())
+        .parse::<EmbeddingProvider>()?;
+    if crate::config::local_only() && provider != EmbeddingProvider::Local {
         bail!("AI_LOCAL_ONLY requires EMBED_PROVIDER=local");
     }
     let model_env = std::env::var("EMBED_MODEL").ok();
@@ -46,8 +49,8 @@ pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
         .ok()
         .and_then(|s| s.parse::<usize>().ok());
 
-    match provider.as_str() {
-        "local" | "fastembed" => {
+    match provider {
+        EmbeddingProvider::Local => {
             #[cfg(feature = "local-models")]
             {
                 Ok(Arc::new(LocalBgeM3::new()?))
@@ -61,7 +64,7 @@ pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
                 );
             }
         }
-        "openai" => {
+        EmbeddingProvider::Openai => {
             let model = model_env.unwrap_or_else(|| "text-embedding-3-small".into());
             let ndims = ndims_env
                 .or_else(|| default_ndims_for_model(&model))
@@ -81,7 +84,7 @@ pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
                 ndims,
             }))
         }
-        "openrouter" => {
+        EmbeddingProvider::Openrouter => {
             use rig::providers::openrouter;
             let model = model_env.unwrap_or_else(|| "qwen/qwen3-embedding-8b".into());
             let ndims = ndims_env
@@ -103,7 +106,7 @@ pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
                 id: format!("openrouter:{model}"),
             }))
         }
-        "cohere" => {
+        EmbeddingProvider::Cohere => {
             use rig::providers::cohere;
             let model = model_env.unwrap_or_else(|| "embed-multilingual-v3.0".into());
             let client = cohere::Client::from_env().context("COHERE_API_KEY not set")?;
@@ -115,7 +118,7 @@ pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
                 id: format!("cohere:{model}"),
             }))
         }
-        "voyageai" => {
+        EmbeddingProvider::Voyageai => {
             use rig::providers::voyageai;
             let model = model_env.unwrap_or_else(|| "voyage-3-large".into());
             let api_key = std::env::var("VOYAGE_API_KEY").context("VOYAGE_API_KEY not set")?;
@@ -124,7 +127,7 @@ pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
                 .with_context(|| format!("EMBED_NDIMS required for Voyage model {model}"))?;
             Ok(Arc::new(VoyageEmbedder::new(api_key, model, ndims)?))
         }
-        "gemini" => {
+        EmbeddingProvider::Gemini => {
             use rig::providers::gemini;
             let model = model_env.unwrap_or_else(|| "gemini-embedding-2".into());
             let client = gemini::Client::from_env().context("GEMINI_API_KEY not set")?;
@@ -138,7 +141,6 @@ pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
                 id: format!("gemini:{model}"),
             }))
         }
-        other => bail!("unknown EMBED_PROVIDER: {other}"),
     }
 }
 
@@ -427,14 +429,16 @@ pub trait RerankBackend: Send + Sync {
 }
 
 pub fn make_reranker() -> Result<Arc<dyn RerankBackend>> {
-    let provider = std::env::var("RERANK_PROVIDER").unwrap_or_else(|_| "openrouter".into());
-    if crate::config::local_only() && !matches!(provider.as_str(), "local" | "fastembed") {
+    let provider = std::env::var("RERANK_PROVIDER")
+        .unwrap_or_else(|_| "openrouter".into())
+        .parse::<RerankProvider>()?;
+    if crate::config::local_only() && provider != RerankProvider::Local {
         bail!("AI_LOCAL_ONLY requires RERANK_PROVIDER=local");
     }
     let model_env = std::env::var("RERANK_MODEL").ok();
 
-    match provider.as_str() {
-        "local" | "fastembed" => {
+    match provider {
+        RerankProvider::Local => {
             #[cfg(feature = "local-models")]
             {
                 Ok(Arc::new(LocalReranker::new()?))
@@ -447,11 +451,10 @@ pub fn make_reranker() -> Result<Arc<dyn RerankBackend>> {
                 );
             }
         }
-        "openrouter" => {
+        RerankProvider::Openrouter => {
             let model = model_env.unwrap_or_else(|| "cohere/rerank-v3.5".into());
             Ok(Arc::new(OpenRouterReranker::new(model)?))
         }
-        other => bail!("unknown RERANK_PROVIDER: {other}"),
     }
 }
 
@@ -584,19 +587,19 @@ impl RerankBackend for OpenRouterReranker {
 
 // ───────────────────────── worker ─────────────────────────
 
-fn classify_embedding_failure(error: &anyhow::Error) -> (&'static str, bool) {
+fn classify_embedding_failure(error: &anyhow::Error) -> (FailureKind, bool) {
     for cause in error.chain() {
         if let Some(request) = cause.downcast_ref::<reqwest::Error>() {
             if request.is_timeout() || request.is_connect() {
-                return ("network", false);
+                return (FailureKind::Network, false);
             }
             if let Some(status) = request.status() {
                 return if matches!(status.as_u16(), 408 | 429) || status.is_server_error() {
-                    ("transient", false)
+                    (FailureKind::Transient, false)
                 } else if matches!(status.as_u16(), 401 | 403) {
-                    ("auth", true)
+                    (FailureKind::Auth, true)
                 } else {
-                    ("provider_request", true)
+                    (FailureKind::ProviderRequest, true)
                 };
             }
         }
@@ -605,20 +608,22 @@ fn classify_embedding_failure(error: &anyhow::Error) -> (&'static str, bool) {
                 llm_relay::LlmError::ApiError { status, .. }
                     if matches!(*status, 408 | 429) || *status >= 500 =>
                 {
-                    ("transient", false)
+                    (FailureKind::Transient, false)
                 }
                 llm_relay::LlmError::ApiError {
                     status: 401 | 403, ..
-                } => ("auth", true),
-                llm_relay::LlmError::ApiError { .. } => ("provider_request", true),
+                } => (FailureKind::Auth, true),
+                llm_relay::LlmError::ApiError { .. } => (FailureKind::ProviderRequest, true),
                 llm_relay::LlmError::Config(_)
                 | llm_relay::LlmError::Client(_)
-                | llm_relay::LlmError::ResponseTooLarge { .. } => ("configuration", true),
-                _ => ("provider_response", false),
+                | llm_relay::LlmError::ResponseTooLarge { .. } => {
+                    (FailureKind::Configuration, true)
+                }
+                _ => (FailureKind::ProviderResponse, false),
             };
         }
     }
-    ("provider_response", false)
+    (FailureKind::ProviderResponse, false)
 }
 
 pub fn spawn_worker(conn: Connection, embedder: Arc<dyn EmbedderBackend>, paused: Arc<AtomicBool>) {
@@ -664,7 +669,7 @@ async fn tick(conn: &Connection, embedder: &dyn EmbedderBackend) -> Result<()> {
             ids.len(),
             embedder.ndims()
         );
-        db::record_embedding_failure(conn, ids.clone(), "schema", &error, true).await?;
+        db::record_embedding_failure(conn, ids.clone(), FailureKind::Schema, &error, true).await?;
         anyhow::bail!(error);
     }
     // A structural Undo/import can replace nodes while a network request is

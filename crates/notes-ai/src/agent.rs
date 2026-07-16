@@ -1,8 +1,8 @@
 use crate::embed::{EmbedderBackend, RerankBackend};
 use futures::StreamExt;
 use llm_relay::RigClient;
-use notes_core::Connection;
 use notes_core::db::{self, Node, SearchHit};
+use notes_core::{Connection, NodeKind};
 use rig::agent::MultiTurnStreamItem;
 use rig::client::CompletionClient;
 use rig::completion::{CompletionModel, Message, Prompt};
@@ -750,7 +750,7 @@ pub struct CreateNode {
 
 #[derive(Deserialize)]
 pub struct CreateNodeArgs {
-    pub kind: String,
+    pub kind: NodeKind,
     pub title: Option<String>,
     pub content: String,
 }
@@ -785,12 +785,12 @@ impl Tool for CreateNode {
                 "node title or content exceeds the allowed size".into(),
             ));
         }
-        if args.kind == "block" {
+        if args.kind == NodeKind::Block {
             return Err(ToolError::ToolCallError(
                 "orphan blocks cannot be created; create a page instead".into(),
             ));
         }
-        if args.kind == "page"
+        if args.kind == NodeKind::Page
             && args
                 .title
                 .as_ref()
@@ -987,7 +987,7 @@ async fn run_chat_with_model<M: CompletionModel + 'static>(
         .map_err(|e| AgentError(format!("{e:#}")))
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, specta::Type)]
 #[serde(tag = "role", rename_all = "lowercase")]
 pub enum ChatTurn {
     User { text: String },
@@ -1003,7 +1003,7 @@ impl From<ChatTurn> for Message {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, specta::Type)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ChatEvent {
     TextDelta {
@@ -1015,6 +1015,7 @@ pub enum ChatEvent {
     ToolStart {
         id: String,
         name: String,
+        #[specta(type = specta_typescript::Unknown)]
         args: serde_json::Value,
     },
     ToolEnd {
@@ -1261,7 +1262,7 @@ mod tests {
             Node {
                 id: 1,
                 uuid: "one".into(),
-                kind: "page".into(),
+                kind: NodeKind::Page,
                 title: Some("First note".into()),
                 content: String::new(),
                 content_json: None,
@@ -1273,7 +1274,7 @@ mod tests {
             Node {
                 id: 2,
                 uuid: "two".into(),
-                kind: "page".into(),
+                kind: NodeKind::Page,
                 title: Some("Second note".into()),
                 content: String::new(),
                 content_json: None,

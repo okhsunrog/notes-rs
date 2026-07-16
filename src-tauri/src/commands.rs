@@ -5,6 +5,7 @@ use notes_ai::agent::{self, ChatEvent, ChatTurn};
 use notes_ai::embed::{EmbedderBackend, RerankBackend};
 use notes_core::Connection;
 use notes_core::db::{self, Node, SearchHit};
+use notes_core::{NodeKind, ReorderDirection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -14,6 +15,7 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
+use tauri_specta::Event;
 
 pub struct AppState {
     pub conn: Connection,
@@ -23,7 +25,40 @@ pub struct AppState {
     pub chat_cancellations: Arc<std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>>,
 }
 
-#[derive(Debug, Serialize)]
+/// The single frontend invalidation stream for persisted Rust state.
+/// Payloads carry affected IDs when a command can identify them; whole-workspace
+/// replacements (import/sync) deliberately request a full cache refresh.
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DomainEvent {
+    NodeChanged {
+        node_ids: Vec<i64>,
+        parent_ids: Vec<i64>,
+    },
+    NodeDeleted {
+        node_ids: Vec<i64>,
+        parent_ids: Vec<i64>,
+    },
+    GraphChanged {
+        node_ids: Vec<i64>,
+    },
+    HistoryChanged,
+    BackgroundStatusChanged,
+    SettingsChanged,
+    WorkspaceChanged,
+}
+
+#[derive(Debug, Clone, Serialize, specta::Type, tauri_specta::Event)]
+#[tauri_specta(event_name = "domain:event")]
+pub struct DomainEventMessage(pub DomainEvent);
+
+pub(crate) fn emit_domain(app: &AppHandle, event: DomainEvent) {
+    if let Err(error) = DomainEventMessage(event).emit(app) {
+        tracing::warn!(%error, "failed to emit domain event");
+    }
+}
+
+#[derive(Debug, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct BackgroundStatus {
     pub paused: bool,
@@ -34,23 +69,23 @@ pub struct BackgroundStatus {
     pub failures: Vec<db::BackgroundFailure>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderProbeRequest {
-    protocol: String,
+    protocol: crate::settings::CompletionProtocol,
     base_url: String,
     model: String,
     api_key: Option<String>,
-    key_scope: Option<String>,
+    key_scope: Option<crate::settings::ProviderKeyScope>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderProbeResult {
     capabilities: Vec<CapabilityProbeResult>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CapabilityProbeResult {
     name: String,
@@ -94,7 +129,7 @@ pub struct Startup {
     pub status: Arc<RwLock<StartupStatus>>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, specta::Type)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum StartupStatus {
     Starting { message: String },
@@ -107,6 +142,7 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn is_ready(state: State<'_, Startup>) -> bool {
     matches!(
         *state.status.read().unwrap_or_else(|e| e.into_inner()),
@@ -115,6 +151,7 @@ pub fn is_ready(state: State<'_, Startup>) -> bool {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn startup_status(state: State<'_, Startup>) -> StartupStatus {
     state
         .status
@@ -124,28 +161,33 @@ pub fn startup_status(state: State<'_, Startup>) -> StartupStatus {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn load_settings(app: AppHandle) -> Result<crate::settings::SettingsSnapshot, String> {
     crate::settings::load(&app).map_err(err)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn save_settings(
     app: AppHandle,
     update: crate::settings::SettingsUpdate,
 ) -> Result<crate::settings::SettingsSnapshot, String> {
-    crate::settings::save(&app, update).map_err(err)
+    let settings = crate::settings::save(&app, update).map_err(err)?;
+    emit_domain(&app, DomainEvent::SettingsChanged);
+    Ok(settings)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn test_completion_provider(
     request: ProviderProbeRequest,
 ) -> Result<ProviderProbeResult, String> {
     let mut config = crate::settings::completion_config_for_probe(
-        &request.protocol,
+        request.protocol,
         request.base_url,
         request.model,
         request.api_key,
-        request.key_scope.as_deref(),
+        request.key_scope,
     )
     .map_err(err)?
     .timeout(std::time::Duration::from_secs(20))
@@ -239,11 +281,13 @@ pub async fn test_completion_provider(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn restart_app(app: AppHandle) {
     app.restart()
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn background_status(state: State<'_, AppState>) -> Result<BackgroundStatus, String> {
     let queues = db::queue_status(&state.conn).await.map_err(err)?;
     Ok(BackgroundStatus {
@@ -257,34 +301,59 @@ pub async fn background_status(state: State<'_, AppState>) -> Result<BackgroundS
 }
 
 #[tauri::command]
-pub fn set_background_paused(state: State<'_, AppState>, paused: bool) {
+#[specta::specta]
+pub fn set_background_paused(app: AppHandle, state: State<'_, AppState>, paused: bool) {
     state.background_paused.store(paused, Ordering::Release);
+    emit_domain(&app, DomainEvent::BackgroundStatusChanged);
 }
 
 #[tauri::command]
-pub async fn retry_background_jobs(state: State<'_, AppState>) -> Result<(), String> {
-    db::retry_background_jobs(&state.conn).await.map_err(err)
-}
-
-#[tauri::command]
-pub async fn clear_background_jobs(state: State<'_, AppState>) -> Result<(), String> {
-    db::clear_background_jobs(&state.conn).await.map_err(err)
-}
-
-#[tauri::command]
-pub async fn create_node(
+#[specta::specta]
+pub async fn retry_background_jobs(
+    app: AppHandle,
     state: State<'_, AppState>,
-    kind: String,
+) -> Result<(), String> {
+    db::retry_background_jobs(&state.conn).await.map_err(err)?;
+    emit_domain(&app, DomainEvent::BackgroundStatusChanged);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn clear_background_jobs(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    db::clear_background_jobs(&state.conn).await.map_err(err)?;
+    emit_domain(&app, DomainEvent::BackgroundStatusChanged);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn create_node(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    kind: NodeKind,
     title: Option<String>,
     content: String,
     content_json: Option<String>,
 ) -> Result<Node, String> {
-    db::create_node(&state.conn, kind, title, content, content_json)
+    let node = db::create_node(&state.conn, kind, title, content, content_json)
         .await
-        .map_err(err)
+        .map_err(err)?;
+    emit_domain(
+        &app,
+        DomainEvent::NodeChanged {
+            node_ids: vec![node.id],
+            parent_ids: node.parent_id.into_iter().collect(),
+        },
+    );
+    Ok(node)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn update_node(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -296,11 +365,25 @@ pub async fn update_node(
     db::update_node(&state.conn, id, title, content, content_json)
         .await
         .map_err(err)?;
+    let parent_ids = db::get_node(&state.conn, id)
+        .await
+        .map_err(err)?
+        .and_then(|node| node.parent_id)
+        .into_iter()
+        .collect();
+    emit_domain(
+        &app,
+        DomainEvent::NodeChanged {
+            node_ids: vec![id],
+            parent_ids,
+        },
+    );
     let _ = app.emit("pages:changed", ());
     Ok(())
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn update_block_with_refs(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -310,11 +393,19 @@ pub async fn update_block_with_refs(
     let result = db::update_block_with_refs(&state.conn, id, block)
         .await
         .map_err(err)?;
+    emit_domain(
+        &app,
+        DomainEvent::NodeChanged {
+            node_ids: vec![result.0.id],
+            parent_ids: result.0.parent_id.into_iter().collect(),
+        },
+    );
     let _ = app.emit("pages:changed", ());
     Ok(result)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn split_block(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -325,12 +416,22 @@ pub async fn split_block(
         .await
         .map_err(err)?;
     let nodes = db::split_block(&state.conn, id, parts).await.map_err(err)?;
+    emit_domain(
+        &app,
+        DomainEvent::NodeChanged {
+            node_ids: nodes.iter().map(|node| node.id).collect(),
+            parent_ids: nodes.iter().filter_map(|node| node.parent_id).collect(),
+        },
+    );
+    emit_domain(&app, DomainEvent::HistoryChanged);
     let _ = app.emit("pages:changed", ());
     Ok(nodes)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn link_nodes(
+    app: AppHandle,
     state: State<'_, AppState>,
     src: i64,
     dst: i64,
@@ -339,15 +440,24 @@ pub async fn link_nodes(
 ) -> Result<(), String> {
     db::link_nodes(&state.conn, src, dst, kind, weight.unwrap_or(1.0))
         .await
-        .map_err(err)
+        .map_err(err)?;
+    emit_domain(
+        &app,
+        DomainEvent::GraphChanged {
+            node_ids: vec![src, dst],
+        },
+    );
+    Ok(())
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn get_node(state: State<'_, AppState>, id: i64) -> Result<Option<Node>, String> {
     db::get_node(&state.conn, id).await.map_err(err)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn neighbors(
     state: State<'_, AppState>,
     id: i64,
@@ -357,6 +467,7 @@ pub async fn neighbors(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn list_entities(
     state: State<'_, AppState>,
     limit: Option<u32>,
@@ -367,6 +478,7 @@ pub async fn list_entities(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn list_pages(
     state: State<'_, AppState>,
     limit: Option<u32>,
@@ -377,6 +489,7 @@ pub async fn list_pages(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn delete_page(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -394,11 +507,20 @@ pub async fn delete_page(
         // database nodes. Explicit attachment deletion removes the file.
         let _ = app.emit("pages:changed", ());
         let _ = app.emit("entities:changed", ());
+        emit_domain(
+            &app,
+            DomainEvent::NodeDeleted {
+                node_ids: vec![id],
+                parent_ids: Vec::new(),
+            },
+        );
+        emit_domain(&app, DomainEvent::HistoryChanged);
     }
     Ok(attachments.is_some())
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn find_backlinks(
     state: State<'_, AppState>,
     id: i64,
@@ -408,6 +530,7 @@ pub async fn find_backlinks(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn graph_snapshot(
     state: State<'_, AppState>,
     focus_id: Option<i64>,
@@ -416,6 +539,7 @@ pub async fn graph_snapshot(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn export_data(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -441,6 +565,7 @@ pub async fn export_data(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn import_data(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -462,12 +587,15 @@ pub async fn import_data(
     restore_archive(&app, &state.conn, archive)
         .await
         .map_err(err)?;
+    emit_domain(&app, DomainEvent::WorkspaceChanged);
+    emit_domain(&app, DomainEvent::HistoryChanged);
     let _ = app.emit("pages:changed", ());
     let _ = app.emit("entities:changed", ());
     Ok(Some(path.display().to_string()))
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn create_backup(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
     write_backup(&app, &state.conn, "manual")
         .await
@@ -493,6 +621,7 @@ async fn write_backup(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn choose_sync_directory(app: AppHandle) -> Result<Option<String>, String> {
     app.dialog()
         .file()
@@ -503,6 +632,7 @@ pub fn choose_sync_directory(app: AppHandle) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn sync_push(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
     let settings = crate::settings::load(&app).map_err(err)?;
     let directory = sync_directory(&settings.sync_directory).map_err(err)?;
@@ -521,6 +651,7 @@ pub async fn sync_push(app: AppHandle, state: State<'_, AppState>) -> Result<Str
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn sync_pull(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
     let settings = crate::settings::load(&app).map_err(err)?;
     let path = sync_directory(&settings.sync_directory)
@@ -534,6 +665,8 @@ pub async fn sync_pull(app: AppHandle, state: State<'_, AppState>) -> Result<Str
     restore_archive(&app, &state.conn, archive)
         .await
         .map_err(err)?;
+    emit_domain(&app, DomainEvent::WorkspaceChanged);
+    emit_domain(&app, DomainEvent::HistoryChanged);
     let _ = app.emit("pages:changed", ());
     let _ = app.emit("entities:changed", ());
     Ok(path.display().to_string())
@@ -548,6 +681,7 @@ fn sync_directory(value: &str) -> anyhow::Result<std::path::PathBuf> {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn attach_file(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -595,6 +729,7 @@ pub async fn attach_file(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn list_attachments(
     state: State<'_, AppState>,
     parent_id: i64,
@@ -605,6 +740,7 @@ pub async fn list_attachments(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn open_attachment(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -613,7 +749,7 @@ pub async fn open_attachment(
     let node = db::get_node(&state.conn, id)
         .await
         .map_err(err)?
-        .filter(|node| node.kind == "attachment")
+        .filter(|node| node.kind == NodeKind::Attachment)
         .ok_or_else(|| "attachment not found".to_string())?;
     let path = safe_app_data_path(&app, &node.content).map_err(err)?;
     app.opener()
@@ -622,6 +758,7 @@ pub async fn open_attachment(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn delete_attachment(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -648,7 +785,7 @@ fn add_archive_files(app: &AppHandle, archive: &mut db::DataArchive) -> anyhow::
     for node in archive
         .nodes
         .iter()
-        .filter(|node| node.kind == "attachment")
+        .filter(|node| node.kind == NodeKind::Attachment)
     {
         let path = safe_app_data_path(app, &node.content)?;
         let bytes = std::fs::read(&path)
@@ -721,6 +858,7 @@ fn safe_relative_path(value: &str) -> anyhow::Result<std::path::PathBuf> {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn list_block_children(
     state: State<'_, AppState>,
     parent_id: i64,
@@ -731,7 +869,9 @@ pub async fn list_block_children(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn create_block(
+    app: AppHandle,
     state: State<'_, AppState>,
     parent_id: Option<i64>,
     position: Option<f64>,
@@ -741,49 +881,105 @@ pub async fn create_block(
     db::checkpoint_history(&state.conn, "create block")
         .await
         .map_err(err)?;
-    db::create_block(&state.conn, parent_id, position, content, content_json)
+    let node = db::create_block(&state.conn, parent_id, position, content, content_json)
         .await
-        .map_err(err)
+        .map_err(err)?;
+    emit_domain(
+        &app,
+        DomainEvent::NodeChanged {
+            node_ids: vec![node.id],
+            parent_ids: node.parent_id.into_iter().collect(),
+        },
+    );
+    emit_domain(&app, DomainEvent::HistoryChanged);
+    Ok(node)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn move_block(
+    app: AppHandle,
     state: State<'_, AppState>,
     id: i64,
     new_parent_id: Option<i64>,
     new_position: Option<f64>,
 ) -> Result<Node, String> {
+    let old_parent_id = db::get_node(&state.conn, id)
+        .await
+        .map_err(err)?
+        .and_then(|node| node.parent_id);
     db::checkpoint_history(&state.conn, "move block")
         .await
         .map_err(err)?;
-    db::move_block(&state.conn, id, new_parent_id, new_position)
+    let node = db::move_block(&state.conn, id, new_parent_id, new_position)
         .await
-        .map_err(err)
+        .map_err(err)?;
+    emit_domain(
+        &app,
+        DomainEvent::NodeChanged {
+            node_ids: vec![node.id],
+            parent_ids: old_parent_id.into_iter().chain(node.parent_id).collect(),
+        },
+    );
+    emit_domain(&app, DomainEvent::HistoryChanged);
+    Ok(node)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn reorder_block(
+    app: AppHandle,
     state: State<'_, AppState>,
     id: i64,
-    direction: String,
+    direction: ReorderDirection,
 ) -> Result<Node, String> {
     db::checkpoint_history(&state.conn, "reorder block")
         .await
         .map_err(err)?;
-    db::reorder_block(&state.conn, id, direction)
+    let node = db::reorder_block(&state.conn, id, direction)
         .await
-        .map_err(err)
+        .map_err(err)?;
+    emit_domain(
+        &app,
+        DomainEvent::NodeChanged {
+            node_ids: vec![node.id],
+            parent_ids: node.parent_id.into_iter().collect(),
+        },
+    );
+    emit_domain(&app, DomainEvent::HistoryChanged);
+    Ok(node)
 }
 
 #[tauri::command]
-pub async fn delete_block(state: State<'_, AppState>, id: i64) -> Result<bool, String> {
+#[specta::specta]
+pub async fn delete_block(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<bool, String> {
+    let parent_id = db::get_node(&state.conn, id)
+        .await
+        .map_err(err)?
+        .and_then(|node| node.parent_id);
     db::checkpoint_history(&state.conn, "delete block")
         .await
         .map_err(err)?;
-    db::delete_block(&state.conn, id).await.map_err(err)
+    let deleted = db::delete_block(&state.conn, id).await.map_err(err)?;
+    if deleted {
+        emit_domain(
+            &app,
+            DomainEvent::NodeDeleted {
+                node_ids: vec![id],
+                parent_ids: parent_id.into_iter().collect(),
+            },
+        );
+        emit_domain(&app, DomainEvent::HistoryChanged);
+    }
+    Ok(deleted)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn replace_block_refs(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -794,11 +990,18 @@ pub async fn replace_block_refs(
     let broken = db::replace_block_refs(&state.conn, block_id, wikilink_titles, block_uuids)
         .await
         .map_err(err)?;
+    emit_domain(
+        &app,
+        DomainEvent::GraphChanged {
+            node_ids: vec![block_id],
+        },
+    );
     let _ = app.emit("pages:changed", ());
     Ok(broken)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn get_page_by_title(
     state: State<'_, AppState>,
     title: String,
@@ -807,6 +1010,7 @@ pub async fn get_page_by_title(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn get_node_by_uuid(
     state: State<'_, AppState>,
     uuid: String,
@@ -815,6 +1019,7 @@ pub async fn get_node_by_uuid(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn get_or_create_page_by_title(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -823,11 +1028,19 @@ pub async fn get_or_create_page_by_title(
     let page = db::get_or_create_page_by_title(&state.conn, title)
         .await
         .map_err(err)?;
+    emit_domain(
+        &app,
+        DomainEvent::NodeChanged {
+            node_ids: vec![page.id],
+            parent_ids: Vec::new(),
+        },
+    );
     let _ = app.emit("pages:changed", ());
     Ok(page)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn create_page(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -840,41 +1053,63 @@ pub async fn create_page(
     db::checkpoint_history(&state.conn, "create page")
         .await
         .map_err(err)?;
-    let page = db::create_node(&state.conn, "page".into(), Some(title), String::new(), None)
-        .await
-        .map_err(err)?;
+    let page = db::create_node(
+        &state.conn,
+        NodeKind::Page,
+        Some(title),
+        String::new(),
+        None,
+    )
+    .await
+    .map_err(err)?;
+    emit_domain(
+        &app,
+        DomainEvent::NodeChanged {
+            node_ids: vec![page.id],
+            parent_ids: Vec::new(),
+        },
+    );
+    emit_domain(&app, DomainEvent::HistoryChanged);
     let _ = app.emit("pages:changed", ());
     Ok(page)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn history_status(state: State<'_, AppState>) -> Result<(i64, i64), String> {
     db::history_status(&state.conn).await.map_err(err)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn undo(app: AppHandle, state: State<'_, AppState>) -> Result<bool, String> {
     let changed = db::undo_history(&state.conn).await.map_err(err)?;
     if changed {
         let _ = app.emit("pages:changed", ());
         let _ = app.emit("entities:changed", ());
         let _ = app.emit("history:changed", ());
+        emit_domain(&app, DomainEvent::WorkspaceChanged);
+        emit_domain(&app, DomainEvent::HistoryChanged);
     }
     Ok(changed)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn redo(app: AppHandle, state: State<'_, AppState>) -> Result<bool, String> {
     let changed = db::redo_history(&state.conn).await.map_err(err)?;
     if changed {
         let _ = app.emit("pages:changed", ());
         let _ = app.emit("entities:changed", ());
         let _ = app.emit("history:changed", ());
+        emit_domain(&app, DomainEvent::WorkspaceChanged);
+        emit_domain(&app, DomainEvent::HistoryChanged);
     }
     Ok(changed)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn get_containing_page(
     state: State<'_, AppState>,
     id: i64,
@@ -883,6 +1118,7 @@ pub async fn get_containing_page(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn search_pages_by_title(
     state: State<'_, AppState>,
     query: String,
@@ -894,6 +1130,7 @@ pub async fn search_pages_by_title(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn search_blocks_fts(
     state: State<'_, AppState>,
     query: String,
@@ -905,6 +1142,7 @@ pub async fn search_blocks_fts(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn search_fts(
     state: State<'_, AppState>,
     query: String,
@@ -915,6 +1153,7 @@ pub async fn search_fts(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn search_vec(
     state: State<'_, AppState>,
     query: String,
@@ -926,6 +1165,7 @@ pub async fn search_vec(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn search_hybrid(
     state: State<'_, AppState>,
     query: String,
@@ -944,6 +1184,7 @@ pub async fn search_hybrid(
 
 /// Retrieve via hybrid RRF, then rerank with the configured provider.
 #[tauri::command]
+#[specta::specta]
 pub async fn search_agentic(
     state: State<'_, AppState>,
     query: String,
@@ -988,6 +1229,7 @@ pub async fn search_agentic(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn rerank(
     state: State<'_, AppState>,
     query: String,
@@ -1013,6 +1255,7 @@ fn validate_search_request(query: &str, limit: u32) -> Result<u32, String> {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn chat(state: State<'_, AppState>, message: String) -> Result<String, String> {
     agent::run_chat(
         state.conn.clone(),
@@ -1025,6 +1268,7 @@ pub async fn chat(state: State<'_, AppState>, message: String) -> Result<String,
 }
 
 #[tauri::command]
+#[specta::specta]
 #[allow(clippy::too_many_arguments)]
 pub async fn chat_stream(
     app: AppHandle,
@@ -1077,11 +1321,14 @@ pub async fn chat_stream(
         let _ = app.emit("pages:changed", ());
         let _ = app.emit("entities:changed", ());
         let _ = app.emit("history:changed", ());
+        emit_domain(&app, DomainEvent::WorkspaceChanged);
+        emit_domain(&app, DomainEvent::HistoryChanged);
     }
     result.map_err(|error| error.to_string())
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn cancel_chat(state: State<'_, AppState>, request_id: String) -> bool {
     let active = state
         .chat_cancellations

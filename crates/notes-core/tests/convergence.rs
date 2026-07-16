@@ -63,7 +63,7 @@ fn create(
         1_000 + index as u64,
         OpKind::NodeCreate(NodeCreate {
             uuid: uuid.into(),
-            node_kind: kind.into(),
+            node_kind: kind.parse().expect("valid test node kind"),
             title: (kind == "page").then(|| "Root".into()),
             content: String::new(),
             content_json: None,

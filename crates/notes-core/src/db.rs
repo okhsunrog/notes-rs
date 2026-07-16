@@ -1,3 +1,4 @@
+use crate::model::{BackgroundQueue, FailureKind, NodeKind, ReorderDirection};
 use crate::operation::{
     self, AttachmentAdd, AttachmentRemove, EdgeAdd, NodeCreate, NodeDelete, NodeMove,
     NodeSetContent, NodeSetTitle, OpKind, Origin,
@@ -43,7 +44,7 @@ pub async fn open(path: impl AsRef<Path>, embedder_id: &str, ndims: usize) -> Re
     Ok(conn)
 }
 
-const CURRENT_SCHEMA_VERSION: i64 = 7;
+const CURRENT_SCHEMA_VERSION: i64 = 8;
 
 async fn migrate(conn: &Connection, ndims: usize) -> Result<()> {
     let schema = SCHEMA_V1.replace("{NDIMS}", &ndims.to_string());
@@ -128,6 +129,25 @@ async fn migrate(conn: &Connection, ndims: usize) -> Result<()> {
                    JOIN nodes src ON src.id = edges.src
                    JOIN nodes dst ON dst.id = edges.dst
                   WHERE edges.kind NOT IN ('refs', 'mentions', 'attachment');",
+            )?;
+        }
+        if previous_version < 8 {
+            c.execute_batch(
+                "CREATE TABLE IF NOT EXISTS node_structure_lww (
+                   node_uuid TEXT PRIMARY KEY,
+                   parent_uuid TEXT,
+                   position REAL NOT NULL,
+                   hlc TEXT NOT NULL
+                 );
+                 INSERT OR IGNORE INTO node_structure_lww(node_uuid, parent_uuid, position, hlc)
+                 SELECT child.uuid, parent.uuid, COALESCE(child.position, 0),
+                        COALESCE(
+                          child.structure_hlc,
+                          '0000000000000000-00000000-00000000000000000000000000000000'
+                        )
+                   FROM nodes child
+                   LEFT JOIN nodes parent ON parent.id = child.parent_id
+                  WHERE child.kind = 'block';",
             )?;
         }
 
@@ -484,6 +504,14 @@ CREATE TABLE IF NOT EXISTS edge_lww (
   weight REAL NOT NULL,
   PRIMARY KEY(src_uuid, dst_uuid, kind)
 );
+-- Keep the requested parent separate from materialized parent_id. Cycle
+-- repair may root a block, but must not destroy the winning LWW intent.
+CREATE TABLE IF NOT EXISTS node_structure_lww (
+  node_uuid TEXT PRIMARY KEY,
+  parent_uuid TEXT,
+  position REAL NOT NULL,
+  hlc TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS attachment_lww (
   node_uuid TEXT NOT NULL,
   blob_hash TEXT NOT NULL,
@@ -589,11 +617,11 @@ BEGIN
 END;
 "#;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct Node {
     pub id: i64,
     pub uuid: String,
-    pub kind: String,
+    pub kind: NodeKind,
     pub title: Option<String>,
     pub content: String,
     pub content_json: Option<String>,
@@ -677,13 +705,13 @@ async fn count_missing_block_refs(conn: &Connection, block_uuids: Vec<String>) -
     .await
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct SearchHit {
     pub node: Node,
     pub score: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct Edge {
     pub src: i64,
     pub dst: i64,
@@ -713,7 +741,7 @@ pub struct EntityDescriptionRecord {
     pub created_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, specta::Type)]
 pub struct GraphSnapshot {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
@@ -724,12 +752,12 @@ type ReorderPlan = (String, Option<String>, Vec<(String, f64)>);
 
 pub async fn create_node(
     conn: &Connection,
-    kind: String,
+    kind: NodeKind,
     title: Option<String>,
     content: String,
     content_json: Option<String>,
 ) -> Result<Node> {
-    if kind == "page"
+    if kind == NodeKind::Page
         && let Some(title) = title.as_deref()
         && let Some(existing) = get_page_by_title(conn, title.to_string()).await?
     {
@@ -782,7 +810,7 @@ pub async fn update_node(
     Ok(())
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct BlockContent {
     pub content: String,
@@ -797,7 +825,7 @@ pub async fn update_block_with_refs(
 ) -> Result<(Node, u32)> {
     let node = get_node(conn, id)
         .await?
-        .filter(|node| node.kind == "block")
+        .filter(|node| node.kind == NodeKind::Block)
         .context("atomic block save requires a block node")?;
     apply_local(
         conn,
@@ -829,12 +857,12 @@ pub async fn split_block(
     let (source_uuid, parent_uuid, mut siblings) = conn
         .call(
             move |database| -> rusqlite::Result<(String, String, Vec<String>)> {
-                let (source_uuid, parent_id, kind): (String, i64, String) = database.query_row(
+                let (source_uuid, parent_id, kind): (String, i64, NodeKind) = database.query_row(
                     "SELECT uuid, parent_id, kind FROM nodes WHERE id = ?1",
                     [id],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )?;
-                if kind != "block" {
+                if kind != NodeKind::Block {
                     return Err(rusqlite::Error::InvalidParameterName(
                         "only a block can be split".into(),
                     ));
@@ -872,7 +900,7 @@ pub async fn split_block(
         result_uuids.push(uuid.clone());
         kinds.push(OpKind::NodeCreate(NodeCreate {
             uuid,
-            node_kind: "block".into(),
+            node_kind: NodeKind::Block,
             title: None,
             content: part.content,
             content_json: None,
@@ -2086,7 +2114,7 @@ fn archive_transition_kinds(current: &DataArchive, target: &DataArchive) -> Resu
         match current_by_uuid.get(uuid) {
             None => kinds.push(OpKind::NodeCreate(NodeCreate {
                 uuid: (*uuid).to_string(),
-                node_kind: target_node.kind.clone(),
+                node_kind: target_node.kind,
                 title: target_node.title.clone(),
                 content: target_node.content.clone(),
                 content_json: target_node.content_json.clone(),
@@ -2114,7 +2142,7 @@ fn archive_transition_kinds(current: &DataArchive, target: &DataArchive) -> Resu
         }
     }
     for (uuid, target_node) in &target_by_uuid {
-        if target_node.kind != "block" {
+        if target_node.kind != NodeKind::Block {
             continue;
         }
         let parent_uuid = target_node
@@ -2302,7 +2330,7 @@ pub async fn create_block(
         conn,
         vec![OpKind::NodeCreate(NodeCreate {
             uuid: uuid.clone(),
-            node_kind: "block".into(),
+            node_kind: NodeKind::Block,
             title: None,
             content,
             content_json,
@@ -2329,12 +2357,12 @@ pub async fn move_block(
     let (uuid, parent_uuid, position) = conn
         .call(
             move |database| -> rusqlite::Result<(String, Option<String>, f64)> {
-                let (uuid, kind): (String, String) = database.query_row(
+                let (uuid, kind): (String, NodeKind) = database.query_row(
                     "SELECT uuid, kind FROM nodes WHERE id = ?1",
                     [id],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )?;
-                if kind != "block" {
+                if kind != NodeKind::Block {
                     return Err(rusqlite::Error::InvalidParameterName(
                         "only block nodes can be moved".into(),
                     ));
@@ -2398,7 +2426,11 @@ pub async fn move_block(
         .context("moved block disappeared")
 }
 
-pub async fn reorder_block(conn: &Connection, id: i64, direction: String) -> Result<Node> {
+pub async fn reorder_block(
+    conn: &Connection,
+    id: i64,
+    direction: ReorderDirection,
+) -> Result<Node> {
     let (uuid, parent_uuid, moves) = conn.call(move |database| -> rusqlite::Result<ReorderPlan> {
         let parent_id: Option<i64> = database.query_row(
             "SELECT parent_id FROM nodes WHERE id = ?1 AND kind = 'block'",
@@ -2417,15 +2449,10 @@ pub async fn reorder_block(conn: &Connection, id: i64, direction: String) -> Res
             .iter()
             .position(|(sibling_uuid, _)| *sibling_uuid == uuid)
             .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-        let target = match direction.as_str() {
-            "up" if index > 0 => Some(index - 1),
-            "down" if index + 1 < siblings.len() => Some(index + 1),
-            "up" | "down" => None,
-            _ => {
-                return Err(rusqlite::Error::InvalidParameterName(
-                    "direction must be up or down".into(),
-                ));
-            }
+        let target = match direction {
+            ReorderDirection::Up if index > 0 => Some(index - 1),
+            ReorderDirection::Down if index + 1 < siblings.len() => Some(index + 1),
+            ReorderDirection::Up | ReorderDirection::Down => None,
         };
         let mut moves = Vec::new();
         if let Some(target) = target {
@@ -2554,7 +2581,7 @@ pub async fn get_or_create_page_by_title(conn: &Connection, title: String) -> Re
     if let Some(n) = found {
         return Ok(n);
     }
-    create_node(conn, "page".into(), Some(trimmed), String::new(), None).await
+    create_node(conn, NodeKind::Page, Some(trimmed), String::new(), None).await
 }
 
 /// Pull the next batch from the embed queue, packaging each row with its
@@ -2566,15 +2593,15 @@ type EmbedChainRow = (i64, i32, Option<String>, String);
 pub const EMBED_MAX_ATTEMPTS: i64 = 8;
 pub const EMBED_BACKOFF_BASE_SECS: i64 = 5;
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct BackgroundFailure {
-    pub queue: String,
+    pub queue: BackgroundQueue,
     pub node_id: i64,
     pub node_title: Option<String>,
     pub retry_count: i64,
     pub last_attempt: Option<i64>,
-    pub failure_kind: String,
+    pub failure_kind: FailureKind,
     pub last_error: String,
     pub terminal: bool,
 }
@@ -2649,14 +2676,13 @@ pub async fn take_pending_embeddings(conn: &Connection, batch: u32) -> Result<Ve
 pub async fn record_embedding_failure(
     conn: &Connection,
     node_ids: Vec<i64>,
-    failure_kind: &str,
+    failure_kind: FailureKind,
     error: &str,
     terminal: bool,
 ) -> Result<()> {
     if node_ids.is_empty() {
         return Ok(());
     }
-    let failure_kind = failure_kind.to_string();
     let error: String = error.chars().take(2_000).collect();
     conn.call(move |c| -> rusqlite::Result<()> {
         let transaction = c.transaction()?;
@@ -2905,11 +2931,10 @@ pub async fn set_last_extracted_hash(conn: &Connection, node_id: i64, hash: Stri
 pub async fn record_extraction_failure(
     conn: &Connection,
     node_id: i64,
-    failure_kind: &str,
+    failure_kind: FailureKind,
     error: &str,
     terminal: bool,
 ) -> Result<()> {
-    let failure_kind = failure_kind.to_string();
     let error: String = error.chars().take(2_000).collect();
     conn.call(move |c| -> rusqlite::Result<()> {
         c.execute(
@@ -3026,7 +3051,7 @@ mod tests {
         let (_database, connection) = temporary_database().await;
         let page = create_node(
             &connection,
-            "page".into(),
+            NodeKind::Page,
             Some("Page".into()),
             String::new(),
             None,
@@ -3051,7 +3076,7 @@ mod tests {
         let (_database, connection) = temporary_database().await;
         let block = create_node(
             &connection,
-            "block".into(),
+            NodeKind::Block,
             None,
             "Offline-first Rust notebook".into(),
             None,
@@ -3077,7 +3102,7 @@ mod tests {
         let (_database, connection) = temporary_database().await;
         let source = create_node(
             &connection,
-            "page".into(),
+            NodeKind::Page,
             Some("Source".into()),
             String::new(),
             None,
@@ -3127,7 +3152,7 @@ mod tests {
         let (_database, connection) = temporary_database().await;
         let first = create_node(
             &connection,
-            "page".into(),
+            NodeKind::Page,
             Some("First".into()),
             "Rust note".into(),
             None,
@@ -3136,7 +3161,7 @@ mod tests {
         .expect("create first source");
         let second = create_node(
             &connection,
-            "page".into(),
+            NodeKind::Page,
             Some("Second".into()),
             "Another Rust note".into(),
             None,
@@ -3201,7 +3226,7 @@ mod tests {
         let (_database, connection) = temporary_database().await;
         let source = create_node(
             &connection,
-            "page".into(),
+            NodeKind::Page,
             Some("Before".into()),
             "old content".into(),
             None,
@@ -3253,7 +3278,7 @@ mod tests {
         let (_database, connection) = temporary_database().await;
         let page = create_node(
             &connection,
-            "page".into(),
+            NodeKind::Page,
             Some("Page".into()),
             String::new(),
             None,
@@ -3302,7 +3327,7 @@ mod tests {
         let (_database, connection) = temporary_database().await;
         let page = create_node(
             &connection,
-            "page".into(),
+            NodeKind::Page,
             Some("Page".into()),
             String::new(),
             None,
@@ -3316,7 +3341,7 @@ mod tests {
             .await
             .expect("create second");
 
-        reorder_block(&connection, second.id, "up".into())
+        reorder_block(&connection, second.id, ReorderDirection::Up)
             .await
             .expect("reorder");
         let siblings = list_block_children(&connection, page.id)
@@ -3335,7 +3360,7 @@ mod tests {
         let (_database, connection) = temporary_database().await;
         let page = create_node(
             &connection,
-            "page".into(),
+            NodeKind::Page,
             Some("Original".into()),
             String::new(),
             None,
@@ -3388,7 +3413,7 @@ mod tests {
         let (_database, connection) = temporary_database().await;
         let page = create_node(
             &connection,
-            "page".into(),
+            NodeKind::Page,
             Some("Source".into()),
             String::new(),
             None,
@@ -3410,7 +3435,7 @@ mod tests {
             .expect("stub page");
         let explicit = create_node(
             &connection,
-            "page".into(),
+            NodeKind::Page,
             Some("Roadmap".into()),
             String::new(),
             None,
@@ -3432,7 +3457,7 @@ mod tests {
         let (_database, connection) = temporary_database().await;
         let original = create_node(
             &connection,
-            "page".into(),
+            NodeKind::Page,
             Some("Old title".into()),
             String::new(),
             None,
@@ -3450,7 +3475,7 @@ mod tests {
         .expect("rename page");
         let replacement = create_node(
             &connection,
-            "page".into(),
+            NodeKind::Page,
             Some("Old title".into()),
             String::new(),
             None,
@@ -3465,7 +3490,7 @@ mod tests {
         let (_database, connection) = temporary_database().await;
         let page = create_node(
             &connection,
-            "page".into(),
+            NodeKind::Page,
             Some("Page".into()),
             String::new(),
             None,
@@ -3509,7 +3534,7 @@ mod tests {
         let (_database, connection) = temporary_database().await;
         let page = create_node(
             &connection,
-            "page".into(),
+            NodeKind::Page,
             Some("Queued".into()),
             "content".into(),
             None,
@@ -3519,7 +3544,7 @@ mod tests {
         record_embedding_failure(
             &connection,
             vec![page.id],
-            "network",
+            FailureKind::Network,
             "connection timed out",
             false,
         )
@@ -3528,7 +3553,7 @@ mod tests {
         record_extraction_failure(
             &connection,
             page.id,
-            "provider_request",
+            FailureKind::ProviderRequest,
             "model unavailable",
             true,
         )
@@ -3559,17 +3584,29 @@ mod tests {
         assert_eq!(status.extractions_failed, 0);
         assert!(status.failures.is_empty());
 
-        record_extraction_failure(&connection, page.id, "schema", "invalid JSON", false)
-            .await
-            .expect("record first schema mismatch");
-        record_extraction_failure(&connection, page.id, "schema", "invalid JSON again", false)
-            .await
-            .expect("record second schema mismatch");
+        record_extraction_failure(
+            &connection,
+            page.id,
+            FailureKind::Schema,
+            "invalid JSON",
+            false,
+        )
+        .await
+        .expect("record first schema mismatch");
+        record_extraction_failure(
+            &connection,
+            page.id,
+            FailureKind::Schema,
+            "invalid JSON again",
+            false,
+        )
+        .await
+        .expect("record second schema mismatch");
         let status = queue_status(&connection)
             .await
             .expect("read terminal schema failure");
         assert!(status.failures[0].terminal);
-        assert_eq!(status.failures[0].failure_kind, "schema");
+        assert_eq!(status.failures[0].failure_kind, FailureKind::Schema);
 
         clear_background_jobs(&connection)
             .await
@@ -3589,7 +3626,7 @@ mod tests {
         let (_database, connection) = temporary_database().await;
         let first = create_node(
             &connection,
-            "page".into(),
+            NodeKind::Page,
             Some("First".into()),
             String::new(),
             None,
@@ -3601,7 +3638,7 @@ mod tests {
             .expect("checkpoint");
         let second = create_node(
             &connection,
-            "page".into(),
+            NodeKind::Page,
             Some("Second".into()),
             String::new(),
             None,

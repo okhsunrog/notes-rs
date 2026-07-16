@@ -161,7 +161,7 @@ impl SyncClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notes_core::{db, export_sync_snapshot, import_sync_snapshot};
+    use notes_core::{NodeKind, db, export_sync_snapshot, import_sync_snapshot};
 
     async fn client(name: &str) -> (tempfile::TempDir, Connection, SyncClient) {
         let directory = tempfile::tempdir().expect("temporary directory");
@@ -182,7 +182,7 @@ mod tests {
 
         db::create_node(
             &left,
-            "page".into(),
+            NodeKind::Page,
             Some("Left".into()),
             "offline left".into(),
             None,
@@ -191,7 +191,7 @@ mod tests {
         .expect("left edit");
         db::create_node(
             &right,
-            "page".into(),
+            NodeKind::Page,
             Some("Right".into()),
             "offline right".into(),
             None,
@@ -239,7 +239,7 @@ mod tests {
         let mut server = LoopbackServer::new();
         db::create_node(
             &connection,
-            "page".into(),
+            NodeKind::Page,
             Some("Before restart".into()),
             String::new(),
             None,
@@ -254,7 +254,7 @@ mod tests {
         assert_eq!(duplicate[0].seq, 1);
         db::create_node(
             &connection,
-            "page".into(),
+            NodeKind::Page,
             Some("After restart".into()),
             String::new(),
             None,
@@ -274,7 +274,7 @@ mod tests {
         let mut server = LoopbackServer::new();
         let page = db::create_node(
             &source,
-            "page".into(),
+            NodeKind::Page,
             Some("Snapshot".into()),
             String::new(),
             None,

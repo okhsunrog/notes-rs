@@ -43,11 +43,15 @@ export default defineConfig({
   },
 
   lint: {
-    ignorePatterns: ["dist/**", "src-tauri/**"],
+    ignorePatterns: ["dist/**", "src-tauri/**", "src/lib/bindings.ts"],
     options: {
       typeAware: true,
       typeCheck: true,
     },
+  },
+
+  fmt: {
+    ignorePatterns: ["dist/**", "src/lib/bindings.ts"],
   },
 
   test: {

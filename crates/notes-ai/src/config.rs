@@ -1,8 +1,87 @@
 //! Environment-backed AI configuration shared by desktop and server hosts.
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
 
 pub const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsupportedConfigValue {
+    setting: &'static str,
+    value: String,
+}
+
+impl fmt::Display for UnsupportedConfigValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "unsupported {}: {}", self.setting, self.value)
+    }
+}
+
+impl std::error::Error for UnsupportedConfigValue {}
+
+macro_rules! config_enum {
+    ($name:ident { $($variant:ident => [$primary:literal $(, $alias:literal)*]),+ $(,)? }) => {
+        #[derive(
+            Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, specta::Type,
+        )]
+        #[serde(rename_all = "lowercase")]
+        pub enum $name {
+            $($variant),+
+        }
+
+        impl $name {
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $primary),+
+                }
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str(self.as_str())
+            }
+        }
+
+        impl FromStr for $name {
+            type Err = UnsupportedConfigValue;
+
+            fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+                match value {
+                    $($primary $(| $alias)* => Ok(Self::$variant),)+
+                    _ => Err(UnsupportedConfigValue {
+                        setting: stringify!($name),
+                        value: value.to_owned(),
+                    }),
+                }
+            }
+        }
+    };
+}
+
+config_enum!(CompletionProtocol {
+    Openai => ["openai"],
+    Anthropic => ["anthropic"],
+});
+config_enum!(ExtractionProtocol {
+    Inherit => ["inherit"],
+    Openai => ["openai"],
+    Anthropic => ["anthropic"],
+});
+config_enum!(EmbeddingProvider {
+    Openrouter => ["openrouter"],
+    Openai => ["openai"],
+    Cohere => ["cohere"],
+    Voyageai => ["voyageai"],
+    Gemini => ["gemini"],
+    Local => ["local", "fastembed"],
+});
+config_enum!(RerankProvider {
+    Openrouter => ["openrouter"],
+    Local => ["local", "fastembed"],
+});
 
 pub fn validate_http_base_url(value: &str) -> Result<()> {
     let url = reqwest::Url::parse(value.trim()).context("base URL must be a valid URL")?;
@@ -62,19 +141,23 @@ pub fn extraction_model() -> String {
 }
 
 pub fn chat_completion_config() -> Result<llm_relay::ClientConfig> {
-    let protocol = std::env::var("CHAT_PROTOCOL").unwrap_or_else(|_| "openai".into());
+    let protocol = std::env::var("CHAT_PROTOCOL")
+        .unwrap_or_else(|_| "openai".into())
+        .parse::<CompletionProtocol>()?;
     let base_url = std::env::var("CHAT_BASE_URL")
         .ok()
         .or_else(|| std::env::var("OPENROUTER_BASE_URL").ok());
     let api_key = std::env::var("CHAT_API_KEY")
         .ok()
-        .or_else(|| legacy_openrouter_key(&protocol, base_url.as_deref()));
-    completion_config(&protocol, base_url, api_key, chat_model())
+        .or_else(|| legacy_openrouter_key(protocol, base_url.as_deref()));
+    completion_config(protocol, base_url, api_key, chat_model())
 }
 
 pub fn extraction_completion_config() -> Result<llm_relay::ClientConfig> {
-    let protocol = std::env::var("EXTRACT_PROTOCOL").unwrap_or_else(|_| "inherit".into());
-    if protocol == "inherit" {
+    let protocol = std::env::var("EXTRACT_PROTOCOL")
+        .unwrap_or_else(|_| "inherit".into())
+        .parse::<ExtractionProtocol>()?;
+    if protocol == ExtractionProtocol::Inherit {
         let mut config = chat_completion_config()?;
         config.model = extraction_model();
         return Ok(config);
@@ -83,12 +166,15 @@ pub fn extraction_completion_config() -> Result<llm_relay::ClientConfig> {
     let api_key = std::env::var("EXTRACT_API_KEY")
         .ok()
         .or_else(|| std::env::var("CHAT_API_KEY").ok())
-        .or_else(|| legacy_openrouter_key(&protocol, base_url.as_deref()));
-    completion_config(&protocol, base_url, api_key, extraction_model())
+        .or_else(|| legacy_openrouter_key(protocol.into(), base_url.as_deref()));
+    completion_config(protocol.into(), base_url, api_key, extraction_model())
 }
 
-pub fn legacy_openrouter_key(protocol: &str, base_url: Option<&str>) -> Option<String> {
-    if protocol != "openai" {
+pub fn legacy_openrouter_key(
+    protocol: CompletionProtocol,
+    base_url: Option<&str>,
+) -> Option<String> {
+    if protocol != CompletionProtocol::Openai {
         return None;
     }
     let host = base_url
@@ -102,14 +188,14 @@ pub fn legacy_openrouter_key(protocol: &str, base_url: Option<&str>) -> Option<S
 }
 
 pub fn completion_config(
-    protocol: &str,
+    protocol: CompletionProtocol,
     base_url: Option<String>,
     api_key: Option<String>,
     model: String,
 ) -> Result<llm_relay::ClientConfig> {
     let api_key = api_key.unwrap_or_default();
     match protocol {
-        "openai" => {
+        CompletionProtocol::Openai => {
             let base_url = base_url.unwrap_or_else(|| "https://api.openai.com/v1".into());
             let config = llm_relay::ClientConfig::openai_compatible(base_url, api_key, model);
             if config.api_key.is_empty() {
@@ -118,9 +204,20 @@ pub fn completion_config(
                 Ok(config)
             }
         }
-        "anthropic" => Ok(llm_relay::ClientConfig::anthropic(api_key, model)
+        CompletionProtocol::Anthropic => Ok(llm_relay::ClientConfig::anthropic(api_key, model)
             .base_url(base_url.unwrap_or_else(|| "https://api.anthropic.com".into()))),
-        other => bail!("unsupported completion protocol: {other}"),
+    }
+}
+
+impl From<ExtractionProtocol> for CompletionProtocol {
+    fn from(value: ExtractionProtocol) -> Self {
+        match value {
+            ExtractionProtocol::Openai => Self::Openai,
+            ExtractionProtocol::Anthropic => Self::Anthropic,
+            ExtractionProtocol::Inherit => {
+                unreachable!("inherit is resolved before selecting a completion transport")
+            }
+        }
     }
 }
 
@@ -153,7 +250,7 @@ mod tests {
     #[test]
     fn builds_protocol_neutral_completion_configs() {
         let openai = completion_config(
-            "openai",
+            CompletionProtocol::Openai,
             Some("http://localhost:11434/v1".into()),
             None,
             "qwen3".into(),
@@ -163,7 +260,7 @@ mod tests {
         assert_eq!(openai.auth_scheme, llm_relay::AuthScheme::None);
 
         let anthropic = completion_config(
-            "anthropic",
+            CompletionProtocol::Anthropic,
             Some("https://proxy.example/anthropic".into()),
             Some("secret".into()),
             "custom-claude".into(),

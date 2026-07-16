@@ -39,5 +39,9 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+      - name: Verify generated Tauri bindings
+        run: |
+          cargo run -p notes-rs --bin export-bindings -- src/lib/bindings.ts
+          git diff --exit-code -- src/lib/bindings.ts
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked

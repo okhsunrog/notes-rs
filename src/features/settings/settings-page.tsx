@@ -48,6 +48,8 @@ import {
   syncPush,
   type SettingsSnapshot,
   type BackgroundStatus,
+  type EmbeddingProvider,
+  type RerankProvider,
 } from "@/lib/api";
 
 type Props = {
@@ -635,8 +637,8 @@ export function SettingsPage({
               value={settings.embeddingProvider}
               disabled={settings.localOnly}
               onChange={(event) => {
-                const provider = event.currentTarget.value;
-                const defaults: Record<string, [string, string]> = {
+                const provider = event.currentTarget.value as EmbeddingProvider;
+                const defaults: Record<EmbeddingProvider, [string, string]> = {
                   openrouter: ["qwen/qwen3-embedding-8b", "4096"],
                   openai: ["text-embedding-3-small", "1536"],
                   cohere: ["embed-multilingual-v3.0", "1024"],
@@ -644,7 +646,7 @@ export function SettingsPage({
                   gemini: ["gemini-embedding-2", "3072"],
                   local: ["bge-m3", "1024"],
                 };
-                const [model, dimensions] = defaults[provider] ?? ["", ""];
+                const [model, dimensions] = defaults[provider];
                 setSettings((current) =>
                   current
                     ? {
@@ -708,7 +710,9 @@ export function SettingsPage({
             <select
               value={settings.rerankProvider}
               disabled={settings.localOnly}
-              onChange={(event) => update("rerankProvider", event.currentTarget.value)}
+              onChange={(event) =>
+                update("rerankProvider", event.currentTarget.value as RerankProvider)
+              }
               className="h-10 w-full rounded-xl border border-border/70 bg-background/70 px-3 text-sm shadow-none"
             >
               <option value="openrouter">OpenRouter</option>

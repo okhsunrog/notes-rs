@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "desktop:dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
+    "bindings:generate": "cargo run -p notes-rs --bin export-bindings -- src/lib/bindings.ts",
     "tauri": "tauri",
     "prepare": "vp config"
   },

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use notes_core::{Connection, db};
+use notes_core::{Connection, FailureKind, db};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
@@ -70,42 +70,42 @@ pub struct ExtractionResult {
 
 pub struct EntityExtractor;
 
-fn classify_failure(error: &anyhow::Error) -> (&'static str, bool) {
+fn classify_failure(error: &anyhow::Error) -> (FailureKind, bool) {
     if let Some(error) = error.downcast_ref::<llm_relay::LlmError>() {
         return match error {
             llm_relay::LlmError::ApiError { status, .. }
                 if matches!(*status, 408 | 429) || *status >= 500 =>
             {
-                ("transient", false)
+                (FailureKind::Transient, false)
             }
             llm_relay::LlmError::ApiError {
                 status: 401 | 403, ..
-            } => ("auth", true),
-            llm_relay::LlmError::ApiError { .. } => ("provider_request", true),
+            } => (FailureKind::Auth, true),
+            llm_relay::LlmError::ApiError { .. } => (FailureKind::ProviderRequest, true),
             llm_relay::LlmError::InvalidStructuredOutput { .. }
-            | llm_relay::LlmError::ParseResponse(_) => ("schema", false),
+            | llm_relay::LlmError::ParseResponse(_) => (FailureKind::Schema, false),
             llm_relay::LlmError::Config(_) | llm_relay::LlmError::ResponseTooLarge { .. } => {
-                ("configuration", true)
+                (FailureKind::Configuration, true)
             }
             llm_relay::LlmError::Request(request) => {
                 if request.is_timeout() || request.is_connect() {
-                    ("network", false)
+                    (FailureKind::Network, false)
                 } else if request
                     .status()
                     .is_some_and(|status| status.is_client_error())
                 {
-                    ("provider_request", true)
+                    (FailureKind::ProviderRequest, true)
                 } else {
-                    ("network", false)
+                    (FailureKind::Network, false)
                 }
             }
-            llm_relay::LlmError::Client(_) => ("configuration", true),
+            llm_relay::LlmError::Client(_) => (FailureKind::Configuration, true),
             llm_relay::LlmError::EmptyResponse
             | llm_relay::LlmError::Conversion(_)
-            | llm_relay::LlmError::Stream(_) => ("provider_response", false),
+            | llm_relay::LlmError::Stream(_) => (FailureKind::ProviderResponse, false),
         };
     }
-    ("configuration", true)
+    (FailureKind::Configuration, true)
 }
 
 impl Default for EntityExtractor {
@@ -191,7 +191,7 @@ async fn tick(
                             db::record_extraction_failure(
                                 conn,
                                 node_id,
-                                "apply",
+                                FailureKind::Apply,
                                 &e.to_string(),
                                 true,
                             )

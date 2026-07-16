@@ -1,87 +1,37 @@
-import { invoke } from "@tauri-apps/api/core";
-
-export type Node = {
-  id: number;
-  uuid: string;
-  kind: string;
-  title: string | null;
-  content: string;
-  content_json: string | null;
-  parent_id: number | null;
-  position: number | null;
-  created_at: number;
-  updated_at: number;
-};
-
-export type SearchHit = { node: Node; score: number };
-export type Edge = { src: number; dst: number; kind: string; weight: number; created_at: number };
-export type GraphSnapshot = { nodes: Node[]; edges: Edge[] };
-export type BackgroundStatus = {
-  paused: boolean;
-  embeddingsPending: number;
-  embeddingsFailed: number;
-  extractionsPending: number;
-  extractionsFailed: number;
-  failures: BackgroundFailure[];
-};
-export type BackgroundFailure = {
-  queue: "embedding" | "extraction";
-  nodeId: number;
-  nodeTitle: string | null;
-  retryCount: number;
-  lastAttempt: number | null;
-  failureKind: string;
-  lastError: string;
-  terminal: boolean;
-};
-export type Mode = "fts" | "vec" | "hybrid" | "agentic";
-export type StartupStatus =
-  | { state: "starting"; message: string }
-  | { state: "ready" }
-  | { state: "error"; message: string };
-
-export type SettingsSnapshot = {
-  localOnly: boolean;
-  entityExtractionEnabled: boolean;
-  queryRewritingEnabled: boolean;
-  chatModel: string;
-  chatProtocol: "openai" | "anthropic";
-  chatBaseUrl: string;
-  extractionModel: string;
-  extractionProtocol: "inherit" | "openai" | "anthropic";
-  extractionBaseUrl: string;
-  embeddingProvider: string;
-  embeddingModel: string;
-  embeddingNdims: string;
-  rerankProvider: string;
-  rerankModel: string;
-  openrouterBaseUrl: string;
-  openaiBaseUrl: string;
-  windowDecorationMode: "native" | "borderless" | "kde";
-  syncDirectory: string;
-  kdeDecorationsAvailable: boolean;
-  configuredKeys: string[];
-  localModelsAvailable: boolean;
-  configPath: string;
-};
-
-export type SettingsUpdate = Omit<
+import { commands } from "@/lib/bindings";
+import type {
+  BackgroundFailure,
+  BackgroundStatus,
+  BlockContent,
+  ChatEvent,
+  Edge,
+  EmbeddingProvider,
+  GraphSnapshot,
+  Node,
+  SearchHit,
+  RerankProvider,
   SettingsSnapshot,
-  "configuredKeys" | "localModelsAvailable" | "kdeDecorationsAvailable" | "configPath"
-> & {
-  apiKeys: Record<string, string>;
-  clearKeys: string[];
+  SettingsUpdate,
+  StartupStatus,
+} from "@/lib/bindings";
+
+export type {
+  BackgroundFailure,
+  BackgroundStatus,
+  BlockContent,
+  ChatEvent,
+  Edge,
+  EmbeddingProvider,
+  GraphSnapshot,
+  Node,
+  SearchHit,
+  RerankProvider,
+  SettingsSnapshot,
+  SettingsUpdate,
+  StartupStatus,
 };
 
-export type ChatEvent =
-  | { kind: "text_delta"; text: string }
-  | { kind: "reasoning"; text: string }
-  | { kind: "tool_start"; id: string; name: string; args: unknown }
-  | { kind: "tool_end"; id: string; result: string }
-  | { kind: "usage"; inputTokens: number; outputTokens: number; totalTokens: number }
-  | { kind: "cancelled" }
-  | { kind: "done"; text: string }
-  | { kind: "error"; message: string };
+export type Mode = "fts" | "vec" | "hybrid" | "agentic";
 
 export type ToolCallView = {
   id: string;
@@ -90,6 +40,7 @@ export type ToolCallView = {
   result?: string;
 };
 
+/** UI-only conversation state; the transport receives only role and text. */
 export type ChatTurn = {
   role: "user" | "assistant";
   text: string;
@@ -97,20 +48,13 @@ export type ChatTurn = {
   usage?: { inputTokens: number; outputTokens: number; totalTokens: number };
 };
 
-const SEARCH_CMD: Record<Mode, string> = {
-  fts: "search_fts",
-  vec: "search_vec",
-  hybrid: "search_hybrid",
-  agentic: "search_agentic",
-};
-
 export function createNode(args: {
-  kind: string;
+  kind: Node["kind"];
   title: string | null;
   content: string;
   contentJson: string | null;
 }) {
-  return invoke<Node>("create_node", args);
+  return commands.createNode(args.kind, args.title, args.content, args.contentJson);
 }
 
 export function updateNode(args: {
@@ -119,38 +63,16 @@ export function updateNode(args: {
   content: string;
   contentJson: string | null;
 }) {
-  return invoke<void>("update_node", args);
+  return commands.updateNode(args.id, args.title, args.content, args.contentJson);
 }
 
-export type BlockContent = {
-  content: string;
-  wikilinkTitles: string[];
-  blockUuids: string[];
-};
-
-export function updateBlockWithRefs(id: number, block: BlockContent) {
-  return invoke<[Node, number]>("update_block_with_refs", { id, block });
-}
-
-export function splitBlock(id: number, parts: BlockContent[]) {
-  return invoke<Node[]>("split_block", { id, parts });
-}
-
-export function isReady() {
-  return invoke<boolean>("is_ready");
-}
-
-export function getStartupStatus() {
-  return invoke<StartupStatus>("startup_status");
-}
-
-export function loadSettings() {
-  return invoke<SettingsSnapshot>("load_settings");
-}
-
-export function saveSettings(update: SettingsUpdate) {
-  return invoke<SettingsSnapshot>("save_settings", { update });
-}
+export const updateBlockWithRefs = (id: number, block: BlockContent) =>
+  commands.updateBlockWithRefs(id, block);
+export const splitBlock = (id: number, parts: BlockContent[]) => commands.splitBlock(id, parts);
+export const isReady = commands.isReady;
+export const getStartupStatus = commands.startupStatus;
+export const loadSettings = commands.loadSettings;
+export const saveSettings = commands.saveSettings;
 
 export function testCompletionProvider(request: {
   protocol: "openai" | "anthropic";
@@ -159,118 +81,41 @@ export function testCompletionProvider(request: {
   apiKey?: string;
   keyScope?: "chat" | "extraction";
 }) {
-  return invoke<{
-    capabilities: Array<{ name: string; ok: boolean; latencyMs: number; detail: string }>;
-  }>("test_completion_provider", { request });
+  return commands.testCompletionProvider({
+    ...request,
+    apiKey: request.apiKey ?? null,
+    keyScope: request.keyScope ?? null,
+  });
 }
 
-export function restartApp() {
-  return invoke<void>("restart_app");
-}
-
-export function getBackgroundStatus() {
-  return invoke<BackgroundStatus>("background_status");
-}
-
-export function setBackgroundPaused(paused: boolean) {
-  return invoke<void>("set_background_paused", { paused });
-}
-
-export function retryBackgroundJobs() {
-  return invoke<void>("retry_background_jobs");
-}
-
-export function clearBackgroundJobs() {
-  return invoke<void>("clear_background_jobs");
-}
-
-export function listEntities(limit = 30) {
-  return invoke<Node[]>("list_entities", { limit });
-}
-
-export function listPages(limit = 200) {
-  return invoke<Node[]>("list_pages", { limit });
-}
-
-export function createPage(title: string) {
-  return invoke<Node>("create_page", { title });
-}
-
-export function deletePage(id: number) {
-  return invoke<boolean>("delete_page", { id });
-}
-
-export function findBacklinks(id: number, kind: string | null = null) {
-  return invoke<Node[]>("find_backlinks", { id, kind });
-}
-
-export function getGraphSnapshot(focusId: number | null = null) {
-  return invoke<GraphSnapshot>("graph_snapshot", { focusId });
-}
-
-export function exportData() {
-  return invoke<string | null>("export_data");
-}
-
-export function importData() {
-  return invoke<string | null>("import_data");
-}
-
-export function createBackup() {
-  return invoke<string>("create_backup");
-}
-
-export function chooseSyncDirectory() {
-  return invoke<string | null>("choose_sync_directory");
-}
-
-export function syncPush() {
-  return invoke<string>("sync_push");
-}
-
-export function syncPull() {
-  return invoke<string>("sync_pull");
-}
-
-export function attachFile(parentId: number) {
-  return invoke<Node | null>("attach_file", { parentId });
-}
-
-export function listAttachments(parentId: number) {
-  return invoke<Node[]>("list_attachments", { parentId });
-}
-
-export function openAttachment(id: number) {
-  return invoke<void>("open_attachment", { id });
-}
-
-export function deleteAttachment(id: number) {
-  return invoke<boolean>("delete_attachment", { id });
-}
-
-export function getHistoryStatus() {
-  return invoke<[number, number]>("history_status");
-}
-
-export function undo() {
-  return invoke<boolean>("undo");
-}
-
-export function redo() {
-  return invoke<boolean>("redo");
-}
-
-export function getNode(id: number) {
-  return invoke<Node | null>("get_node", { id });
-}
-
-export function getContainingPage(id: number) {
-  return invoke<Node | null>("get_containing_page", { id });
-}
-
-export function listBlockChildren(parentId: number) {
-  return invoke<Node[]>("list_block_children", { parentId });
-}
+export const restartApp = commands.restartApp;
+export const getBackgroundStatus = commands.backgroundStatus;
+export const setBackgroundPaused = commands.setBackgroundPaused;
+export const retryBackgroundJobs = commands.retryBackgroundJobs;
+export const clearBackgroundJobs = commands.clearBackgroundJobs;
+export const listEntities = (limit = 30) => commands.listEntities(limit);
+export const listPages = (limit = 200) => commands.listPages(limit);
+export const createPage = commands.createPage;
+export const deletePage = commands.deletePage;
+export const findBacklinks = (id: number, kind: string | null = null) =>
+  commands.findBacklinks(id, kind);
+export const getGraphSnapshot = (focusId: number | null = null) => commands.graphSnapshot(focusId);
+export const exportData = commands.exportData;
+export const importData = commands.importData;
+export const createBackup = commands.createBackup;
+export const chooseSyncDirectory = commands.chooseSyncDirectory;
+export const syncPush = commands.syncPush;
+export const syncPull = commands.syncPull;
+export const attachFile = commands.attachFile;
+export const listAttachments = commands.listAttachments;
+export const openAttachment = commands.openAttachment;
+export const deleteAttachment = commands.deleteAttachment;
+export const getHistoryStatus = commands.historyStatus;
+export const undo = commands.undo;
+export const redo = commands.redo;
+export const getNode = commands.getNode;
+export const getContainingPage = commands.getContainingPage;
+export const listBlockChildren = commands.listBlockChildren;
 
 export function createBlock(args: {
   parentId: number | null;
@@ -278,7 +123,7 @@ export function createBlock(args: {
   content: string;
   contentJson: string | null;
 }) {
-  return invoke<Node>("create_block", args);
+  return commands.createBlock(args.parentId, args.position, args.content, args.contentJson);
 }
 
 export function moveBlock(args: {
@@ -286,47 +131,37 @@ export function moveBlock(args: {
   newParentId: number | null;
   newPosition: number | null;
 }) {
-  return invoke<Node>("move_block", args);
+  return commands.moveBlock(args.id, args.newParentId, args.newPosition);
 }
 
-export function reorderBlock(id: number, direction: "up" | "down") {
-  return invoke<Node>("reorder_block", { id, direction });
-}
+export const reorderBlock = (id: number, direction: "up" | "down") =>
+  commands.reorderBlock(id, direction);
+export const deleteBlock = commands.deleteBlock;
 
-export function deleteBlock(id: number) {
-  return invoke<boolean>("delete_block", { id });
-}
-
-/** Replace all outgoing ref edges from `blockId`. Returns count of broken
- * `((uuid))` refs that pointed at non-existent blocks. */
 export function replaceBlockRefs(args: {
   blockId: number;
   wikilinkTitles: string[];
   blockUuids: string[];
 }) {
-  return invoke<number>("replace_block_refs", args);
+  return commands.replaceBlockRefs(args.blockId, args.wikilinkTitles, args.blockUuids);
 }
 
-export function getOrCreatePageByTitle(title: string) {
-  return invoke<Node>("get_or_create_page_by_title", { title });
-}
-
-export function getPageByTitle(title: string) {
-  return invoke<Node | null>("get_page_by_title", { title });
-}
-
-export function getNodeByUuid(uuid: string) {
-  return invoke<Node | null>("get_node_by_uuid", { uuid });
-}
-
-export function searchPagesByTitle(query: string, limit = 8) {
-  return invoke<Node[]>("search_pages_by_title", { query, limit });
-}
-
-export function searchBlocksFts(query: string, limit = 8) {
-  return invoke<Node[]>("search_blocks_fts", { query, limit });
-}
+export const getOrCreatePageByTitle = commands.getOrCreatePageByTitle;
+export const getPageByTitle = commands.getPageByTitle;
+export const getNodeByUuid = commands.getNodeByUuid;
+export const searchPagesByTitle = (query: string, limit = 8) =>
+  commands.searchPagesByTitle(query, limit);
+export const searchBlocksFts = (query: string, limit = 8) => commands.searchBlocksFts(query, limit);
 
 export function search(mode: Mode, query: string, limit = 20) {
-  return invoke<SearchHit[]>(SEARCH_CMD[mode], { query, limit });
+  switch (mode) {
+    case "fts":
+      return commands.searchFts(query, limit);
+    case "vec":
+      return commands.searchVec(query, limit);
+    case "hybrid":
+      return commands.searchHybrid(query, limit);
+    case "agentic":
+      return commands.searchAgentic(query, limit);
+  }
 }

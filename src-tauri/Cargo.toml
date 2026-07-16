@@ -29,6 +29,12 @@ tauri-plugin-dialog = "2.7.1"
 tauri-plugin-mcp-bridge = "0.12.0"
 serde.workspace = true
 serde_json.workspace = true
+specta.workspace = true
+specta-typescript.workspace = true
+tauri-specta = { git = "https://github.com/specta-rs/tauri-specta", rev = "40a7b831b0493ac2be7bc7bfd55980d5a6802044", features = [
+  "typescript",
+  "derive",
+] }
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber = "0.3.23"

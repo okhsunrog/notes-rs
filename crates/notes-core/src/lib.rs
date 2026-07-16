@@ -2,11 +2,13 @@
 
 pub mod db;
 pub mod hlc;
+pub mod model;
 pub mod operation;
 pub mod sqlite;
 pub mod stem;
 
 pub use hlc::Hlc;
+pub use model::{BackgroundQueue, FailureKind, NodeKind, ReorderDirection};
 pub use operation::{
     ApplyOutcome, Op, OpKind, Origin, SnapshotAttachment, SnapshotEdge, SnapshotNode,
     SnapshotTombstone, SyncSnapshot, acknowledge_server_op, apply, apply_batch, apply_sequenced,

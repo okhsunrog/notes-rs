@@ -1,10 +1,15 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use tauri::{AppHandle, Manager};
 
 pub use notes_ai::config::DEFAULT_OPENROUTER_BASE_URL;
+pub use notes_ai::config::{
+    CompletionProtocol, EmbeddingProvider, ExtractionProtocol, RerankProvider,
+};
 
 const SECRET_KEYS: &[&str] = &[
     "CHAT_API_KEY",
@@ -16,26 +21,73 @@ const SECRET_KEYS: &[&str] = &[
     "GEMINI_API_KEY",
 ];
 
-#[derive(Debug, Clone, Serialize)]
+macro_rules! settings_enum {
+    ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
+        #[derive(
+            Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type,
+        )]
+        #[serde(rename_all = "lowercase")]
+        pub enum $name {
+            $($variant),+
+        }
+
+        impl $name {
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $value),+
+                }
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str(self.as_str())
+            }
+        }
+
+        impl FromStr for $name {
+            type Err = anyhow::Error;
+
+            fn from_str(value: &str) -> Result<Self> {
+                match value {
+                    $($value => Ok(Self::$variant),)+
+                    _ => bail!("unsupported {}: {value}", stringify!($name)),
+                }
+            }
+        }
+    };
+}
+
+settings_enum!(WindowDecorationMode {
+    Native => "native",
+    Borderless => "borderless",
+    Kde => "kde",
+});
+settings_enum!(ProviderKeyScope {
+    Chat => "chat",
+    Extraction => "extraction",
+});
+
+#[derive(Debug, Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsSnapshot {
     pub local_only: bool,
     pub entity_extraction_enabled: bool,
     pub query_rewriting_enabled: bool,
     pub chat_model: String,
-    pub chat_protocol: String,
+    pub chat_protocol: CompletionProtocol,
     pub chat_base_url: String,
     pub extraction_model: String,
-    pub extraction_protocol: String,
+    pub extraction_protocol: ExtractionProtocol,
     pub extraction_base_url: String,
-    pub embedding_provider: String,
+    pub embedding_provider: EmbeddingProvider,
     pub embedding_model: String,
     pub embedding_ndims: String,
-    pub rerank_provider: String,
+    pub rerank_provider: RerankProvider,
     pub rerank_model: String,
     pub openrouter_base_url: String,
     pub openai_base_url: String,
-    pub window_decoration_mode: String,
+    pub window_decoration_mode: WindowDecorationMode,
     pub sync_directory: String,
     pub kde_decorations_available: bool,
     pub configured_keys: Vec<String>,
@@ -43,26 +95,26 @@ pub struct SettingsSnapshot {
     pub config_path: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsUpdate {
     pub local_only: bool,
     pub entity_extraction_enabled: bool,
     pub query_rewriting_enabled: bool,
     pub chat_model: String,
-    pub chat_protocol: String,
+    pub chat_protocol: CompletionProtocol,
     pub chat_base_url: String,
     pub extraction_model: String,
-    pub extraction_protocol: String,
+    pub extraction_protocol: ExtractionProtocol,
     pub extraction_base_url: String,
-    pub embedding_provider: String,
+    pub embedding_provider: EmbeddingProvider,
     pub embedding_model: String,
     pub embedding_ndims: String,
-    pub rerank_provider: String,
+    pub rerank_provider: RerankProvider,
     pub rerank_model: String,
     pub openrouter_base_url: String,
     pub openai_base_url: String,
-    pub window_decoration_mode: String,
+    pub window_decoration_mode: WindowDecorationMode,
     pub sync_directory: String,
     #[serde(default)]
     pub api_keys: BTreeMap<String, String>,
@@ -103,18 +155,18 @@ pub fn load(app: &AppHandle) -> Result<SettingsSnapshot> {
         entity_extraction_enabled: value("ENTITY_EXTRACTION_ENABLED", "true") == "true",
         query_rewriting_enabled: value("QUERY_REWRITING_ENABLED", "true") == "true",
         chat_model: value("CHAT_MODEL", "deepseek/deepseek-v4-flash"),
-        chat_protocol: value("CHAT_PROTOCOL", "openai"),
+        chat_protocol: value("CHAT_PROTOCOL", "openai").parse()?,
         chat_base_url: value(
             "CHAT_BASE_URL",
             &value("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_BASE_URL),
         ),
         extraction_model: value("EXTRACT_MODEL", "deepseek/deepseek-v4-flash"),
-        extraction_protocol: value("EXTRACT_PROTOCOL", "inherit"),
+        extraction_protocol: value("EXTRACT_PROTOCOL", "inherit").parse()?,
         extraction_base_url: value("EXTRACT_BASE_URL", ""),
-        embedding_provider: value("EMBED_PROVIDER", "openrouter"),
+        embedding_provider: value("EMBED_PROVIDER", "openrouter").parse()?,
         embedding_model: value("EMBED_MODEL", "qwen/qwen3-embedding-8b"),
         embedding_ndims: value("EMBED_NDIMS", "4096"),
-        rerank_provider: value("RERANK_PROVIDER", "openrouter"),
+        rerank_provider: value("RERANK_PROVIDER", "openrouter").parse()?,
         rerank_model: value("RERANK_MODEL", "cohere/rerank-v3.5"),
         openrouter_base_url: value("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_BASE_URL),
         openai_base_url: value("OPENAI_BASE_URL", "https://api.openai.com/v1"),
@@ -127,7 +179,8 @@ pub fn load(app: &AppHandle) -> Result<SettingsSnapshot> {
                 } else {
                     "native".into()
                 }
-            }),
+            })
+            .parse()?,
         sync_directory: value("SYNC_DIRECTORY", ""),
         kde_decorations_available: cfg!(target_os = "linux")
             && std::env::var_os("WAYLAND_DISPLAY").is_some(),
@@ -151,15 +204,31 @@ pub fn save(app: &AppHandle, update: SettingsUpdate) -> Result<SettingsSnapshot>
         update.query_rewriting_enabled.to_string(),
     );
     set_or_remove(&mut values, "CHAT_MODEL", update.chat_model);
-    set_or_remove(&mut values, "CHAT_PROTOCOL", update.chat_protocol);
+    set_or_remove(
+        &mut values,
+        "CHAT_PROTOCOL",
+        update.chat_protocol.to_string(),
+    );
     set_or_remove(&mut values, "CHAT_BASE_URL", update.chat_base_url);
     set_or_remove(&mut values, "EXTRACT_MODEL", update.extraction_model);
-    set_or_remove(&mut values, "EXTRACT_PROTOCOL", update.extraction_protocol);
+    set_or_remove(
+        &mut values,
+        "EXTRACT_PROTOCOL",
+        update.extraction_protocol.to_string(),
+    );
     set_or_remove(&mut values, "EXTRACT_BASE_URL", update.extraction_base_url);
-    set_or_remove(&mut values, "EMBED_PROVIDER", update.embedding_provider);
+    set_or_remove(
+        &mut values,
+        "EMBED_PROVIDER",
+        update.embedding_provider.to_string(),
+    );
     set_or_remove(&mut values, "EMBED_MODEL", update.embedding_model);
     set_or_remove(&mut values, "EMBED_NDIMS", update.embedding_ndims);
-    set_or_remove(&mut values, "RERANK_PROVIDER", update.rerank_provider);
+    set_or_remove(
+        &mut values,
+        "RERANK_PROVIDER",
+        update.rerank_provider.to_string(),
+    );
     set_or_remove(&mut values, "RERANK_MODEL", update.rerank_model);
     set_or_remove(
         &mut values,
@@ -170,7 +239,7 @@ pub fn save(app: &AppHandle, update: SettingsUpdate) -> Result<SettingsSnapshot>
     values.remove("WINDOW_DECORATIONS");
     values.insert(
         "WINDOW_DECORATION_MODE".into(),
-        update.window_decoration_mode.clone(),
+        update.window_decoration_mode.to_string(),
     );
     set_or_remove(&mut values, "SYNC_DIRECTORY", update.sync_directory);
 
@@ -193,7 +262,7 @@ pub fn save(app: &AppHandle, update: SettingsUpdate) -> Result<SettingsSnapshot>
 pub fn apply_saved_window_preferences(app: &AppHandle) -> Result<()> {
     let settings = load(app)?;
     #[cfg(target_os = "linux")]
-    if settings.window_decoration_mode == "kde" {
+    if settings.window_decoration_mode == WindowDecorationMode::Kde {
         use gtk::prelude::GtkWindowExt;
         let window = app
             .get_webview_window("main")
@@ -208,10 +277,10 @@ pub fn apply_saved_window_preferences(app: &AppHandle) -> Result<()> {
     apply_window_decorations(app, &settings.window_decoration_mode)
 }
 
-fn apply_window_decorations(app: &AppHandle, mode: &str) -> Result<()> {
+fn apply_window_decorations(app: &AppHandle, mode: &WindowDecorationMode) -> Result<()> {
     app.get_webview_window("main")
         .context("main window is unavailable")?
-        .set_decorations(mode != "borderless")
+        .set_decorations(*mode != WindowDecorationMode::Borderless)
         .context("applying window decorations")
 }
 
@@ -226,10 +295,10 @@ pub fn prepare_linux_window_backend() -> Result<()> {
         .context("HOME and XDG_DATA_HOME are both unavailable")?;
     let path = data_home.join("dev.okhsunrog.notes-rs/.env");
     let values = read_env(&path)?;
-    if values
-        .get("WINDOW_DECORATION_MODE")
-        .is_some_and(|mode| mode == "kde")
-    {
+    if values.get("WINDOW_DECORATION_MODE").is_some_and(|mode| {
+        mode.parse::<WindowDecorationMode>()
+            .is_ok_and(|mode| mode == WindowDecorationMode::Kde)
+    }) {
         // SAFETY: main calls this before Tauri starts GTK or any threads.
         unsafe {
             std::env::set_var("GDK_BACKEND", "wayland");
@@ -240,32 +309,13 @@ pub fn prepare_linux_window_backend() -> Result<()> {
 }
 
 fn validate(update: &SettingsUpdate) -> Result<()> {
-    const EMBED_PROVIDERS: &[&str] = &[
-        "openrouter",
-        "openai",
-        "cohere",
-        "voyageai",
-        "gemini",
-        "local",
-    ];
-    if !EMBED_PROVIDERS.contains(&update.embedding_provider.as_str()) {
-        bail!("unsupported embedding provider");
-    }
-    if !matches!(update.rerank_provider.as_str(), "openrouter" | "local") {
-        bail!("unsupported rerank provider");
-    }
-    if !matches!(
-        update.window_decoration_mode.as_str(),
-        "native" | "borderless" | "kde"
-    ) {
-        bail!("unsupported window decoration mode");
-    }
-    if update.window_decoration_mode == "kde"
+    if update.window_decoration_mode == WindowDecorationMode::Kde
         && (!cfg!(target_os = "linux") || std::env::var_os("WAYLAND_DISPLAY").is_none())
     {
         bail!("KDE decorations require Linux and a native Wayland session");
     }
-    if (update.embedding_provider == "local" || update.rerank_provider == "local")
+    if (update.embedding_provider == EmbeddingProvider::Local
+        || update.rerank_provider == RerankProvider::Local)
         && !cfg!(feature = "local-models")
     {
         bail!("this build does not include the local-models feature");
@@ -274,7 +324,9 @@ fn validate(update: &SettingsUpdate) -> Result<()> {
         if !cfg!(feature = "local-models") {
             bail!("local-only mode requires a build with the local-models feature");
         }
-        if update.embedding_provider != "local" || update.rerank_provider != "local" {
+        if update.embedding_provider != EmbeddingProvider::Local
+            || update.rerank_provider != RerankProvider::Local
+        {
             bail!("local-only mode requires local embeddings and local reranking");
         }
         if update.entity_extraction_enabled {
@@ -286,17 +338,8 @@ fn validate(update: &SettingsUpdate) -> Result<()> {
     if update.chat_model.trim().is_empty() || update.extraction_model.trim().is_empty() {
         bail!("chat and extraction model IDs cannot be empty");
     }
-    if !matches!(update.chat_protocol.as_str(), "openai" | "anthropic") {
-        bail!("chat protocol must be openai or anthropic");
-    }
-    if !matches!(
-        update.extraction_protocol.as_str(),
-        "inherit" | "openai" | "anthropic"
-    ) {
-        bail!("extraction protocol must inherit chat, use openai, or use anthropic");
-    }
     notes_ai::config::validate_http_base_url(&update.chat_base_url)?;
-    if update.extraction_protocol != "inherit" {
+    if update.extraction_protocol != ExtractionProtocol::Inherit {
         notes_ai::config::validate_http_base_url(&update.extraction_base_url)?;
     }
     if !update.embedding_ndims.trim().is_empty() {
@@ -315,16 +358,15 @@ fn validate(update: &SettingsUpdate) -> Result<()> {
 }
 
 pub(crate) fn completion_config_for_probe(
-    protocol: &str,
+    protocol: CompletionProtocol,
     base_url: String,
     model: String,
     api_key: Option<String>,
-    key_scope: Option<&str>,
+    key_scope: Option<ProviderKeyScope>,
 ) -> Result<llm_relay::ClientConfig> {
     let configured_key = match key_scope {
-        Some("extraction") => std::env::var("EXTRACT_API_KEY").ok(),
-        Some("chat") | None => std::env::var("CHAT_API_KEY").ok(),
-        Some(other) => bail!("unsupported provider probe key scope: {other}"),
+        Some(ProviderKeyScope::Extraction) => std::env::var("EXTRACT_API_KEY").ok(),
+        Some(ProviderKeyScope::Chat) | None => std::env::var("CHAT_API_KEY").ok(),
     };
     let api_key = api_key
         .filter(|value| !value.trim().is_empty())

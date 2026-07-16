@@ -14,119 +14,10 @@ pub fn prepare_window_backend() {
     }
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .init();
-
-    let builder = tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init());
-
-    // Development-only bridge for MCP-powered UI inspection and automation.
-    // Restrict it to localhost; release builds do not register the plugin.
-    #[cfg(debug_assertions)]
-    let builder = builder.plugin(
-        tauri_plugin_mcp_bridge::Builder::new()
-            .bind_address("127.0.0.1")
-            .build(),
-    );
-
-    builder
-        .setup(|app| {
-            let handle = app.handle().clone();
-            let data_dir = app.path().app_data_dir().expect("resolving app data dir");
-            std::fs::create_dir_all(&data_dir).expect("creating data dir");
-
-            // Desktop launches don't inherit shell env. Load .env from the app
-            // data dir if present so API keys configured by the user survive
-            // double-click launches. Missing file is fine.
-            let env_path = data_dir.join(".env");
-            match dotenvy::from_path(&env_path) {
-                Ok(()) => tracing::info!(?env_path, "loaded .env"),
-                Err(dotenvy::Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => tracing::warn!(?env_path, error = %e, "failed to load .env"),
-            }
-            if let Err(error) = settings::apply_saved_window_preferences(&handle) {
-                tracing::warn!(%error, "failed to apply saved window preferences");
-            }
-
-            let db_path = data_dir.join("notes.db");
-
-            // Register the readiness flag immediately so the frontend can
-            // poll/listen instead of invoking commands that would otherwise
-            // fail with an opaque "state not managed" error during the
-            // (slow, first-run) embedder model download.
-            let startup = Arc::new(RwLock::new(commands::StartupStatus::Starting {
-                message: "Opening database and loading search providers…".into(),
-            }));
-            handle.manage(commands::Startup {
-                status: startup.clone(),
-            });
-
-            tauri::async_runtime::spawn(async move {
-                let initialize = async {
-                    let embedder = embed::make_embedder()?;
-                    let id = embedder.id();
-                    let ndims = embedder.ndims();
-                    tracing::info!(embedder = %id, ndims, "embedder loaded");
-                    let conn = db::open(&db_path, &id, ndims).await?;
-                    let reranker = embed::make_reranker()?;
-                    anyhow::Ok((conn, embedder, reranker))
-                };
-
-                match initialize.await {
-                    Ok((conn, embedder, reranker)) => {
-                        let background_paused = Arc::new(AtomicBool::new(false));
-                        embed::spawn_worker(
-                            conn.clone(),
-                            embedder.clone(),
-                            background_paused.clone(),
-                        );
-                        if notes_ai::config::entity_extraction_enabled() {
-                            let extractor = Arc::new(extract::EntityExtractor::new());
-                            let event_handle = handle.clone();
-                            extract::spawn_worker(
-                                conn.clone(),
-                                extractor,
-                                Arc::new(move || {
-                                    let _ = event_handle.emit("entities:changed", ());
-                                }),
-                                background_paused.clone(),
-                            );
-                        } else {
-                            tracing::info!("automatic entity extraction is disabled");
-                        }
-                        handle.manage(commands::AppState {
-                            conn,
-                            embedder,
-                            reranker,
-                            background_paused,
-                            chat_cancellations: Arc::new(std::sync::Mutex::new(
-                                std::collections::HashMap::new(),
-                            )),
-                        });
-                        *startup.write().unwrap_or_else(|e| e.into_inner()) =
-                            commands::StartupStatus::Ready;
-                        let _ = handle.emit("app:ready", ());
-                        tracing::info!(?db_path, "notes-rs ready");
-                    }
-                    Err(error) => {
-                        let message = format!("{error:#}");
-                        tracing::error!(%message, "notes-rs startup failed");
-                        *startup.write().unwrap_or_else(|e| e.into_inner()) =
-                            commands::StartupStatus::Error {
-                                message: message.clone(),
-                            };
-                        let _ = handle.emit("app:startup-error", message);
-                    }
-                }
-            });
-
-            Ok(())
-        })
-        .invoke_handler(tauri::generate_handler![
+fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
+    tauri_specta::Builder::<tauri::Wry>::new()
+        .error_handling(tauri_specta::ErrorHandlingMode::Throw)
+        .commands(tauri_specta::collect_commands![
             commands::is_ready,
             commands::startup_status,
             commands::load_settings,
@@ -184,6 +75,146 @@ pub fn run() {
             commands::search_pages_by_title,
             commands::search_blocks_fts,
         ])
+        .events(tauri_specta::collect_events![commands::DomainEventMessage])
+        .dangerously_cast_bigints_to_number()
+}
+
+pub fn export_bindings(path: impl AsRef<std::path::Path>) -> Result<(), String> {
+    specta_builder()
+        .export(
+            specta_typescript::Typescript::default()
+                .header("/* eslint-disable */\n// Generated by tauri-specta. Do not edit.\n"),
+            path,
+        )
+        .map_err(|error| error.to_string())
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
+
+    let specta_builder = specta_builder();
+
+    #[cfg(debug_assertions)]
+    export_bindings("../src/lib/bindings.ts").expect("exporting TypeScript bindings");
+
+    let invoke_handler = specta_builder.invoke_handler();
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init());
+
+    // Development-only bridge for MCP-powered UI inspection and automation.
+    // Restrict it to localhost; release builds do not register the plugin.
+    #[cfg(debug_assertions)]
+    let builder = builder.plugin(
+        tauri_plugin_mcp_bridge::Builder::new()
+            .bind_address("127.0.0.1")
+            .build(),
+    );
+
+    builder
+        .setup(move |app| {
+            specta_builder.mount_events(app);
+            let handle = app.handle().clone();
+            let data_dir = app.path().app_data_dir().expect("resolving app data dir");
+            std::fs::create_dir_all(&data_dir).expect("creating data dir");
+
+            // Desktop launches don't inherit shell env. Load .env from the app
+            // data dir if present so API keys configured by the user survive
+            // double-click launches. Missing file is fine.
+            let env_path = data_dir.join(".env");
+            match dotenvy::from_path(&env_path) {
+                Ok(()) => tracing::info!(?env_path, "loaded .env"),
+                Err(dotenvy::Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => tracing::warn!(?env_path, error = %e, "failed to load .env"),
+            }
+            if let Err(error) = settings::apply_saved_window_preferences(&handle) {
+                tracing::warn!(%error, "failed to apply saved window preferences");
+            }
+
+            let db_path = data_dir.join("notes.db");
+
+            // Register the readiness flag immediately so the frontend can
+            // poll/listen instead of invoking commands that would otherwise
+            // fail with an opaque "state not managed" error during the
+            // (slow, first-run) embedder model download.
+            let startup = Arc::new(RwLock::new(commands::StartupStatus::Starting {
+                message: "Opening database and loading search providers…".into(),
+            }));
+            handle.manage(commands::Startup {
+                status: startup.clone(),
+            });
+
+            tauri::async_runtime::spawn(async move {
+                let initialize = async {
+                    let embedder = embed::make_embedder()?;
+                    let id = embedder.id();
+                    let ndims = embedder.ndims();
+                    tracing::info!(embedder = %id, ndims, "embedder loaded");
+                    let conn = db::open(&db_path, &id, ndims).await?;
+                    let reranker = embed::make_reranker()?;
+                    anyhow::Ok((conn, embedder, reranker))
+                };
+
+                match initialize.await {
+                    Ok((conn, embedder, reranker)) => {
+                        let background_paused = Arc::new(AtomicBool::new(false));
+                        embed::spawn_worker(
+                            conn.clone(),
+                            embedder.clone(),
+                            background_paused.clone(),
+                        );
+                        if notes_ai::config::entity_extraction_enabled() {
+                            let extractor = Arc::new(extract::EntityExtractor::new());
+                            let event_handle = handle.clone();
+                            extract::spawn_worker(
+                                conn.clone(),
+                                extractor,
+                                Arc::new(move || {
+                                    let _ = event_handle.emit("entities:changed", ());
+                                    commands::emit_domain(
+                                        &event_handle,
+                                        commands::DomainEvent::GraphChanged {
+                                            node_ids: Vec::new(),
+                                        },
+                                    );
+                                }),
+                                background_paused.clone(),
+                            );
+                        } else {
+                            tracing::info!("automatic entity extraction is disabled");
+                        }
+                        handle.manage(commands::AppState {
+                            conn,
+                            embedder,
+                            reranker,
+                            background_paused,
+                            chat_cancellations: Arc::new(std::sync::Mutex::new(
+                                std::collections::HashMap::new(),
+                            )),
+                        });
+                        *startup.write().unwrap_or_else(|e| e.into_inner()) =
+                            commands::StartupStatus::Ready;
+                        let _ = handle.emit("app:ready", ());
+                        tracing::info!(?db_path, "notes-rs ready");
+                    }
+                    Err(error) => {
+                        let message = format!("{error:#}");
+                        tracing::error!(%message, "notes-rs startup failed");
+                        *startup.write().unwrap_or_else(|e| e.into_inner()) =
+                            commands::StartupStatus::Error {
+                                message: message.clone(),
+                            };
+                        let _ = handle.emit("app:startup-error", message);
+                    }
+                }
+            });
+
+            Ok(())
+        })
+        .invoke_handler(invoke_handler)
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

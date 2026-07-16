@@ -1,6 +1,6 @@
 //! Versioned, UUID-addressed source operations and the single apply boundary.
 
-use crate::{Connection, Hlc, db};
+use crate::{Connection, Hlc, NodeKind, db};
 use anyhow::{Context, Result, bail};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -40,7 +40,7 @@ pub enum OpKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NodeCreate {
     pub uuid: String,
-    pub node_kind: String,
+    pub node_kind: NodeKind,
     pub title: Option<String>,
     pub content: String,
     pub content_json: Option<String>,
@@ -123,7 +123,7 @@ pub struct SyncSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SnapshotNode {
     pub uuid: String,
-    pub kind: String,
+    pub kind: NodeKind,
     pub title: Option<String>,
     pub content: String,
     pub content_json: Option<String>,
@@ -467,7 +467,11 @@ pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> 
                 )?;
             }
         }
-        for node in snapshot.nodes.iter().filter(|node| node.kind == "block") {
+        for node in snapshot
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Block)
+        {
             let id = db::stable_node_id(&node.uuid)
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             let (wikilinks, block_refs) = parse_refs(&node.content);
@@ -647,9 +651,6 @@ fn validate(operation: &Op) -> Result<()> {
     match &operation.kind {
         OpKind::NodeCreate(payload) => {
             require_uuid(&payload.uuid)?;
-            if payload.node_kind.trim().is_empty() {
-                bail!("node_create requires uuid and node_kind");
-            }
         }
         OpKind::NodeSetContent(payload) => require_uuid(&payload.uuid)?,
         OpKind::NodeSetTitle(payload) => require_uuid(&payload.uuid)?,
@@ -735,12 +736,12 @@ fn apply_one(
                 ],
             )?;
             if changed > 0 {
-                let (kind, id): (String, i64) = transaction.query_row(
+                let (kind, id): (NodeKind, i64) = transaction.query_row(
                     "SELECT kind, id FROM nodes WHERE uuid = ?1",
                     [&payload.uuid],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )?;
-                if kind == "block" {
+                if kind == NodeKind::Block {
                     let (wikilinks, block_refs) = parse_refs(&payload.content);
                     db::replace_block_refs_tx_at(
                         transaction,
@@ -783,23 +784,27 @@ fn apply_one(
             Ok(vec![payload.uuid.clone()])
         }
         OpKind::NodeMove(payload) => {
-            let parent_id = resolve_parent(transaction, payload.parent_uuid.as_deref())?;
             let changed = transaction.execute(
-                "UPDATE nodes SET parent_id = ?2, position = ?3,
-                    structure_hlc = ?4, updated_at = ?5
-                 WHERE uuid = ?1 AND kind = 'block'
-                   AND (structure_hlc IS NULL OR structure_hlc < ?4)
-                   AND NOT EXISTS (SELECT 1 FROM tombstones WHERE uuid = ?1)",
+                "INSERT INTO node_structure_lww(node_uuid, parent_uuid, position, hlc)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(node_uuid) DO UPDATE SET
+                   parent_uuid = excluded.parent_uuid,
+                   position = excluded.position,
+                   hlc = excluded.hlc
+                 WHERE node_structure_lww.hlc < excluded.hlc",
                 rusqlite::params![
                     payload.uuid,
-                    parent_id,
+                    payload.parent_uuid,
                     payload.position,
                     operation.hlc,
-                    timestamp
                 ],
             )?;
             if changed > 0 {
-                repair_parent_cycle(transaction, &payload.uuid)?;
+                reconcile_node_structure(transaction)?;
+                transaction.execute(
+                    "UPDATE nodes SET updated_at = ?2 WHERE uuid = ?1",
+                    rusqlite::params![payload.uuid, timestamp],
+                )?;
             }
             Ok(vec![payload.uuid.clone()])
         }
@@ -856,6 +861,7 @@ fn apply_one(
                        root_uuid = COALESCE(excluded.root_uuid, tombstones.root_uuid)",
                     rusqlite::params![payload.uuid, operation.hlc, root_uuid],
                 )?;
+                reconcile_node_structure(transaction)?;
             }
             Ok(vec![payload.uuid.clone()])
         }
@@ -916,7 +922,7 @@ fn apply_node_create(
         payload.title.as_deref().unwrap_or(""),
         payload.content
     ));
-    if payload.node_kind == "page"
+    if payload.node_kind == NodeKind::Page
         && let Some(title) = payload.title.as_deref()
     {
         let stub_uuid = db::page_uuid(title);
@@ -962,7 +968,25 @@ fn apply_node_create(
             operation_timestamp(operation),
         ],
     )?;
-    if payload.node_kind == "block" {
+    if payload.node_kind == NodeKind::Block {
+        transaction.execute(
+            "INSERT INTO node_structure_lww(node_uuid, parent_uuid, position, hlc)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(node_uuid) DO UPDATE SET
+               parent_uuid = excluded.parent_uuid,
+               position = excluded.position,
+               hlc = excluded.hlc
+             WHERE node_structure_lww.hlc < excluded.hlc",
+            rusqlite::params![
+                payload.uuid,
+                payload.parent_uuid,
+                payload.position.unwrap_or_default(),
+                operation.hlc,
+            ],
+        )?;
+        reconcile_node_structure(transaction)?;
+    }
+    if payload.node_kind == NodeKind::Block {
         let id = transaction.query_row(
             "SELECT id FROM nodes WHERE uuid = ?1",
             [&payload.uuid],
@@ -1319,55 +1343,95 @@ fn containing_page_uuid(
         .optional()
 }
 
-fn repair_parent_cycle(
-    transaction: &rusqlite::Transaction<'_>,
-    moved_uuid: &str,
-) -> rusqlite::Result<()> {
-    let mut chain = Vec::<(i64, String, String)>::new();
-    let mut next = transaction
+fn reconcile_node_structure(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+    let intents = {
+        let mut statement = transaction.prepare(
+            "SELECT node_uuid, parent_uuid, position, hlc
+               FROM node_structure_lww ORDER BY node_uuid",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, f64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    // Re-materialize every winning intent first. Cycle breaking happens only
+    // in parent_id, so a later delivery can always reproduce the same graph.
+    for (node_uuid, parent_uuid, position, hlc) in &intents {
+        let parent_id = resolve_parent(transaction, parent_uuid.as_deref())?;
+        transaction.execute(
+            "UPDATE nodes SET parent_id = ?2, position = ?3, structure_hlc = ?4
+             WHERE uuid = ?1 AND kind = 'block'
+               AND NOT EXISTS (SELECT 1 FROM tombstones WHERE uuid = ?1)",
+            rusqlite::params![node_uuid, parent_id, position, hlc],
+        )?;
+    }
+
+    let root_id = transaction
         .query_row(
-            "SELECT id, uuid, COALESCE(structure_hlc, '') FROM nodes WHERE uuid = ?1",
-            [moved_uuid],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            "SELECT id FROM nodes WHERE kind = 'page' ORDER BY uuid LIMIT 1",
+            [],
+            |row| row.get::<_, i64>(0),
         )
         .optional()?;
-    while let Some((id, uuid, clock)) = next {
-        if let Some(start) = chain.iter().position(|(_, seen, _)| seen == &uuid) {
-            let cycle = &chain[start..];
-            let Some((break_id, _, _)) =
-                cycle
-                    .iter()
-                    .min_by(|(_, left_uuid, left_clock), (_, right_uuid, right_clock)| {
-                        (left_clock, left_uuid).cmp(&(right_clock, right_uuid))
-                    })
-            else {
-                return Ok(());
-            };
-            let root_id = transaction
-                .query_row(
-                    "SELECT id FROM nodes WHERE kind = 'page' ORDER BY uuid LIMIT 1",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()?;
-            transaction.execute(
-                "UPDATE nodes SET parent_id = ?2 WHERE id = ?1",
-                rusqlite::params![break_id, root_id],
+    loop {
+        let nodes = {
+            let mut statement = transaction.prepare(
+                "SELECT id, uuid, parent_id, COALESCE(structure_hlc, '')
+                   FROM nodes WHERE kind = 'block' ORDER BY uuid",
             )?;
-            return Ok(());
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let by_id = nodes
+            .iter()
+            .map(|node| (node.0, node))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut cycle_to_break = None;
+        for start in &nodes {
+            let mut chain = Vec::new();
+            let mut next = Some(start.0);
+            while let Some(id) = next {
+                if let Some(cycle_start) = chain.iter().position(|seen| *seen == id) {
+                    cycle_to_break = chain[cycle_start..]
+                        .iter()
+                        .filter_map(|id| by_id.get(id).copied())
+                        .min_by(|left, right| {
+                            (left.3.as_str(), left.1.as_str())
+                                .cmp(&(right.3.as_str(), right.1.as_str()))
+                        })
+                        .map(|node| node.0);
+                    break;
+                }
+                chain.push(id);
+                next = by_id.get(&id).and_then(|node| node.2);
+            }
+            if cycle_to_break.is_some() {
+                break;
+            }
         }
-        chain.push((id, uuid, clock));
-        next = transaction
-            .query_row(
-                "SELECT parent.id, parent.uuid, COALESCE(parent.structure_hlc, '')
-                   FROM nodes child JOIN nodes parent ON parent.id = child.parent_id
-                  WHERE child.id = ?1",
-                [id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?;
+        let Some(break_id) = cycle_to_break else {
+            return Ok(());
+        };
+        transaction.execute(
+            "UPDATE nodes SET parent_id = ?2 WHERE id = ?1",
+            rusqlite::params![break_id, root_id],
+        )?;
     }
-    Ok(())
 }
 
 fn reconcile_deferred_for_node(
@@ -1542,7 +1606,7 @@ mod tests {
             0,
             OpKind::NodeCreate(NodeCreate {
                 uuid: uuid.into(),
-                node_kind: kind.into(),
+                node_kind: kind.parse().expect("valid test node kind"),
                 title: title.map(str::to_owned),
                 content: String::new(),
                 content_json: None,
@@ -1600,7 +1664,7 @@ mod tests {
             &connection,
             vec![OpKind::NodeCreate(NodeCreate {
                 uuid: node_uuid,
-                node_kind: "page".into(),
+                node_kind: NodeKind::Page,
                 title: Some("Idempotent".into()),
                 content: String::new(),
                 content_json: None,
@@ -1655,7 +1719,7 @@ mod tests {
             &connection,
             vec![OpKind::NodeCreate(NodeCreate {
                 uuid: node_uuid.clone(),
-                node_kind: "page".into(),
+                node_kind: NodeKind::Page,
                 title: Some("LWW".into()),
                 content: "initial".into(),
                 content_json: None,
@@ -1715,7 +1779,7 @@ mod tests {
             vec![
                 OpKind::NodeCreate(NodeCreate {
                     uuid: node_uuid.clone(),
-                    node_kind: "page".into(),
+                    node_kind: NodeKind::Page,
                     title: Some("Deleted".into()),
                     content: String::new(),
                     content_json: None,
@@ -1771,7 +1835,7 @@ mod tests {
             &connection,
             vec![OpKind::NodeCreate(NodeCreate {
                 uuid: block_uuid.clone(),
-                node_kind: "block".into(),
+                node_kind: NodeKind::Block,
                 title: None,
                 content: "See [[Roadmap]]".into(),
                 content_json: None,
@@ -1797,7 +1861,7 @@ mod tests {
             &connection,
             vec![OpKind::NodeCreate(NodeCreate {
                 uuid: canonical_uuid.clone(),
-                node_kind: "page".into(),
+                node_kind: NodeKind::Page,
                 title: Some("Roadmap".into()),
                 content: String::new(),
                 content_json: None,
