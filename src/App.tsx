@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { Loader2, Redo2, Search, Settings, Undo2 } from "lucide-react";
+import { GitFork, Loader2, Redo2, Search, Settings, Undo2 } from "lucide-react";
 import { AppLayout } from "@/app/layout";
 import { WindowControls } from "@/app/window-controls";
 import { Toaster } from "@/components/ui/sonner";
 import { EntitiesCard } from "@/features/entities/entities-card";
-import { KnowledgePanel } from "@/features/graph/knowledge-panel";
+import { GraphWorkspace, KnowledgePanel } from "@/features/graph/knowledge-panel";
 import { HomeView } from "@/features/home/home-view";
 import { SearchCard } from "@/features/search/search-card";
 import { PagesList } from "@/features/pages/pages-list";
@@ -43,6 +43,7 @@ function App() {
   const creatingNoteRef = useRef(false);
   const [newNote, setNewNote] = useState<{ pageId: number; blockId: number | null } | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [graphOpen, setGraphOpen] = useState(false);
 
   const createNewNote = useCallback(async () => {
     if (creatingNoteRef.current) return;
@@ -69,6 +70,7 @@ function App() {
       }
       setNewNote({ pageId: page.id, blockId });
       setActiveNode(page);
+      setGraphOpen(false);
       setHits([]);
       setStatus("New note ready — name it, then press Enter to write.");
       window.dispatchEvent(new Event("notes-rs:show-main"));
@@ -186,6 +188,7 @@ function App() {
         return;
       }
       setActiveNode(page);
+      setGraphOpen(false);
       window.dispatchEvent(new Event("notes-rs:show-main"));
       if (page.id !== node.id) {
         setStatus(`Opened ${page.title ?? "page"} containing #${node.id}`);
@@ -268,6 +271,17 @@ function App() {
         headerActions={
           <>
             <Button
+              variant={graphOpen ? "secondary" : "ghost"}
+              size="sm"
+              aria-label={graphOpen ? "Close knowledge graph" : "Open knowledge graph"}
+              aria-pressed={graphOpen}
+              onClick={() => setGraphOpen((open) => !open)}
+              className="hidden h-8 gap-1.5 rounded-xl px-2.5 sm:flex"
+            >
+              <GitFork className="size-3.5" />
+              <span className="text-xs">Graph</span>
+            </Button>
+            <Button
               variant="ghost"
               size="sm"
               onClick={() => setSearchOpen(true)}
@@ -345,6 +359,15 @@ function App() {
           )
         }
         right={<KnowledgePanel node={activeNode} onOpenNode={openSearchResult} />}
+        fullWorkspace={
+          graphOpen ? (
+            <GraphWorkspace
+              node={activeNode}
+              onOpenNode={openSearchResult}
+              onClose={() => setGraphOpen(false)}
+            />
+          ) : undefined
+        }
       />
       <Dialog open={searchOpen} onOpenChange={setSearchOpen}>
         <DialogContent className="top-[18%] max-h-[70vh] max-w-2xl translate-y-0 overflow-y-auto rounded-2xl border-border/60 bg-background/95 p-3 shadow-2xl backdrop-blur-xl">

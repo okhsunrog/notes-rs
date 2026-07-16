@@ -8,9 +8,10 @@ type Props = {
   sidebar: ReactNode;
   center: ReactNode;
   right: ReactNode;
+  fullWorkspace?: ReactNode;
 };
 
-export function AppLayout({ status, headerActions, sidebar, center, right }: Props) {
+export function AppLayout({ status, headerActions, sidebar, center, right, fullWorkspace }: Props) {
   const [compact, setCompact] = useState(() => window.innerWidth < 1000);
   const [compactPanel, setCompactPanel] = useState<"notes" | "editor" | "assistant">("editor");
 
@@ -52,7 +53,11 @@ export function AppLayout({ status, headerActions, sidebar, center, right }: Pro
         <div className="flex items-center gap-1">{headerActions}</div>
       </header>
 
-      {compact ? (
+      {fullWorkspace ? (
+        <div className="workspace-frame mx-2 mb-2 min-h-0 flex-1 overflow-hidden rounded-2xl border shadow-xl shadow-black/5">
+          {fullWorkspace}
+        </div>
+      ) : compact ? (
         <div className="workspace-frame mx-2 mb-2 flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border shadow-xl shadow-black/5">
           <div className="min-h-0 flex-1 overflow-hidden">
             {compactPanel === "notes" && (
@@ -90,26 +95,25 @@ export function AppLayout({ status, headerActions, sidebar, center, right }: Pro
           </nav>
         </div>
       ) : (
-        <Group
-          orientation="horizontal"
-          className="workspace-frame mx-2 mb-2 flex-1 overflow-hidden rounded-2xl border shadow-xl shadow-black/5"
-        >
-          <Panel defaultSize="21%" minSize="16%" maxSize="30%">
-            <aside className="sidebar-surface h-full overflow-y-auto p-3">{sidebar}</aside>
-          </Panel>
+        <div className="workspace-frame mx-2 mb-2 min-h-0 flex-1 overflow-hidden rounded-2xl border shadow-xl shadow-black/5">
+          <Group orientation="horizontal" className="h-full min-h-0">
+            <Panel defaultSize="21%" minSize="16%" maxSize="30%">
+              <aside className="sidebar-surface h-full overflow-y-auto p-3">{sidebar}</aside>
+            </Panel>
 
-          <Separator className="group relative w-px bg-border/70 transition hover:bg-primary/40 after:absolute after:inset-y-0 after:-left-1 after:w-2" />
+            <Separator className="group relative w-px bg-border/70 transition hover:bg-primary/40 after:absolute after:inset-y-0 after:-left-1 after:w-2" />
 
-          <Panel defaultSize="56%" minSize="38%">
-            <main className="canvas-surface h-full overflow-y-auto">{center}</main>
-          </Panel>
+            <Panel defaultSize="56%" minSize="38%">
+              <main className="canvas-surface h-full overflow-y-auto">{center}</main>
+            </Panel>
 
-          <Separator className="group relative w-px bg-border/70 transition hover:bg-primary/40 after:absolute after:inset-y-0 after:-left-1 after:w-2" />
+            <Separator className="group relative w-px bg-border/70 transition hover:bg-primary/40 after:absolute after:inset-y-0 after:-left-1 after:w-2" />
 
-          <Panel defaultSize="23%" minSize="18%" maxSize="38%" collapsible>
-            <section className="inspector-surface h-full overflow-hidden p-3">{right}</section>
-          </Panel>
-        </Group>
+            <Panel defaultSize="23%" minSize="18%" maxSize="38%" collapsible>
+              <section className="inspector-surface h-full overflow-hidden p-3">{right}</section>
+            </Panel>
+          </Group>
+        </div>
       )}
     </div>
   );

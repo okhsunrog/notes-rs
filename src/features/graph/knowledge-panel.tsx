@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { GitFork, MessageCircle, RefreshCw, Sparkles } from "lucide-react";
+import { ArrowLeft, RefreshCw, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ChatCard } from "@/features/chat/chat-card";
 import { findBacklinks, getGraphSnapshot, type GraphSnapshot, type Node } from "@/lib/api";
@@ -9,8 +9,7 @@ type Props = {
   onOpenNode: (node: Node) => void | Promise<void>;
 };
 
-export function KnowledgePanel({ node, onOpenNode }: Props) {
-  const [tab, setTab] = useState<"chat" | "graph">("chat");
+export function KnowledgePanel({ node }: Props) {
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
       <div className="flex shrink-0 items-center gap-2 px-1 pt-1">
@@ -22,47 +21,14 @@ export function KnowledgePanel({ node, onOpenNode }: Props) {
           <p className="text-[10px] text-muted-foreground">Context-aware tools</p>
         </div>
       </div>
-      <div className="flex shrink-0 gap-1 rounded-xl bg-sidebar-accent p-1">
-        <TabButton active={tab === "chat"} onClick={() => setTab("chat")}>
-          <MessageCircle className="size-3.5" /> Chat
-        </TabButton>
-        <TabButton active={tab === "graph"} onClick={() => setTab("graph")}>
-          <GitFork className="size-3.5" /> Graph
-        </TabButton>
-      </div>
-      <div className={tab === "chat" ? "min-h-0 flex-1 pt-1" : "hidden"}>
+      <div className="min-h-0 flex-1 pt-1">
         <ChatCard node={node} />
       </div>
-      {tab === "graph" && (
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          <GraphContext node={node} onOpenNode={onOpenNode} />
-        </div>
-      )}
     </div>
   );
 }
 
-function TabButton({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium transition ${active ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
-    >
-      {children}
-    </button>
-  );
-}
-
-function GraphContext({ node, onOpenNode }: Props) {
+export function GraphWorkspace({ node, onOpenNode, onClose }: Props & { onClose: () => void }) {
   const [snapshot, setSnapshot] = useState<GraphSnapshot>({ nodes: [], edges: [] });
   const [backlinks, setBacklinks] = useState<Node[]>([]);
   const [error, setError] = useState("");
@@ -70,7 +36,7 @@ function GraphContext({ node, onOpenNode }: Props) {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([getGraphSnapshot(node?.id ?? null), node ? findBacklinks(node.id) : []])
+    Promise.all([getGraphSnapshot(null), node ? findBacklinks(node.id) : []])
       .then(([graph, incoming]) => {
         if (!cancelled) {
           setSnapshot(graph);
@@ -85,41 +51,64 @@ function GraphContext({ node, onOpenNode }: Props) {
   }, [node, version]);
 
   return (
-    <div className="space-y-5 py-2">
-      <div className="flex items-center justify-between">
+    <div className="graph-workspace flex h-full min-h-0 flex-col bg-canvas">
+      <div className="flex h-16 shrink-0 items-center gap-3 border-b border-border/60 px-5">
+        <Button variant="ghost" size="icon-sm" aria-label="Back to notes" onClick={onClose}>
+          <ArrowLeft className="size-4" />
+        </Button>
         <div>
-          <h2 className="text-sm font-semibold">Connections</h2>
+          <h2 className="text-sm font-semibold">Knowledge graph</h2>
           <p className="text-xs text-muted-foreground">
-            {node ? `Around #${node.id}` : "Recent pages and entities"}
+            {node ? `Focused around ${node.title ?? `node #${node.id}`}` : "All pages and entities"}
           </p>
         </div>
         <Button
+          className="ml-auto"
           variant="ghost"
           size="sm"
-          aria-label="Refresh graph"
           onClick={() => setVersion((value) => value + 1)}
         >
           <RefreshCw className="size-3.5" />
+          Refresh
         </Button>
       </div>
-      {error && <p className="text-xs text-destructive">{error}</p>}
-      <GraphView snapshot={snapshot} focusId={node?.id ?? null} onOpenNode={onOpenNode} />
-      <section>
-        <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          Backlinks
-        </h3>
-        {node === null ? (
-          <p className="text-xs text-muted-foreground">Select a page to inspect backlinks.</p>
-        ) : backlinks.length === 0 ? (
-          <p className="text-xs text-muted-foreground">No incoming links.</p>
-        ) : (
-          <ul className="space-y-1">
+      <div className="flex min-h-0 flex-1">
+        <div className="relative min-w-0 flex-1 overflow-hidden">
+          {error && (
+            <p className="absolute top-4 left-4 z-10 rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              {error}
+            </p>
+          )}
+          <GraphView snapshot={snapshot} focusId={node?.id ?? null} onOpenNode={onOpenNode} />
+          <div className="pointer-events-none absolute bottom-5 left-5 flex gap-3 rounded-xl border border-border/60 bg-card/80 px-3 py-2 text-[10px] text-muted-foreground shadow-sm backdrop-blur">
+            <span>
+              <i className="mr-1 inline-block size-2 rounded-full bg-sky-500" /> Page
+            </span>
+            <span>
+              <i className="mr-1 inline-block size-2 rounded-full bg-amber-500" /> Entity
+            </span>
+            <span>Click a node to open it</span>
+          </div>
+        </div>
+        <aside className="w-72 shrink-0 overflow-y-auto border-l border-border/60 bg-sidebar/65 p-4">
+          <h3 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+            Backlinks
+          </h3>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {node
+              ? `Incoming links to #${node.id}`
+              : "Open a note before entering the graph to inspect its backlinks."}
+          </p>
+          {node && backlinks.length === 0 && (
+            <p className="mt-4 text-xs text-muted-foreground">No incoming links.</p>
+          )}
+          <ul className="mt-4 space-y-2">
             {backlinks.map((backlink) => (
               <li key={backlink.id}>
                 <button
                   type="button"
                   onClick={() => void onOpenNode(backlink)}
-                  className="w-full rounded-xl border border-border/60 bg-card/50 px-2.5 py-2 text-left text-xs transition hover:border-primary/20 hover:bg-primary/5"
+                  className="w-full rounded-xl border border-border/60 bg-card/55 px-3 py-2.5 text-left text-xs transition hover:border-primary/25 hover:bg-primary/5"
                 >
                   <span className="font-medium">
                     {backlink.title ?? (backlink.content.slice(0, 48) || `#${backlink.id}`)}
@@ -129,8 +118,8 @@ function GraphContext({ node, onOpenNode }: Props) {
               </li>
             ))}
           </ul>
-        )}
-      </section>
+        </aside>
+      </div>
     </div>
   );
 }
@@ -148,23 +137,32 @@ function GraphView({
     const count = snapshot.nodes.length;
     return snapshot.nodes.map((node, index) => {
       const angle = count <= 1 ? 0 : (index / count) * Math.PI * 2 - Math.PI / 2;
-      const radius = count <= 1 ? 0 : 38;
-      return { node, x: 50 + Math.cos(angle) * radius, y: 50 + Math.sin(angle) * radius };
+      const radiusX = count <= 1 ? 0 : Math.min(430, 150 + count * 30);
+      const radiusY = count <= 1 ? 0 : Math.min(250, 90 + count * 18);
+      return {
+        node,
+        x: 600 + Math.cos(angle) * radiusX,
+        y: 350 + Math.sin(angle) * radiusY,
+      };
     });
   }, [snapshot.nodes]);
   const byId = new Map(positioned.map((item) => [item.node.id, item]));
-  if (positioned.length === 0)
+
+  if (positioned.length === 0) {
     return (
-      <div className="rounded-2xl border border-dashed border-border/70 p-7 text-center text-xs text-muted-foreground">
+      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
         Graph is empty.
       </div>
     );
+  }
+
   return (
     <svg
-      viewBox="0 0 100 100"
+      viewBox="0 0 1200 700"
+      preserveAspectRatio="xMidYMid meet"
       role="img"
       aria-label="Knowledge graph"
-      className="aspect-square w-full rounded-2xl border border-border/60 bg-card/40 shadow-inner"
+      className="h-full w-full bg-card/20"
     >
       {snapshot.edges.map((edge) => {
         const source = byId.get(edge.src);
@@ -177,7 +175,7 @@ function GraphView({
             x2={target.x}
             y2={target.y}
             className="stroke-border"
-            strokeWidth="0.8"
+            strokeWidth="2"
           >
             <title>{edge.kind}</title>
           </line>
@@ -193,12 +191,12 @@ function GraphView({
           onKeyDown={(event) => {
             if (event.key === "Enter" || event.key === " ") void onOpenNode(node);
           }}
-          className="cursor-pointer"
+          className="cursor-pointer outline-none"
         >
           <circle
             cx={x}
             cy={y}
-            r={node.id === focusId ? 5 : 3.7}
+            r={node.id === focusId ? 18 : 13}
             className={
               node.kind === "entity"
                 ? "fill-amber-500"
@@ -207,8 +205,13 @@ function GraphView({
                   : "fill-sky-500"
             }
           />
-          <text x={x} y={y + 7} textAnchor="middle" className="fill-foreground text-[3.2px]">
-            {(node.title ?? `#${node.id}`).slice(0, 16)}
+          <text
+            x={x}
+            y={y + 34}
+            textAnchor="middle"
+            className="fill-foreground text-[14px] font-medium"
+          >
+            {(node.title ?? `#${node.id}`).slice(0, 28)}
           </text>
         </g>
       ))}
