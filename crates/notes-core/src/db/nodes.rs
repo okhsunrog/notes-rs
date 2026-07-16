@@ -272,6 +272,30 @@ pub async fn get_node(conn: &Connection, id: i64) -> Result<Option<Node>> {
     Ok(node)
 }
 
+pub async fn node_uuids_for_ids(
+    conn: &Connection,
+    ids: impl IntoIterator<Item = i64>,
+) -> Result<Vec<uuid::Uuid>> {
+    let mut ids = ids.into_iter().collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.dedup();
+    conn.call(move |database| {
+        let mut uuids = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(uuid) = database
+                .query_row("SELECT uuid FROM nodes WHERE id = ?1", [id], |row| {
+                    row.get::<_, uuid::Uuid>(0)
+                })
+                .optional()?
+            {
+                uuids.push(uuid);
+            }
+        }
+        Ok(uuids)
+    })
+    .await
+}
+
 pub async fn get_containing_page(conn: &Connection, id: i64) -> Result<Option<Node>> {
     conn.call(move |database| -> rusqlite::Result<Option<Node>> {
         let sql = format!(

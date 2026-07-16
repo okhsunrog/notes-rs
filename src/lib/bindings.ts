@@ -182,7 +182,7 @@ export type CreatedNote = {
  *  Payloads carry affected IDs when a command can identify them; whole-workspace
  *  replacements (import/sync) deliberately request a full cache refresh.
  */
-export type DomainEvent = { kind: "node_changed"; node_ids: number[]; parent_ids: number[] } | { kind: "node_deleted"; node_ids: number[]; parent_ids: number[] } | { kind: "graph_changed"; node_ids: number[] } | { kind: "history_changed" } | { kind: "background_status_changed" } | { kind: "settings_changed" } | { kind: "workspace_changed" };
+export type DomainEvent = { kind: "node_changed"; node_uuids: string[]; parent_uuids: string[] } | { kind: "node_deleted"; node_uuids: string[]; parent_uuids: string[] } | { kind: "graph_changed"; node_uuids: string[] } | { kind: "history_changed" } | { kind: "background_status_changed" } | { kind: "settings_changed" } | { kind: "workspace_changed" };
 
 export type DomainEventMessage = DomainEvent;
 

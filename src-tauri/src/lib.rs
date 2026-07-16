@@ -179,7 +179,7 @@ pub fn run() {
                                     commands::emit_domain(
                                         &event_handle,
                                         commands::DomainEvent::GraphChanged {
-                                            node_ids: Vec::new(),
+                                            node_uuids: Vec::new(),
                                         },
                                     );
                                 }),

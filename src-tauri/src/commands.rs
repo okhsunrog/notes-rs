@@ -32,15 +32,15 @@ pub struct AppState {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DomainEvent {
     NodeChanged {
-        node_ids: Vec<i64>,
-        parent_ids: Vec<i64>,
+        node_uuids: Vec<uuid::Uuid>,
+        parent_uuids: Vec<uuid::Uuid>,
     },
     NodeDeleted {
-        node_ids: Vec<i64>,
-        parent_ids: Vec<i64>,
+        node_uuids: Vec<uuid::Uuid>,
+        parent_uuids: Vec<uuid::Uuid>,
     },
     GraphChanged {
-        node_ids: Vec<i64>,
+        node_uuids: Vec<uuid::Uuid>,
     },
     HistoryChanged,
     BackgroundStatusChanged,
@@ -56,6 +56,38 @@ pub(crate) fn emit_domain(app: &AppHandle, event: DomainEvent) {
     if let Err(error) = DomainEventMessage(event).emit(app) {
         tracing::warn!(%error, "failed to emit domain event");
     }
+}
+
+async fn node_uuids_for_ids(
+    connection: &Connection,
+    ids: impl IntoIterator<Item = i64>,
+) -> Vec<uuid::Uuid> {
+    match db::node_uuids_for_ids(connection, ids).await {
+        Ok(uuids) => uuids,
+        Err(error) => {
+            tracing::warn!(%error, "failed to resolve node UUIDs for domain event");
+            Vec::new()
+        }
+    }
+}
+
+async fn emit_nodes_changed(
+    app: &AppHandle,
+    connection: &Connection,
+    nodes: &[Node],
+    additional_parent_ids: impl IntoIterator<Item = i64>,
+) {
+    let parent_ids = nodes
+        .iter()
+        .filter_map(|node| node.parent_id)
+        .chain(additional_parent_ids);
+    emit_domain(
+        app,
+        DomainEvent::NodeChanged {
+            node_uuids: nodes.iter().map(|node| node.uuid).collect(),
+            parent_uuids: node_uuids_for_ids(connection, parent_ids).await,
+        },
+    );
 }
 
 #[derive(Debug, Serialize, specta::Type)]
@@ -363,13 +395,7 @@ pub async fn create_node(
     let node = db::create_node(&state.conn, kind, title, content, content_json)
         .await
         .map_err(err)?;
-    emit_domain(
-        &app,
-        DomainEvent::NodeChanged {
-            node_ids: vec![node.id],
-            parent_ids: node.parent_id.into_iter().collect(),
-        },
-    );
+    emit_nodes_changed(&app, &state.conn, std::slice::from_ref(&node), []).await;
     Ok(node)
 }
 
@@ -386,19 +412,11 @@ pub async fn update_node(
     db::update_node(&state.conn, id, title, content, content_json)
         .await
         .map_err(err)?;
-    let parent_ids = db::get_node(&state.conn, id)
+    let node = db::get_node(&state.conn, id)
         .await
         .map_err(err)?
-        .and_then(|node| node.parent_id)
-        .into_iter()
-        .collect();
-    emit_domain(
-        &app,
-        DomainEvent::NodeChanged {
-            node_ids: vec![id],
-            parent_ids,
-        },
-    );
+        .ok_or_else(|| "updated node disappeared".to_string())?;
+    emit_nodes_changed(&app, &state.conn, std::slice::from_ref(&node), []).await;
     let _ = app.emit("pages:changed", ());
     Ok(())
 }
@@ -414,13 +432,7 @@ pub async fn rename_page(
     let node = db::rename_page(&state.conn, uuid, title)
         .await
         .map_err(err)?;
-    emit_domain(
-        &app,
-        DomainEvent::NodeChanged {
-            node_ids: vec![node.id],
-            parent_ids: Vec::new(),
-        },
-    );
+    emit_nodes_changed(&app, &state.conn, std::slice::from_ref(&node), []).await;
     let _ = app.emit("pages:changed", ());
     Ok(node)
 }
@@ -435,13 +447,13 @@ pub async fn create_note(
         .await
         .map_err(err)?;
     let note = db::create_note(&state.conn).await.map_err(err)?;
-    emit_domain(
+    emit_nodes_changed(
         &app,
-        DomainEvent::NodeChanged {
-            node_ids: vec![note.page.id, note.initial_block.id],
-            parent_ids: vec![note.page.id],
-        },
-    );
+        &state.conn,
+        &[note.page.clone(), note.initial_block.clone()],
+        [],
+    )
+    .await;
     emit_domain(&app, DomainEvent::HistoryChanged);
     let _ = app.emit("pages:changed", ());
     Ok(note)
@@ -458,13 +470,7 @@ pub async fn update_block_with_refs(
     let result = db::update_block_with_refs(&state.conn, id, block)
         .await
         .map_err(err)?;
-    emit_domain(
-        &app,
-        DomainEvent::NodeChanged {
-            node_ids: vec![result.0.id],
-            parent_ids: result.0.parent_id.into_iter().collect(),
-        },
-    );
+    emit_nodes_changed(&app, &state.conn, std::slice::from_ref(&result.0), []).await;
     let _ = app.emit("pages:changed", ());
     Ok(result)
 }
@@ -481,13 +487,7 @@ pub async fn split_block(
         .await
         .map_err(err)?;
     let nodes = db::split_block(&state.conn, id, parts).await.map_err(err)?;
-    emit_domain(
-        &app,
-        DomainEvent::NodeChanged {
-            node_ids: nodes.iter().map(|node| node.id).collect(),
-            parent_ids: nodes.iter().filter_map(|node| node.parent_id).collect(),
-        },
-    );
+    emit_nodes_changed(&app, &state.conn, &nodes, []).await;
     emit_domain(&app, DomainEvent::HistoryChanged);
     let _ = app.emit("pages:changed", ());
     Ok(nodes)
@@ -509,7 +509,7 @@ pub async fn link_nodes(
     emit_domain(
         &app,
         DomainEvent::GraphChanged {
-            node_ids: vec![src, dst],
+            node_uuids: node_uuids_for_ids(&state.conn, [src, dst]).await,
         },
     );
     Ok(())
@@ -560,6 +560,12 @@ pub async fn delete_page(
     state: State<'_, AppState>,
     id: i64,
 ) -> Result<bool, String> {
+    let deleted_uuids = db::read_subtree(&state.conn, id, u32::MAX)
+        .await
+        .map_err(err)?
+        .into_iter()
+        .map(|node| node.uuid)
+        .collect::<Vec<_>>();
     db::checkpoint_history(&state.conn, "delete page")
         .await
         .map_err(err)?;
@@ -575,8 +581,8 @@ pub async fn delete_page(
         emit_domain(
             &app,
             DomainEvent::NodeDeleted {
-                node_ids: vec![id],
-                parent_ids: Vec::new(),
+                node_uuids: deleted_uuids,
+                parent_uuids: Vec::new(),
             },
         );
         emit_domain(&app, DomainEvent::HistoryChanged);
@@ -953,13 +959,7 @@ pub async fn create_block(
     let node = db::create_block(&state.conn, parent_id, position, content, content_json)
         .await
         .map_err(err)?;
-    emit_domain(
-        &app,
-        DomainEvent::NodeChanged {
-            node_ids: vec![node.id],
-            parent_ids: node.parent_id.into_iter().collect(),
-        },
-    );
+    emit_nodes_changed(&app, &state.conn, std::slice::from_ref(&node), []).await;
     emit_domain(&app, DomainEvent::HistoryChanged);
     Ok(node)
 }
@@ -983,13 +983,13 @@ pub async fn move_block(
     let node = db::move_block(&state.conn, id, new_parent_id, new_position)
         .await
         .map_err(err)?;
-    emit_domain(
+    emit_nodes_changed(
         &app,
-        DomainEvent::NodeChanged {
-            node_ids: vec![node.id],
-            parent_ids: old_parent_id.into_iter().chain(node.parent_id).collect(),
-        },
-    );
+        &state.conn,
+        std::slice::from_ref(&node),
+        old_parent_id,
+    )
+    .await;
     emit_domain(&app, DomainEvent::HistoryChanged);
     Ok(node)
 }
@@ -1008,13 +1008,7 @@ pub async fn reorder_block(
     let node = db::reorder_block(&state.conn, id, direction)
         .await
         .map_err(err)?;
-    emit_domain(
-        &app,
-        DomainEvent::NodeChanged {
-            node_ids: vec![node.id],
-            parent_ids: node.parent_id.into_iter().collect(),
-        },
-    );
+    emit_nodes_changed(&app, &state.conn, std::slice::from_ref(&node), []).await;
     emit_domain(&app, DomainEvent::HistoryChanged);
     Ok(node)
 }
@@ -1026,10 +1020,15 @@ pub async fn delete_block(
     state: State<'_, AppState>,
     id: i64,
 ) -> Result<bool, String> {
-    let parent_id = db::get_node(&state.conn, id)
+    let deleted_node = db::get_node(&state.conn, id)
         .await
         .map_err(err)?
-        .and_then(|node| node.parent_id);
+        .filter(|node| node.kind == NodeKind::Block);
+    let parent_uuids = node_uuids_for_ids(
+        &state.conn,
+        deleted_node.iter().filter_map(|node| node.parent_id),
+    )
+    .await;
     db::checkpoint_history(&state.conn, "delete block")
         .await
         .map_err(err)?;
@@ -1038,8 +1037,8 @@ pub async fn delete_block(
         emit_domain(
             &app,
             DomainEvent::NodeDeleted {
-                node_ids: vec![id],
-                parent_ids: parent_id.into_iter().collect(),
+                node_uuids: deleted_node.into_iter().map(|node| node.uuid).collect(),
+                parent_uuids,
             },
         );
         emit_domain(&app, DomainEvent::HistoryChanged);
@@ -1062,7 +1061,7 @@ pub async fn replace_block_refs(
     emit_domain(
         &app,
         DomainEvent::GraphChanged {
-            node_ids: vec![block_id],
+            node_uuids: node_uuids_for_ids(&state.conn, [block_id]).await,
         },
     );
     let _ = app.emit("pages:changed", ());
@@ -1097,13 +1096,7 @@ pub async fn get_or_create_page_by_title(
     let page = db::get_or_create_page_by_title(&state.conn, title)
         .await
         .map_err(err)?;
-    emit_domain(
-        &app,
-        DomainEvent::NodeChanged {
-            node_ids: vec![page.id],
-            parent_ids: Vec::new(),
-        },
-    );
+    emit_nodes_changed(&app, &state.conn, std::slice::from_ref(&page), []).await;
     let _ = app.emit("pages:changed", ());
     Ok(page)
 }
@@ -1131,13 +1124,7 @@ pub async fn create_page(
     )
     .await
     .map_err(err)?;
-    emit_domain(
-        &app,
-        DomainEvent::NodeChanged {
-            node_ids: vec![page.id],
-            parent_ids: Vec::new(),
-        },
-    );
+    emit_nodes_changed(&app, &state.conn, std::slice::from_ref(&page), []).await;
     emit_domain(&app, DomainEvent::HistoryChanged);
     let _ = app.emit("pages:changed", ());
     Ok(page)
