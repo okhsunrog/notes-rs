@@ -178,7 +178,7 @@ export function PageView({
       <div className="editor-body">
         <Outliner key={node.id} page={node} initialEditingId={focusBody ? initialBlockId : null} />
       </div>
-      <div className="mt-auto pt-16">
+      <div className="mt-16">
         <AttachmentsCard parentId={node.id} onStatus={onStatus} />
       </div>
     </article>

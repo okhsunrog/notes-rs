@@ -1,11 +1,9 @@
 import { useState } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
-import { Send, Wrench, CheckCircle2 } from "lucide-react";
+import { ArrowUp, CheckCircle2, Sparkles, Wrench } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Separator } from "@/components/ui/separator";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import type { ChatEvent, ChatTurn } from "@/lib/api";
 
 export function ChatCard() {
@@ -67,66 +65,98 @@ export function ChatCard() {
   }
 
   return (
-    <Card className="flex h-full flex-col">
-      <CardHeader>
-        <CardTitle>Chat</CardTitle>
-        <CardDescription>Agentic RAG over your notes. Tool calls stream live.</CardDescription>
-      </CardHeader>
-      <CardContent className="flex min-h-0 flex-1 flex-col space-y-3">
-        <ScrollArea className="min-h-0 flex-1 rounded-md border bg-card p-3">
-          {chatLog.length === 0 && (
-            <p className="text-sm italic text-muted-foreground">
-              Ask the agent something about your notes…
+    <div className="flex h-full min-h-0 flex-col">
+      <ScrollArea className="min-h-0 flex-1 px-1">
+        {chatLog.length === 0 && (
+          <div className="flex min-h-[24rem] flex-col items-center justify-center px-4 text-center">
+            <div className="mb-4 flex size-11 items-center justify-center rounded-2xl bg-primary/10 text-primary ring-1 ring-primary/15">
+              <Sparkles className="size-5" />
+            </div>
+            <p className="text-sm font-semibold">Ask your knowledge base</p>
+            <p className="mt-2 max-w-[16rem] text-xs leading-relaxed text-muted-foreground">
+              I can find connections, summarize ideas, and trace information across your notes.
             </p>
-          )}
-          <div className="space-y-4">
-            {chatLog.map((t, i) => (
-              <div key={i}>
-                <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                  {t.role}
-                </div>
-                {t.tools && t.tools.length > 0 && (
-                  <ul className="mb-2 space-y-1">
-                    {t.tools.map((tool, j) => (
-                      <li
-                        key={j}
-                        className="flex items-start gap-2 rounded-sm bg-muted px-2 py-1 text-xs"
-                      >
-                        {tool.result ? (
-                          <CheckCircle2 className="mt-0.5 size-3 shrink-0 text-emerald-500" />
-                        ) : (
-                          <Wrench className="mt-0.5 size-3 shrink-0 animate-pulse" />
-                        )}
-                        <span className="font-mono">
-                          {tool.name}(
-                          <span className="text-muted-foreground">{JSON.stringify(tool.args)}</span>
-                          )
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                <p className="whitespace-pre-wrap text-sm leading-relaxed">{t.text}</p>
-                {i < chatLog.length - 1 && <Separator className="mt-3" />}
-              </div>
-            ))}
-            {chatBusy && <p className="text-sm italic text-muted-foreground">thinking…</p>}
+            <div className="mt-5 flex w-full max-w-[17rem] flex-col gap-1.5">
+              {[
+                "What have I been thinking about?",
+                "Find related ideas",
+                "Summarize this note",
+              ].map((prompt) => (
+                <button
+                  key={prompt}
+                  type="button"
+                  onClick={() => setChatInput(prompt)}
+                  className="rounded-xl border border-border/60 bg-card/55 px-3 py-2 text-left text-[11px] text-muted-foreground transition hover:border-primary/25 hover:bg-primary/5 hover:text-foreground"
+                >
+                  {prompt}
+                </button>
+              ))}
+            </div>
           </div>
-        </ScrollArea>
+        )}
+        <div className="space-y-5 py-3">
+          {chatLog.map((t, i) => (
+            <div
+              key={i}
+              className={
+                t.role === "user"
+                  ? "ml-8 rounded-2xl rounded-br-md bg-primary px-3.5 py-2.5 text-primary-foreground shadow-sm"
+                  : "pr-2"
+              }
+            >
+              {t.role === "assistant" && (
+                <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold tracking-wide text-primary uppercase">
+                  <Sparkles className="size-3" /> notes assistant
+                </div>
+              )}
+              {t.tools && t.tools.length > 0 && (
+                <ul className="mb-2 space-y-1">
+                  {t.tools.map((tool, j) => (
+                    <li
+                      key={j}
+                      className="flex items-start gap-2 rounded-sm bg-muted px-2 py-1 text-xs"
+                    >
+                      {tool.result ? (
+                        <CheckCircle2 className="mt-0.5 size-3 shrink-0 text-emerald-500" />
+                      ) : (
+                        <Wrench className="mt-0.5 size-3 shrink-0 animate-pulse" />
+                      )}
+                      <span className="font-mono">
+                        {tool.name}(
+                        <span className="text-muted-foreground">{JSON.stringify(tool.args)}</span>)
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <p className="whitespace-pre-wrap text-[13px] leading-relaxed">{t.text}</p>
+            </div>
+          ))}
+          {chatBusy && <p className="text-sm italic text-muted-foreground">thinking…</p>}
+        </div>
+      </ScrollArea>
 
-        <form onSubmit={sendChat} className="flex gap-2">
-          <Input
-            placeholder="message"
-            value={chatInput}
-            onChange={(e) => setChatInput(e.currentTarget.value)}
-            disabled={chatBusy}
-            className="flex-1"
-          />
-          <Button type="submit" aria-label="Send message" disabled={chatBusy}>
-            <Send className="size-4" />
-          </Button>
-        </form>
-      </CardContent>
-    </Card>
+      <form
+        onSubmit={sendChat}
+        className="mt-2 flex gap-2 rounded-2xl border border-border/70 bg-card/75 p-1.5 shadow-sm focus-within:border-primary/30 focus-within:ring-3 focus-within:ring-primary/10"
+      >
+        <Input
+          placeholder="Ask about your notes…"
+          value={chatInput}
+          onChange={(e) => setChatInput(e.currentTarget.value)}
+          disabled={chatBusy}
+          className="h-9 flex-1 border-0 bg-transparent shadow-none focus-visible:ring-0"
+        />
+        <Button
+          type="submit"
+          size="icon-sm"
+          aria-label="Send message"
+          disabled={chatBusy}
+          className="size-9 rounded-xl"
+        >
+          <ArrowUp className="size-4" />
+        </Button>
+      </form>
+    </div>
   );
 }

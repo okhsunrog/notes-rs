@@ -420,10 +420,10 @@ export function BlockNode({ block, parent, depth }: Props) {
 
   return (
     <li className="flex flex-col">
-      <div className="group flex items-start gap-1 py-0.5">
+      <div className="group -mx-2 flex items-start gap-1 rounded-xl px-2 py-1 transition-colors hover:bg-primary/[0.035] focus-within:bg-primary/[0.04]">
         <button
           type="button"
-          className="mt-1.5 flex size-4 shrink-0 items-center justify-center text-muted-foreground/50 hover:text-foreground"
+          className="mt-1.5 flex size-4 shrink-0 items-center justify-center rounded text-muted-foreground/35 transition hover:bg-primary/10 hover:text-primary"
           onClick={toggleCollapsed}
           title={collapsed ? "expand" : "collapse"}
         >
@@ -494,7 +494,7 @@ export function BlockNode({ block, parent, depth }: Props) {
         </div>
       </div>
       {!collapsed && (
-        <div className="ml-5 border-l border-border/40 pl-2">
+        <div className="ml-[1.4rem] border-l border-primary/10 pl-3">
           <BlockChildren parent={block} depth={depth + 1} />
         </div>
       )}
@@ -522,6 +522,10 @@ function BlockBullet({ state }: { state: SaveState }) {
         ? "bg-amber-500/60"
         : state === "error"
           ? "bg-destructive"
-          : "bg-muted-foreground/70";
-  return <span className={`mt-2 size-1.5 shrink-0 rounded-full ${cls}`} />;
+          : "bg-primary/65";
+  return (
+    <span
+      className={`mt-[0.55rem] size-2 shrink-0 rounded-full ring-4 ring-transparent transition group-hover:ring-primary/8 ${cls}`}
+    />
+  );
 }

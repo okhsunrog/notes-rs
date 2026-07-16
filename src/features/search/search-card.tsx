@@ -13,7 +13,7 @@ import {
 import { search, type Mode, type Node, type SearchHit } from "@/lib/api";
 
 type Props = {
-  variant?: "card" | "inline";
+  variant?: "card" | "inline" | "dialog";
   hits: SearchHit[];
   setHits: React.Dispatch<React.SetStateAction<SearchHit[]>>;
   onOpenNode: (n: Node) => void | Promise<void>;
@@ -106,6 +106,13 @@ export function SearchCard({ variant = "card", hits, setHits, onOpenNode, onStat
       <Card className="gap-4 rounded-2xl border-border/60 bg-card/65 py-5 shadow-sm backdrop-blur [&_[data-slot=card-header]]:px-5 [&_[data-slot=card-content]]:px-5">
         {content}
       </Card>
+    );
+  }
+  if (variant === "dialog") {
+    return (
+      <div className="py-2 [&_[data-slot=card-header]]:px-3 [&_[data-slot=card-content]]:px-3">
+        {content}
+      </div>
     );
   }
   return <Card>{content}</Card>;

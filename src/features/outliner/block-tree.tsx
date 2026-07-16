@@ -66,10 +66,25 @@ export function BlockChildren({ parent, depth }: Props) {
   }
 
   return (
-    <ul className="flex flex-col">
-      {blocks.map((b) => (
-        <BlockNode key={b.id} block={b} parent={parent} depth={depth} />
-      ))}
-    </ul>
+    <>
+      <ul className="flex flex-col gap-0.5">
+        {blocks.map((b) => (
+          <BlockNode key={b.id} block={b} parent={parent} depth={depth} />
+        ))}
+      </ul>
+      {depth === 0 && (
+        <button
+          type="button"
+          onClick={() => void addBlock()}
+          className="group mt-3 flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-muted-foreground/55 transition hover:bg-primary/5 hover:text-primary"
+        >
+          <Plus className="size-3.5 transition group-hover:rotate-90" />
+          Add another block
+          <span className="ml-auto opacity-0 transition group-hover:opacity-70">
+            or press Enter
+          </span>
+        </button>
+      )}
+    </>
   );
 }

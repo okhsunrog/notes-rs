@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { GitFork, MessageCircle, RefreshCw } from "lucide-react";
+import { GitFork, MessageCircle, RefreshCw, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ChatCard } from "@/features/chat/chat-card";
 import { findBacklinks, getGraphSnapshot, type GraphSnapshot, type Node } from "@/lib/api";
@@ -12,8 +12,17 @@ type Props = {
 export function KnowledgePanel({ node, onOpenNode }: Props) {
   const [tab, setTab] = useState<"chat" | "graph">("chat");
   return (
-    <div className="flex h-full min-h-0 flex-col gap-2">
-      <div className="flex shrink-0 gap-1 rounded-md bg-muted p-1">
+    <div className="flex h-full min-h-0 flex-col gap-3">
+      <div className="flex shrink-0 items-center gap-2 px-1 pt-1">
+        <span className="flex size-7 items-center justify-center rounded-xl bg-primary/10 text-primary">
+          <Sparkles className="size-3.5" />
+        </span>
+        <div>
+          <p className="text-xs font-semibold">Knowledge companion</p>
+          <p className="text-[10px] text-muted-foreground">Context-aware tools</p>
+        </div>
+      </div>
+      <div className="flex shrink-0 gap-1 rounded-xl bg-sidebar-accent p-1">
         <TabButton active={tab === "chat"} onClick={() => setTab("chat")}>
           <MessageCircle className="size-3.5" /> Chat
         </TabButton>
@@ -21,7 +30,7 @@ export function KnowledgePanel({ node, onOpenNode }: Props) {
           <GitFork className="size-3.5" /> Graph
         </TabButton>
       </div>
-      <div className={tab === "chat" ? "min-h-0 flex-1" : "hidden"}>
+      <div className={tab === "chat" ? "min-h-0 flex-1 pt-1" : "hidden"}>
         <ChatCard />
       </div>
       {tab === "graph" && (
@@ -46,7 +55,7 @@ function TabButton({
     <button
       type="button"
       onClick={onClick}
-      className={`flex flex-1 items-center justify-center gap-1 rounded px-2 py-1 text-xs ${active ? "bg-background shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
+      className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium transition ${active ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
     >
       {children}
     </button>
@@ -76,10 +85,10 @@ function GraphContext({ node, onOpenNode }: Props) {
   }, [node, version]);
 
   return (
-    <div className="space-y-4 py-2">
+    <div className="space-y-5 py-2">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-sm font-semibold">Knowledge graph</h2>
+          <h2 className="text-sm font-semibold">Connections</h2>
           <p className="text-xs text-muted-foreground">
             {node ? `Around #${node.id}` : "Recent pages and entities"}
           </p>
@@ -110,7 +119,7 @@ function GraphContext({ node, onOpenNode }: Props) {
                 <button
                   type="button"
                   onClick={() => void onOpenNode(backlink)}
-                  className="w-full rounded border px-2 py-1.5 text-left text-xs hover:bg-accent"
+                  className="w-full rounded-xl border border-border/60 bg-card/50 px-2.5 py-2 text-left text-xs transition hover:border-primary/20 hover:bg-primary/5"
                 >
                   <span className="font-medium">
                     {backlink.title ?? (backlink.content.slice(0, 48) || `#${backlink.id}`)}
@@ -146,7 +155,7 @@ function GraphView({
   const byId = new Map(positioned.map((item) => [item.node.id, item]));
   if (positioned.length === 0)
     return (
-      <div className="rounded border border-dashed p-5 text-center text-xs text-muted-foreground">
+      <div className="rounded-2xl border border-dashed border-border/70 p-7 text-center text-xs text-muted-foreground">
         Graph is empty.
       </div>
     );
@@ -155,7 +164,7 @@ function GraphView({
       viewBox="0 0 100 100"
       role="img"
       aria-label="Knowledge graph"
-      className="aspect-square w-full rounded-md border bg-muted/20"
+      className="aspect-square w-full rounded-2xl border border-border/60 bg-card/40 shadow-inner"
     >
       {snapshot.edges.map((edge) => {
         const source = byId.get(edge.src);

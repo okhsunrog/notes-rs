@@ -31,12 +31,15 @@ export function EntitiesCard({ variant = "card" }: Props = {}) {
 
   if (variant === "compact") {
     return (
-      <div className="flex flex-col gap-2">
-        <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          Entities
+      <div className="flex flex-col gap-2 border-t border-border/50 pt-3">
+        <div className="flex items-center justify-between px-1 text-[11px] font-semibold tracking-wide text-muted-foreground">
+          <span>CONCEPTS</span>
+          {entities.length > 0 && <span>{entities.length}</span>}
         </div>
         {entities.length === 0 ? (
-          <p className="text-xs italic text-muted-foreground">no entities yet</p>
+          <p className="px-1 text-[11px] leading-relaxed text-muted-foreground">
+            Concepts appear as your notes are indexed.
+          </p>
         ) : (
           <div className="flex flex-wrap gap-1">
             {entities.map((e) => (

@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { Loader2, Redo2, Settings, Undo2 } from "lucide-react";
+import { Loader2, Redo2, Search, Settings, Undo2 } from "lucide-react";
 import { AppLayout } from "@/app/layout";
 import { WindowControls } from "@/app/window-controls";
 import { Toaster } from "@/components/ui/sonner";
 import { EntitiesCard } from "@/features/entities/entities-card";
 import { KnowledgePanel } from "@/features/graph/knowledge-panel";
 import { HomeView } from "@/features/home/home-view";
+import { SearchCard } from "@/features/search/search-card";
 import { PagesList } from "@/features/pages/pages-list";
 import { PageView } from "@/features/pages/page-view";
 import { SettingsPage } from "@/features/settings/settings-page";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import {
   getContainingPage,
   getHistoryStatus,
@@ -39,6 +41,7 @@ function App() {
   const [history, setHistory] = useState<[number, number]>([0, 0]);
   const [creatingNote, setCreatingNote] = useState(false);
   const [newNote, setNewNote] = useState<{ pageId: number; blockId: number | null } | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
 
   const createNewNote = useCallback(async () => {
     if (creatingNote) return;
@@ -126,6 +129,11 @@ function App() {
   useEffect(() => {
     if (!ready) return;
     const keydown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setSearchOpen(true);
+        return;
+      }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "n") {
         event.preventDefault();
         void createNewNote();
@@ -258,6 +266,16 @@ function App() {
             <Button
               variant="ghost"
               size="sm"
+              onClick={() => setSearchOpen(true)}
+              className="mr-2 hidden h-8 rounded-xl border border-border/60 bg-card/55 px-3 text-muted-foreground shadow-sm hover:bg-card sm:flex"
+            >
+              <Search className="size-3.5" />
+              <span className="text-xs">Search</span>
+              <kbd className="ml-3 rounded bg-muted px-1.5 py-0.5 text-[9px]">Ctrl K</kbd>
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
               aria-label="Undo structural change"
               disabled={history[0] === 0}
               onClick={() => void moveHistory("undo")}
@@ -324,6 +342,24 @@ function App() {
         }
         right={<KnowledgePanel node={activeNode} onOpenNode={openSearchResult} />}
       />
+      <Dialog open={searchOpen} onOpenChange={setSearchOpen}>
+        <DialogContent className="top-[18%] max-h-[70vh] max-w-2xl translate-y-0 overflow-y-auto rounded-2xl border-border/60 bg-background/95 p-3 shadow-2xl backdrop-blur-xl">
+          <div className="sr-only">
+            <DialogTitle>Search notes</DialogTitle>
+            <DialogDescription>Search all notes and blocks.</DialogDescription>
+          </div>
+          <SearchCard
+            variant="dialog"
+            hits={hits}
+            setHits={setHits}
+            onOpenNode={async (node) => {
+              await openSearchResult(node);
+              setSearchOpen(false);
+            }}
+            onStatus={setStatus}
+          />
+        </DialogContent>
+      </Dialog>
       <Toaster position="bottom-right" />
     </>
   );
