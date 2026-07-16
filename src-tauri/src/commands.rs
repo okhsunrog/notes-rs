@@ -458,13 +458,13 @@ pub async fn create_note(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn update_block_with_refs(
+pub async fn set_block_content(
     app: AppHandle,
     state: State<'_, AppState>,
-    id: i64,
+    uuid: uuid::Uuid,
     block: db::BlockContent,
 ) -> Result<(Node, u32), String> {
-    let result = db::update_block_with_refs(&state.conn, id, block)
+    let result = db::set_block_content(&state.conn, uuid, block)
         .await
         .map_err(err)?;
     emit_nodes_changed(&app, &state.conn, std::slice::from_ref(&result.0), []).await;
@@ -955,23 +955,19 @@ pub async fn create_block(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn move_block(
+pub async fn indent_block(
     app: AppHandle,
     state: State<'_, AppState>,
-    id: i64,
-    new_parent_id: Option<i64>,
-    new_position: Option<f64>,
+    uuid: uuid::Uuid,
 ) -> Result<Node, String> {
-    let old_parent_id = db::get_node(&state.conn, id)
+    let old_parent_id = db::get_node_by_uuid(&state.conn, uuid)
         .await
         .map_err(err)?
         .and_then(|node| node.parent_id);
-    db::checkpoint_history(&state.conn, "move block")
+    db::checkpoint_history(&state.conn, "indent block")
         .await
         .map_err(err)?;
-    let node = db::move_block(&state.conn, id, new_parent_id, new_position)
-        .await
-        .map_err(err)?;
+    let node = db::indent_block(&state.conn, uuid).await.map_err(err)?;
     emit_nodes_changed(
         &app,
         &state.conn,
@@ -985,21 +981,65 @@ pub async fn move_block(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn reorder_block(
+pub async fn outdent_block(
     app: AppHandle,
     state: State<'_, AppState>,
-    id: i64,
+    uuid: uuid::Uuid,
+) -> Result<Node, String> {
+    let old_parent_id = db::get_node_by_uuid(&state.conn, uuid)
+        .await
+        .map_err(err)?
+        .and_then(|node| node.parent_id);
+    db::checkpoint_history(&state.conn, "outdent block")
+        .await
+        .map_err(err)?;
+    let node = db::outdent_block(&state.conn, uuid).await.map_err(err)?;
+    emit_nodes_changed(
+        &app,
+        &state.conn,
+        std::slice::from_ref(&node),
+        old_parent_id,
+    )
+    .await;
+    emit_domain(&app, DomainEvent::HistoryChanged);
+    Ok(node)
+}
+
+async fn move_block_in_direction(
+    app: &AppHandle,
+    state: &AppState,
+    uuid: uuid::Uuid,
     direction: ReorderDirection,
 ) -> Result<Node, String> {
     db::checkpoint_history(&state.conn, "reorder block")
         .await
         .map_err(err)?;
-    let node = db::reorder_block(&state.conn, id, direction)
+    let node = db::move_block_in_direction(&state.conn, uuid, direction)
         .await
         .map_err(err)?;
-    emit_nodes_changed(&app, &state.conn, std::slice::from_ref(&node), []).await;
-    emit_domain(&app, DomainEvent::HistoryChanged);
+    emit_nodes_changed(app, &state.conn, std::slice::from_ref(&node), []).await;
+    emit_domain(app, DomainEvent::HistoryChanged);
     Ok(node)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn move_block_up(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    uuid: uuid::Uuid,
+) -> Result<Node, String> {
+    move_block_in_direction(&app, &state, uuid, ReorderDirection::Up).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn move_block_down(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    uuid: uuid::Uuid,
+) -> Result<Node, String> {
+    move_block_in_direction(&app, &state, uuid, ReorderDirection::Down).await
 }
 
 #[tauri::command]

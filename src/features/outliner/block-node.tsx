@@ -5,12 +5,14 @@ import { toast } from "sonner";
 import {
   createBlock,
   deleteBlock,
-  moveBlock,
-  reorderBlock,
+  indentBlock,
+  moveBlockDown,
+  moveBlockUp,
+  outdentBlock,
   searchBlocksFts,
   searchPagesByTitle,
   splitBlock,
-  updateBlockWithRefs,
+  setBlockContent,
   type BlockContent,
   type Node,
 } from "@/lib/api";
@@ -133,7 +135,7 @@ export function BlockNode({ block, parent, depth }: Props) {
     }
     setSaveState("saving");
     try {
-      const [updated] = await updateBlockWithRefs(current.id, blockContent(next));
+      const [updated] = await setBlockContent(current.uuid, blockContent(next));
       blockRef.current = updated;
       queryClient.setQueryData<Node[]>(queryKeys.children(parent.uuid), (rows = []) =>
         rows.map((row) => (row.uuid === updated.uuid ? updated : row)),
@@ -349,14 +351,8 @@ export function BlockNode({ block, parent, depth }: Props) {
 
   const onTab = async () => {
     await flush();
-    const prev = prevSibling(siblings(), block.id);
-    if (!prev) return;
     try {
-      const moved = await moveBlock({
-        id: block.id,
-        newParentId: prev.id,
-        newPosition: null,
-      });
+      const moved = await indentBlock(block.uuid);
       await invalidateChildren();
       store.setEditing(moved.id);
     } catch (e) {
@@ -366,16 +362,9 @@ export function BlockNode({ block, parent, depth }: Props) {
 
   const onShiftTab = async () => {
     if (parent.kind === "page") return;
-    const grandparentId = parent.parent_id;
-    if (grandparentId === null) return;
     await flush();
-    const newPos = (parent.position ?? 0) + 0.5;
     try {
-      const moved = await moveBlock({
-        id: block.id,
-        newParentId: grandparentId,
-        newPosition: newPos,
-      });
+      const moved = await outdentBlock(block.uuid);
       await invalidateChildren();
       store.setEditing(moved.id);
     } catch (e) {
@@ -400,7 +389,7 @@ export function BlockNode({ block, parent, depth }: Props) {
   const onReorder = async (direction: "up" | "down") => {
     await flush();
     try {
-      await reorderBlock(block.id, direction);
+      await (direction === "up" ? moveBlockUp(block.uuid) : moveBlockDown(block.uuid));
       await invalidateChildren(parent.uuid);
       store.setEditing(block.id);
     } catch (error) {

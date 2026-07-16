@@ -25,7 +25,7 @@ export const commands = {
 	updateNode: (id: number, title: string | null, content: string, contentJson: string | null) => __TAURI_INVOKE<null>("update_node", { id, title, content, contentJson }),
 	renamePage: (uuid: string, title: string | null) => __TAURI_INVOKE<Node>("rename_page", { uuid, title }),
 	createNote: () => __TAURI_INVOKE<CreatedNote>("create_note"),
-	updateBlockWithRefs: (id: number, block: BlockContent) => __TAURI_INVOKE<[Node, number]>("update_block_with_refs", { id, block }),
+	setBlockContent: (uuid: string, block: BlockContent) => __TAURI_INVOKE<[Node, number]>("set_block_content", { uuid, block }),
 	splitBlock: (id: number, parts: BlockContent[]) => __TAURI_INVOKE<Node[]>("split_block", { id, parts }),
 	linkNodes: (src: number, dst: number, kind: string, weight: number | null) => __TAURI_INVOKE<null>("link_nodes", { src, dst, kind, weight }),
 	getNode: (id: number) => __TAURI_INVOKE<{
@@ -91,8 +91,10 @@ export const commands = {
 	createPage: (title: string) => __TAURI_INVOKE<Node>("create_page", { title }),
 	listBlockChildren: (parentId: number) => __TAURI_INVOKE<Node[]>("list_block_children", { parentId }),
 	createBlock: (parentId: number | null, position: number | null, content: string, contentJson: string | null) => __TAURI_INVOKE<Node>("create_block", { parentId, position, content, contentJson }),
-	moveBlock: (id: number, newParentId: number | null, newPosition: number | null) => __TAURI_INVOKE<Node>("move_block", { id, newParentId, newPosition }),
-	reorderBlock: (id: number, direction: ReorderDirection) => __TAURI_INVOKE<Node>("reorder_block", { id, direction }),
+	indentBlock: (uuid: string) => __TAURI_INVOKE<Node>("indent_block", { uuid }),
+	outdentBlock: (uuid: string) => __TAURI_INVOKE<Node>("outdent_block", { uuid }),
+	moveBlockUp: (uuid: string) => __TAURI_INVOKE<Node>("move_block_up", { uuid }),
+	moveBlockDown: (uuid: string) => __TAURI_INVOKE<Node>("move_block_down", { uuid }),
 	deleteBlock: (id: number) => __TAURI_INVOKE<boolean>("delete_block", { id }),
 	replaceBlockRefs: (blockId: number, wikilinkTitles: string[], blockUuids: string[]) => __TAURI_INVOKE<number>("replace_block_refs", { blockId, wikilinkTitles, blockUuids }),
 	getOrCreatePageByTitle: (title: string) => __TAURI_INVOKE<Node>("get_or_create_page_by_title", { title }),
@@ -236,8 +238,6 @@ export type ProviderProbeRequest = {
 export type ProviderProbeResult = {
 	capabilities: CapabilityProbeResult[],
 };
-
-export type ReorderDirection = "up" | "down";
 
 export type RerankProvider = "openrouter" | "local";
 

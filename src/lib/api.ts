@@ -68,8 +68,8 @@ export function updateNode(args: {
   return commands.updateNode(args.id, args.title, args.content, args.contentJson);
 }
 
-export const updateBlockWithRefs = (id: number, block: BlockContent) =>
-  commands.updateBlockWithRefs(id, block);
+export const setBlockContent = (uuid: string, block: BlockContent) =>
+  commands.setBlockContent(uuid, block);
 export const renamePage = commands.renamePage;
 export const createNote = commands.createNote;
 export const splitBlock = (id: number, parts: BlockContent[]) => commands.splitBlock(id, parts);
@@ -130,16 +130,10 @@ export function createBlock(args: {
   return commands.createBlock(args.parentId, args.position, args.content, args.contentJson);
 }
 
-export function moveBlock(args: {
-  id: number;
-  newParentId: number | null;
-  newPosition: number | null;
-}) {
-  return commands.moveBlock(args.id, args.newParentId, args.newPosition);
-}
-
-export const reorderBlock = (id: number, direction: "up" | "down") =>
-  commands.reorderBlock(id, direction);
+export const indentBlock = commands.indentBlock;
+export const outdentBlock = commands.outdentBlock;
+export const moveBlockUp = commands.moveBlockUp;
+export const moveBlockDown = commands.moveBlockDown;
 export const deleteBlock = commands.deleteBlock;
 
 export function replaceBlockRefs(args: {

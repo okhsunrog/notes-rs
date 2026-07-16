@@ -166,6 +166,19 @@ pub async fn update_block_with_refs(
     Ok((updated, broken))
 }
 
+pub async fn set_block_content(
+    conn: &Connection,
+    uuid: uuid::Uuid,
+    block: BlockContent,
+) -> Result<(Node, u32)> {
+    let id = get_node_by_uuid(conn, uuid)
+        .await?
+        .filter(|node| node.kind == NodeKind::Block)
+        .context("block was not found")?
+        .id;
+    update_block_with_refs(conn, id, block).await
+}
+
 /// Split one block into ordered siblings as a single transaction. Sibling
 /// positions are normalized to wide integer gaps, preventing fractional
 /// indexing from converging after repeated inserts.

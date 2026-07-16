@@ -191,6 +191,65 @@ pub async fn reorder_block(
         .context("reordered block disappeared")
 }
 
+pub async fn indent_block(conn: &Connection, uuid: uuid::Uuid) -> Result<Node> {
+    let node = get_node_by_uuid(conn, uuid)
+        .await?
+        .filter(|node| node.kind == NodeKind::Block)
+        .context("block was not found")?;
+    let parent_id = node.parent_id.context("block has no parent")?;
+    let siblings = list_block_children(conn, parent_id).await?;
+    let index = siblings
+        .iter()
+        .position(|sibling| sibling.uuid == uuid)
+        .context("block is absent from its parent")?;
+    let Some(previous) = index.checked_sub(1).and_then(|index| siblings.get(index)) else {
+        return Ok(node);
+    };
+    move_block(conn, node.id, Some(previous.id), None).await
+}
+
+pub async fn outdent_block(conn: &Connection, uuid: uuid::Uuid) -> Result<Node> {
+    let node = get_node_by_uuid(conn, uuid)
+        .await?
+        .filter(|node| node.kind == NodeKind::Block)
+        .context("block was not found")?;
+    let parent = get_node(
+        conn,
+        node.parent_id
+            .context("block has no parent to outdent from")?,
+    )
+    .await?
+    .filter(|parent| parent.kind == NodeKind::Block)
+    .context("top-level blocks cannot be outdented")?;
+    let grandparent_id = parent.parent_id.context("parent block has no parent")?;
+    let siblings = list_block_children(conn, grandparent_id).await?;
+    let parent_index = siblings
+        .iter()
+        .position(|sibling| sibling.uuid == parent.uuid)
+        .context("parent is absent from its parent")?;
+    let parent_position = parent.position.unwrap_or(0.0);
+    let position = siblings
+        .get(parent_index + 1)
+        .and_then(|next| next.position)
+        .map_or(parent_position + 1024.0, |next| {
+            (parent_position + next) / 2.0
+        });
+    move_block(conn, node.id, Some(grandparent_id), Some(position)).await
+}
+
+pub async fn move_block_in_direction(
+    conn: &Connection,
+    uuid: uuid::Uuid,
+    direction: ReorderDirection,
+) -> Result<Node> {
+    let id = get_node_by_uuid(conn, uuid)
+        .await?
+        .filter(|node| node.kind == NodeKind::Block)
+        .context("block was not found")?
+        .id;
+    reorder_block(conn, id, direction).await
+}
+
 /// Delete a block. Refuses (returns `false`) if the block has children, so
 /// callers can show feedback instead of silently cascading. Returns `true` on
 /// successful delete.

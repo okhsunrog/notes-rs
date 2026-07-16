@@ -584,6 +584,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn uuid_block_intents_indent_outdent_and_reorder() {
+        let (_database, connection) = temporary_database().await;
+        let page = create_node(
+            &connection,
+            NodeKind::Page,
+            Some("Page".into()),
+            String::new(),
+            None,
+        )
+        .await
+        .expect("create page");
+        let first = create_block(&connection, Some(page.id), None, "first".into(), None)
+            .await
+            .expect("create first");
+        let second = create_block(&connection, Some(page.id), None, "second".into(), None)
+            .await
+            .expect("create second");
+        let third = create_block(&connection, Some(page.id), None, "third".into(), None)
+            .await
+            .expect("create third");
+
+        let indented = indent_block(&connection, second.uuid)
+            .await
+            .expect("indent by UUID");
+        assert_eq!(indented.parent_id, Some(first.id));
+
+        let outdented = outdent_block(&connection, second.uuid)
+            .await
+            .expect("outdent by UUID");
+        assert_eq!(outdented.parent_id, Some(page.id));
+
+        move_block_in_direction(&connection, third.uuid, ReorderDirection::Up)
+            .await
+            .expect("reorder by UUID");
+        let siblings = list_block_children(&connection, page.id)
+            .await
+            .expect("list siblings");
+        assert_eq!(siblings[0].uuid, first.uuid);
+        assert_eq!(siblings[1].uuid, third.uuid);
+        assert_eq!(siblings[2].uuid, second.uuid);
+    }
+
+    #[tokio::test]
     async fn archive_round_trip_restores_nodes_edges_and_hierarchy() {
         let (_database, connection) = temporary_database().await;
         let page = create_node(
