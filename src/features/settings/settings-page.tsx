@@ -55,7 +55,7 @@ import {
 
 type Props = {
   onBack: () => void;
-  onDecorationModeChanged: (mode: "native" | "borderless" | "kde") => void;
+  onDecorationModeChanged: (mode: "native" | "borderless") => void;
   dataAvailable: boolean;
   onDataChanged: () => void;
 };
@@ -603,7 +603,7 @@ export function SettingsPage({
 
         <SettingsSection
           title="Window"
-          description="Choose the native GTK frame, a borderless notes-rs frame, or KWin's server-side decoration on native Wayland."
+          description="Choose the native window frame or a borderless notes-rs frame."
         >
           <Field label="Decoration mode">
             <select
@@ -616,17 +616,13 @@ export function SettingsPage({
               }
               className="h-10 w-full rounded-xl border border-border/70 bg-background/70 px-3 text-sm shadow-none"
             >
-              <option value="native">Native Wayland (GTK header bar)</option>
+              <option value="native">Native (compositor decorations)</option>
               <option value="borderless">Borderless (notes-rs controls)</option>
-              <option value="kde" disabled={!settings.kdeDecorationsAvailable}>
-                KDE/KWin server decoration (native Wayland)
-                {settings.kdeDecorationsAvailable ? "" : " (Wayland unavailable)"}
-              </option>
             </select>
           </Field>
           <p className="text-xs text-muted-foreground">
-            Borderless applies immediately. Switching to or from KDE/KWin requires an app restart
-            because GTK negotiates its decoration strategy before creating the Wayland surface.
+            Both modes apply immediately. On KDE Plasma (Wayland) the native mode uses KWin&apos;s
+            server-side decorations.
           </p>
         </SettingsSection>
 

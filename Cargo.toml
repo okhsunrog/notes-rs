@@ -44,3 +44,10 @@ tokio = { version = "1.52.4", features = ["full"] }
 tracing = "0.1.44"
 uuid = { version = "1.24.0", features = ["v4", "v5", "v7", "serde"] }
 url = { version = "2.5.8", features = ["serde"] }
+
+# tao 0.35.3 unconditionally installs a CSD GtkHeaderBar on every Wayland
+# window, which prevents GTK from negotiating KWin server-side decorations.
+# Fixed upstream by tauri-apps/tao#1218 ("apply CSD only when necessary").
+# Drop this patch once a tao release after 0.35.3 ships.
+[patch.crates-io]
+tao = { git = "https://github.com/tauri-apps/tao", rev = "f7f8173dc85287b2a18aceb9c47533097b8c123f" }

@@ -59,6 +59,3 @@ local-models = ["notes-ai/local-models"]
 
 [dev-dependencies]
 tempfile.workspace = true
-
-[target.'cfg(target_os = "linux")'.dependencies]
-gtk = "0.18.2"

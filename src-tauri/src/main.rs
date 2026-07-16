@@ -2,7 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    #[cfg(target_os = "linux")]
-    notes_rs_lib::prepare_window_backend();
     notes_rs_lib::run()
 }

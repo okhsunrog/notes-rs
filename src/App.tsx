@@ -38,7 +38,7 @@ function App() {
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [activeNode, setActiveNode] = useState<Node | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [windowDecorationMode, setWindowDecorationMode] = useState<"native" | "borderless" | "kde">(
+  const [windowDecorationMode, setWindowDecorationMode] = useState<"native" | "borderless">(
     "native",
   );
   const [history, setHistory] = useState<[number, number]>([0, 0]);

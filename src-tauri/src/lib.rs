@@ -7,13 +7,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 use tauri::{Emitter, Manager};
 
-#[cfg(target_os = "linux")]
-pub fn prepare_window_backend() {
-    if let Err(error) = settings::prepare_linux_window_backend() {
-        eprintln!("notes-rs: could not prepare the saved window backend: {error:#}");
-    }
-}
-
 fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
     tauri_specta::Builder::<tauri::Wry>::new()
         .error_handling(tauri_specta::ErrorHandlingMode::Throw)

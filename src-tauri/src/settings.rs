@@ -51,7 +51,6 @@ macro_rules! settings_enum {
 settings_enum!(WindowDecorationMode {
     Native => "native",
     Borderless => "borderless",
-    Kde => "kde",
 });
 settings_enum!(ProviderKeyScope {
     Chat => "chat",
@@ -123,7 +122,6 @@ pub struct SettingsSnapshot {
     pub openai_base_url: url::Url,
     pub window_decoration_mode: WindowDecorationMode,
     pub sync_directory: Option<PathBuf>,
-    pub kde_decorations_available: bool,
     pub configured_keys: Vec<SecretKey>,
     pub local_models_available: bool,
     pub config_path: PathBuf,
@@ -215,7 +213,7 @@ pub fn load(app: &AppHandle) -> Result<SettingsSnapshot> {
         openai_base_url: value("OPENAI_BASE_URL", "https://api.openai.com/v1")
             .parse()
             .context("OPENAI_BASE_URL must be an absolute URL")?,
-        window_decoration_mode: values
+        window_decoration_mode: match values
             .get("WINDOW_DECORATION_MODE")
             .cloned()
             .unwrap_or_else(|| {
@@ -225,10 +223,15 @@ pub fn load(app: &AppHandle) -> Result<SettingsSnapshot> {
                     "native".into()
                 }
             })
-            .parse()?,
+            .as_str()
+        {
+            // Legacy mode: the patched tao no longer installs a CSD titlebar
+            // on decorated Wayland windows, so KWin server-side decorations
+            // are what "native" already produces.
+            "kde" => WindowDecorationMode::Native,
+            other => other.parse()?,
+        },
         sync_directory: non_empty(&value("SYNC_DIRECTORY", "")).map(PathBuf::from),
-        kde_decorations_available: cfg!(target_os = "linux")
-            && std::env::var_os("WAYLAND_DISPLAY").is_some(),
         configured_keys,
         local_models_available: cfg!(feature = "local-models"),
         config_path: path,
@@ -334,19 +337,6 @@ pub fn save(app: &AppHandle, update: SettingsUpdate) -> Result<SettingsSnapshot>
 
 pub fn apply_saved_window_preferences(app: &AppHandle) -> Result<()> {
     let settings = load(app)?;
-    #[cfg(target_os = "linux")]
-    if settings.window_decoration_mode == WindowDecorationMode::Kde {
-        use gtk::prelude::GtkWindowExt;
-        let window = app
-            .get_webview_window("main")
-            .context("main window is unavailable")?
-            .gtk_window()
-            .context("accessing the GTK window")?;
-        // Tao installs a custom GtkHeaderBar on every Wayland window. GTK
-        // always treats a custom titlebar as CSD, so remove it and let GTK's
-        // Wayland backend negotiate server decorations with KWin.
-        window.set_titlebar(None::<&gtk::Widget>);
-    }
     apply_window_decorations(app, &settings.window_decoration_mode)
 }
 
@@ -357,36 +347,7 @@ fn apply_window_decorations(app: &AppHandle, mode: &WindowDecorationMode) -> Res
         .context("applying window decorations")
 }
 
-/// Must run before Tauri initializes GTK. `GTK_CSD=0` makes undecorated GTK3
-/// windows ask the Wayland compositor to provide decorations. The custom
-/// titlebar installed by Tao is removed later in `apply_saved_window_preferences`.
-#[cfg(target_os = "linux")]
-pub fn prepare_linux_window_backend() -> Result<()> {
-    let data_home = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
-        .context("HOME and XDG_DATA_HOME are both unavailable")?;
-    let path = data_home.join("dev.okhsunrog.notes-rs/.env");
-    let values = read_env(&path)?;
-    if values.get("WINDOW_DECORATION_MODE").is_some_and(|mode| {
-        mode.parse::<WindowDecorationMode>()
-            .is_ok_and(|mode| mode == WindowDecorationMode::Kde)
-    }) {
-        // SAFETY: main calls this before Tauri starts GTK or any threads.
-        unsafe {
-            std::env::set_var("GDK_BACKEND", "wayland");
-            std::env::set_var("GTK_CSD", "0");
-        }
-    }
-    Ok(())
-}
-
 fn validate(update: &SettingsUpdate) -> Result<()> {
-    if update.window_decoration_mode == WindowDecorationMode::Kde
-        && (!cfg!(target_os = "linux") || std::env::var_os("WAYLAND_DISPLAY").is_none())
-    {
-        bail!("KDE decorations require Linux and a native Wayland session");
-    }
     if (update.embedding_provider == EmbeddingProvider::Local
         || update.rerank_provider == RerankProvider::Local)
         && !cfg!(feature = "local-models")

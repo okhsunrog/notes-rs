@@ -267,7 +267,6 @@ export type SettingsSnapshot = {
 	openaiBaseUrl: string,
 	windowDecorationMode: WindowDecorationMode,
 	syncDirectory: string | null,
-	kdeDecorationsAvailable: boolean,
 	configuredKeys: SecretKey[],
 	localModelsAvailable: boolean,
 	configPath: string,
@@ -298,7 +297,7 @@ export type SettingsUpdate = {
 
 export type StartupStatus = { state: "starting"; message: string } | { state: "ready" } | { state: "error"; message: string };
 
-export type WindowDecorationMode = "native" | "borderless" | "kde";
+export type WindowDecorationMode = "native" | "borderless";
 
 /* Tauri Specta runtime */
 type EventEmit<T> = [T] extends [null] ? () => Promise<void> : (payload: T) => Promise<void>;
