@@ -17,10 +17,8 @@ import {
   getHistoryStatus,
   getStartupStatus,
   loadSettings,
-  createBlock,
-  createPage,
+  createNote,
   deletePage,
-  listPages,
   redo,
   undo,
   type Node,
@@ -55,26 +53,9 @@ function App() {
     creatingNoteRef.current = true;
     setCreatingNote(true);
     try {
-      const pages = await listPages();
-      const titles = new Set(pages.map((page) => page.title));
-      let title = "Untitled note";
-      let suffix = 2;
-      while (titles.has(title)) title = `Untitled note ${suffix++}`;
-      const page = await createPage(title);
-      let blockId: number | null = null;
-      try {
-        const block = await createBlock({
-          parentId: page.id,
-          position: null,
-          content: "",
-          contentJson: null,
-        });
-        blockId = block.id;
-      } catch (error) {
-        setStatus(`Note created, but its first block failed: ${String(error)}`);
-      }
-      setNewNote({ pageId: page.id, blockId });
-      setActiveNode(page);
+      const note = await createNote();
+      setNewNote({ pageId: note.page.id, blockId: note.initialBlock.id });
+      setActiveNode(note.page);
       setGraphOpen(false);
       setHits([]);
       setStatus("New note ready — name it, then press Enter to write.");

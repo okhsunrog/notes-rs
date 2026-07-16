@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Outliner } from "@/features/outliner/outliner";
 import { AttachmentsCard } from "@/features/attachments/attachments-card";
-import { updateNode, type Node } from "@/lib/api";
+import { renamePage, type Node } from "@/lib/api";
 
 type Props = {
   node: Node;
@@ -45,6 +45,10 @@ export function PageView({
   onStatusRef.current = onStatus;
 
   const flush = useCallback(async () => {
+    if (timer.current) {
+      clearTimeout(timer.current);
+      timer.current = null;
+    }
     const current = nodeRef.current;
     const nextTitle = titleRef.current.trim() || null;
     if (nextTitle === (current.title ?? null)) {
@@ -53,17 +57,7 @@ export function PageView({
     }
     setSaveState("saving");
     try {
-      await updateNode({
-        id: current.id,
-        title: nextTitle,
-        content: current.content,
-        contentJson: current.content_json,
-      });
-      const updated: Node = {
-        ...current,
-        title: nextTitle,
-        updated_at: Math.floor(Date.now() / 1000),
-      };
+      const updated = await renamePage(current.uuid, nextTitle);
       nodeRef.current = updated;
       onSavedRef.current(updated);
       setSaveState("saved");

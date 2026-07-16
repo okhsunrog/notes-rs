@@ -41,20 +41,96 @@ pub async fn update_node(
     content: String,
     content_json: Option<String>,
 ) -> Result<()> {
-    let uuid = require_node_uuid(conn, id).await?;
+    let current = get_node(conn, id).await?.context("node not found")?;
+    let mut kinds = Vec::with_capacity(2);
+    if current.title != title {
+        kinds.push(OpKind::NodeSetTitle(NodeSetTitle {
+            uuid: current.uuid,
+            title,
+        }));
+    }
+    if current.content != content || current.content_json != content_json {
+        kinds.push(OpKind::NodeSetContent(NodeSetContent {
+            uuid: current.uuid,
+            content,
+            content_json,
+        }));
+    }
+    apply_local(conn, kinds).await?;
+    Ok(())
+}
+
+pub async fn rename_page(
+    conn: &Connection,
+    uuid: uuid::Uuid,
+    title: Option<String>,
+) -> Result<Node> {
+    let page = get_node_by_uuid(conn, uuid)
+        .await?
+        .filter(|node| node.kind == NodeKind::Page)
+        .context("page not found")?;
+    if page.title != title {
+        apply_local(
+            conn,
+            vec![OpKind::NodeSetTitle(NodeSetTitle { uuid, title })],
+        )
+        .await?;
+    }
+    get_node_by_uuid(conn, uuid)
+        .await?
+        .context("renamed page disappeared")
+}
+
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatedNote {
+    pub page: Node,
+    pub initial_block: Node,
+}
+
+/// Create the page and its first editable block in one operation batch. An
+/// untitled page uses NULL title identity, so concurrent note creation cannot
+/// collide on the case-insensitive page-title index.
+pub async fn create_note(conn: &Connection) -> Result<CreatedNote> {
+    let page_uuid = uuid::Uuid::now_v7();
+    let block_uuid = uuid::Uuid::now_v7();
+    let now = chrono::Utc::now().timestamp();
     apply_local(
         conn,
         vec![
-            OpKind::NodeSetTitle(NodeSetTitle { uuid, title }),
-            OpKind::NodeSetContent(NodeSetContent {
-                uuid,
-                content,
-                content_json,
+            OpKind::NodeCreate(NodeCreate {
+                uuid: page_uuid,
+                node_kind: NodeKind::Page,
+                title: None,
+                content: String::new(),
+                content_json: None,
+                parent_uuid: None,
+                position: None,
+                created_at: now,
+            }),
+            OpKind::NodeCreate(NodeCreate {
+                uuid: block_uuid,
+                node_kind: NodeKind::Block,
+                title: None,
+                content: String::new(),
+                content_json: None,
+                parent_uuid: Some(page_uuid),
+                position: Some(1024.0),
+                created_at: now,
             }),
         ],
     )
     .await?;
-    Ok(())
+    let page = get_node_by_uuid(conn, page_uuid)
+        .await?
+        .context("created page was not materialized")?;
+    let initial_block = get_node_by_uuid(conn, block_uuid)
+        .await?
+        .context("created initial block was not materialized")?;
+    Ok(CreatedNote {
+        page,
+        initial_block,
+    })
 }
 
 #[derive(Debug, Clone, Deserialize, specta::Type)]

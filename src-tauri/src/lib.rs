@@ -33,6 +33,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::redo,
             commands::create_node,
             commands::update_node,
+            commands::rename_page,
+            commands::create_note,
             commands::update_block_with_refs,
             commands::split_block,
             commands::link_nodes,

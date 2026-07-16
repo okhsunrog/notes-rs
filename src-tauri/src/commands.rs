@@ -405,6 +405,50 @@ pub async fn update_node(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn rename_page(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    uuid: uuid::Uuid,
+    title: Option<String>,
+) -> Result<Node, String> {
+    let node = db::rename_page(&state.conn, uuid, title)
+        .await
+        .map_err(err)?;
+    emit_domain(
+        &app,
+        DomainEvent::NodeChanged {
+            node_ids: vec![node.id],
+            parent_ids: Vec::new(),
+        },
+    );
+    let _ = app.emit("pages:changed", ());
+    Ok(node)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn create_note(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<db::CreatedNote, String> {
+    db::checkpoint_history(&state.conn, "create note")
+        .await
+        .map_err(err)?;
+    let note = db::create_note(&state.conn).await.map_err(err)?;
+    emit_domain(
+        &app,
+        DomainEvent::NodeChanged {
+            node_ids: vec![note.page.id, note.initial_block.id],
+            parent_ids: vec![note.page.id],
+        },
+    );
+    emit_domain(&app, DomainEvent::HistoryChanged);
+    let _ = app.emit("pages:changed", ());
+    Ok(note)
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn update_block_with_refs(
     app: AppHandle,
     state: State<'_, AppState>,

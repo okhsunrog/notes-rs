@@ -23,6 +23,8 @@ export const commands = {
 	redo: () => __TAURI_INVOKE<boolean>("redo"),
 	createNode: (kind: NodeKind, title: string | null, content: string, contentJson: string | null) => __TAURI_INVOKE<Node>("create_node", { kind, title, content, contentJson }),
 	updateNode: (id: number, title: string | null, content: string, contentJson: string | null) => __TAURI_INVOKE<null>("update_node", { id, title, content, contentJson }),
+	renamePage: (uuid: string, title: string | null) => __TAURI_INVOKE<Node>("rename_page", { uuid, title }),
+	createNote: () => __TAURI_INVOKE<CreatedNote>("create_note"),
 	updateBlockWithRefs: (id: number, block: BlockContent) => __TAURI_INVOKE<[Node, number]>("update_block_with_refs", { id, block }),
 	splitBlock: (id: number, parts: BlockContent[]) => __TAURI_INVOKE<Node[]>("split_block", { id, parts }),
 	linkNodes: (src: number, dst: number, kind: string, weight: number | null) => __TAURI_INVOKE<null>("link_nodes", { src, dst, kind, weight }),
@@ -169,6 +171,11 @@ export type ChatEvent = { kind: "text_delta"; text: string } | { kind: "reasonin
 export type ChatTurn = { role: "user"; text: string } | { role: "assistant"; text: string };
 
 export type CompletionProtocol = "openai" | "anthropic";
+
+export type CreatedNote = {
+	page: Node,
+	initialBlock: Node,
+};
 
 /**
  *  The single frontend invalidation stream for persisted Rust state.

@@ -714,6 +714,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn renaming_a_page_does_not_advance_its_content_clock() {
+        let (_database, connection) = temporary_database().await;
+        let page = create_node(
+            &connection,
+            NodeKind::Page,
+            Some("Before".into()),
+            "keep this content".into(),
+            None,
+        )
+        .await
+        .expect("create page");
+        let before: (Option<String>, Option<String>) = connection
+            .call({
+                let uuid = page.uuid;
+                move |database| {
+                    database.query_row(
+                        "SELECT title_hlc, content_hlc FROM nodes WHERE uuid = ?1",
+                        [uuid],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                }
+            })
+            .await
+            .expect("read clocks before rename");
+
+        let renamed = rename_page(&connection, page.uuid, Some("After".into()))
+            .await
+            .expect("rename page");
+        let after: (Option<String>, Option<String>) = connection
+            .call({
+                let uuid = page.uuid;
+                move |database| {
+                    database.query_row(
+                        "SELECT title_hlc, content_hlc FROM nodes WHERE uuid = ?1",
+                        [uuid],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                }
+            })
+            .await
+            .expect("read clocks after rename");
+
+        assert_eq!(renamed.title.as_deref(), Some("After"));
+        assert_eq!(renamed.content, "keep this content");
+        assert_ne!(after.0, before.0);
+        assert_eq!(after.1, before.1);
+    }
+
+    #[tokio::test]
+    async fn create_note_materializes_page_and_initial_block_together() {
+        let (_database, connection) = temporary_database().await;
+        let note = create_note(&connection).await.expect("create note");
+
+        assert_eq!(note.page.kind, NodeKind::Page);
+        assert_eq!(note.page.title, None);
+        assert_eq!(note.initial_block.kind, NodeKind::Block);
+        assert_eq!(note.initial_block.parent_id, Some(note.page.id));
+        let children = list_block_children(&connection, note.page.id)
+            .await
+            .expect("list initial blocks");
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].uuid, note.initial_block.uuid);
+    }
+
+    #[tokio::test]
     async fn attachments_follow_their_page_into_deletion() {
         let (_database, connection) = temporary_database().await;
         let page = create_node(

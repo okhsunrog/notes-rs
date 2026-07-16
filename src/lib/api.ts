@@ -70,6 +70,8 @@ export function updateNode(args: {
 
 export const updateBlockWithRefs = (id: number, block: BlockContent) =>
   commands.updateBlockWithRefs(id, block);
+export const renamePage = commands.renamePage;
+export const createNote = commands.createNote;
 export const splitBlock = (id: number, parts: BlockContent[]) => commands.splitBlock(id, parts);
 export const isReady = commands.isReady;
 export const getStartupStatus = commands.startupStatus;
