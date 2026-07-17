@@ -69,7 +69,7 @@ pub struct ExtractionResult {
 }
 
 pub struct EntityExtractor {
-    config: Option<llm_relay::ClientConfig>,
+    config: llm_relay::ClientConfig,
 }
 
 fn classify_failure(error: &anyhow::Error) -> (FailureKind, bool) {
@@ -110,30 +110,13 @@ fn classify_failure(error: &anyhow::Error) -> (FailureKind, bool) {
     (FailureKind::Configuration, true)
 }
 
-impl Default for EntityExtractor {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl EntityExtractor {
-    pub fn new() -> Self {
-        Self { config: None }
-    }
-
-    pub fn with_config(config: llm_relay::ClientConfig) -> Self {
-        Self {
-            config: Some(config),
-        }
+    pub fn new(config: llm_relay::ClientConfig) -> Self {
+        Self { config }
     }
 
     pub async fn extract(&self, text: String) -> Result<ExtractionResult> {
-        let config = self
-            .config
-            .clone()
-            .map(Ok)
-            .unwrap_or_else(crate::config::extraction_completion_config)?
-            .max_tokens(2_048);
+        let config = self.config.clone().max_tokens(2_048);
         let client = llm_relay::LlmClient::new(config)?;
         let response = client
             .complete_structured::<ExtractionResult>(&text, "entity_extraction", Some(PREAMBLE))

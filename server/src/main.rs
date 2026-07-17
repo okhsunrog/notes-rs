@@ -12,13 +12,11 @@ struct Arguments {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
     let arguments = Arguments::parse();
     let config = notes_server::ServerConfig::load(&arguments.config)?;
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_new(&config.log_filter)?)
+        .init();
     let state = notes_server::build_state(&config).await?;
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await

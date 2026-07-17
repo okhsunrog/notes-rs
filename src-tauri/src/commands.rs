@@ -158,6 +158,8 @@ pub struct AppState {
     pub embedder: Option<Arc<dyn EmbedderBackend>>,
     pub reranker: Option<Arc<dyn RerankBackend>>,
     pub remote_ai: Option<notes_sync::HttpTransport>,
+    pub chat_config: Option<llm_relay::ClientConfig>,
+    pub query_rewriting_enabled: bool,
     pub background_paused: Arc<AtomicBool>,
     pub chat_cancellations: Arc<std::sync::Mutex<HashMap<uuid::Uuid, Arc<AtomicBool>>>>,
 }
@@ -369,9 +371,11 @@ pub fn save_settings(
 #[tauri::command]
 #[specta::specta]
 pub async fn test_completion_provider(
+    app: AppHandle,
     request: ProviderProbeRequest,
 ) -> CommandResult<ProviderProbeResult> {
     let mut config = crate::settings::completion_config_for_probe(
+        &app,
         request.protocol,
         request.base_url,
         request.model,
@@ -1621,11 +1625,17 @@ pub async fn chat(state: State<'_, AppState>, message: String) -> CommandResult<
         .as_ref()
         .context("local reranking provider is unavailable")
         .map_err(err)?;
-    agent::run_chat(
+    let config = state
+        .chat_config
+        .clone()
+        .context("chat provider is unavailable")
+        .map_err(err)?;
+    agent::run_chat_with_config(
         state.conn.clone(),
         embedder.clone(),
         reranker.clone(),
         message,
+        config,
     )
     .await
     .map_err(err)
@@ -1689,7 +1699,12 @@ pub async fn chat_stream(
     let emit = move |ev: ChatEvent| {
         let _ = on_event.send(ev);
     };
-    let result = agent::run_chat_stream(
+    let config = state
+        .chat_config
+        .clone()
+        .context("chat provider is unavailable")
+        .map_err(err)?;
+    let result = agent::run_chat_stream_with_config(
         state.conn.clone(),
         embedder.clone(),
         reranker.clone(),
@@ -1705,6 +1720,8 @@ pub async fn chat_stream(
         },
         cancellation,
         emit,
+        config,
+        state.query_rewriting_enabled,
     )
     .await;
     state

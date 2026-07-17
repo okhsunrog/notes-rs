@@ -93,20 +93,10 @@ Release webviews use a restrictive Content Security Policy and do not expose the
 
 ## Configuration
 
-Open **Settings** from the title bar to configure Chat, extraction, embedding and reranking providers, API keys, model dimensions, privacy controls, and window decorations. Chat and extraction accept either the OpenAI Chat Completions or Anthropic Messages protocol with any custom HTTP(S) API base. Capability probes validate unsaved settings independently for plain completion, streaming, required tools, and strict structured output. Entity extraction uses a typed JSON Schema contract through `llm-relay`: OpenAI-compatible servers receive `response_format.json_schema`, while native Anthropic servers receive a required typed tool. Window decorations offer the native compositor frame or a borderless notes-rs frame; on KDE Plasma (Wayland) the native mode uses KWin's server-side decorations, negotiated automatically by GTK. Secrets are stored in the platform-specific Tauri app-data `.env` with owner-only permissions and existing values are never returned to the webview. Provider changes take effect after using **Restart app**.
+Open **Settings** from the title bar to configure Chat, extraction, embedding and reranking providers, API keys, model dimensions, privacy controls, sync, and window decorations. Chat and extraction accept either the OpenAI Chat Completions or Anthropic Messages protocol with any custom HTTP(S) API base. Capability probes validate unsaved settings independently for plain completion, streaming, required tools, and strict structured output. Entity extraction uses a typed JSON Schema contract through `llm-relay`: OpenAI-compatible servers receive `response_format.json_schema`, while native Anthropic servers receive a required typed tool. Window decorations offer the native compositor frame or a borderless notes-rs frame; on KDE Plasma (Wayland) the native mode uses KWin's server-side decorations, negotiated automatically by GTK.
 
-The same file can be managed manually. Existing OpenRouter installations remain compatible. A provider-neutral Chat configuration looks like:
+The application has one configuration source: the typed `settings.json` shown in Settings. It is written atomically in platform app data with owner-only permissions; secrets are never returned to the webview. Process environment variables and alternate configuration files are not inputs. Provider changes take effect after using **Restart app**.
 
-```dotenv
-CHAT_PROTOCOL=openai
-CHAT_BASE_URL=http://localhost:11434/v1
-CHAT_MODEL=qwen3
-# CHAT_API_KEY is optional for no-auth local servers
-
-EXTRACT_PROTOCOL=inherit
-EXTRACT_MODEL=qwen3
-```
-
-Use `CHAT_PROTOCOL=anthropic` with a compatible Messages endpoint when appropriate. Extraction can inherit Chat or use a separate protocol, URL, key, and model. Optional embedding settings include `EMBED_PROVIDER`, `EMBED_MODEL`, `EMBED_NDIMS`, and `OPENAI_BASE_URL`; reranking can be configured with `RERANK_PROVIDER` and `RERANK_MODEL`. OpenRouter remains the migration-compatible default, not a requirement.
+OpenRouter remains the migration-compatible default, not a requirement. Chat and extraction can target any OpenAI- or Anthropic-compatible endpoint; an empty API key is supported for local no-auth servers. Extraction can inherit the Chat transport or use a separate protocol, URL, key, and model.
 
 The privacy controls can disable extraction and conversational query rewriting independently. Builds made with the Rust `local-models` feature can enable strict local-only mode, which forces local embeddings/reranking and disables cloud Chat, extraction, and rewriting. Background failures retain their category and safe diagnostic text; transient failures back off, permanent configuration/authentication failures stop, and malformed structured output gets one retry before requiring attention. AI write tools are read-only by default and become available for one request only after an explicit confirmation in Chat.

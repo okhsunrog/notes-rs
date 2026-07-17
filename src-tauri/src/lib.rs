@@ -126,32 +126,21 @@ pub fn run() {
             let data_dir = app.path().app_data_dir().expect("resolving app data dir");
             std::fs::create_dir_all(&data_dir).expect("creating data dir");
 
-            // Desktop launches don't inherit shell env. Load .env from the app
-            // data dir if present so API keys configured by the user survive
-            // double-click launches. Missing file is fine.
-            let env_path = data_dir.join(".env");
-            match dotenvy::from_path(&env_path) {
-                Ok(()) => tracing::info!(?env_path, "loaded .env"),
-                Err(dotenvy::Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => tracing::warn!(?env_path, error = %e, "failed to load .env"),
-            }
             #[cfg(not(mobile))]
             if let Err(error) = settings::apply_saved_window_preferences(&handle) {
                 tracing::warn!(%error, "failed to apply saved window preferences");
             }
 
             let db_path = data_dir.join("notes.db");
-            let sync_credentials = settings::sync_credentials(&handle);
-            let server_mode = matches!(sync_credentials, Ok(Some(_)));
+            let configured_settings = settings::runtime(&handle)?;
+            let sync_credentials = configured_settings.sync_credentials()?;
+            let server_mode = sync_credentials.is_some();
             let remote_ai = sync_credentials
                 .as_ref()
-                .ok()
-                .and_then(Option::as_ref)
                 .map(|(server_url, token)| {
                     notes_sync::HttpTransport::new(server_url.clone(), token.clone())
                 })
                 .transpose()?;
-            let configured_settings = settings::load(&handle);
             let sync_runtime = sync::SyncRuntime::disabled();
             let sync_status = sync_runtime.status.clone();
             app.manage(sync_runtime);
@@ -169,16 +158,12 @@ pub fn run() {
 
             tauri::async_runtime::spawn(async move {
                 let initialize = async {
-                    let (embedder, reranker, id, ndims) = if server_mode {
-                        let settings = configured_settings?;
-                        let fallback_ndims = settings
-                            .embedding_ndims
+                    let (embedder, reranker, id, ndims, chat_config, extraction_config) = if server_mode {
+                        let fallback_ndims = configured_settings
+                            .embedding_dimensions()
                             .context("embedding dimensions are required in server mode")?
                             as usize;
-                        let fallback_id = format!(
-                            "{}:{}",
-                            settings.embedding_provider, settings.embedding_model
-                        );
+                        let fallback_id = configured_settings.embedding_provider_id();
                         let (id, ndims) = match remote_ai.as_ref() {
                             Some(transport) => match transport.info().await {
                                 Ok(info) => {
@@ -195,21 +180,42 @@ pub fn run() {
                             None => (fallback_id, fallback_ndims),
                         };
                         tracing::info!(embedder = %id, ndims, "using server-owned AI");
-                        (None, None, id, ndims)
+                        (None, None, id, ndims, None, None)
                     } else {
-                        let embedder = embed::make_embedder()?;
+                        let embedder = embed::make_embedder(&configured_settings.embedder_config())?;
                         let id = embedder.id();
                         let ndims = embedder.ndims();
-                        let reranker = embed::make_reranker()?;
+                        let reranker = embed::make_reranker(&configured_settings.reranker_config())?;
+                        let chat_config = configured_settings
+                            .cloud_ai_enabled()
+                            .then(|| configured_settings.chat_config())
+                            .transpose()?;
+                        let extraction_config = configured_settings
+                            .entity_extraction_enabled()
+                            .then(|| configured_settings.extraction_config())
+                            .transpose()?;
                         tracing::info!(embedder = %id, ndims, "local AI providers loaded");
-                        (Some(embedder), Some(reranker), id, ndims)
+                        (
+                            Some(embedder),
+                            Some(reranker),
+                            id,
+                            ndims,
+                            chat_config,
+                            extraction_config,
+                        )
                     };
                     let conn = db::open(&db_path, &id, ndims).await?;
-                    anyhow::Ok((conn, embedder, reranker))
+                    anyhow::Ok((
+                        conn,
+                        embedder,
+                        reranker,
+                        chat_config,
+                        extraction_config,
+                    ))
                 };
 
                 match initialize.await {
-                    Ok((conn, embedder, reranker)) => {
+                    Ok((conn, embedder, reranker, chat_config, extraction_config)) => {
                         let background_paused = Arc::new(AtomicBool::new(false));
                         if let Some(embedder) = &embedder {
                             let embedding_event_handle = handle.clone();
@@ -225,8 +231,9 @@ pub fn run() {
                                 background_paused.clone(),
                             );
                         }
-                        if !server_mode && notes_ai::config::entity_extraction_enabled() {
-                            let extractor = Arc::new(extract::EntityExtractor::new());
+                        if let Some(extraction_config) = extraction_config {
+                            let extractor =
+                                Arc::new(extract::EntityExtractor::new(extraction_config));
                             let event_handle = handle.clone();
                             let status_event_handle = handle.clone();
                             extract::spawn_worker(
@@ -256,32 +263,23 @@ pub fn run() {
                             embedder,
                             reranker,
                             remote_ai,
+                            chat_config,
+                            query_rewriting_enabled: configured_settings
+                                .query_rewriting_enabled(),
                             background_paused,
                             chat_cancellations: Arc::new(std::sync::Mutex::new(
                                 std::collections::HashMap::new(),
                             )),
                         });
-                        match sync_credentials {
-                            Ok(Some((server_url, token))) => sync::spawn_worker(
+                        if let Some((server_url, token)) = sync_credentials {
+                            sync::spawn_worker(
                                 handle.clone(),
                                 conn.clone(),
                                 server_url,
                                 token,
                                 data_dir.clone(),
                                 sync_status,
-                            ),
-                            Ok(None) => {}
-                            Err(error) => {
-                                tracing::error!(%error, "sync configuration is invalid");
-                                *sync_status.write().unwrap_or_else(|e| e.into_inner()) =
-                                    sync::SyncStatus {
-                                        state: sync::SyncConnectionState::Error,
-                                        server_url: None,
-                                        last_server_seq: 0,
-                                        pending_operations: 0,
-                                        message: Some(error.to_string()),
-                                    };
-                            }
+                            )
                         }
                         *startup.write().unwrap_or_else(|e| e.into_inner()) =
                             commands::StartupStatus::Ready;

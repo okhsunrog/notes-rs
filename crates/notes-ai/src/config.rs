@@ -1,4 +1,4 @@
-//! Environment-backed AI configuration shared by desktop and server hosts.
+//! Typed AI configuration primitives shared by desktop and server hosts.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -94,13 +94,6 @@ pub fn validate_http_base_url(value: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn openrouter_client() -> Result<rig::providers::openrouter::Client> {
-    let api_key = std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set")?;
-    let base_url =
-        std::env::var("OPENROUTER_BASE_URL").unwrap_or_else(|_| DEFAULT_OPENROUTER_BASE_URL.into());
-    openrouter_client_from(api_key, &base_url)
-}
-
 pub fn openrouter_client_from(
     api_key: String,
     base_url: &str,
@@ -113,78 +106,14 @@ pub fn openrouter_client_from(
         .context("building OpenRouter client")
 }
 
-fn env_flag(key: &str, default: bool) -> bool {
-    std::env::var(key)
-        .ok()
-        .map(|value| value.eq_ignore_ascii_case("true") || value == "1")
-        .unwrap_or(default)
-}
-
-pub fn local_only() -> bool {
-    env_flag("AI_LOCAL_ONLY", false)
-}
-
-pub fn entity_extraction_enabled() -> bool {
-    env_flag("ENTITY_EXTRACTION_ENABLED", true) && !local_only()
-}
-
-pub fn query_rewriting_enabled() -> bool {
-    env_flag("QUERY_REWRITING_ENABLED", true) && !local_only()
-}
-
-pub fn chat_model() -> String {
-    std::env::var("CHAT_MODEL").unwrap_or_else(|_| "deepseek/deepseek-v4-flash".into())
-}
-
-pub fn extraction_model() -> String {
-    std::env::var("EXTRACT_MODEL").unwrap_or_else(|_| "deepseek/deepseek-v4-flash".into())
-}
-
-pub fn chat_completion_config() -> Result<llm_relay::ClientConfig> {
-    let protocol = std::env::var("CHAT_PROTOCOL")
-        .unwrap_or_else(|_| "openai".into())
-        .parse::<CompletionProtocol>()?;
-    let base_url = std::env::var("CHAT_BASE_URL")
-        .ok()
-        .or_else(|| std::env::var("OPENROUTER_BASE_URL").ok());
-    let api_key = std::env::var("CHAT_API_KEY")
-        .ok()
-        .or_else(|| legacy_openrouter_key(protocol, base_url.as_deref()));
-    completion_config(protocol, base_url, api_key, chat_model())
-}
-
-pub fn extraction_completion_config() -> Result<llm_relay::ClientConfig> {
-    let protocol = std::env::var("EXTRACT_PROTOCOL")
-        .unwrap_or_else(|_| "inherit".into())
-        .parse::<ExtractionProtocol>()?;
-    if protocol == ExtractionProtocol::Inherit {
-        let mut config = chat_completion_config()?;
-        config.model = extraction_model();
-        return Ok(config);
-    }
-    let base_url = std::env::var("EXTRACT_BASE_URL").ok();
-    let api_key = std::env::var("EXTRACT_API_KEY")
-        .ok()
-        .or_else(|| std::env::var("CHAT_API_KEY").ok())
-        .or_else(|| legacy_openrouter_key(protocol.into(), base_url.as_deref()));
-    completion_config(protocol.into(), base_url, api_key, extraction_model())
-}
-
-pub fn legacy_openrouter_key(
-    protocol: CompletionProtocol,
-    base_url: Option<&str>,
-) -> Option<String> {
+pub fn uses_openrouter_endpoint(protocol: CompletionProtocol, base_url: Option<&str>) -> bool {
     if protocol != CompletionProtocol::Openai {
-        return None;
+        return false;
     }
     let host = base_url
         .and_then(|value| reqwest::Url::parse(value).ok())
         .and_then(|url| url.host_str().map(str::to_owned));
-    if host.as_deref() == Some("openrouter.ai") {
-        std::env::var("OPENROUTER_API_KEY").ok()
-    } else {
-        None
-    }
+    host.as_deref() == Some("openrouter.ai")
 }
 
 pub fn completion_config(
@@ -219,13 +148,6 @@ impl From<ExtractionProtocol> for CompletionProtocol {
             }
         }
     }
-}
-
-pub fn ensure_cloud_ai_allowed(feature: &str) -> Result<()> {
-    if local_only() {
-        bail!("{feature} is disabled in local-only mode because no local chat model is configured")
-    }
-    Ok(())
 }
 
 #[cfg(test)]

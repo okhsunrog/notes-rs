@@ -11,6 +11,7 @@ async fn bootstraps_and_fanouts_operations_over_the_real_network_protocol() {
     let server_directory = tempfile::tempdir().expect("server directory");
     let config = ServerConfig {
         listen: "127.0.0.1:0".parse().expect("listen address"),
+        log_filter: "info".into(),
         data_dir: server_directory.path().to_owned(),
         snapshot_every_ops: 10_000,
         max_blob_bytes: 1024,

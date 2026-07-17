@@ -7,7 +7,6 @@ use fastembed::{
     TextRerank,
 };
 use notes_core::{Connection, FailureKind, db};
-use rig::client::ProviderClient;
 use rig::embeddings::EmbeddingModel;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -28,28 +27,23 @@ pub trait EmbedderBackend: Send + Sync {
     async fn embed_query(&self, text: String) -> Result<Vec<f32>>;
 }
 
-/// Reads env vars and constructs the configured embedder.
-///
-/// `EMBED_PROVIDER` — one of: `openrouter` (default), `local`, `openai`,
-///                   `cohere`, `voyageai`, `gemini`. `local` requires building
-///                   with `--features local-models`.
-/// `EMBED_MODEL`    — provider-specific model id; falls back to a sensible
-///                   default per provider.
-/// `EMBED_NDIMS`    — ndims override; required for some providers, has model-
-///                   specific defaults for the known ones (OpenAI / Qwen).
-pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
-    let provider = std::env::var("EMBED_PROVIDER")
-        .unwrap_or_else(|_| "openrouter".into())
-        .parse::<EmbeddingProvider>()?;
-    if crate::config::local_only() && provider != EmbeddingProvider::Local {
-        bail!("AI_LOCAL_ONLY requires EMBED_PROVIDER=local");
-    }
-    let model_env = std::env::var("EMBED_MODEL").ok();
-    let ndims_env = std::env::var("EMBED_NDIMS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok());
+#[derive(Debug, Clone)]
+pub struct EmbedderConfig {
+    pub provider: EmbeddingProvider,
+    pub model: String,
+    pub ndims: Option<usize>,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub local_only: bool,
+}
 
-    match provider {
+/// Constructs an embedder exclusively from host-owned typed settings.
+pub fn make_embedder(config: &EmbedderConfig) -> Result<Arc<dyn EmbedderBackend>> {
+    if config.local_only && config.provider != EmbeddingProvider::Local {
+        bail!("local-only mode requires the local embedding provider");
+    }
+
+    match config.provider {
         EmbeddingProvider::Local => {
             #[cfg(feature = "local-models")]
             {
@@ -58,20 +52,23 @@ pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
             #[cfg(not(feature = "local-models"))]
             {
                 bail!(
-                    "EMBED_PROVIDER=local requested but this binary was built without the \
+                    "local embedding requested but this binary was built without the \
                      'local-models' feature. Rebuild with `cargo build --features local-models`, \
-                     or pick a cloud provider (set EMBED_PROVIDER to openrouter/openai/gemini/etc)."
+                     or pick a cloud provider."
                 );
             }
         }
         EmbeddingProvider::Openai => {
-            let model = model_env.unwrap_or_else(|| "text-embedding-3-small".into());
-            let ndims = ndims_env
+            let model = config.model.clone();
+            let ndims = config
+                .ndims
                 .or_else(|| default_ndims_for_model(&model))
-                .with_context(|| format!("EMBED_NDIMS required for OpenAI model {model}"))?;
-            let base_url = std::env::var("OPENAI_BASE_URL")
-                .unwrap_or_else(|_| "https://api.openai.com/v1".into());
-            let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+                .with_context(|| format!("embedding dimensions are required for {model}"))?;
+            let base_url = config
+                .base_url
+                .clone()
+                .unwrap_or_else(|| "https://api.openai.com/v1".into());
+            let api_key = config.api_key.clone().unwrap_or_default();
             let mut config =
                 llm_relay::EmbeddingsConfig::openai_compatible(base_url, api_key, model.clone())
                     .dimensions(ndims as u32);
@@ -86,16 +83,19 @@ pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
         }
         EmbeddingProvider::Openrouter => {
             use rig::providers::openrouter;
-            let model = model_env.unwrap_or_else(|| "qwen/qwen3-embedding-8b".into());
-            let ndims = ndims_env
+            let model = config.model.clone();
+            let ndims = config
+                .ndims
                 .or_else(|| default_ndims_for_model(&model))
                 .with_context(|| {
-                    format!(
-                        "EMBED_NDIMS required for openrouter model {model}; \
-                         set it explicitly (e.g. 4096 for qwen/qwen3-embedding-8b)"
-                    )
+                    format!("embedding dimensions are required for OpenRouter model {model}")
                 })?;
-            let client = crate::config::openrouter_client()?;
+            let api_key = required_key(config.api_key.as_deref(), "OpenRouter")?;
+            let base_url = config
+                .base_url
+                .as_deref()
+                .unwrap_or(crate::config::DEFAULT_OPENROUTER_BASE_URL);
+            let client = crate::config::openrouter_client_from(api_key, base_url)?;
             let m = <openrouter::EmbeddingModel as EmbeddingModel>::make(
                 &client,
                 model.clone(),
@@ -108,8 +108,9 @@ pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
         }
         EmbeddingProvider::Cohere => {
             use rig::providers::cohere;
-            let model = model_env.unwrap_or_else(|| "embed-multilingual-v3.0".into());
-            let client = cohere::Client::from_env().context("COHERE_API_KEY not set")?;
+            let model = config.model.clone();
+            let api_key = required_key(config.api_key.as_deref(), "Cohere")?;
+            let client = cohere::Client::new(api_key).context("building Cohere client")?;
             let passages = client.embedding_model(&model, "search_document");
             let query = client.embedding_model(&model, "search_query");
             Ok(Arc::new(AsymmetricRigEmbedder {
@@ -120,21 +121,23 @@ pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
         }
         EmbeddingProvider::Voyageai => {
             use rig::providers::voyageai;
-            let model = model_env.unwrap_or_else(|| "voyage-3-large".into());
-            let api_key = std::env::var("VOYAGE_API_KEY").context("VOYAGE_API_KEY not set")?;
-            let ndims = ndims_env
+            let model = config.model.clone();
+            let api_key = required_key(config.api_key.as_deref(), "Voyage AI")?;
+            let ndims = config
+                .ndims
                 .or_else(|| voyageai::model_dimensions_from_identifier(&model))
-                .with_context(|| format!("EMBED_NDIMS required for Voyage model {model}"))?;
+                .with_context(|| format!("embedding dimensions are required for {model}"))?;
             Ok(Arc::new(VoyageEmbedder::new(api_key, model, ndims)?))
         }
         EmbeddingProvider::Gemini => {
             use rig::providers::gemini;
-            let model = model_env.unwrap_or_else(|| "gemini-embedding-2".into());
-            let client = gemini::Client::from_env().context("GEMINI_API_KEY not set")?;
+            let model = config.model.clone();
+            let api_key = required_key(config.api_key.as_deref(), "Gemini")?;
+            let client = gemini::Client::new(api_key).context("building Gemini client")?;
             let m = <gemini::embedding::EmbeddingModel as EmbeddingModel>::make(
                 &client,
                 model.clone(),
-                ndims_env,
+                config.ndims,
             );
             Ok(Arc::new(RigEmbedder {
                 model: m,
@@ -142,6 +145,13 @@ pub fn make_embedder() -> Result<Arc<dyn EmbedderBackend>> {
             }))
         }
     }
+}
+
+fn required_key(value: Option<&str>, provider: &str) -> Result<String> {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .with_context(|| format!("{provider} API key is not configured"))
 }
 
 /// Builds an OpenRouter embedder from an explicit host-owned configuration.
@@ -152,21 +162,14 @@ pub fn make_openrouter_embedder(
     model: String,
     ndims: usize,
 ) -> Result<Arc<dyn EmbedderBackend>> {
-    use rig::providers::openrouter;
-
-    if api_key.trim().is_empty() {
-        bail!("OpenRouter API key cannot be empty");
-    }
-    if ndims == 0 {
-        bail!("embedding dimensions must be positive");
-    }
-    let client = crate::config::openrouter_client_from(api_key, base_url)?;
-    let embedding_model =
-        <openrouter::EmbeddingModel as EmbeddingModel>::make(&client, model.clone(), Some(ndims));
-    Ok(Arc::new(RigEmbedder {
-        model: embedding_model,
-        id: format!("openrouter:{model}"),
-    }))
+    make_embedder(&EmbedderConfig {
+        provider: EmbeddingProvider::Openrouter,
+        model,
+        ndims: Some(ndims),
+        base_url: Some(base_url.into()),
+        api_key: Some(api_key),
+        local_only: false,
+    })
 }
 
 /// Built-in ndims for well-known embedding models so users don't need to
@@ -453,16 +456,21 @@ pub trait RerankBackend: Send + Sync {
     async fn rerank(&self, query: String, docs: Vec<String>) -> Result<Vec<(usize, f32)>>;
 }
 
-pub fn make_reranker() -> Result<Arc<dyn RerankBackend>> {
-    let provider = std::env::var("RERANK_PROVIDER")
-        .unwrap_or_else(|_| "openrouter".into())
-        .parse::<RerankProvider>()?;
-    if crate::config::local_only() && provider != RerankProvider::Local {
-        bail!("AI_LOCAL_ONLY requires RERANK_PROVIDER=local");
-    }
-    let model_env = std::env::var("RERANK_MODEL").ok();
+#[derive(Debug, Clone)]
+pub struct RerankerConfig {
+    pub provider: RerankProvider,
+    pub model: String,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub local_only: bool,
+}
 
-    match provider {
+pub fn make_reranker(config: &RerankerConfig) -> Result<Arc<dyn RerankBackend>> {
+    if config.local_only && config.provider != RerankProvider::Local {
+        bail!("local-only mode requires the local reranking provider");
+    }
+
+    match config.provider {
         RerankProvider::Local => {
             #[cfg(feature = "local-models")]
             {
@@ -471,14 +479,22 @@ pub fn make_reranker() -> Result<Arc<dyn RerankBackend>> {
             #[cfg(not(feature = "local-models"))]
             {
                 bail!(
-                    "RERANK_PROVIDER=local requires the 'local-models' Cargo feature; \
+                    "local reranking requires the 'local-models' Cargo feature; \
                      rebuild with `--features local-models` or use a cloud provider."
                 );
             }
         }
         RerankProvider::Openrouter => {
-            let model = model_env.unwrap_or_else(|| "cohere/rerank-v3.5".into());
-            Ok(Arc::new(OpenRouterReranker::new(model)?))
+            let api_key = required_key(config.api_key.as_deref(), "OpenRouter")?;
+            let base_url = config
+                .base_url
+                .as_deref()
+                .unwrap_or(crate::config::DEFAULT_OPENROUTER_BASE_URL);
+            Ok(Arc::new(OpenRouterReranker::from_config(
+                api_key,
+                base_url,
+                config.model.clone(),
+            )?))
         }
     }
 }
@@ -532,13 +548,6 @@ pub struct OpenRouterReranker {
 }
 
 impl OpenRouterReranker {
-    pub fn new(model: String) -> Result<Self> {
-        let api_key = std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set")?;
-        let base = std::env::var("OPENROUTER_BASE_URL")
-            .unwrap_or_else(|_| crate::config::DEFAULT_OPENROUTER_BASE_URL.into());
-        Self::from_config(api_key, &base, model)
-    }
-
     pub fn from_config(api_key: String, base_url: &str, model: String) -> Result<Self> {
         if api_key.trim().is_empty() {
             bail!("OpenRouter API key cannot be empty");
@@ -558,9 +567,13 @@ pub fn make_openrouter_reranker(
     base_url: &str,
     model: String,
 ) -> Result<Arc<dyn RerankBackend>> {
-    Ok(Arc::new(OpenRouterReranker::from_config(
-        api_key, base_url, model,
-    )?))
+    make_reranker(&RerankerConfig {
+        provider: RerankProvider::Openrouter,
+        model,
+        base_url: Some(base_url.into()),
+        api_key: Some(api_key),
+        local_only: false,
+    })
 }
 
 #[derive(Debug, Deserialize)]

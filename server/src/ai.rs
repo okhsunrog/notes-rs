@@ -14,6 +14,7 @@ pub struct AiRuntime {
     chat: llm_relay::ClientConfig,
     extraction: llm_relay::ClientConfig,
     entity_extraction_enabled: bool,
+    query_rewriting_enabled: bool,
 }
 
 impl AiRuntime {
@@ -47,6 +48,7 @@ impl AiRuntime {
             chat,
             extraction,
             entity_extraction_enabled: config.entity_extraction_enabled,
+            query_rewriting_enabled: config.query_rewriting_enabled,
         })
     }
 
@@ -61,7 +63,7 @@ impl AiRuntime {
         if self.entity_extraction_enabled {
             notes_ai::extract::spawn_worker(
                 connection,
-                Arc::new(notes_ai::extract::EntityExtractor::with_config(
+                Arc::new(notes_ai::extract::EntityExtractor::new(
                     self.extraction.clone(),
                 )),
                 Arc::new(|| {}),
@@ -147,6 +149,7 @@ impl AiRuntime {
             cancelled,
             emit,
             self.chat.clone(),
+            self.query_rewriting_enabled,
         )
         .await
         .map_err(anyhow::Error::from)

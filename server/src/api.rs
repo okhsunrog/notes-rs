@@ -667,6 +667,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let config = ServerConfig {
             listen: "127.0.0.1:0".parse().expect("listen address"),
+            log_filter: "info".into(),
             data_dir: directory.path().to_owned(),
             snapshot_every_ops: 2,
             max_blob_bytes: 1024,

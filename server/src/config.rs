@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 pub struct ServerConfig {
     #[serde(default = "default_listen")]
     pub listen: SocketAddr,
+    #[serde(default = "default_log_filter")]
+    pub log_filter: String,
     pub data_dir: PathBuf,
     #[serde(default = "default_snapshot_interval")]
     pub snapshot_every_ops: u64,
@@ -30,6 +32,7 @@ pub struct AiConfig {
     pub chat_model: String,
     pub extraction_model: String,
     pub entity_extraction_enabled: bool,
+    pub query_rewriting_enabled: bool,
 }
 
 impl Default for AiConfig {
@@ -43,6 +46,7 @@ impl Default for AiConfig {
             chat_model: "google/gemini-3.1-flash-lite".into(),
             extraction_model: "google/gemini-3.1-flash-lite".into(),
             entity_extraction_enabled: true,
+            query_rewriting_enabled: true,
         }
     }
 }
@@ -84,6 +88,8 @@ impl ServerConfig {
         if self.users.is_empty() {
             bail!("at least one user must be configured");
         }
+        tracing_subscriber::EnvFilter::try_new(&self.log_filter)
+            .context("log_filter must be a valid tracing filter")?;
         if self.storage.embedding_dimensions == 0 {
             bail!("storage.embedding_dimensions must be positive");
         }
@@ -151,6 +157,10 @@ fn default_listen() -> SocketAddr {
     "127.0.0.1:8787".parse().expect("valid default address")
 }
 
+fn default_log_filter() -> String {
+    "info".into()
+}
+
 const fn default_snapshot_interval() -> u64 {
     10_000
 }
@@ -167,6 +177,7 @@ mod tests {
     fn rejects_path_shaped_user_ids_and_short_tokens() {
         let config = ServerConfig {
             listen: default_listen(),
+            log_filter: default_log_filter(),
             data_dir: "/tmp/notes".into(),
             snapshot_every_ops: 10_000,
             max_blob_bytes: 1,
@@ -188,6 +199,7 @@ mod tests {
         };
         let config = ServerConfig {
             listen: default_listen(),
+            log_filter: default_log_filter(),
             data_dir: "/tmp/notes".into(),
             snapshot_every_ops: 10_000,
             max_blob_bytes: 1,

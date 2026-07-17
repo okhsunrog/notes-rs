@@ -1,4 +1,5 @@
 use crate::embed::{EmbedderBackend, RerankBackend};
+use anyhow::Context;
 use futures::StreamExt;
 use llm_relay::RigClient;
 use notes_core::db::{self, Node, SearchHit};
@@ -70,10 +71,12 @@ fn into_tool_err(e: anyhow::Error) -> ToolError {
 pub struct QueryRewriter {
     /// Pre-formatted history block, ready to drop into a prompt.
     history_text: Arc<String>,
+    enabled: bool,
+    config: Option<llm_relay::ClientConfig>,
 }
 
 impl QueryRewriter {
-    pub fn new(history: &[ChatTurn]) -> Self {
+    pub fn new(history: &[ChatTurn], enabled: bool, config: llm_relay::ClientConfig) -> Self {
         use std::fmt::Write;
         let mut s = String::new();
         for t in history {
@@ -88,20 +91,21 @@ impl QueryRewriter {
         }
         Self {
             history_text: Arc::new(s),
+            enabled,
+            config: Some(config),
         }
     }
 
     pub fn empty() -> Self {
         Self {
             history_text: Arc::new(String::new()),
+            enabled: false,
+            config: None,
         }
     }
 
     pub async fn rewrite(&self, query: &str) -> String {
-        if self.history_text.is_empty()
-            || !looks_contextual(query)
-            || !crate::config::query_rewriting_enabled()
-        {
+        if !self.enabled || self.history_text.is_empty() || !looks_contextual(query) {
             return query.to_string();
         }
         match self.try_rewrite(query).await {
@@ -115,7 +119,6 @@ impl QueryRewriter {
     }
 
     async fn try_rewrite(&self, query: &str) -> anyhow::Result<String> {
-        crate::config::ensure_cloud_ai_allowed("query rewriting")?;
         let prompt = format!(
             "Conversation history:\n{history}\nSearch query: {query}\n\n\
              Rewrite the query into a fully standalone form that resolves \
@@ -127,7 +130,10 @@ impl QueryRewriter {
             history = self.history_text,
             query = query,
         );
-        let config = crate::config::chat_completion_config()?;
+        let config = self
+            .config
+            .clone()
+            .context("query rewriting client is not configured")?;
         match config.rig_client()? {
             RigClient::OpenAi(client) => {
                 rewrite_with_model(client.completion_model(&config.model), prompt).await
@@ -889,7 +895,6 @@ fn build_agent<M: CompletionModel + 'static>(
     allow_writes: bool,
     active_node_id: Option<i64>,
 ) -> Result<rig::agent::Agent<M>, AgentError> {
-    crate::config::ensure_cloud_ai_allowed("chat").map_err(AgentError::from)?;
     let preamble = active_node_id.map_or_else(
         || SYSTEM_PROMPT.to_string(),
         |id| {
@@ -927,16 +932,6 @@ fn build_agent<M: CompletionModel + 'static>(
             .tool(LinkNodes { conn });
     }
     Ok(builder.build())
-}
-
-pub async fn run_chat(
-    conn: Connection,
-    embedder: Arc<dyn EmbedderBackend>,
-    reranker: Arc<dyn RerankBackend>,
-    message: String,
-) -> Result<String, AgentError> {
-    let config = crate::config::chat_completion_config().map_err(AgentError::from)?;
-    run_chat_with_config(conn, embedder, reranker, message, config).await
 }
 
 pub async fn run_chat_with_config(
@@ -1050,34 +1045,6 @@ pub enum ChatEvent {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn run_chat_stream(
-    conn: Connection,
-    embedder: Arc<dyn EmbedderBackend>,
-    reranker: Arc<dyn RerankBackend>,
-    history: Vec<ChatTurn>,
-    message: String,
-    allow_writes: bool,
-    active_node_id: Option<i64>,
-    cancelled: Arc<AtomicBool>,
-    emit: impl Fn(ChatEvent) + Send + Sync + 'static,
-) -> Result<String, AgentError> {
-    let config = crate::config::chat_completion_config().map_err(AgentError::from)?;
-    run_chat_stream_with_config(
-        conn,
-        embedder,
-        reranker,
-        history,
-        message,
-        allow_writes,
-        active_node_id,
-        cancelled,
-        emit,
-        config,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
 pub async fn run_chat_stream_with_config(
     conn: Connection,
     embedder: Arc<dyn EmbedderBackend>,
@@ -1089,6 +1056,7 @@ pub async fn run_chat_stream_with_config(
     cancelled: Arc<AtomicBool>,
     emit: impl Fn(ChatEvent) + Send + Sync + 'static,
     config: llm_relay::ClientConfig,
+    query_rewriting_enabled: bool,
 ) -> Result<String, AgentError> {
     if message.trim().is_empty() || message.chars().count() > 16_000 {
         return Err(AgentError(
@@ -1124,6 +1092,8 @@ pub async fn run_chat_stream_with_config(
                 active_node_id,
                 cancelled,
                 emit,
+                config.clone(),
+                query_rewriting_enabled,
             )
             .await
         }
@@ -1139,6 +1109,8 @@ pub async fn run_chat_stream_with_config(
                 active_node_id,
                 cancelled,
                 emit,
+                config.clone(),
+                query_rewriting_enabled,
             )
             .await
         }
@@ -1157,8 +1129,10 @@ async fn run_chat_stream_with_model<M: CompletionModel + 'static>(
     active_node_id: Option<i64>,
     cancelled: Arc<AtomicBool>,
     emit: Arc<dyn Fn(ChatEvent) + Send + Sync>,
+    query_rewriter_config: llm_relay::ClientConfig,
+    query_rewriting_enabled: bool,
 ) -> Result<String, AgentError> {
-    let rewriter = QueryRewriter::new(&history);
+    let rewriter = QueryRewriter::new(&history, query_rewriting_enabled, query_rewriter_config);
     let agent = build_agent(
         model,
         conn,
