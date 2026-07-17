@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  BookOpen,
   CalendarDays,
   Check,
   Clock3,
@@ -13,6 +12,13 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { DocumentPage } from "@/features/document/document-page";
+import { DocumentAuthoringControls } from "@/features/document/document-authoring-controls";
+import {
+  documentAuthoringAvailability,
+  transitionDocumentAuthoring,
+  type DocumentAuthoringAction,
+} from "@/features/document/document-authoring-model";
+import { useDocumentAuthoringPreference } from "@/features/document/document-authoring-preference";
 import { Outliner } from "@/features/outliner/outliner";
 import type { MarkdownOpenHandler } from "@/features/markdown";
 import { AttachmentsCard } from "@/features/attachments/attachments-card";
@@ -28,7 +34,12 @@ import {
 } from "@/lib/api";
 import { DebouncedAction } from "@/lib/debounced-action";
 import { PagePresentation } from "./page-presentation";
-import { usePageSessionRegistry, usePageWriterLease, useTitleDraftOverlay } from "./page-session";
+import {
+  usePageSessionRegistry,
+  usePageWriterLease,
+  usePageWriterPaneId,
+  useTitleDraftOverlay,
+} from "./page-session";
 import {
   dispositionFromShiftKey,
   type OpenDisposition,
@@ -72,6 +83,7 @@ export function PageView({
 }: Props) {
   const sessions = usePageSessionRegistry();
   const titleOverlay = useTitleDraftOverlay(page.uuid);
+  const writerPaneId = usePageWriterPaneId(page.uuid);
   const ownsWriter = usePageWriterLease(
     page.uuid,
     paneId,
@@ -82,6 +94,8 @@ export function PageView({
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [layoutBusy, setLayoutBusy] = useState(false);
   const [bodyFocusRequest, setBodyFocusRequest] = useState(0);
+  const [documentAuthoringMode, setDocumentAuthoringMode] = useDocumentAuthoringPreference();
+  const authoringAvailability = documentAuthoringAvailability(paneId, writerPaneId);
 
   const autosave = useRef(new DebouncedAction()).current;
   const titleInput = useRef<HTMLInputElement>(null);
@@ -177,6 +191,22 @@ export function PageView({
   const registerDocumentFlush = useCallback((flushDocument: (() => Promise<boolean>) | null) => {
     documentFlushRef.current = flushDocument;
   }, []);
+
+  const selectDocumentAction = useCallback(
+    (action: DocumentAuthoringAction) => {
+      const transition = transitionDocumentAuthoring(
+        action,
+        documentAuthoringMode,
+        authoringAvailability,
+      );
+      if (!transition) return;
+      if (transition.persistedAuthoringMode) {
+        setDocumentAuthoringMode(transition.persistedAuthoringMode);
+      }
+      onPresentationChange(transition.presentation);
+    },
+    [authoringAvailability, documentAuthoringMode, onPresentationChange, setDocumentAuthoringMode],
+  );
 
   useEffect(() => {
     pageRef.current = page;
@@ -297,7 +327,7 @@ export function PageView({
               scheduleSave();
             }}
             placeholder="Untitled note"
-            className="h-[3.5rem] min-w-0 border-0 bg-transparent px-0 py-1 text-[2.6rem] leading-tight font-semibold tracking-[-0.045em] shadow-none placeholder:text-muted-foreground/35 focus-visible:ring-0"
+            className="h-20 min-w-0 appearance-none border-0 bg-transparent px-0 py-3 text-[2.6rem] leading-normal font-semibold tracking-[-0.045em] shadow-none placeholder:text-muted-foreground/35 focus-visible:ring-0"
           />
         )}
         <div className="mt-2 flex items-center gap-1">
@@ -400,28 +430,13 @@ export function PageView({
             </Button>
           ))}
         </div>
-        {page.layout === "document" && (
-          <div
-            role="group"
-            aria-label="Document presentation"
-            className="flex items-center rounded-lg border border-border/60 bg-card/55 p-0.5"
-          >
-            {DOCUMENT_PRESENTATIONS.map(({ value, label, icon: Icon }) => (
-              <Button
-                key={value}
-                type="button"
-                variant={presentation === value ? "secondary" : "ghost"}
-                size="xs"
-                aria-pressed={presentation === value}
-                onClick={() => onPresentationChange(value)}
-                className="rounded-md px-2 text-[10px]"
-              >
-                <Icon className="size-3" />
-                <span className="hidden sm:inline">{label}</span>
-              </Button>
-            ))}
-          </div>
-        )}
+        <DocumentAuthoringControls
+          layout={page.layout}
+          presentation={presentation}
+          authoringMode={documentAuthoringMode}
+          availability={authoringAvailability}
+          onAction={selectDocumentAction}
+        />
         <Button
           variant="ghost"
           size="xs"
@@ -441,6 +456,7 @@ export function PageView({
             pageUuid={page.uuid}
             editing={presentation === PagePresentation.Editing}
             canEdit={canEdit}
+            authoringMode={documentAuthoringMode}
             focusRequest={bodyFocusRequest}
             onOpenMarkdownLink={onOpenMarkdownLink}
             onStatus={onStatus}
@@ -476,15 +492,6 @@ const PAGE_LAYOUTS: Array<{
 }> = [
   { value: "outline", label: "Outline", icon: ListTree },
   { value: "document", label: "Document", icon: FileText },
-];
-
-const DOCUMENT_PRESENTATIONS: Array<{
-  value: PagePresentation;
-  label: string;
-  icon: typeof FileText;
-}> = [
-  { value: PagePresentation.Editing, label: "Write", icon: FileText },
-  { value: PagePresentation.Reading, label: "Read", icon: BookOpen },
 ];
 
 function SaveIndicator({ state }: { state: SaveState }) {

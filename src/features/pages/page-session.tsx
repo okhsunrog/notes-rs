@@ -612,7 +612,7 @@ export function useDocumentDraftOverlay(pageUuid: string): DocumentDraftOverlay 
   );
 }
 
-function useWriterPaneId(pageUuid: string): PaneId | null {
+export function usePageWriterPaneId(pageUuid: string): PaneId | null {
   const registry = usePageSessionRegistry();
   return useSyncExternalStore(
     (listener) => registry.subscribe(pageUuid, listener),
@@ -623,7 +623,7 @@ function useWriterPaneId(pageUuid: string): PaneId | null {
 
 export function usePageWriterLease(pageUuid: string, paneId: PaneId, enabled: boolean): boolean {
   const registry = usePageSessionRegistry();
-  const writerPaneId = useWriterPaneId(pageUuid);
+  const writerPaneId = usePageWriterPaneId(pageUuid);
   const token = useRef<WriterLeaseToken | null>(null);
   if (token.current === null) token.current = registry.createWriterLeaseToken();
 

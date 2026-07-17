@@ -17,13 +17,14 @@ import {
   type PersistedDocumentSnapshot,
 } from "@/features/pages/page-session";
 import { DocumentCodec } from "./document-codec";
-import { ContinuousDocumentEditor } from "./continuous-document-editor";
+import { ContinuousDocumentEditor, type DocumentAuthoringMode } from "./continuous-document-editor";
 import { documentUnitsForSave } from "./document-save-model";
 
 type Props = {
   pageUuid: string;
   editing: boolean;
   canEdit: boolean;
+  authoringMode: DocumentAuthoringMode;
   focusRequest: number;
   onOpenMarkdownLink: MarkdownOpenHandler;
   onStatus: (message: string) => void;
@@ -55,6 +56,7 @@ export function DocumentPage({
   pageUuid,
   editing,
   canEdit,
+  authoringMode,
   focusRequest,
   onOpenMarkdownLink,
   onStatus,
@@ -87,6 +89,7 @@ export function DocumentPage({
       persisted={persisted}
       editing={editing}
       canEdit={canEdit}
+      authoringMode={authoringMode}
       focusRequest={focusRequest}
       onOpenMarkdownLink={onOpenMarkdownLink}
       onStatus={onStatus}
@@ -106,6 +109,7 @@ function LoadedDocumentPage({
   persisted,
   editing,
   canEdit,
+  authoringMode,
   focusRequest,
   onOpenMarkdownLink,
   onStatus,
@@ -262,7 +266,7 @@ function LoadedDocumentPage({
           value={buffer}
           readOnly={!canEdit}
           focusRequest={focusRequest}
-          mode="source"
+          mode={authoringMode}
           onChange={updateDraft}
           onCompositionEnd={(value) => {
             updateDraft(value, false);

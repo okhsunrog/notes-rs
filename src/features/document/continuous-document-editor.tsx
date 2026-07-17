@@ -1,13 +1,15 @@
 import { defaultKeymap, history, historyKeymap, redo, undo } from "@codemirror/commands";
-import { markdown } from "@codemirror/lang-markdown";
+import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { Annotation, Compartment, EditorState, Prec, Transaction } from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
 import { useEffect, useRef } from "react";
+import { documentAuthoringExtensions, type DocumentAuthoringMode } from "./document-live-preview";
 import { resolveDocumentHistoryKey } from "./document-editor-model";
 import type { DocumentHistoryAction } from "./document-editor-model";
+import { notesLinkMarkdownExtension } from "./notes-link-markdown-extension";
 
-export type DocumentAuthoringMode = "source";
+export type { DocumentAuthoringMode } from "./document-live-preview";
 
 type Props = {
   value: string;
@@ -20,6 +22,7 @@ type Props = {
 };
 
 const externalDocumentUpdate = Annotation.define<boolean>();
+const MODE_RETRY_DELAYS_MS = [0, 16, 32, 64, 128, 256] as const;
 
 const documentEditorTheme = EditorView.theme({
   "&": {
@@ -49,10 +52,6 @@ const documentEditorTheme = EditorView.theme({
   ".cm-gutters": { display: "none" },
 });
 
-function authoringExtensions(mode: DocumentAuthoringMode) {
-  return EditorView.contentAttributes.of({ "data-document-authoring-mode": mode });
-}
-
 function editableExtensions(readOnly: boolean) {
   return [EditorView.editable.of(!readOnly), EditorState.readOnly.of(readOnly)];
 }
@@ -73,7 +72,7 @@ export function ContinuousDocumentEditor({
   value,
   readOnly,
   focusRequest,
-  mode = "source",
+  mode = "live_preview",
   onChange,
   onCompositionEnd,
   onBlur,
@@ -84,17 +83,57 @@ export function ContinuousDocumentEditor({
   const callbacksRef = useRef({ onChange, onCompositionEnd, onBlur });
   const modeCompartmentRef = useRef(new Compartment());
   const editableCompartmentRef = useRef(new Compartment());
+  const pendingModeRef = useRef(mode);
+  const appliedModeRef = useRef(mode);
+  const applyPendingModeRef = useRef<() => void>(() => undefined);
   callbacksRef.current = { onChange, onCompositionEnd, onBlur };
+  pendingModeRef.current = mode;
 
   useEffect(() => {
     const parent = mountRef.current;
     if (!parent) return;
     const modeCompartment = modeCompartmentRef.current;
     const editableCompartment = editableCompartmentRef.current;
+    let view: EditorView;
+    let destroyed = false;
+    let modeRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    let modeRetryAttempt = 0;
+    const clearModeRetry = () => {
+      if (modeRetryTimer !== null) clearTimeout(modeRetryTimer);
+      modeRetryTimer = null;
+    };
+    const applyPendingMode = () => {
+      if (destroyed || viewRef.current !== view) return true;
+      const pendingMode = pendingModeRef.current;
+      if (appliedModeRef.current === pendingMode) return true;
+      if (view.composing || view.compositionStarted) return false;
+      clearModeRetry();
+      view.dispatch({
+        effects: modeCompartment.reconfigure(documentAuthoringExtensions(pendingMode)),
+      });
+      appliedModeRef.current = pendingMode;
+      return true;
+    };
+    const applyModeAfterComposition = () => {
+      modeRetryTimer = null;
+      if (applyPendingMode()) return;
+      const delay = MODE_RETRY_DELAYS_MS[modeRetryAttempt];
+      if (delay === undefined) return;
+      modeRetryAttempt += 1;
+      modeRetryTimer = setTimeout(applyModeAfterComposition, delay);
+    };
+    const scheduleModeAfterComposition = () => {
+      clearModeRetry();
+      modeRetryAttempt = 0;
+      modeRetryTimer = setTimeout(applyModeAfterComposition, 0);
+    };
     const state = EditorState.create({
       doc: initialValueRef.current,
       extensions: [
-        markdown(),
+        markdown({
+          base: markdownLanguage,
+          extensions: notesLinkMarkdownExtension,
+        }),
         syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
         history(),
         EditorView.lineWrapping,
@@ -105,7 +144,7 @@ export function ContinuousDocumentEditor({
           autocorrect: "on",
           spellcheck: "true",
         }),
-        modeCompartment.of(authoringExtensions(mode)),
+        modeCompartment.of(documentAuthoringExtensions(mode)),
         editableCompartment.of(editableExtensions(readOnly)),
         Prec.highest(
           EditorView.domEventHandlers({
@@ -125,18 +164,27 @@ export function ContinuousDocumentEditor({
               return true;
             },
             compositionend(_event, view) {
-              queueMicrotask(() =>
-                callbacksRef.current.onCompositionEnd(view.state.doc.toString()),
-              );
+              queueMicrotask(() => {
+                callbacksRef.current.onCompositionEnd(view.state.doc.toString());
+              });
+              scheduleModeAfterComposition();
               return false;
             },
             blur() {
               callbacksRef.current.onBlur();
+              scheduleModeAfterComposition();
               return false;
             },
           }),
         ),
         EditorView.updateListener.of((update) => {
+          if (
+            appliedModeRef.current !== pendingModeRef.current &&
+            !update.view.composing &&
+            !update.view.compositionStarted
+          ) {
+            queueMicrotask(applyPendingMode);
+          }
           if (!update.docChanged) return;
           if (
             update.transactions.some((transaction) =>
@@ -151,9 +199,13 @@ export function ContinuousDocumentEditor({
         documentEditorTheme,
       ],
     });
-    const view = new EditorView({ state, parent });
+    view = new EditorView({ state, parent });
     viewRef.current = view;
+    applyPendingModeRef.current = applyPendingMode;
     return () => {
+      destroyed = true;
+      clearModeRetry();
+      applyPendingModeRef.current = () => undefined;
       viewRef.current = null;
       view.destroy();
     };
@@ -178,9 +230,7 @@ export function ContinuousDocumentEditor({
   }, [readOnly]);
 
   useEffect(() => {
-    viewRef.current?.dispatch({
-      effects: modeCompartmentRef.current.reconfigure(authoringExtensions(mode)),
-    });
+    applyPendingModeRef.current();
   }, [mode]);
 
   useEffect(() => {
