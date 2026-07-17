@@ -6,7 +6,6 @@ describe("settings update mapping", () => {
   it("keeps the persisted settings contract in one place", () => {
     const snapshot = {
       windowDecorationMode: "native",
-      syncDirectory: null,
       syncServerUrl: "https://notes.example.test",
       configuredKeys: [],
       configPath: "/tmp/settings",

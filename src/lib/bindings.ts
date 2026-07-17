@@ -75,9 +75,6 @@ export const commands = {
 	exportData: () => typedError<string | null, CommandError>(__TAURI_INVOKE("export_data")),
 	importData: () => typedError<string | null, CommandError>(__TAURI_INVOKE("import_data")),
 	createBackup: () => typedError<string, CommandError>(__TAURI_INVOKE("create_backup")),
-	chooseSyncDirectory: () => typedError<string | null, CommandError>(__TAURI_INVOKE("choose_sync_directory")),
-	syncPush: () => typedError<string, CommandError>(__TAURI_INVOKE("sync_push")),
-	syncPull: () => typedError<string, CommandError>(__TAURI_INVOKE("sync_pull")),
 	attachFile: (parentId: number) => typedError<{
 	id: number,
 	uuid: string,
@@ -281,7 +278,6 @@ export type SecretKey = "SYNC_TOKEN";
 
 export type SettingsSnapshot = {
 	windowDecorationMode: WindowDecorationMode,
-	syncDirectory: string | null,
 	syncServerUrl: string | null,
 	configuredKeys: SecretKey[],
 	configPath: string,
@@ -289,7 +285,6 @@ export type SettingsSnapshot = {
 
 export type SettingsUpdate = {
 	windowDecorationMode: WindowDecorationMode,
-	syncDirectory: string | null,
 	syncServerUrl: string | null,
 	apiKeys?: Partial<{ [key in SecretKey]: string }>,
 	clearKeys?: SecretKey[],

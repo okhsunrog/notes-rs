@@ -19,7 +19,6 @@ import { useConfirmation } from "@/app/confirmation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
-  chooseSyncDirectory,
   createBackup,
   exportData,
   getSyncStatus,
@@ -28,8 +27,6 @@ import {
   resetSettings,
   restartApp,
   saveSettings,
-  syncPull,
-  syncPush,
   type SecretKey,
   type SettingsSnapshot,
 } from "@/lib/api";
@@ -128,45 +125,6 @@ export function SettingsPage({
         );
         if (action === "import") onDataChanged();
       }
-    } catch (reason) {
-      setError(String(reason));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function chooseSync() {
-    try {
-      const directory = await chooseSyncDirectory();
-      if (directory) update("syncDirectory", directory);
-    } catch (reason) {
-      setError(String(reason));
-    }
-  }
-
-  async function runSync(direction: "push" | "pull") {
-    const current = settings;
-    if (!dataAvailable || !current) return;
-    if (
-      direction === "pull" &&
-      !(await confirm({
-        title: "Pull folder snapshot?",
-        description:
-          "The folder snapshot will replace the current local workspace. A recovery backup is created first.",
-        confirmLabel: "Pull and replace",
-        destructive: true,
-      }))
-    )
-      return;
-    setBusy(true);
-    setError("");
-    try {
-      const saved = await saveSettings(toSettingsUpdate(current, secrets, clearKeys));
-      setSettings(saved);
-      queryClient.setQueryData(queryKeys.settings, saved);
-      const path = direction === "push" ? await syncPush() : await syncPull();
-      setMessage(`${direction === "push" ? "Pushed" : "Pulled"} sync snapshot: ${path}`);
-      if (direction === "pull") onDataChanged();
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -426,15 +384,7 @@ export function SettingsPage({
           onMessage={setMessage}
         />
 
-        <DataSettingsSections
-          settings={settings}
-          dataAvailable={dataAvailable}
-          busy={busy}
-          updateSyncDirectory={(directory) => update("syncDirectory", directory)}
-          dataAction={dataAction}
-          chooseSync={chooseSync}
-          runSync={runSync}
-        />
+        <DataSettingsSections dataAvailable={dataAvailable} busy={busy} dataAction={dataAction} />
 
         {error && (
           <p

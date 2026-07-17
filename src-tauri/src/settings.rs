@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use tauri::{AppHandle, Manager};
 
-const SETTINGS_VERSION: u32 = 2;
+const SETTINGS_VERSION: u32 = 3;
 
 macro_rules! settings_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
@@ -62,7 +62,6 @@ pub enum SecretKey {
 #[serde(rename_all = "camelCase")]
 pub struct SettingsSnapshot {
     pub window_decoration_mode: WindowDecorationMode,
-    pub sync_directory: Option<PathBuf>,
     pub sync_server_url: Option<url::Url>,
     pub configured_keys: Vec<SecretKey>,
     pub config_path: PathBuf,
@@ -72,7 +71,6 @@ pub struct SettingsSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct SettingsUpdate {
     pub window_decoration_mode: WindowDecorationMode,
-    pub sync_directory: Option<PathBuf>,
     pub sync_server_url: Option<url::Url>,
     #[serde(default)]
     pub api_keys: BTreeMap<SecretKey, String>,
@@ -85,7 +83,6 @@ pub struct SettingsUpdate {
 struct StoredSettings {
     version: u32,
     window_decoration_mode: WindowDecorationMode,
-    sync_directory: Option<PathBuf>,
     sync_server_url: Option<url::Url>,
     secrets: BTreeMap<SecretKey, String>,
 }
@@ -95,7 +92,6 @@ impl Default for StoredSettings {
         Self {
             version: SETTINGS_VERSION,
             window_decoration_mode: WindowDecorationMode::Native,
-            sync_directory: None,
             sync_server_url: None,
             secrets: BTreeMap::new(),
         }
@@ -152,7 +148,6 @@ fn snapshot(stored: StoredSettings, path: PathBuf) -> Result<SettingsSnapshot> {
         .collect();
     Ok(SettingsSnapshot {
         window_decoration_mode: stored.window_decoration_mode,
-        sync_directory: stored.sync_directory,
         sync_server_url: stored.sync_server_url,
         configured_keys,
         config_path: path,
@@ -163,7 +158,6 @@ pub fn save(app: &AppHandle, update: SettingsUpdate) -> Result<SettingsSnapshot>
     validate_update(&update)?;
     let mut stored = load_stored(app)?;
     stored.window_decoration_mode = update.window_decoration_mode;
-    stored.sync_directory = update.sync_directory;
     stored.sync_server_url = update.sync_server_url;
     for key in update.clear_keys {
         stored.secrets.remove(&key);
@@ -300,7 +294,6 @@ mod tests {
             object.keys().map(String::as_str).collect::<Vec<_>>(),
             vec![
                 "secrets",
-                "syncDirectory",
                 "syncServerUrl",
                 "version",
                 "windowDecorationMode",

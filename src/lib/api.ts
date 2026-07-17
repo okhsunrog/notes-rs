@@ -133,9 +133,6 @@ export const getGraphSnapshot = (focusId: number | null = null) =>
 export const exportData = checkedCommand(commands.exportData);
 export const importData = checkedCommand(commands.importData);
 export const createBackup = checkedCommand(commands.createBackup);
-export const chooseSyncDirectory = checkedCommand(commands.chooseSyncDirectory);
-export const syncPush = checkedCommand(commands.syncPush);
-export const syncPull = checkedCommand(commands.syncPull);
 export const attachFile = checkedCommand(commands.attachFile);
 export const listAttachments = checkedCommand(commands.listAttachments);
 export const openAttachment = checkedCommand(commands.openAttachment);
