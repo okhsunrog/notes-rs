@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "crates/notes-core",
   "crates/notes-ai",
+  "crates/notes-protocol",
   "crates/notes-sync",
   "plugins/tauri-plugin-mobile-system",
   "server",
@@ -28,6 +29,7 @@ fastembed = "5.17.3"
 llm-relay = { path = "../llm-relay", features = ["embeddings", "rig", "streaming"] }
 notes-ai = { path = "crates/notes-ai" }
 notes-core = { path = "crates/notes-core" }
+notes-protocol = { path = "crates/notes-protocol" }
 notes-sync = { path = "crates/notes-sync" }
 proptest = "1.8.0"
 reqwest = { version = "0.13.4", default-features = false }

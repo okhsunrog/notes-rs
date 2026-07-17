@@ -2,9 +2,10 @@ use crate::config::{ServerConfig, UserConfig};
 use crate::oplog::Oplog;
 use anyhow::{Context, Result, bail};
 use notes_core::{
-    Connection, Origin, acknowledge_server_op, apply, export_sync_snapshot, import_sync_snapshot,
+    Connection, apply_sequenced_batch, export_sync_snapshot, import_sync_snapshot, sync_cursor,
 };
-use notes_sync::{Op, SequencedOp, SyncSnapshot};
+use notes_protocol::SequencedOp;
+use notes_sync::{Op, SyncSnapshot};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -188,19 +189,22 @@ impl UserState {
 }
 
 async fn replay_oplog(notes: &Connection, oplog: &Oplog) -> Result<()> {
-    let mut cursor = 0;
+    let mut cursor = sync_cursor(notes).await?;
     loop {
         let operations = oplog.ops_since(cursor, REPLAY_BATCH_SIZE).await?;
         if operations.is_empty() {
             return Ok(());
         }
-        for operation in operations {
-            apply(notes, &operation.envelope, Origin::Remote)
-                .await
-                .with_context(|| format!("replaying server op {}", operation.seq))?;
-            acknowledge_server_op(notes, operation.envelope.op_id, operation.seq).await?;
-            cursor = operation.seq;
-        }
+        cursor = operations.last().expect("non-empty oplog batch").seq;
+        apply_sequenced_batch(
+            notes,
+            operations
+                .into_iter()
+                .map(|operation| (operation.seq, operation.envelope))
+                .collect(),
+        )
+        .await
+        .with_context(|| format!("replaying server operations through sequence {cursor}"))?;
     }
 }
 
@@ -277,16 +281,30 @@ async fn ingest_operations(
     if operations.len() > 256 {
         bail!("a sync batch cannot contain more than 256 operations");
     }
-    let mut accepted = Vec::with_capacity(operations.len());
+    let mut appends = Vec::with_capacity(operations.len());
     for operation in operations {
-        let append = oplog.append(operation).await?;
-        if let Err(error) = apply(notes, &append.operation.envelope, Origin::Remote).await {
-            if append.inserted {
-                oplog.remove_tail(&append.operation).await?;
+        match oplog.append(operation).await {
+            Ok(append) => appends.push(append),
+            Err(error) => {
+                for append in appends.iter().rev().filter(|append| append.inserted) {
+                    oplog.remove_tail(&append.operation).await?;
+                }
+                return Err(error.context("appending ingested operation"));
             }
-            return Err(error.context("applying ingested operation"));
         }
-        acknowledge_server_op(notes, append.operation.envelope.op_id, append.operation.seq).await?;
+    }
+    let sequenced = appends
+        .iter()
+        .map(|append| (append.operation.seq, append.operation.envelope.clone()))
+        .collect();
+    if let Err(error) = apply_sequenced_batch(notes, sequenced).await {
+        for append in appends.iter().rev().filter(|append| append.inserted) {
+            oplog.remove_tail(&append.operation).await?;
+        }
+        return Err(error.context("applying ingested operations"));
+    }
+    let mut accepted = Vec::with_capacity(appends.len());
+    for append in appends {
         if append.inserted {
             let _ = operations_tx.send(append.operation.clone());
             if snapshot_every_ops > 0 && append.operation.seq % snapshot_every_ops == 0 {

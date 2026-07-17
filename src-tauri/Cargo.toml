@@ -23,6 +23,7 @@ tauri-build = { version = "2.6.3", features = [] }
 [dependencies]
 notes-ai.workspace = true
 notes-core.workspace = true
+notes-protocol.workspace = true
 notes-sync.workspace = true
 tauri = { version = "2.11.5", features = [] }
 tauri-plugin-opener = "2.5.4"
@@ -35,6 +36,7 @@ tauri-specta = { git = "https://github.com/specta-rs/tauri-specta", rev = "40a7b
   "derive",
 ] }
 anyhow.workspace = true
+async-trait.workspace = true
 tracing.workspace = true
 tracing-subscriber = "0.3.23"
 uuid.workspace = true

@@ -1,7 +1,8 @@
 use futures::StreamExt;
 use notes_core::{NodeKind, acknowledge_server_op, apply_sequenced, export_sync_snapshot};
+use notes_protocol::ServerMessage;
 use notes_server::config::{ServerConfig, StorageConfig, UserConfig};
-use notes_sync::{HttpTransport, ServerMessage};
+use notes_sync::HttpTransport;
 use tokio_tungstenite::tungstenite::Message;
 
 const TOKEN: &str = "network-test-token-with-at-least-thirty-two-characters";

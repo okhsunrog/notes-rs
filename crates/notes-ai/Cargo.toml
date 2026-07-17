@@ -18,6 +18,7 @@ fastembed = { workspace = true, optional = true }
 futures.workspace = true
 llm-relay.workspace = true
 notes-core.workspace = true
+notes-protocol.workspace = true
 reqwest.workspace = true
 rig.workspace = true
 schemars.workspace = true

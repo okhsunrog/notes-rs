@@ -1,7 +1,9 @@
 use anyhow::{Context, Result, bail};
+use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
-use notes_core::{Connection, acknowledge_server_op, apply_sequenced, export_sync_snapshot};
-use notes_sync::{ClientMessage, HttpTransport, ServerMessage, SyncSnapshot};
+use notes_core::{Connection, acknowledge_server_ops, apply_sequenced_batch, export_sync_snapshot};
+use notes_protocol::{ClientMessage, SequencedOp, ServerMessage};
+use notes_sync::{HttpTransport, SyncClient, SyncSnapshot, SyncTransport};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -10,6 +12,33 @@ use tauri::AppHandle;
 use tokio_tungstenite::tungstenite::Message;
 
 const SYNC_BATCH_SIZE: u32 = 256;
+
+struct DesktopTransport<'a> {
+    http: &'a HttpTransport,
+    data_dir: &'a Path,
+}
+
+#[async_trait]
+impl SyncTransport for DesktopTransport<'_> {
+    async fn ops_since(&mut self, since: u64, limit: usize) -> Result<Vec<SequencedOp>> {
+        self.http.ops_since(since, limit).await
+    }
+
+    async fn push(&mut self, operations: Vec<notes_core::Op>) -> Result<Vec<SequencedOp>> {
+        self.http.push(operations).await
+    }
+
+    async fn prepare_push(&mut self, operations: &[notes_core::Op]) -> Result<()> {
+        upload_operation_blobs(self.http, self.data_dir, operations).await
+    }
+
+    async fn prepare_pull(&mut self, operations: &[SequencedOp]) -> Result<()> {
+        for operation in operations {
+            download_operation_blob(self.http, self.data_dir, &operation.envelope).await?;
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
@@ -260,44 +289,18 @@ async fn synchronize_http(
     transport: &HttpTransport,
     data_dir: &Path,
 ) -> Result<()> {
-    catch_up(app, connection, transport, data_dir).await?;
-    loop {
-        let pending = notes_core::pending_outbox(connection, SYNC_BATCH_SIZE).await?;
-        if pending.is_empty() {
-            break;
-        }
-        let full_batch = pending.len() == SYNC_BATCH_SIZE as usize;
-        upload_operation_blobs(transport, data_dir, &pending).await?;
-        for accepted in transport.push(pending).await? {
-            acknowledge_server_op(connection, accepted.envelope.op_id, accepted.seq).await?;
-        }
-        if !full_batch {
-            break;
-        }
+    let mut transport = DesktopTransport {
+        http: transport,
+        data_dir,
+    };
+    let stats = SyncClient::new(connection.clone())
+        .with_batch_size(SYNC_BATCH_SIZE)
+        .sync_until_idle(&mut transport)
+        .await?;
+    if stats.applied > 0 {
+        emit_workspace_changed(app);
     }
-    catch_up(app, connection, transport, data_dir).await
-}
-
-async fn catch_up(
-    app: &AppHandle,
-    connection: &Connection,
-    transport: &HttpTransport,
-    data_dir: &Path,
-) -> Result<()> {
-    loop {
-        let cursor = notes_core::sync_cursor(connection).await?;
-        let operations = transport
-            .ops_since(cursor, SYNC_BATCH_SIZE as usize)
-            .await?;
-        if operations.is_empty() {
-            return Ok(());
-        }
-        let full_batch = operations.len() == SYNC_BATCH_SIZE as usize;
-        apply_server_operations(app, connection, transport, data_dir, operations).await?;
-        if !full_batch {
-            return Ok(());
-        }
-    }
+    Ok(())
 }
 
 async fn handle_server_message(
@@ -312,9 +315,13 @@ async fn handle_server_message(
             apply_server_operations(app, connection, transport, data_dir, ops).await
         }
         ServerMessage::Ack { ops } => {
-            for operation in ops {
-                acknowledge_server_op(connection, operation.envelope.op_id, operation.seq).await?;
-            }
+            acknowledge_server_ops(
+                connection,
+                ops.into_iter()
+                    .map(|operation| (operation.envelope.op_id, operation.seq))
+                    .collect(),
+            )
+            .await?;
             Ok(())
         }
         ServerMessage::Pong => Ok(()),
@@ -327,22 +334,20 @@ async fn apply_server_operations(
     connection: &Connection,
     transport: &HttpTransport,
     data_dir: &Path,
-    operations: Vec<notes_sync::SequencedOp>,
+    operations: Vec<SequencedOp>,
 ) -> Result<()> {
-    let mut changed = false;
-    for operation in operations {
-        let cursor = notes_core::sync_cursor(connection).await?;
-        if operation.seq > cursor.saturating_add(1) {
-            bail!(
-                "sync sequence gap: expected {}, received {}",
-                cursor.saturating_add(1),
-                operation.seq
-            );
-        }
-        let outcome = apply_sequenced(connection, operation.seq, &operation.envelope).await?;
+    for operation in &operations {
         download_operation_blob(transport, data_dir, &operation.envelope).await?;
-        changed |= outcome.applied;
     }
+    let outcomes = apply_sequenced_batch(
+        connection,
+        operations
+            .into_iter()
+            .map(|operation| (operation.seq, operation.envelope))
+            .collect(),
+    )
+    .await?;
+    let changed = outcomes.iter().any(|outcome| outcome.applied);
     if changed {
         emit_workspace_changed(app);
     }

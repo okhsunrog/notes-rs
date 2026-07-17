@@ -1,10 +1,11 @@
-use crate::{
-    AcceptedOps, BootstrapRequest, OpsBatch, PushOps, SequencedOp, ServerInfo, SyncSnapshot,
-};
+use crate::{SyncSnapshot, SyncTransport};
 use anyhow::{Context, Result, bail};
+use async_trait::async_trait;
 use futures::StreamExt;
-use notes_ai::agent::{ChatEvent, ChatTurn};
 use notes_core::db::SearchHit;
+use notes_protocol::{
+    AcceptedOps, BootstrapRequest, ChatEvent, ChatTurn, OpsBatch, PushOps, SequencedOp, ServerInfo,
+};
 use reqwest::StatusCode;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -300,6 +301,17 @@ impl HttpTransport {
         self.base_url
             .join(path)
             .with_context(|| format!("joining sync endpoint {path}"))
+    }
+}
+
+#[async_trait]
+impl SyncTransport for HttpTransport {
+    async fn ops_since(&mut self, since: u64, limit: usize) -> Result<Vec<SequencedOp>> {
+        HttpTransport::ops_since(self, since, limit).await
+    }
+
+    async fn push(&mut self, operations: Vec<notes_core::Op>) -> Result<Vec<SequencedOp>> {
+        HttpTransport::push(self, operations).await
     }
 }
 

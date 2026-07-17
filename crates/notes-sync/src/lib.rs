@@ -6,18 +6,8 @@
 mod machine;
 mod transport;
 
-pub use machine::{LoopbackServer, SequencedOp, SyncClient, SyncStats};
+pub use machine::{LoopbackServer, SyncClient, SyncStats, SyncTransport};
 pub use transport::{HttpTransport, SyncSocket};
-
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ServerInfo {
-    pub embedding_provider_id: String,
-    pub embedding_dimensions: usize,
-    pub ai_enabled: bool,
-}
 
 pub use notes_core::Hlc;
 pub use notes_core::operation::FORMAT_VERSION;
@@ -31,39 +21,3 @@ pub use notes_core::{
     configure_sync, export_sync_snapshot, import_sync_snapshot, local_ops, pending_outbox,
     sync_cursor,
 };
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct OpsBatch {
-    pub ops: Vec<SequencedOp>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct PushOps {
-    pub ops: Vec<Op>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AcceptedOps {
-    pub ops: Vec<SequencedOp>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct BootstrapRequest {
-    pub snapshot: SyncSnapshot,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ClientMessage {
-    Push { ops: Vec<Op> },
-    Ping,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ServerMessage {
-    Ops { ops: Vec<SequencedOp> },
-    Ack { ops: Vec<SequencedOp> },
-    Pong,
-    Error { code: String, message: String },
-}

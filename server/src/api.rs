@@ -11,9 +11,11 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use futures::{SinkExt, StreamExt};
-use notes_ai::agent::{ChatEvent, ChatTurn};
 use notes_core::db::SearchHit;
-use notes_sync::{AcceptedOps, BootstrapRequest, ClientMessage, OpsBatch, PushOps, ServerMessage};
+use notes_protocol::{
+    AcceptedOps, BootstrapRequest, ChatEvent, ChatTurn, ClientMessage, OpsBatch, PushOps,
+    ServerInfo, ServerMessage,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path as FilePath, PathBuf};
@@ -204,8 +206,8 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn info(State(state): State<AppState>) -> Json<notes_sync::ServerInfo> {
-    Json(notes_sync::ServerInfo {
+async fn info(State(state): State<AppState>) -> Json<ServerInfo> {
+    Json(ServerInfo {
         embedding_provider_id: state.embedding_provider_id,
         embedding_dimensions: state.embedding_dimensions,
         ai_enabled: state.ai.is_some(),
@@ -801,7 +803,7 @@ mod tests {
             .await
             .expect("body")
             .to_bytes();
-        let info: notes_sync::ServerInfo = serde_json::from_slice(&body).expect("server info");
+        let info: ServerInfo = serde_json::from_slice(&body).expect("server info");
         assert_eq!(info.embedding_provider_id, "test");
         assert_eq!(info.embedding_dimensions, 8);
         assert!(!info.ai_enabled);

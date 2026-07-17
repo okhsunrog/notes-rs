@@ -1,15 +1,24 @@
 use anyhow::{Result, bail};
+use async_trait::async_trait;
 use notes_core::{
-    Connection, Op, acknowledge_server_op, apply_sequenced, configure_sync, pending_outbox,
+    Connection, Op, acknowledge_server_ops, apply_sequenced_batch, configure_sync, pending_outbox,
     sync_cursor,
 };
-use serde::{Deserialize, Serialize};
+use notes_protocol::SequencedOp;
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SequencedOp {
-    pub seq: u64,
-    pub envelope: Op,
+#[async_trait]
+pub trait SyncTransport: Send {
+    async fn ops_since(&mut self, since: u64, limit: usize) -> Result<Vec<SequencedOp>>;
+    async fn push(&mut self, operations: Vec<Op>) -> Result<Vec<SequencedOp>>;
+
+    async fn prepare_push(&mut self, _operations: &[Op]) -> Result<()> {
+        Ok(())
+    }
+
+    async fn prepare_pull(&mut self, _operations: &[SequencedOp]) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Deterministic in-memory transport used before the HTTP/WS server exists.
@@ -77,6 +86,17 @@ impl LoopbackServer {
     }
 }
 
+#[async_trait]
+impl SyncTransport for LoopbackServer {
+    async fn ops_since(&mut self, since: u64, limit: usize) -> Result<Vec<SequencedOp>> {
+        Ok(LoopbackServer::ops_since(self, since, limit))
+    }
+
+    async fn push(&mut self, operations: Vec<Op>) -> Result<Vec<SequencedOp>> {
+        Ok(self.ingest(operations))
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SyncStats {
     pub pushed: usize,
@@ -92,12 +112,16 @@ pub struct SyncClient {
 }
 
 impl SyncClient {
-    pub async fn enable(conn: Connection, server_url: &str) -> Result<Self> {
-        configure_sync(&conn, server_url).await?;
-        Ok(Self {
+    pub fn new(conn: Connection) -> Self {
+        Self {
             conn,
             batch_size: 256,
-        })
+        }
+    }
+
+    pub async fn enable(conn: Connection, server_url: &str) -> Result<Self> {
+        configure_sync(&conn, server_url).await?;
+        Ok(Self::new(conn))
     }
 
     pub fn with_batch_size(mut self, batch_size: u32) -> Self {
@@ -105,52 +129,68 @@ impl SyncClient {
         self
     }
 
-    pub async fn sync_once(&self, server: &mut LoopbackServer) -> Result<SyncStats> {
+    pub async fn sync_once<T: SyncTransport>(&self, transport: &mut T) -> Result<SyncStats> {
         let mut stats = SyncStats::default();
-        self.catch_up(server, &mut stats).await?;
+        self.catch_up(transport, &mut stats).await?;
 
         let outbox = pending_outbox(&self.conn, self.batch_size).await?;
         stats.pushed = outbox.len();
-        for accepted in server.ingest(outbox) {
-            // A transport ack prunes the outbox; the server echo remains in
-            // the log and exercises idempotent redelivery on catch-up.
-            acknowledge_server_op(&self.conn, accepted.envelope.op_id, accepted.seq).await?;
+        if !outbox.is_empty() {
+            transport.prepare_push(&outbox).await?;
+            let accepted = transport.push(outbox).await?;
+            acknowledge_server_ops(
+                &self.conn,
+                accepted
+                    .iter()
+                    .map(|operation| (operation.envelope.op_id, operation.seq))
+                    .collect(),
+            )
+            .await?;
         }
 
-        self.catch_up(server, &mut stats).await?;
+        self.catch_up(transport, &mut stats).await?;
         stats.cursor = sync_cursor(&self.conn).await?;
         Ok(stats)
     }
 
-    pub async fn sync_until_idle(&self, server: &mut LoopbackServer) -> Result<SyncStats> {
+    pub async fn sync_until_idle<T: SyncTransport>(&self, transport: &mut T) -> Result<SyncStats> {
         let mut total = SyncStats::default();
         loop {
-            let stats = self.sync_once(server).await?;
+            let stats = self.sync_once(transport).await?;
             total.pushed += stats.pushed;
             total.received += stats.received;
             total.applied += stats.applied;
             total.cursor = stats.cursor;
             if stats.pushed < self.batch_size as usize
-                && server.ops_since(stats.cursor, 1).is_empty()
+                && transport.ops_since(stats.cursor, 1).await?.is_empty()
             {
                 return Ok(total);
             }
         }
     }
 
-    async fn catch_up(&self, server: &LoopbackServer, stats: &mut SyncStats) -> Result<()> {
+    async fn catch_up<T: SyncTransport>(
+        &self,
+        transport: &mut T,
+        stats: &mut SyncStats,
+    ) -> Result<()> {
         loop {
             let cursor = sync_cursor(&self.conn).await?;
-            let batch = server.ops_since(cursor, self.batch_size as usize);
+            let batch = transport
+                .ops_since(cursor, self.batch_size as usize)
+                .await?;
             if batch.is_empty() {
                 return Ok(());
             }
             let full_batch = batch.len() == self.batch_size as usize;
-            for item in batch {
-                let outcome = apply_sequenced(&self.conn, item.seq, &item.envelope).await?;
-                stats.received += 1;
-                stats.applied += usize::from(outcome.applied);
-            }
+            transport.prepare_pull(&batch).await?;
+            let sequenced = batch
+                .iter()
+                .map(|item| (item.seq, item.envelope.clone()))
+                .collect::<Vec<_>>();
+            let outcomes = apply_sequenced_batch(&self.conn, sequenced).await?;
+            stats.received += batch.len();
+            stats.applied += outcomes.iter().filter(|outcome| outcome.applied).count();
             if !full_batch {
                 return Ok(());
             }

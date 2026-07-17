@@ -268,20 +268,112 @@ pub async fn pending_outbox(conn: &Connection, limit: u32) -> Result<Vec<Op>> {
 }
 
 pub async fn apply_sequenced(conn: &Connection, seq: u64, op: &Op) -> Result<ApplyOutcome> {
-    let outcome = apply(conn, op, Origin::Remote).await?;
-    acknowledge_server_op(conn, op.op_id, seq).await?;
-    advance_sync_cursor(conn, seq).await?;
-    Ok(outcome)
+    let mut outcomes = apply_sequenced_batch(conn, vec![(seq, op.clone())]).await?;
+    Ok(outcomes.pop().unwrap_or_default())
+}
+
+/// Apply an ordered server batch, acknowledge echoed local operations, and
+/// advance the sync cursor in one SQLite transaction.
+pub async fn apply_sequenced_batch(
+    conn: &Connection,
+    operations: Vec<(u64, Op)>,
+) -> Result<Vec<ApplyOutcome>> {
+    for (_, operation) in &operations {
+        validate(operation)?;
+    }
+    conn.call(move |database| {
+        let transaction = database.transaction()?;
+        let mut cursor = transaction
+            .query_row(
+                "SELECT value FROM sync_meta WHERE key = 'last_server_seq'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|value| {
+                value.parse::<u64>().map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let mut outcomes = Vec::with_capacity(operations.len());
+        for (seq, operation) in operations {
+            if seq > cursor.saturating_add(1) {
+                return Err(rusqlite::Error::InvalidParameterName(format!(
+                    "sync sequence gap: expected {}, received {seq}",
+                    cursor.saturating_add(1)
+                )));
+            }
+            let existing = transaction
+                .query_row(
+                    "SELECT seq FROM applied_ops WHERE op_id = ?1",
+                    [&operation.op_id],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .optional()?;
+            if let Some(Some(existing_seq)) = existing
+                && existing_seq as u64 != seq
+            {
+                return Err(rusqlite::Error::InvalidParameterName(format!(
+                    "operation {} was assigned conflicting server sequences {existing_seq} and {seq}",
+                    operation.op_id
+                )));
+            }
+            let outcome = if existing.is_some() {
+                ApplyOutcome::default()
+            } else {
+                let affected_uuids = apply_one(&transaction, &operation, Origin::Remote)?;
+                observe_hlc(&transaction, &operation.hlc)?;
+                ApplyOutcome {
+                    applied: true,
+                    affected_uuids,
+                }
+            };
+            transaction.execute(
+                "INSERT INTO applied_ops(op_id, seq) VALUES (?1, ?2)
+                 ON CONFLICT(op_id) DO UPDATE SET seq = excluded.seq",
+                rusqlite::params![operation.op_id, seq as i64],
+            )?;
+            transaction.execute(
+                "DELETE FROM sync_outbox WHERE op_id = ?1",
+                [&operation.op_id],
+            )?;
+            cursor = cursor.max(seq);
+            outcomes.push(outcome);
+        }
+        transaction.execute(
+            "INSERT INTO sync_meta(key, value) VALUES ('last_server_seq', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [cursor.to_string()],
+        )?;
+        transaction.commit()?;
+        Ok(outcomes)
+    })
+    .await
 }
 
 pub async fn acknowledge_server_op(conn: &Connection, op_id: uuid::Uuid, seq: u64) -> Result<()> {
+    acknowledge_server_ops(conn, vec![(op_id, seq)]).await
+}
+
+pub async fn acknowledge_server_ops(
+    conn: &Connection,
+    acknowledgements: Vec<(uuid::Uuid, u64)>,
+) -> Result<()> {
     conn.call(move |database| {
         let transaction = database.transaction()?;
-        transaction.execute(
-            "UPDATE applied_ops SET seq = ?2 WHERE op_id = ?1",
-            rusqlite::params![op_id, seq as i64],
-        )?;
-        transaction.execute("DELETE FROM sync_outbox WHERE op_id = ?1", [op_id])?;
+        for (op_id, seq) in acknowledgements {
+            transaction.execute(
+                "UPDATE applied_ops SET seq = ?2 WHERE op_id = ?1",
+                rusqlite::params![op_id, seq as i64],
+            )?;
+            transaction.execute("DELETE FROM sync_outbox WHERE op_id = ?1", [op_id])?;
+        }
         transaction.commit()?;
         Ok(())
     })
@@ -543,31 +635,6 @@ fn sql_hlc(value: String, index: usize) -> rusqlite::Result<Hlc> {
 
 fn optional_sql_hlc(value: Option<String>, index: usize) -> rusqlite::Result<Option<Hlc>> {
     value.map(|value| sql_hlc(value, index)).transpose()
-}
-
-async fn advance_sync_cursor(conn: &Connection, seq: u64) -> Result<()> {
-    conn.call(move |database| {
-        let transaction = database.transaction()?;
-        let previous = transaction
-            .query_row(
-                "SELECT value FROM sync_meta WHERE key = 'last_server_seq'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or_default();
-        if seq > previous {
-            transaction.execute(
-                "INSERT INTO sync_meta(key, value) VALUES ('last_server_seq', ?1)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                [seq.to_string()],
-            )?;
-        }
-        transaction.commit()?;
-        Ok(())
-    })
-    .await
 }
 
 /// Apply a logical mutation batch atomically. Redelivery of any already
@@ -1598,6 +1665,69 @@ mod tests {
                 created_at: (wall_ms / 1_000) as i64,
             }),
         )
+    }
+
+    #[tokio::test]
+    async fn sequenced_batch_is_atomic_when_it_contains_a_gap() {
+        let (_directory, connection) = database().await;
+        let first_uuid = uuid::Uuid::new_v4();
+        let second_uuid = uuid::Uuid::new_v4();
+        let first = create_node_op(1, 1_000, &first_uuid, "page", Some("First"), None, None);
+        let second = create_node_op(1, 1_001, &second_uuid, "page", Some("Second"), None, None);
+
+        let error = apply_sequenced_batch(&connection, vec![(1, first), (3, second)])
+            .await
+            .expect_err("sequence gap must reject the whole batch");
+        assert!(error.to_string().contains("sync sequence gap"));
+        assert_eq!(sync_cursor(&connection).await.expect("cursor"), 0);
+        assert!(
+            db::get_node_by_uuid(&connection, first_uuid)
+                .await
+                .expect("first node query")
+                .is_none()
+        );
+        assert!(
+            db::get_node_by_uuid(&connection, second_uuid)
+                .await
+                .expect("second node query")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn sequenced_batch_applies_and_advances_cursor_once() {
+        let (_directory, connection) = database().await;
+        let first_uuid = uuid::Uuid::new_v4();
+        let second_uuid = uuid::Uuid::new_v4();
+        let operations = vec![
+            (
+                1,
+                create_node_op(1, 1_000, &first_uuid, "page", Some("First"), None, None),
+            ),
+            (
+                2,
+                create_node_op(1, 1_001, &second_uuid, "page", Some("Second"), None, None),
+            ),
+        ];
+
+        let outcomes = apply_sequenced_batch(&connection, operations)
+            .await
+            .expect("apply batch");
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes.iter().all(|outcome| outcome.applied));
+        assert_eq!(sync_cursor(&connection).await.expect("cursor"), 2);
+        assert!(
+            db::get_node_by_uuid(&connection, first_uuid)
+                .await
+                .expect("first node query")
+                .is_some()
+        );
+        assert!(
+            db::get_node_by_uuid(&connection, second_uuid)
+                .await
+                .expect("second node query")
+                .is_some()
+        );
     }
 
     #[test]

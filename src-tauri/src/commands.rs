@@ -1,11 +1,12 @@
 use anyhow::Context;
 use base64::Engine;
 use futures::StreamExt;
-use notes_ai::agent::{self, ChatEvent, ChatTurn};
+use notes_ai::agent;
 use notes_ai::embed::{EmbedderBackend, RerankBackend};
 use notes_core::Connection;
 use notes_core::db::{self, Node, SearchHit};
 use notes_core::{NodeKind, ReorderDirection};
+use notes_protocol::{ChatEvent, ChatTurn};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;

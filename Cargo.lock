@@ -3373,6 +3373,7 @@ dependencies = [
  "futures",
  "llm-relay",
  "notes-core",
+ "notes-protocol",
  "reqwest 0.13.4",
  "rig-core",
  "schemars 1.2.1",
@@ -3409,16 +3410,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "notes-protocol"
+version = "0.1.0"
+dependencies = [
+ "notes-core",
+ "serde",
+ "serde_json",
+ "specta",
+ "specta-typescript",
+ "uuid",
+]
+
+[[package]]
 name = "notes-rs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64 0.22.1",
  "chrono",
  "futures",
  "llm-relay",
  "notes-ai",
  "notes-core",
+ "notes-protocol",
  "notes-sync",
  "schemars 1.2.1",
  "serde",
@@ -3456,6 +3471,7 @@ dependencies = [
  "llm-relay",
  "notes-ai",
  "notes-core",
+ "notes-protocol",
  "notes-sync",
  "rusqlite",
  "serde",
@@ -3479,9 +3495,10 @@ name = "notes-sync"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "futures",
- "notes-ai",
  "notes-core",
+ "notes-protocol",
  "reqwest 0.13.4",
  "serde",
  "serde_json",

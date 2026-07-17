@@ -1,9 +1,10 @@
 use crate::config::AiConfig;
 use anyhow::{Context, Result, bail};
-use notes_ai::agent::{self, ChatEvent, ChatTurn};
+use notes_ai::agent;
 use notes_ai::embed::{EmbedderBackend, RerankBackend};
 use notes_core::Connection;
 use notes_core::db::{self, SearchHit};
+use notes_protocol::{ChatEvent, ChatTurn};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 

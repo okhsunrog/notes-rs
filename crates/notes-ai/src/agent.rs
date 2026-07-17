@@ -4,6 +4,7 @@ use futures::StreamExt;
 use llm_relay::RigClient;
 use notes_core::db::{self, Node, SearchHit};
 use notes_core::{Connection, NodeKind};
+use notes_protocol::{ChatEvent, ChatTurn};
 use rig::agent::MultiTurnStreamItem;
 use rig::client::CompletionClient;
 use rig::completion::{CompletionModel, Message, Prompt};
@@ -986,56 +987,11 @@ async fn run_chat_with_model<M: CompletionModel + 'static>(
         .map_err(|e| AgentError(format!("{e:#}")))
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, specta::Type)]
-#[serde(tag = "role", rename_all = "lowercase")]
-pub enum ChatTurn {
-    User { text: String },
-    Assistant { text: String },
-}
-
-impl From<ChatTurn> for Message {
-    fn from(t: ChatTurn) -> Self {
-        match t {
-            ChatTurn::User { text } => Message::user(text),
-            ChatTurn::Assistant { text } => Message::assistant(text),
-        }
+fn chat_turn_message(turn: ChatTurn) -> Message {
+    match turn {
+        ChatTurn::User { text } => Message::user(text),
+        ChatTurn::Assistant { text } => Message::assistant(text),
     }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, specta::Type)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ChatEvent {
-    TextDelta {
-        text: String,
-    },
-    Reasoning {
-        text: String,
-    },
-    ToolStart {
-        id: String,
-        name: String,
-        #[specta(type = specta_typescript::Unknown)]
-        args: serde_json::Value,
-    },
-    ToolEnd {
-        id: String,
-        result: String,
-    },
-    Done {
-        text: String,
-    },
-    Error {
-        message: String,
-    },
-    Usage {
-        #[serde(rename = "inputTokens")]
-        input_tokens: u64,
-        #[serde(rename = "outputTokens")]
-        output_tokens: u64,
-        #[serde(rename = "totalTokens")]
-        total_tokens: u64,
-    },
-    Cancelled,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1136,7 +1092,7 @@ async fn run_chat_stream_with_model<M: CompletionModel + 'static>(
         allow_writes,
         active_node_id,
     )?;
-    let history: Vec<Message> = history.into_iter().map(Into::into).collect();
+    let history: Vec<Message> = history.into_iter().map(chat_turn_message).collect();
 
     let mut stream = agent
         .stream_prompt(message)

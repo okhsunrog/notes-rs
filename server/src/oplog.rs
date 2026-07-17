@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use notes_core::Connection;
-use notes_sync::SequencedOp;
+use notes_protocol::SequencedOp;
 use rusqlite::OptionalExtension;
 use std::path::Path;
 
