@@ -38,7 +38,8 @@ The detailed implementation record is in [SYNC_ARCHITECTURE_PLAN.md](SYNC_ARCHIT
 The accepted Outline/Document, Live Preview, Reading, and CodeMirror boundary is recorded in
 [EDITOR_ARCHITECTURE.md](EDITOR_ARCHITECTURE.md). General side-by-side panes, linked previews, and
 the collapsible AI companion are defined in
-[WORKSPACE_ARCHITECTURE.md](WORKSPACE_ARCHITECTURE.md).
+[WORKSPACE_ARCHITECTURE.md](WORKSPACE_ARCHITECTURE.md). The Journal domain, Today/calendar UI, and
+Logseq conversion plan are recorded in [JOURNAL_ARCHITECTURE.md](JOURNAL_ARCHITECTURE.md).
 
 ## Development
 

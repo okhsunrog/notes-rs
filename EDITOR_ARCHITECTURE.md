@@ -10,6 +10,9 @@ General side-by-side composition, navigation, linked preview panes, and the Assi
 defined in [`WORKSPACE_ARCHITECTURE.md`](WORKSPACE_ARCHITECTURE.md). Split is a workspace operation,
 not an editor mode.
 
+Journal is an orthogonal typed page identity using the same editor and is defined in
+[`JOURNAL_ARCHITECTURE.md`](JOURNAL_ARCHITECTURE.md).
+
 ## 1. Goals
 
 The editor must support both short block-first notes and long articles or project documentation

@@ -75,6 +75,9 @@ PaneContent =
 Each kind is rendered by an exhaustive registry/switch. New surfaces can therefore participate in
 the same split, focus, close, navigation, and responsive behavior without changing the tree model.
 
+`JournalTimeline` is defined in [`JOURNAL_ARCHITECTURE.md`](JOURNAL_ARCHITECTURE.md). Individual
+journal days resolve to ordinary Page content and need no special editor pane.
+
 Each pane owns:
 
 - its current `PaneContent`;

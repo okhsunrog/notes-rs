@@ -15,6 +15,9 @@ General multi-pane composition, adjacent navigation, linked preview, responsive 
 the collapsible AI companion are defined in
 [`WORKSPACE_ARCHITECTURE.md`](WORKSPACE_ARCHITECTURE.md).
 
+The accepted daily Journal domain, UI surfaces, sync identity, and loss-aware Logseq import boundary
+are defined in [`JOURNAL_ARCHITECTURE.md`](JOURNAL_ARCHITECTURE.md).
+
 ## 1. Product boundary
 
 notes-rs is a local-first personal knowledge application for desktop and Android. Both clients use
@@ -24,9 +27,11 @@ The main invariants are:
 
 1. Pages and blocks are distinct domain types. There is no generic `Node`, `NodeKind`, or `nodes`
    table.
-2. UUID is the durable identity everywhere outside SQLite implementation details. New domain and
-   operation IDs use UUIDv7; UUIDs are stored as 16-byte SQLite values and cross Rust/TypeScript
-   boundaries through native Specta UUID support.
+2. UUID is the durable identity everywhere outside SQLite implementation details. User-created
+   domain and operation IDs use UUIDv7. The accepted Journal design deliberately derives a journal
+   page UUID deterministically from workspace UUID plus civil date so concurrent offline creation
+   converges. UUIDs are stored as 16-byte SQLite values and cross Rust/TypeScript boundaries through
+   native Specta UUID support.
 3. Editing, attachments, graph navigation, history, and lexical search work from the local
    database without a server.
 4. The server owns all AI work and provider credentials. Clients never load sqlite-vec, embedding
@@ -87,6 +92,11 @@ with persisted `PageLayout = Outline | Document`; Reading becomes a pane-local p
 side-by-side Split becomes a workspace layout operation. Neither enters content operations or sync.
 See [`EDITOR_ARCHITECTURE.md`](EDITOR_ARCHITECTURE.md) and
 [`WORKSPACE_ARCHITECTURE.md`](WORKSPACE_ARCHITECTURE.md).
+
+The accepted Journal target adds a closed `PageKind = Note | Journal { date }` independently of
+layout. Journal reuses the ordinary page/block model and defaults to Outline; calendar/timeline is a
+workspace surface, not another page kind or editor. Its implementation is pending. See
+[`JOURNAL_ARCHITECTURE.md`](JOURNAL_ARCHITECTURE.md).
 
 ### Blocks
 
@@ -311,6 +321,7 @@ reverse proxy. Deployment produces a static musl binary rather than a container 
 | Typed `pages` / `blocks` baseline with no generic nodes                | Complete                                    |
 | Typed block styles and provisional three-way page view                 | Complete as a prototype                     |
 | Accepted continuous editor and pane-local view architecture            | Design complete; implementation pending     |
+| Typed Journal identity, surfaces, and Logseq conversion boundary       | Design complete; implementation pending     |
 | UUIDv7 operations, HLC/LWW apply, tombstones, deterministic structure  | Complete                                    |
 | Action-based inverse-operation undo/redo                               | Complete                                    |
 | Local FTS, refs, backlinks, graph, attachments, archives               | Complete                                    |
@@ -361,12 +372,14 @@ Product and corpus support:
    preview, responsive projection, and collapsible Assistant dock.
 3. Add server-side retrieval chunking for large blocks/documents. The current index unit is one
    page or block UUID, which is sufficient for the demo but not ideal for long articles.
-4. Add Markdown-vault, Obsidian, and Logseq import, including page properties, block UUIDs, nesting,
-   and assets; no legacy notes-rs database importer is planned.
-5. Add daily notes, templates, properties, saved queries, and an extension model.
-6. Add drag-and-drop movement, cross-block selection, transclusion, richer Markdown authoring,
+4. Implement the accepted Journal domain, Today/calendar surfaces, deterministic offline identity,
+   and journal-aware search/graph filters.
+5. Add Markdown-vault, Obsidian, and the staged Logseq importer, including page properties, block
+   UUIDs, nesting, and assets; no legacy notes-rs database importer is planned.
+6. Add journal templates, general properties, saved queries, and an extension model.
+7. Add drag-and-drop movement, cross-block selection, transclusion, richer Markdown authoring,
    graph filters/layouts, and measured larger-corpus performance work.
-7. Add signed production packages and end-to-end UI/accessibility coverage on desktop and real
+8. Add signed production packages and end-to-end UI/accessibility coverage on desktop and real
    Android hardware.
 
 ## 12. Explicit non-goals
