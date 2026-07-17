@@ -1,0 +1,100 @@
+use super::*;
+
+#[tauri::command]
+#[specta::specta]
+pub fn is_ready(state: State<'_, Startup>) -> bool {
+    matches!(
+        *state.status.read().unwrap_or_else(|e| e.into_inner()),
+        StartupStatus::Ready
+    )
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn startup_status(state: State<'_, Startup>) -> StartupStatus {
+    state
+        .status
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn sync_status(state: State<'_, crate::sync::SyncRuntime>) -> crate::sync::SyncStatus {
+    state
+        .status
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+}
+
+fn remote_ai(state: &AppState) -> CommandResult<&notes_sync::HttpTransport> {
+    state.remote_ai.as_ref().ok_or_else(|| CommandError {
+        code: CommandErrorCode::Unavailable,
+        message: "server AI requires a configured notes-rs server".into(),
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn server_ai_status(state: State<'_, AppState>) -> CommandResult<AiIndexStatus> {
+    remote_ai(&state)?.ai_status().await.map_err(err)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn save_server_ai_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    settings: AiRuntimeSettings,
+) -> CommandResult<AiIndexStatus> {
+    let status = remote_ai(&state)?
+        .update_ai_settings(settings)
+        .await
+        .map_err(err)?;
+    emit_domain(&app, DomainEvent::ServerAiChanged);
+    Ok(status)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn reindex_server_ai(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CommandResult<AiIndexStatus> {
+    let status = remote_ai(&state)?.reindex_ai().await.map_err(err)?;
+    emit_domain(&app, DomainEvent::ServerAiChanged);
+    Ok(status)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn load_settings(app: AppHandle) -> CommandResult<crate::settings::SettingsSnapshot> {
+    crate::settings::load(&app).map_err(err)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn save_settings(
+    app: AppHandle,
+    update: crate::settings::SettingsUpdate,
+) -> CommandResult<crate::settings::SettingsSnapshot> {
+    let settings = crate::settings::save(&app, update).map_err(err)?;
+    emit_domain(&app, DomainEvent::SettingsChanged);
+    Ok(settings)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn reset_settings(app: AppHandle) -> CommandResult<crate::settings::SettingsSnapshot> {
+    let settings = crate::settings::reset(&app).map_err(err)?;
+    emit_domain(&app, DomainEvent::SettingsChanged);
+    Ok(settings)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn restart_app(app: AppHandle) {
+    app.restart()
+}
