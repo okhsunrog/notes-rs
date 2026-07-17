@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::{GraphManifest, ImportDiagnostic, LogseqJournalDate, Sha256Digest, SourceRange};
 
-pub const IMPORT_PLANNER_VERSION: u32 = 2;
+pub const IMPORT_PLANNER_VERSION: u32 = 3;
 
 /// Durable identity inputs owned by the caller, never inferred from a path or
 /// from the current source manifest.
@@ -196,9 +196,21 @@ pub struct ImportBlock {
     /// Zero-based deterministic ordinal among siblings. Persistence maps this
     /// to its concrete OrderKey in a later boundary.
     pub sibling_ordinal: u64,
+    pub presentation: ImportBlockPresentation,
     pub markdown: String,
     pub task: Option<ImportTaskMapping>,
     pub provenance: ImportBlockProvenance,
+}
+
+/// Semantic presentation recovered from Logseq's source model. Task state is
+/// intentionally represented separately because it takes precedence at the
+/// persistence boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportBlockPresentation {
+    Paragraph,
+    Bullet,
+    Numbered,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -14,12 +14,12 @@ use notes_markdown::{
 use crate::media::{MediaCollectionError, MediaLimits, MediaOwnerInput, collect_media};
 use crate::prepared::{
     IMPORT_PLANNER_VERSION, IdentityContext, ImportBlock, ImportBlockIdentity, ImportBlockMapping,
-    ImportBlockProvenance, ImportBlockSource, ImportIdentityMaps, ImportMediaKind,
-    ImportMediaOwner, ImportMediaReference, ImportMediaResolution, ImportPage, ImportPageKind,
-    ImportPageProvenance, ImportPageSource, ImportProvenance, ImportReference, ImportReferenceKind,
-    ImportReferenceOwner, ImportReferenceResolution, ImportReferenceTargetKind,
-    ImportReferenceUnresolvedReason, ImportReport, ImportTaskMapping, ImportTaskState,
-    LogseqTaskMarker, PreparedImport,
+    ImportBlockPresentation, ImportBlockProvenance, ImportBlockSource, ImportIdentityMaps,
+    ImportMediaKind, ImportMediaOwner, ImportMediaReference, ImportMediaResolution, ImportPage,
+    ImportPageKind, ImportPageProvenance, ImportPageSource, ImportProvenance, ImportReference,
+    ImportReferenceKind, ImportReferenceOwner, ImportReferenceResolution,
+    ImportReferenceTargetKind, ImportReferenceUnresolvedReason, ImportReport, ImportTaskMapping,
+    ImportTaskState, LogseqTaskMarker, PreparedImport,
 };
 use crate::{
     DiagnosticCode, DiagnosticSeverity, DocumentFormat, GraphManifest, ImportDiagnostic,
@@ -211,6 +211,8 @@ struct BlockWork {
     parent_index: Option<usize>,
     source: ImportBlockSource,
     sibling_ordinal: u64,
+    presentation: ImportBlockPresentation,
+    service_property_ranges: Vec<SourceRange>,
     structural_path: Vec<u64>,
     source_range: SourceRange,
     source_content_sha256: Sha256Digest,
@@ -810,6 +812,8 @@ fn build_page_work<'document>(
             parent_index: None,
             source: ImportBlockSource::Preamble,
             sibling_ordinal: 0,
+            presentation: ImportBlockPresentation::Paragraph,
+            service_property_ranges: Vec::new(),
             structural_path: Vec::new(),
             source_range: preamble.source_range,
             source_content_sha256: content_hash,
@@ -831,6 +835,7 @@ fn build_page_work<'document>(
         let derived_uuid = derived_block_uuid(uuid, &structural_path, content_hash);
         let explicit_identity = block_identity_candidate(document, block, diagnostics)?;
         let task = block_task_mapping(document, block)?;
+        let (presentation, service_property_ranges) = block_presentation(document, block);
         blocks.push(BlockWork {
             derived_uuid,
             target_uuid: derived_uuid,
@@ -852,6 +857,8 @@ fn build_page_work<'document>(
             } else {
                 block.sibling_index
             },
+            presentation,
+            service_property_ranges,
             structural_path,
             source_range: block.source_range,
             source_content_sha256: content_hash,
@@ -1791,10 +1798,10 @@ fn finalize_page(page: &PageWork<'_>) -> ImportPage {
                 ExplicitIdentity::None => (ImportBlockIdentity::Derived, None),
                 ExplicitIdentity::Rejected => (ImportBlockIdentity::RejectedSourceProperty, None),
             };
-            let mut markdown = id_property_range.map_or_else(
-                || block.markdown.clone(),
-                |range| remove_identity_property_line(&block.markdown, block.source_range, range),
-            );
+            let mut hidden_property_ranges = block.service_property_ranges.clone();
+            hidden_property_ranges.extend(id_property_range);
+            let mut markdown =
+                remove_property_lines(&block.markdown, block.source_range, &hidden_property_ranges);
             if let Some(task) = &block.task {
                 markdown = strip_task_marker(&markdown, task.source_marker);
             }
@@ -1803,6 +1810,7 @@ fn finalize_page(page: &PageWork<'_>) -> ImportPage {
                 page_uuid: page.uuid,
                 parent_block_uuid,
                 sibling_ordinal: block.sibling_ordinal,
+                presentation: block.presentation,
                 markdown,
                 task: block.task.clone(),
                 provenance: ImportBlockProvenance {
@@ -1827,19 +1835,52 @@ fn finalize_page(page: &PageWork<'_>) -> ImportPage {
     }
 }
 
-fn remove_identity_property_line(
+fn block_presentation(
+    document: &ParsedLogseqDocument,
+    block: &LogseqSourceBlock,
+) -> (ImportBlockPresentation, Vec<SourceRange>) {
+    let property_ranges = document
+        .constructs
+        .iter()
+        .filter_map(|construct| match (&construct.owner, &construct.kind) {
+            (
+                LogseqConstructOwner::Block { index },
+                LogseqConstructKind::Property { name, value, .. },
+            ) if *index == block.index && name == "logseq.order-list-type" && value == "number" => {
+                Some(construct.source_range)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    if property_ranges.is_empty() {
+        (ImportBlockPresentation::Bullet, property_ranges)
+    } else {
+        (ImportBlockPresentation::Numbered, property_ranges)
+    }
+}
+
+fn remove_property_lines(
     markdown: &str,
     block_source_range: SourceRange,
-    property_range: SourceRange,
+    property_ranges: &[SourceRange],
 ) -> String {
-    let line_index = property_range
-        .start
-        .line
-        .saturating_sub(block_source_range.start.line) as usize;
+    if property_ranges.is_empty() {
+        return markdown.to_owned();
+    }
+    let line_indices = property_ranges
+        .iter()
+        .map(|range| {
+            range
+                .start
+                .line
+                .saturating_sub(block_source_range.start.line) as usize
+        })
+        .collect::<BTreeSet<_>>();
     markdown
         .split('\n')
         .enumerate()
-        .filter_map(|(index, line)| (index != line_index).then_some(line))
+        .filter_map(|(index, line)| (!line_indices.contains(&index)).then_some(line))
         .collect::<Vec<_>>()
         .join("\n")
 }

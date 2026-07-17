@@ -1,8 +1,8 @@
 use std::fs;
 
 use notes_import::{
-    DiagnosticCode, DocumentFormat, IdentityContext, ImportBlockIdentity, ImportBlockSource,
-    ImportPageKind, ImportReferenceResolution, ImportReferenceTargetKind,
+    DiagnosticCode, DocumentFormat, IdentityContext, ImportBlockIdentity, ImportBlockPresentation,
+    ImportBlockSource, ImportPageKind, ImportReferenceResolution, ImportReferenceTargetKind,
     ImportReferenceUnresolvedReason, ImportRerunDecision, ImportTaskState, LogseqTaskMarker,
     PrepareImportError, PrepareImportErrorCode, PrepareLimits, SourceKind,
     compare_import_provenance, parse_logseq_markdown, prepare_import, prepare_import_with_limits,
@@ -508,6 +508,39 @@ fn identity_property_removal_is_exact_for_first_middle_last_and_sole_crlf_lines(
         block.provenance.identity,
         ImportBlockIdentity::Preserved { .. }
     )));
+}
+
+#[test]
+fn ordered_list_service_property_becomes_typed_presentation_and_only_it_is_hidden() {
+    let graph = graph(&[(
+        "pages/Ordered.md",
+        "- first\n  logseq.order-list-type:: number\n  custom:: keep me\n  foo::bar\n- second\n  logseq.order-list-type:: NUMBER\n- third\n  logseq.order-list-type:: numbered\n- fourth\n  id:: 10000000-0000-4000-8000-000000000004\n  logseq.order-list-type:: number\n  logseq.order-list-type:: number\n- logseq.order-list-type:: number\n",
+    )]);
+    let (manifest, documents) = scan_and_parse(&graph);
+    let plan = prepare_import(&documents, identity(), &manifest).expect("prepare ordered blocks");
+    let blocks = &plan.pages[0].blocks;
+
+    assert_eq!(blocks[0].presentation, ImportBlockPresentation::Numbered);
+    assert_eq!(blocks[0].markdown, "first\ncustom:: keep me\nfoo::bar");
+    assert_eq!(blocks[1].presentation, ImportBlockPresentation::Bullet);
+    assert_eq!(
+        blocks[1].markdown,
+        "second\nlogseq.order-list-type:: NUMBER"
+    );
+    assert_eq!(blocks[2].presentation, ImportBlockPresentation::Bullet);
+    assert_eq!(
+        blocks[2].markdown,
+        "third\nlogseq.order-list-type:: numbered"
+    );
+    assert_eq!(blocks[3].presentation, ImportBlockPresentation::Numbered);
+    assert_eq!(blocks[3].markdown, "fourth");
+    assert!(matches!(
+        blocks[3].provenance.identity,
+        ImportBlockIdentity::Preserved { .. }
+    ));
+    assert_eq!(blocks[4].presentation, ImportBlockPresentation::Numbered);
+    assert_eq!(blocks[4].markdown, "");
+    assert!(plan.report.diagnostics.is_empty());
 }
 
 #[test]

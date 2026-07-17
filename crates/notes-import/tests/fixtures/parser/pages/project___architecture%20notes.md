@@ -18,4 +18,5 @@ title:: Project Architecture
 	  - this is fenced code, not a structural block
 	  ```
   - Space-indented sibling child
+    logseq.order-list-type:: number
 - ## Heading block

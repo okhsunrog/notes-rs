@@ -1147,6 +1147,12 @@ fn property_parts(line: &str) -> Option<PropertyParts<'_>> {
         return None;
     }
     let raw_value = &line[delimiter + 2..];
+    // Logseq's property delimiter is followed by whitespace (or the logical
+    // end of line for an empty value). Without this boundary, ordinary text
+    // such as a namespace or identifier containing `::` must stay Markdown.
+    if !raw_value.is_empty() && !raw_value.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
     let value = raw_value.trim();
     let value_start = delimiter + 2 + raw_value.len() - raw_value.trim_start().len();
     let value_end = value_start + value.len();

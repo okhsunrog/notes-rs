@@ -560,6 +560,30 @@ fn property_ast_exposes_trimmed_values_and_exact_ranges_without_reparsing() {
 }
 
 #[test]
+fn property_delimiter_requires_whitespace_or_end_of_line() {
+    let source = "valid:: value\nempty::\ntab::\tvalue\nfoo::bar\nurl::https://example.com\n- body";
+    let entry = manifest_entry(SourceKind::Page, "pages/properties.md", source.as_bytes());
+    let document = parse_logseq_markdown(&entry, source.as_bytes(), &LogseqConfig::default())
+        .expect("parse properties");
+    let properties = document
+        .constructs
+        .iter()
+        .filter_map(|construct| match &construct.kind {
+            LogseqConstructKind::Property { name, value, .. } => {
+                Some((name.as_str(), value.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        properties,
+        [("valid", "value"), ("empty", ""), ("tab", "value")]
+    );
+    assert_eq!(reconstruct_source(&document), source);
+}
+
+#[test]
 fn arbitrary_utf8_and_malformed_structure_never_panics_or_loses_source() {
     const TOKENS: &[&str] = &[
         "-",

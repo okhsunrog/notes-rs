@@ -9,7 +9,7 @@ use notes_core::{
 };
 use notes_import::{
     DiagnosticSeverity, DocumentFormat, DrawingConversionPublication, DrawingConversionStatus,
-    IdentityContext, ImportBlockSource, ImportDiagnostic, ImportMediaKind, ImportMediaOwner,
+    IdentityContext, ImportBlockPresentation, ImportDiagnostic, ImportMediaKind, ImportMediaOwner,
     ImportMediaResolution, ImportPageKind, ImportTaskState, LoadDrawingConversionErrorCode,
     MaterializedMediaBlob, MediaMaterializationPlan, PreparedImport, SourceKind,
 };
@@ -901,9 +901,10 @@ fn imported_block_style(block: &notes_import::ImportBlock) -> BlockStyle {
             ImportTaskState::Cancelled => TaskState::Cancelled,
         });
     }
-    match block.provenance.source {
-        ImportBlockSource::Preamble => BlockStyle::Paragraph,
-        ImportBlockSource::Structural { .. } => BlockStyle::Bullet,
+    match block.presentation {
+        ImportBlockPresentation::Paragraph => BlockStyle::Paragraph,
+        ImportBlockPresentation::Bullet => BlockStyle::Bullet,
+        ImportBlockPresentation::Numbered => BlockStyle::Numbered,
     }
 }
 
@@ -1447,6 +1448,11 @@ mod tests {
                 .any(|block| block.style == BlockStyle::Paragraph)
         );
         assert!(blocks.iter().any(|block| block.style == BlockStyle::Bullet));
+        assert!(
+            blocks
+                .iter()
+                .any(|block| block.style == BlockStyle::Numbered)
+        );
         assert!(blocks.iter().all(|block| block.order_key.value() > 0));
         assert!(batch.provenance.payload.get("scanDiagnostics").is_some());
         assert!(batch.provenance.payload.get("report").is_some());

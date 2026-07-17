@@ -51,11 +51,11 @@ pub use prepare::{
 };
 pub use prepared::{
     IMPORT_PLANNER_VERSION, IdentityContext, ImportBlock, ImportBlockIdentity, ImportBlockMapping,
-    ImportBlockProvenance, ImportBlockSource, ImportIdentityMaps, ImportInlineImageMime,
-    ImportMarkdownRange, ImportMediaBlockedReason, ImportMediaKind, ImportMediaOwner,
-    ImportMediaReference, ImportMediaResolution, ImportMediaUnsupportedReason, ImportPage,
-    ImportPageKind, ImportPageProvenance, ImportPageSource, ImportProvenance, ImportReference,
-    ImportReferenceKind, ImportReferenceOwner, ImportReferenceResolution,
+    ImportBlockPresentation, ImportBlockProvenance, ImportBlockSource, ImportIdentityMaps,
+    ImportInlineImageMime, ImportMarkdownRange, ImportMediaBlockedReason, ImportMediaKind,
+    ImportMediaOwner, ImportMediaReference, ImportMediaResolution, ImportMediaUnsupportedReason,
+    ImportPage, ImportPageKind, ImportPageProvenance, ImportPageSource, ImportProvenance,
+    ImportReference, ImportReferenceKind, ImportReferenceOwner, ImportReferenceResolution,
     ImportReferenceTargetKind, ImportReferenceUnresolvedReason, ImportRemoteMediaScheme,
     ImportReport, ImportRerunDecision, ImportTaskMapping, ImportTaskState, LogseqTaskMarker,
     PreparedImport, compare_import_provenance,
