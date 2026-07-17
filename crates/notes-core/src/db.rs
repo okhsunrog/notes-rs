@@ -20,7 +20,7 @@ mod pages;
 mod search;
 mod workspace;
 
-pub use archive::{export_archive, import_archive};
+pub use archive::{ARCHIVE_VERSION, export_archive, import_archive};
 pub use attachments::{
     attachment_path_ref_count, create_attachment, delete_attachment, get_attachment,
     list_attachments,

@@ -351,7 +351,7 @@ fn assert_archive_semantics(
     attachment_uuid: uuid::Uuid,
 ) {
     assert_eq!(archive.format, "notes-rs");
-    assert_eq!(archive.version, 6);
+    assert_eq!(archive.version, db::ARCHIVE_VERSION);
     assert!(
         archive
             .page_identities

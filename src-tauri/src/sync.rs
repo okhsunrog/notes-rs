@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
+use notes_blob::{BlobHash, BlobStore, BlobStoreError};
 use notes_core::{
     Connection, OpKind, acknowledge_server_ops, apply_sequenced_batch, export_sync_snapshot,
 };
@@ -9,13 +10,13 @@ use notes_sync::{
     AppliedRemoteOperation, HttpTransport, SyncClient, SyncSnapshot, SyncTransport, TransportError,
 };
 use serde::Serialize;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tauri::AppHandle;
 use tokio_tungstenite::tungstenite::Message;
 
 const SYNC_BATCH_SIZE: u32 = 256;
+const MAX_ATTACHMENT_SIZE: u64 = 100 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 enum SyncSessionError {
@@ -40,7 +41,7 @@ fn is_permanent_failure(error: &anyhow::Error) -> bool {
 
 struct DesktopTransport<'a> {
     http: &'a HttpTransport,
-    data_dir: &'a Path,
+    blob_store: &'a BlobStore,
 }
 
 #[async_trait]
@@ -54,12 +55,12 @@ impl SyncTransport for DesktopTransport<'_> {
     }
 
     async fn prepare_push(&mut self, operations: &[notes_core::Op]) -> Result<()> {
-        upload_operation_blobs(self.http, self.data_dir, operations).await
+        upload_operation_blobs(self.http, self.blob_store, operations).await
     }
 
     async fn prepare_pull(&mut self, operations: &[SequencedOp]) -> Result<()> {
         for operation in operations {
-            download_operation_blob(self.http, self.data_dir, &operation.envelope).await?;
+            download_operation_blob(self.http, self.blob_store, &operation.envelope).await?;
         }
         Ok(())
     }
@@ -109,7 +110,7 @@ pub fn spawn_worker(
     connection: Connection,
     server_url: url::Url,
     token: String,
-    data_dir: PathBuf,
+    blob_store: BlobStore,
     status: Arc<RwLock<SyncStatus>>,
 ) {
     tauri::async_runtime::spawn(async move {
@@ -164,7 +165,7 @@ pub fn spawn_worker(
                 &transport,
                 &status,
                 &server_url,
-                &data_dir,
+                &blob_store,
             )
             .await;
             let message = result
@@ -198,10 +199,10 @@ async fn synchronize_session(
     transport: &HttpTransport,
     status: &Arc<RwLock<SyncStatus>>,
     server_url: &url::Url,
-    data_dir: &Path,
+    blob_store: &BlobStore,
 ) -> Result<()> {
     transport.health().await?;
-    initialize_replica(app, connection, transport, data_dir).await?;
+    initialize_replica(app, connection, transport, blob_store).await?;
     let server_info = transport.info().await?;
     if notes_core::db::workspace_uuid(connection).await? != server_info.workspace_uuid {
         return Err(SyncSessionError::WorkspaceConflict.into());
@@ -215,7 +216,7 @@ async fn synchronize_session(
         None,
     )
     .await;
-    synchronize_http(app, connection, transport, data_dir).await?;
+    synchronize_http(app, connection, transport, blob_store).await?;
     let cursor = notes_core::sync_cursor(connection).await?;
     let mut socket = transport.connect(cursor).await?;
     set_connection_state(
@@ -238,7 +239,7 @@ async fn synchronize_session(
                     Message::Text(text) => {
                         let message: ServerMessage = serde_json::from_str(&text)
                             .context("decoding sync websocket message")?;
-                        handle_server_message(app, connection, transport, data_dir, message).await?;
+                        handle_server_message(app, connection, transport, blob_store, message).await?;
                         set_connection_state(
                             app,
                             status,
@@ -256,7 +257,7 @@ async fn synchronize_session(
             _ = drain.tick() => {
                 let pending = notes_core::pending_outbox(connection, SYNC_BATCH_SIZE).await?;
                 if !pending.is_empty() {
-                    upload_operation_blobs(transport, data_dir, &pending).await?;
+                    upload_operation_blobs(transport, blob_store, &pending).await?;
                     let message = serde_json::to_string(&ClientMessage::Push { ops: pending })?;
                     socket.send(Message::Text(message.into())).await?;
                 }
@@ -269,7 +270,7 @@ async fn initialize_replica(
     app: &AppHandle,
     connection: &Connection,
     transport: &HttpTransport,
-    data_dir: &Path,
+    blob_store: &BlobStore,
 ) -> Result<()> {
     if notes_core::sync_cursor(connection).await? != 0 {
         return Ok(());
@@ -280,12 +281,12 @@ async fn initialize_replica(
     let local_empty = snapshot_is_empty(&local);
     match (server_empty, local_empty) {
         (true, false) => {
+            upload_snapshot_blobs(transport, blob_store, &local).await?;
             transport.bootstrap(local.clone()).await?;
-            upload_snapshot_blobs(transport, data_dir, &local).await?;
         }
         (false, true) => {
+            download_snapshot_blobs(transport, blob_store, &server).await?;
             notes_core::import_sync_snapshot(connection, server.clone()).await?;
-            download_snapshot_blobs(transport, data_dir, &server).await?;
             emit_workspace_changed(app);
         }
         (false, false) => {
@@ -293,8 +294,8 @@ async fn initialize_replica(
             if local != server {
                 return Err(SyncSessionError::WorkspaceConflict.into());
             }
+            download_snapshot_blobs(transport, blob_store, &server).await?;
             notes_core::import_sync_snapshot(connection, server.clone()).await?;
-            download_snapshot_blobs(transport, data_dir, &server).await?;
         }
         (true, true) => {
             // The server's durable empty workspace is canonical. This prevents
@@ -319,11 +320,11 @@ async fn synchronize_http(
     app: &AppHandle,
     connection: &Connection,
     transport: &HttpTransport,
-    data_dir: &Path,
+    blob_store: &BlobStore,
 ) -> Result<()> {
     let mut transport = DesktopTransport {
         http: transport,
-        data_dir,
+        blob_store,
     };
     let stats = SyncClient::new(connection.clone())
         .with_batch_size(SYNC_BATCH_SIZE)
@@ -337,12 +338,12 @@ async fn handle_server_message(
     app: &AppHandle,
     connection: &Connection,
     transport: &HttpTransport,
-    data_dir: &Path,
+    blob_store: &BlobStore,
     message: ServerMessage,
 ) -> Result<()> {
     match message {
         ServerMessage::Ops { ops } => {
-            apply_server_operations(app, connection, transport, data_dir, ops).await
+            apply_server_operations(app, connection, transport, blob_store, ops).await
         }
         ServerMessage::Ack { ops } => {
             acknowledge_server_ops(
@@ -367,11 +368,11 @@ async fn apply_server_operations(
     app: &AppHandle,
     connection: &Connection,
     transport: &HttpTransport,
-    data_dir: &Path,
+    blob_store: &BlobStore,
     operations: Vec<SequencedOp>,
 ) -> Result<()> {
     for operation in &operations {
-        download_operation_blob(transport, data_dir, &operation.envelope).await?;
+        download_operation_blob(transport, blob_store, &operation.envelope).await?;
     }
     let previous_contents = previous_operation_contents(connection, &operations).await?;
     let sequenced = operations
@@ -573,13 +574,12 @@ async fn emit_operation_changes(
 
 async fn upload_operation_blobs(
     transport: &HttpTransport,
-    data_dir: &Path,
+    blob_store: &BlobStore,
     operations: &[notes_core::Op],
 ) -> Result<()> {
     for operation in operations {
         if let notes_core::OpKind::AttachmentAdd(attachment) = &operation.kind {
-            let path = attachment_path(data_dir, &attachment.blob_hash, &attachment.filename)?;
-            transport.upload_blob(&attachment.blob_hash, &path).await?;
+            upload_blob(transport, blob_store, attachment.blob_hash, attachment.size).await?;
         }
     }
     Ok(())
@@ -587,23 +587,18 @@ async fn upload_operation_blobs(
 
 async fn download_operation_blob(
     transport: &HttpTransport,
-    data_dir: &Path,
+    blob_store: &BlobStore,
     operation: &notes_core::Op,
 ) -> Result<()> {
     if let notes_core::OpKind::AttachmentAdd(attachment) = &operation.kind {
-        let path = attachment_path(data_dir, &attachment.blob_hash, &attachment.filename)?;
-        if !tokio::fs::try_exists(&path).await? {
-            transport
-                .download_blob(&attachment.blob_hash, &path, 100 * 1024 * 1024)
-                .await?;
-        }
+        download_blob(transport, blob_store, attachment.blob_hash, attachment.size).await?;
     }
     Ok(())
 }
 
 async fn upload_snapshot_blobs(
     transport: &HttpTransport,
-    data_dir: &Path,
+    blob_store: &BlobStore,
     snapshot: &SyncSnapshot,
 ) -> Result<()> {
     for attachment in snapshot
@@ -611,19 +606,17 @@ async fn upload_snapshot_blobs(
         .iter()
         .filter(|attachment| attachment.present)
     {
-        let filename = attachment
-            .filename
-            .as_deref()
-            .context("snapshot attachment is missing its filename")?;
-        let path = attachment_path(data_dir, &attachment.blob_hash, filename)?;
-        transport.upload_blob(&attachment.blob_hash, &path).await?;
+        let size = attachment
+            .size
+            .context("snapshot attachment is missing its size")?;
+        upload_blob(transport, blob_store, attachment.blob_hash, size).await?;
     }
     Ok(())
 }
 
 async fn download_snapshot_blobs(
     transport: &HttpTransport,
-    data_dir: &Path,
+    blob_store: &BlobStore,
     snapshot: &SyncSnapshot,
 ) -> Result<()> {
     for attachment in snapshot
@@ -631,28 +624,81 @@ async fn download_snapshot_blobs(
         .iter()
         .filter(|attachment| attachment.present)
     {
-        let filename = attachment
-            .filename
-            .as_deref()
-            .context("snapshot attachment is missing its filename")?;
-        let path = attachment_path(data_dir, &attachment.blob_hash, filename)?;
-        if !tokio::fs::try_exists(&path).await? {
-            transport
-                .download_blob(&attachment.blob_hash, &path, 100 * 1024 * 1024)
-                .await?;
-        }
+        let size = attachment
+            .size
+            .context("snapshot attachment is missing its size")?;
+        download_blob(transport, blob_store, attachment.blob_hash, size).await?;
     }
     Ok(())
 }
 
-fn attachment_path(data_dir: &Path, hash: &str, filename: &str) -> Result<PathBuf> {
-    let mut components = Path::new(filename).components();
-    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
-        || components.next().is_some()
-    {
-        bail!("attachment filename is not a safe path component");
+async fn upload_blob(
+    transport: &HttpTransport,
+    blob_store: &BlobStore,
+    hash: BlobHash,
+    expected_size: u64,
+) -> Result<()> {
+    anyhow::ensure!(
+        expected_size <= MAX_ATTACHMENT_SIZE,
+        "attachment blob {hash} exceeds the {MAX_ATTACHMENT_SIZE}-byte limit"
+    );
+    let stored = blob_store.open_verified(hash, MAX_ATTACHMENT_SIZE)?;
+    anyhow::ensure!(
+        stored.blob.size == expected_size,
+        "attachment blob {hash} has size {}, expected {expected_size}",
+        stored.blob.size
+    );
+    transport.upload_blob_file(hash, stored.into_file()).await
+}
+
+async fn download_blob(
+    transport: &HttpTransport,
+    blob_store: &BlobStore,
+    hash: BlobHash,
+    expected_size: u64,
+) -> Result<()> {
+    anyhow::ensure!(
+        expected_size <= MAX_ATTACHMENT_SIZE,
+        "attachment blob {hash} exceeds the {MAX_ATTACHMENT_SIZE}-byte limit"
+    );
+    match blob_store.open_verified(hash, MAX_ATTACHMENT_SIZE) {
+        Ok(stored) => {
+            anyhow::ensure!(
+                stored.blob.size == expected_size,
+                "attachment blob {hash} has size {}, expected {expected_size}",
+                stored.blob.size
+            );
+            return Ok(());
+        }
+        Err(BlobStoreError::NotFound { .. }) => {}
+        Err(error) => return Err(error.into()),
     }
-    Ok(data_dir.join("attachments").join(hash).join(filename))
+
+    let staging_directory = blob_store.root().join(".blob-downloads");
+    tokio::fs::create_dir_all(&staging_directory).await?;
+    let staging = staging_directory.join(format!("{}.download", uuid::Uuid::now_v7()));
+    let result = async {
+        transport
+            .download_blob(hash, &staging, MAX_ATTACHMENT_SIZE)
+            .await?;
+        let installed = blob_store.install_file(&staging, hash, MAX_ATTACHMENT_SIZE)?;
+        anyhow::ensure!(
+            installed.blob.size == expected_size,
+            "downloaded attachment blob {hash} has size {}, expected {expected_size}",
+            installed.blob.size
+        );
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    match tokio::fs::remove_file(&staging).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) if result.is_err() => {
+            tracing::warn!(path = %staging.display(), %error, "failed to clean staged blob after download failure");
+        }
+        Err(error) => return Err(error.into()),
+    }
+    result
 }
 
 async fn set_connection_state(

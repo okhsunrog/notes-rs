@@ -268,6 +268,19 @@ impl HttpTransport {
         let file = tokio::fs::File::open(path)
             .await
             .with_context(|| format!("opening attachment {}", path.display()))?;
+        self.upload_blob_stream(hash, file).await
+    }
+
+    /// Uploads an already-open blob handle.
+    ///
+    /// Hosts that verify content-addressed storage should use this overload so
+    /// the exact verified handle is streamed without reopening a mutable path.
+    pub async fn upload_blob_file(&self, hash: BlobHash, file: std::fs::File) -> Result<()> {
+        self.upload_blob_stream(hash, tokio::fs::File::from_std(file))
+            .await
+    }
+
+    async fn upload_blob_stream(&self, hash: BlobHash, file: tokio::fs::File) -> Result<()> {
         let response = self
             .client
             .put(self.endpoint(&format!("v1/blobs/{hash}"))?)

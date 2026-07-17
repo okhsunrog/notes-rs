@@ -1,4 +1,7 @@
 use super::*;
+use notes_blob::{BlobHash, BlobStore};
+use std::collections::BTreeMap;
+use std::io::Read;
 
 #[tauri::command]
 #[specta::specta]
@@ -11,7 +14,7 @@ pub async fn export_data(
         chrono::Utc::now().format("%Y%m%d-%H%M%S")
     );
     let mut archive = db::export_archive(&state.conn).await.map_err(err)?;
-    add_archive_files(&app, &mut archive).map_err(err)?;
+    add_archive_files(&state.blob_store, &mut archive).map_err(err)?;
     let json = serde_json::to_string_pretty(&archive).map_err(err)?;
 
     #[cfg(not(target_os = "android"))]
@@ -87,10 +90,10 @@ pub async fn import_data(
     };
 
     let archive: db::DataArchive = serde_json::from_str(&json).map_err(err)?;
-    write_backup(&app, &state.conn, "before-import")
+    write_backup(&app, &state.conn, &state.blob_store, "before-import")
         .await
         .map_err(err)?;
-    restore_archive(&app, &state.conn, archive)
+    restore_archive(&state.blob_store, &state.conn, archive)
         .await
         .map_err(err)?;
     emit_domain(&app, DomainEvent::WorkspaceChanged);
@@ -104,12 +107,15 @@ pub async fn create_backup(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> CommandResult<std::path::PathBuf> {
-    write_backup(&app, &state.conn, "manual").await.map_err(err)
+    write_backup(&app, &state.conn, &state.blob_store, "manual")
+        .await
+        .map_err(err)
 }
 
 pub(super) async fn write_backup(
     app: &AppHandle,
     connection: &Connection,
+    blob_store: &BlobStore,
     reason: &str,
 ) -> anyhow::Result<std::path::PathBuf> {
     let directory = app.path().app_data_dir()?.join("backups");
@@ -119,118 +125,150 @@ pub(super) async fn write_backup(
         chrono::Utc::now().format("%Y%m%d-%H%M%S")
     ));
     let mut archive = db::export_archive(connection).await?;
-    add_archive_files(app, &mut archive)?;
+    add_archive_files(blob_store, &mut archive)?;
     std::fs::write(&path, serde_json::to_string_pretty(&archive)?)?;
     Ok(path)
 }
 
-fn add_archive_files(app: &AppHandle, archive: &mut db::DataArchive) -> anyhow::Result<()> {
-    for attachment in &archive.attachments {
-        let relative = super::attachments::attachment_relative_path(
-            &attachment.blob_hash,
-            &attachment.filename,
-        );
-        let path = safe_app_data_path(app, &relative)?;
-        let bytes = std::fs::read(&path)
-            .with_context(|| format!("reading attachment {}", path.display()))?;
-        let actual_hash = format!("{:x}", Sha256::digest(&bytes));
+fn add_archive_files(blob_store: &BlobStore, archive: &mut db::DataArchive) -> anyhow::Result<()> {
+    let expected = archive_blob_sizes(archive)?;
+    archive.files.clear();
+    for (blob_hash, expected_size) in expected {
+        let verified =
+            blob_store.open_verified(blob_hash, super::attachments::MAX_ATTACHMENT_SIZE)?;
         anyhow::ensure!(
-            actual_hash == attachment.blob_hash,
-            "attachment {} does not match its stored content hash",
-            attachment.filename
+            verified.blob.size == expected_size,
+            "attachment blob {blob_hash} has size {}, expected {expected_size}",
+            verified.blob.size
+        );
+        let mut bytes = Vec::with_capacity(usize::try_from(verified.blob.size)?);
+        verified.into_file().read_to_end(&mut bytes)?;
+        anyhow::ensure!(
+            bytes.len() as u64 == expected_size && BlobHash::digest(&bytes) == blob_hash,
+            "attachment blob {blob_hash} changed while it was being exported"
         );
         archive.files.insert(
-            relative.to_string_lossy().into_owned(),
+            archive_blob_path(blob_hash),
             base64::engine::general_purpose::STANDARD.encode(bytes),
         );
     }
     Ok(())
 }
 
+fn archive_blob_sizes(archive: &db::DataArchive) -> anyhow::Result<BTreeMap<BlobHash, u64>> {
+    let mut expected = BTreeMap::new();
+    for attachment in &archive.attachments {
+        if let Some(existing) = expected.insert(attachment.blob_hash, attachment.size) {
+            anyhow::ensure!(
+                existing == attachment.size,
+                "attachment metadata disagrees about the size of blob {}",
+                attachment.blob_hash
+            );
+        }
+    }
+    Ok(expected)
+}
+
 async fn restore_archive(
-    app: &AppHandle,
+    blob_store: &BlobStore,
     connection: &Connection,
     archive: db::DataArchive,
 ) -> anyhow::Result<()> {
-    let data_dir = app.path().app_data_dir()?;
-    let staging = data_dir.join(format!("attachments-import-{}", uuid::Uuid::new_v4()));
-    let expected_files = archive
-        .attachments
-        .iter()
-        .map(|attachment| {
-            super::attachments::attachment_relative_path(
-                &attachment.blob_hash,
-                &attachment.filename,
-            )
-        })
+    let expected = archive_blob_sizes(&archive)?;
+    let expected_files = expected
+        .keys()
+        .copied()
+        .map(archive_blob_path)
         .collect::<std::collections::BTreeSet<_>>();
     let actual_files = archive
         .files
         .keys()
-        .map(safe_relative_path)
-        .collect::<anyhow::Result<std::collections::BTreeSet<_>>>()?;
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
     anyhow::ensure!(
         actual_files == expected_files,
         "archive attachment metadata and file payloads do not match"
     );
-    for (relative, encoded) in &archive.files {
-        let relative = safe_relative_path(relative)?;
-        let bytes = base64::engine::general_purpose::STANDARD.decode(encoded)?;
-        let components = relative.components().collect::<Vec<_>>();
-        let expected_hash = components
-            .get(1)
-            .and_then(|component| component.as_os_str().to_str())
-            .context("attachment archive path is missing its content hash")?;
-        anyhow::ensure!(
-            format!("{:x}", Sha256::digest(&bytes)) == expected_hash,
-            "archive attachment payload does not match its content hash"
+    for (blob_hash, expected_size) in expected {
+        let path = archive_blob_path(blob_hash);
+        let encoded = archive
+            .files
+            .get(&path)
+            .with_context(|| format!("archive is missing blob {blob_hash}"))?;
+        let decoder = base64::read::DecoderReader::new(
+            encoded.as_bytes(),
+            &base64::engine::general_purpose::STANDARD,
         );
-        let destination = staging.join(relative.strip_prefix("attachments").unwrap_or(&relative));
-        if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(destination, bytes)?;
+        let installed = blob_store.install_reader(
+            decoder,
+            blob_hash,
+            super::attachments::MAX_ATTACHMENT_SIZE,
+        )?;
+        anyhow::ensure!(
+            installed.blob.size == expected_size,
+            "archive blob {blob_hash} has size {}, expected {expected_size}",
+            installed.blob.size
+        );
     }
-    if let Err(error) = db::import_archive(connection, archive).await {
-        let _ = std::fs::remove_dir_all(staging);
-        return Err(error);
-    }
-    let attachments = data_dir.join("attachments");
-    if attachments.exists() {
-        std::fs::remove_dir_all(&attachments)?;
-    }
-    if staging.exists() {
-        std::fs::rename(staging, attachments)?;
-    }
+    db::import_archive(connection, archive).await?;
     Ok(())
 }
 
-pub(super) fn safe_app_data_path(
-    app: &AppHandle,
-    relative: impl AsRef<std::path::Path>,
-) -> anyhow::Result<std::path::PathBuf> {
-    Ok(app
-        .path()
-        .app_data_dir()?
-        .join(safe_relative_path(relative)?))
+fn archive_blob_path(blob_hash: BlobHash) -> String {
+    let encoded = blob_hash.to_string();
+    format!("blobs/{}/{}", &encoded[..2], encoded)
 }
 
-fn safe_relative_path(value: impl AsRef<std::path::Path>) -> anyhow::Result<std::path::PathBuf> {
-    let path = value.as_ref();
-    if path.is_absolute()
-        || path.components().any(|component| {
-            matches!(
-                component,
-                std::path::Component::ParentDir
-                    | std::path::Component::RootDir
-                    | std::path::Component::Prefix(_)
-            )
-        })
-    {
-        anyhow::bail!("archive contains an unsafe attachment path");
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn archive_blob_paths_are_canonical_and_filename_free() {
+        let hash = BlobHash::digest(b"portable payload");
+        let encoded = hash.to_string();
+        assert_eq!(
+            archive_blob_path(hash),
+            format!("blobs/{}/{}", &encoded[..2], encoded)
+        );
     }
-    if !path.starts_with("attachments") {
-        anyhow::bail!("attachment paths must be below the attachments directory");
+
+    #[test]
+    fn archive_stores_one_payload_per_hash() {
+        let temporary = tempfile::tempdir().unwrap();
+        let blob_store = BlobStore::new(temporary.path());
+        let payload = b"shared attachment bytes";
+        let hash = BlobHash::digest(payload);
+        blob_store
+            .install_reader(payload.as_slice(), hash, payload.len() as u64)
+            .unwrap();
+        let owner = notes_core::AttachmentOwner::Page(uuid::Uuid::now_v7());
+        let attachment = |filename: &str| db::Attachment {
+            uuid: uuid::Uuid::now_v7(),
+            owner,
+            blob_hash: hash,
+            filename: filename.into(),
+            mime: "application/octet-stream".into(),
+            size: payload.len() as u64,
+            created_at: 0,
+        };
+        let mut archive = db::DataArchive {
+            format: "notes-rs".into(),
+            version: 1,
+            workspace_uuid: uuid::Uuid::now_v7(),
+            exported_at: 0,
+            page_identities: Vec::new(),
+            page_aliases: Vec::new(),
+            pages: Vec::new(),
+            blocks: Vec::new(),
+            attachments: vec![attachment("one.bin"), attachment("two.bin")],
+            external_import_receipts: Vec::new(),
+            files: BTreeMap::new(),
+        };
+
+        add_archive_files(&blob_store, &mut archive).unwrap();
+
+        assert_eq!(archive.files.len(), 1);
+        assert!(archive.files.contains_key(&archive_blob_path(hash)));
     }
-    Ok(path.to_path_buf())
 }

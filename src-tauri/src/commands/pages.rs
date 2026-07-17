@@ -122,16 +122,11 @@ pub async fn delete_page(
     state: State<'_, AppState>,
     uuid: uuid::Uuid,
 ) -> CommandResult<bool> {
-    super::data::write_backup(&app, &state.conn, "before-delete")
+    super::data::write_backup(&app, &state.conn, &state.blob_store, "before-delete")
         .await
         .map_err(err)?;
     let deleted = db::delete_page(&state.conn, uuid).await.map_err(err)?;
     if let Some(deleted) = &deleted {
-        for attachment in &deleted.attachments {
-            super::attachments::remove_file_if_unreferenced(&app, &state.conn, attachment)
-                .await
-                .map_err(err)?;
-        }
         emit_domain(
             &app,
             DomainEvent::PagesDeleted {

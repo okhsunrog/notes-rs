@@ -126,6 +126,7 @@ pub fn run() {
             let handle = app.handle().clone();
             let data_dir = app.path().app_data_dir().expect("resolving app data dir");
             std::fs::create_dir_all(&data_dir).expect("creating data dir");
+            let blob_store = notes_blob::BlobStore::new(data_dir.clone());
 
             let startup = Arc::new(RwLock::new(commands::StartupStatus::Starting {
                 message: "Loading device settings…".into(),
@@ -180,6 +181,7 @@ pub fn run() {
                     Ok(conn) => {
                         handle.manage(commands::AppState {
                             conn: conn.clone(),
+                            blob_store: blob_store.clone(),
                             remote_ai,
                             chat_cancellations: Arc::new(std::sync::Mutex::new(
                                 std::collections::HashMap::new(),
@@ -191,7 +193,7 @@ pub fn run() {
                                 conn.clone(),
                                 server_url,
                                 token,
-                                data_dir.clone(),
+                                blob_store,
                                 sync_status,
                             )
                         }

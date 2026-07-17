@@ -97,6 +97,7 @@ impl std::error::Error for CommandError {}
 
 pub struct AppState {
     pub conn: Connection,
+    pub blob_store: notes_blob::BlobStore,
     pub remote_ai: Option<notes_sync::HttpTransport>,
     pub chat_cancellations: Arc<std::sync::Mutex<HashMap<uuid::Uuid, CancellationToken>>>,
 }

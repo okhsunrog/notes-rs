@@ -1,6 +1,9 @@
 use super::*;
+use notes_blob::BlobHash;
+use std::io::Read;
 
-const MAX_ATTACHMENT_SIZE: u64 = 100 * 1024 * 1024;
+pub(super) const MAX_ATTACHMENT_SIZE: u64 = 100 * 1024 * 1024;
+const HASH_BUFFER_SIZE: usize = 64 * 1024;
 
 #[tauri::command]
 #[specta::specta]
@@ -10,7 +13,7 @@ pub async fn attach_file(
     location: notes_core::AttachmentOwner,
 ) -> CommandResult<Option<db::Attachment>> {
     #[cfg(not(target_os = "android"))]
-    let (filename, mime, bytes) = {
+    let (filename, mime, installed) = {
         let Some(source) = app.dialog().file().blocking_pick_file() else {
             return Ok(None);
         };
@@ -27,12 +30,18 @@ pub async fn attach_file(
             .and_then(|name| name.to_str())
             .ok_or_else(|| CommandError::invalid("attachment filename is not valid UTF-8"))?
             .to_owned();
-        let bytes = std::fs::read(&source).map_err(err)?;
-        (filename, "application/octet-stream".to_owned(), bytes)
+        validate_attachment_filename(&filename)?;
+        let source_file = std::fs::File::open(&source).map_err(err)?;
+        let (blob_hash, _) = hash_reader_limited(source_file, MAX_ATTACHMENT_SIZE).map_err(err)?;
+        let installed = state
+            .blob_store
+            .install_file(&source, blob_hash, MAX_ATTACHMENT_SIZE)
+            .map_err(err)?;
+        (filename, "application/octet-stream".to_owned(), installed)
     };
 
     #[cfg(target_os = "android")]
-    let (filename, mime, bytes) = {
+    let (filename, mime, installed) = {
         use tauri_plugin_android_fs::AndroidFsExt;
 
         let api = app.android_fs_async();
@@ -53,36 +62,34 @@ pub async fn attach_file(
             .get_mime_type(&uri)
             .await
             .unwrap_or_else(|_| "application/octet-stream".into());
-        let bytes = api.read(&uri).await.map_err(err)?;
-        (filename, mime, bytes)
+        validate_attachment_filename(&filename)?;
+        let source = api.open_file_readable(&uri).await.map_err(err)?;
+        let (blob_hash, _) = hash_reader_limited(source, MAX_ATTACHMENT_SIZE).map_err(err)?;
+        let source = api.open_file_readable(&uri).await.map_err(err)?;
+        let installed = state
+            .blob_store
+            .install_reader(source, blob_hash, MAX_ATTACHMENT_SIZE)
+            .map_err(err)?;
+        (filename, mime, installed)
     };
 
-    validate_attachment_filename(&filename)?;
-    let size = bytes.len() as u64;
-    let blob_hash = format!("{:x}", Sha256::digest(&bytes));
-    let relative = attachment_relative_path(&blob_hash, &filename);
-    let destination = app.path().app_data_dir().map_err(err)?.join(&relative);
-    let file_already_existed = destination.exists();
-    std::fs::create_dir_all(destination.parent().expect("attachment has parent")).map_err(err)?;
-    std::fs::write(&destination, bytes).map_err(err)?;
-
-    match db::create_attachment(&state.conn, location, blob_hash, filename, mime, size).await {
-        Ok(attachment) => {
-            emit_domain(
-                &app,
-                DomainEvent::AttachmentsChanged {
-                    owner_uuids: vec![attachment.owner.uuid()],
-                },
-            );
-            Ok(Some(attachment))
-        }
-        Err(error) => {
-            if !file_already_existed {
-                let _ = std::fs::remove_file(destination);
-            }
-            Err(err(error))
-        }
-    }
+    let attachment = db::create_attachment(
+        &state.conn,
+        location,
+        installed.blob.hash,
+        filename,
+        mime,
+        installed.blob.size,
+    )
+    .await
+    .map_err(err)?;
+    emit_domain(
+        &app,
+        DomainEvent::AttachmentsChanged {
+            owner_uuids: vec![attachment.owner.uuid()],
+        },
+    );
+    Ok(Some(attachment))
 }
 
 #[tauri::command]
@@ -107,10 +114,21 @@ pub async fn open_attachment(
         .await
         .map_err(err)?
         .ok_or_else(|| CommandError::new(CommandErrorCode::NotFound, "attachment not found"))?;
-    let relative = attachment_relative_path(&attachment.blob_hash, &attachment.filename);
-    let path = super::data::safe_app_data_path(&app, &relative).map_err(err)?;
+    let verified = state
+        .blob_store
+        .open_verified(attachment.blob_hash, MAX_ATTACHMENT_SIZE)
+        .map_err(err)?;
+    if verified.blob.size != attachment.size {
+        return Err(CommandError::new(
+            CommandErrorCode::Conflict,
+            format!(
+                "attachment size does not match its stored blob: expected {}, got {}",
+                attachment.size, verified.blob.size
+            ),
+        ));
+    }
     app.opener()
-        .open_path(path.to_string_lossy(), None::<&str>)
+        .open_path(verified.blob.path.to_string_lossy(), None::<&str>)
         .map_err(err)
 }
 
@@ -121,18 +139,20 @@ pub async fn delete_attachment(
     state: State<'_, AppState>,
     uuid: uuid::Uuid,
 ) -> CommandResult<bool> {
-    super::data::write_backup(&app, &state.conn, "before-attachment-delete")
-        .await
-        .map_err(err)?;
+    super::data::write_backup(
+        &app,
+        &state.conn,
+        &state.blob_store,
+        "before-attachment-delete",
+    )
+    .await
+    .map_err(err)?;
     let Some(attachment) = db::delete_attachment(&state.conn, uuid)
         .await
         .map_err(err)?
     else {
         return Ok(false);
     };
-    remove_file_if_unreferenced(&app, &state.conn, &attachment)
-        .await
-        .map_err(err)?;
     emit_domain(
         &app,
         DomainEvent::AttachmentsChanged {
@@ -142,32 +162,38 @@ pub async fn delete_attachment(
     Ok(true)
 }
 
-pub(super) async fn remove_file_if_unreferenced(
-    app: &AppHandle,
-    connection: &Connection,
-    attachment: &db::Attachment,
-) -> anyhow::Result<()> {
-    let relative = attachment_relative_path(&attachment.blob_hash, &attachment.filename);
-    let path = super::data::safe_app_data_path(app, &relative)?;
-    let still_referenced = db::attachment_path_ref_count(
-        connection,
-        attachment.blob_hash.clone(),
-        attachment.filename.clone(),
-    )
-    .await?
-        > 0;
-    if !still_referenced && path.exists() {
-        std::fs::remove_file(path)?;
-    }
-    Ok(())
-}
-
-pub(super) fn attachment_relative_path(blob_hash: &str, filename: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from("attachments")
-        .join(blob_hash)
-        .join(filename)
-}
-
 fn validate_attachment_filename(filename: &str) -> CommandResult<()> {
     notes_core::validate_attachment_filename(filename).map_err(err)
+}
+
+fn hash_reader_limited(mut reader: impl Read, maximum: u64) -> anyhow::Result<(BlobHash, u64)> {
+    let mut hasher = Sha256::new();
+    let mut size = 0_u64;
+    let mut buffer = [0_u8; HASH_BUFFER_SIZE];
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        size = size
+            .checked_add(count as u64)
+            .context("attachment size overflow")?;
+        anyhow::ensure!(size <= maximum, "attachments are limited to 100 MiB");
+        hasher.update(&buffer[..count]);
+    }
+    Ok((BlobHash::from_bytes(hasher.finalize().into()), size))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn streaming_hash_enforces_limit() {
+        let payload = vec![7_u8; 65];
+        let (hash, size) = hash_reader_limited(payload.as_slice(), 65).unwrap();
+        assert_eq!(hash, BlobHash::digest(&payload));
+        assert_eq!(size, 65);
+        assert!(hash_reader_limited(payload.as_slice(), 64).is_err());
+    }
 }
