@@ -16,13 +16,21 @@ pub enum DiagnosticCode {
     ConfigNotFound,
     SourceDirectoryNotFound,
     UnsupportedDocumentFormat,
+    MixedIndentation,
+    NonCanonicalIndentation,
+    NonCanonicalContinuationIndentation,
+    UnclosedFence,
+    PreservedMacro,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourcePosition {
-    pub line: u32,
-    pub column: u32,
+    /// One-based physical line number.
+    pub line: u64,
+    /// One-based Unicode scalar column.
+    pub column: u64,
+    /// Zero-based byte offset in the original UTF-8 source.
     pub byte_offset: u64,
 }
 
@@ -60,6 +68,23 @@ impl ImportDiagnostic {
             code,
             relative_path,
             range: None,
+            message: message.into(),
+            remediation,
+        }
+    }
+
+    pub(crate) fn warning_at(
+        code: DiagnosticCode,
+        relative_path: impl Into<String>,
+        range: SourceRange,
+        message: impl Into<String>,
+        remediation: Option<String>,
+    ) -> Self {
+        Self {
+            severity: DiagnosticSeverity::Warning,
+            code,
+            relative_path: Some(relative_path.into()),
+            range: Some(range),
             message: message.into(),
             remediation,
         }
