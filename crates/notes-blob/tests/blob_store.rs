@@ -220,6 +220,36 @@ fn oversize_and_wrong_hash_leave_no_temporary_files() {
     assert_eq!(incoming_files(&store, wrong), 0);
 }
 
+#[test]
+fn verified_removal_is_idempotent_and_refuses_corrupt_bytes() {
+    let (_directory, store) = store();
+    let hash = BlobHash::digest(CONTENT);
+    store
+        .install_reader(Cursor::new(CONTENT), hash, 1_024)
+        .expect("install orphan candidate");
+
+    assert!(
+        store
+            .remove_verified(hash, 1_024)
+            .expect("remove verified orphan")
+    );
+    assert!(
+        !store
+            .remove_verified(hash, 1_024)
+            .expect("missing orphan is an idempotent no-op")
+    );
+
+    store
+        .install_reader(Cursor::new(CONTENT), hash, 1_024)
+        .expect("reinstall candidate");
+    fs::write(store.path_for(hash), b"corrupt").expect("corrupt stored bytes");
+    assert!(store.remove_verified(hash, 1_024).is_err());
+    assert!(
+        store.path_for(hash).exists(),
+        "cleanup must not unlink unverified contents"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn rejects_a_symlink_target() {

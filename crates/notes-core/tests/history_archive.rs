@@ -566,3 +566,37 @@ async fn large_archive_restore_reconciles_deleted_and_created_trees_once() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn orphan_blob_cleanup_is_deduplicated_and_serialized_against_metadata() {
+    let database = database().await;
+    let note = db::create_note(&database.connection).await.unwrap();
+    let referenced = hash(0x31);
+    let orphan = hash(0x32);
+    db::create_attachment(
+        &database.connection,
+        AttachmentOwner::Page(note.page.uuid),
+        referenced,
+        "kept.bin".into(),
+        "application/octet-stream".into(),
+        1,
+    )
+    .await
+    .unwrap();
+    let cleaned = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = cleaned.clone();
+
+    let count = db::cleanup_unreferenced_attachment_blobs(
+        &database.connection,
+        vec![orphan, referenced, orphan],
+        move |blob_hash| {
+            observed.lock().unwrap().push(blob_hash);
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(count, 1);
+    assert_eq!(*cleaned.lock().unwrap(), vec![orphan]);
+}

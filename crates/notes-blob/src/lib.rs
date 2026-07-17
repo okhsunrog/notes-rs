@@ -402,6 +402,39 @@ impl BlobStore {
             .map(|verified| verified.blob)
     }
 
+    /// Removes an installed blob only after verifying the exact path contents.
+    ///
+    /// This is intended for host-level orphan cleanup after a metadata
+    /// transaction fails. Callers must serialize the accompanying reference
+    /// check with metadata mutations before invoking this method.
+    pub fn remove_verified(&self, hash: BlobHash, max_bytes: u64) -> Result<bool, BlobStoreError> {
+        let verified = match self.open_verified(hash, max_bytes) {
+            Ok(verified) => verified,
+            Err(BlobStoreError::NotFound { .. }) => return Ok(false),
+            Err(BlobStoreError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
+        let path = verified.blob.path.clone();
+        drop(verified);
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                let shard = path
+                    .parent()
+                    .expect("a canonical blob path always has a shard parent");
+                sync_directory(shard)?;
+                Ok(true)
+            }
+            Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(source) => Err(BlobStoreError::Io {
+                operation: "remove verified blob",
+                path,
+                source,
+            }),
+        }
+    }
+
     fn ensure_shard(&self, shard: &Path) -> Result<(), BlobStoreError> {
         ensure_directory(&self.root)?;
         let blobs = self.root.join("blobs");

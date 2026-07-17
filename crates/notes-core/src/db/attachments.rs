@@ -123,6 +123,39 @@ pub async fn attachment_path_ref_count(
     .await
 }
 
+/// Runs host-owned cleanup for candidate blobs that have no live attachment
+/// metadata while holding the serialized SQLite worker boundary.
+///
+/// This prevents an attachment mutation from racing between the reference
+/// check and filesystem removal. Candidates are sorted and deduplicated before
+/// the callback is invoked.
+pub async fn cleanup_unreferenced_attachment_blobs<F>(
+    conn: &Connection,
+    mut candidates: Vec<BlobHash>,
+    mut cleanup: F,
+) -> Result<u64>
+where
+    F: FnMut(BlobHash) -> Result<()> + Send + 'static,
+{
+    candidates.sort_unstable();
+    candidates.dedup();
+    conn.call_domain(move |database| -> Result<u64> {
+        let mut referenced =
+            database.prepare("SELECT EXISTS(SELECT 1 FROM attachments WHERE blob_hash = ?1)")?;
+        let mut cleaned = 0_u64;
+        for blob_hash in candidates {
+            let is_referenced: bool =
+                referenced.query_row([blob_hash_bytes(&blob_hash)], |row| row.get(0))?;
+            if !is_referenced {
+                cleanup(blob_hash)?;
+                cleaned += 1;
+            }
+        }
+        Ok(cleaned)
+    })
+    .await
+}
+
 pub async fn delete_attachment(conn: &Connection, uuid: uuid::Uuid) -> Result<Option<Attachment>> {
     let attachment = get_attachment(conn, uuid).await?;
     let Some(attachment) = attachment else {

@@ -1,5 +1,5 @@
 use super::*;
-use notes_blob::{BlobHash, BlobStore};
+use notes_blob::{BlobHash, BlobStore, InstallOutcome};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -77,7 +77,20 @@ pub async fn export_data(
         else {
             return Ok(None);
         };
-        let file = api.open_file_writable(&uri).await.map_err(err)?;
+        let file = match api.open_file_writable(&uri).await {
+            Ok(file) => file,
+            Err(open_error) => {
+                let error = anyhow::Error::new(open_error)
+                    .context("opening the newly created Android archive document");
+                let error = match api.remove_file(&uri).await {
+                    Ok(()) => error,
+                    Err(cleanup_error) => error.context(format!(
+                        "also failed to remove the empty Android archive document: {cleanup_error}"
+                    )),
+                };
+                return Err(err(error));
+            }
+        };
         let destination = uri.uri.clone();
         let blob_store = state.blob_store.clone();
         let write_result = tauri::async_runtime::spawn_blocking(move || {
@@ -91,11 +104,23 @@ pub async fn export_data(
         match write_result {
             Ok(Ok(())) => Ok(Some(destination)),
             Ok(Err(error)) => {
-                let _ = api.remove_file(&uri).await;
+                let error = match api.remove_file(&uri).await {
+                    Ok(()) => error,
+                    Err(cleanup_error) => error.context(format!(
+                        "also failed to remove the partial Android archive document: {cleanup_error}"
+                    )),
+                };
                 Err(err(error))
             }
             Err(error) => {
-                let _ = api.remove_file(&uri).await;
+                let error = anyhow::Error::new(error)
+                    .context("Android archive writer task did not complete");
+                let error = match api.remove_file(&uri).await {
+                    Ok(()) => error,
+                    Err(cleanup_error) => error.context(format!(
+                        "also failed to remove the partial Android archive document: {cleanup_error}"
+                    )),
+                };
                 Err(err(error))
             }
         }
@@ -161,13 +186,41 @@ pub async fn import_data(
         _directory: staging_directory,
     } = staged;
     let destination_blob_store = state.blob_store.clone();
-    db::import_archive_with_precommit(&state.conn, archive, move || {
-        publish_staged_blobs(&staged_blob_store, &destination_blob_store, &expected_blobs)?;
+    let published_blobs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let callback_published_blobs = published_blobs.clone();
+    let callback_destination = destination_blob_store.clone();
+    let import_result = db::import_archive_with_precommit(&state.conn, archive, move || {
+        publish_staged_blobs(
+            &staged_blob_store,
+            &callback_destination,
+            &expected_blobs,
+            &callback_published_blobs,
+        )?;
         drop(staging_directory);
         Ok(())
     })
-    .await
-    .map_err(err)?;
+    .await;
+    if let Err(import_error) = import_result {
+        let candidates = published_blobs
+            .lock()
+            .map_err(|_| err("archive blob publication tracker was poisoned"))?
+            .clone();
+        let cleanup_store = destination_blob_store.clone();
+        let cleanup_result =
+            db::cleanup_unreferenced_attachment_blobs(&state.conn, candidates, move |blob_hash| {
+                cleanup_store
+                    .remove_verified(blob_hash, super::attachments::MAX_ATTACHMENT_SIZE)?;
+                Ok(())
+            })
+            .await;
+        let import_error = match cleanup_result {
+            Ok(_) => import_error,
+            Err(cleanup_error) => import_error.context(format!(
+                "archive metadata rolled back, but orphan blob cleanup also failed: {cleanup_error:#}"
+            )),
+        };
+        return Err(err(import_error));
+    }
     emit_domain(&app, DomainEvent::WorkspaceChanged);
     emit_domain(&app, DomainEvent::HistoryChanged);
     Ok(Some(source))
@@ -416,6 +469,7 @@ fn publish_staged_blobs(
     staging: &BlobStore,
     destination: &BlobStore,
     expected: &BTreeMap<BlobHash, u64>,
+    published: &std::sync::Mutex<Vec<BlobHash>>,
 ) -> anyhow::Result<()> {
     for (&blob_hash, &expected_size) in expected {
         let verified = staging.open_verified(blob_hash, expected_size)?;
@@ -432,6 +486,12 @@ fn publish_staged_blobs(
             installed.blob.size == expected_size,
             "published archive blob {blob_hash} has the wrong size"
         );
+        if installed.outcome == InstallOutcome::Installed {
+            published
+                .lock()
+                .map_err(|_| anyhow::anyhow!("archive blob publication tracker was poisoned"))?
+                .push(blob_hash);
+        }
     }
     Ok(())
 }
@@ -693,5 +753,51 @@ mod tests {
 
         let error = write_portable_archive(&mut writer, archive, &source_store).unwrap_err();
         assert!(error.to_string().contains("injected writer failure"));
+    }
+
+    #[test]
+    fn partial_publication_tracks_only_new_blobs_for_rollback() {
+        let staging_directory = tempfile::tempdir().unwrap();
+        let staging_store = BlobStore::new(staging_directory.path());
+        let mut payloads = [
+            b"first staged payload".as_slice(),
+            b"second staged bytes".as_slice(),
+        ]
+        .into_iter()
+        .map(|bytes| (BlobHash::digest(bytes), bytes))
+        .collect::<Vec<_>>();
+        payloads.sort_by_key(|(hash, _)| *hash);
+        let mut expected = BTreeMap::new();
+        for (hash, bytes) in &payloads {
+            staging_store
+                .install_reader(*bytes, *hash, bytes.len() as u64)
+                .unwrap();
+            expected.insert(*hash, bytes.len() as u64);
+        }
+
+        let destination_directory = tempfile::tempdir().unwrap();
+        let destination_store = BlobStore::new(destination_directory.path());
+        let (failing_hash, failing_bytes) = payloads[1];
+        destination_store
+            .install_reader(failing_bytes, failing_hash, failing_bytes.len() as u64)
+            .unwrap();
+        std::fs::write(
+            destination_store.path_for(failing_hash),
+            vec![0_u8; failing_bytes.len()],
+        )
+        .unwrap();
+        let published = std::sync::Mutex::new(Vec::new());
+
+        assert!(
+            publish_staged_blobs(&staging_store, &destination_store, &expected, &published,)
+                .is_err()
+        );
+        let first_hash = payloads[0].0;
+        assert_eq!(*published.lock().unwrap(), vec![first_hash]);
+        assert!(
+            destination_store
+                .remove_verified(first_hash, 1_024)
+                .unwrap()
+        );
     }
 }

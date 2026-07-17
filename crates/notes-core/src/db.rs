@@ -25,8 +25,8 @@ pub use archive::{
     import_archive_with_precommit,
 };
 pub use attachments::{
-    attachment_path_ref_count, create_attachment, delete_attachment, get_attachment,
-    list_attachments,
+    attachment_path_ref_count, cleanup_unreferenced_attachment_blobs, create_attachment,
+    delete_attachment, get_attachment, list_attachments,
 };
 pub use blocks::{
     BlockContent, create_block, delete_block, get_block, get_blocks, indent_block,
