@@ -13,8 +13,9 @@ use axum::routing::{get, post, put};
 use futures::{SinkExt, StreamExt};
 use notes_core::db::SearchHit;
 use notes_protocol::{
-    AcceptedOps, AiIndexStatus, AiRuntimeSettings, BootstrapRequest, ChatEvent, ChatTurn,
-    ClientMessage, OpsBatch, PushOps, ServerInfo, ServerMessage,
+    AcceptedOps, AiIndexStatus, AiProviderProbeResult, AiProviderSettingsUpdate, AiRuntimeSettings,
+    BootstrapRequest, ChatEvent, ChatTurn, ClientMessage, OpsBatch, PushOps, ServerInfo,
+    ServerMessage,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -186,6 +187,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/bootstrap", post(bootstrap))
         .route("/v1/info", get(info))
         .route("/v1/ai/status", get(ai_status).put(update_ai_settings))
+        .route("/v1/ai/provider", put(update_ai_provider))
+        .route("/v1/ai/provider/probe", post(probe_ai_provider))
         .route("/v1/ai/reindex", post(reindex_ai))
         .route("/v1/search", post(search))
         .route("/v1/chat", post(chat))
@@ -238,6 +241,39 @@ async fn update_ai_settings(
         .as_ref()
         .ok_or_else(|| ApiError::unavailable("server AI is not configured"))?;
     ai.update_settings(&user.0.id, settings)
+        .await
+        .map(Json)
+        .map_err(ApiError::internal)
+}
+
+async fn update_ai_provider(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Json(settings): Json<AiProviderSettingsUpdate>,
+) -> Result<Json<AiIndexStatus>, ApiError> {
+    let ai = state
+        .ai
+        .as_ref()
+        .ok_or_else(|| ApiError::unavailable("server AI is not configured"))?;
+    ai.validate_provider_update(&settings)
+        .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
+    ai.update_provider(&user.0.id, settings)
+        .await
+        .map(Json)
+        .map_err(ApiError::internal)
+}
+
+async fn probe_ai_provider(
+    State(state): State<AppState>,
+    Json(settings): Json<AiProviderSettingsUpdate>,
+) -> Result<Json<AiProviderProbeResult>, ApiError> {
+    let ai = state
+        .ai
+        .as_ref()
+        .ok_or_else(|| ApiError::unavailable("server AI is not configured"))?;
+    ai.validate_provider_update(&settings)
+        .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
+    ai.probe_provider(settings)
         .await
         .map(Json)
         .map_err(ApiError::internal)

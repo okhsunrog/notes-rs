@@ -2,9 +2,13 @@ import { commands } from "@/lib/bindings";
 import type {
   BlockContent,
   AiIndexStatus,
+  AiProviderProbeResult,
+  AiProviderSettings,
+  AiProviderSettingsUpdate,
   AiRuntimeSettings,
   ChatEvent,
   CommandError,
+  CompletionProtocol,
   Edge,
   GraphSnapshot,
   Node,
@@ -18,9 +22,13 @@ import type {
 
 export type {
   AiIndexStatus,
+  AiProviderProbeResult,
+  AiProviderSettings,
+  AiProviderSettingsUpdate,
   AiRuntimeSettings,
   BlockContent,
   ChatEvent,
+  CompletionProtocol,
   Edge,
   GraphSnapshot,
   Node,
@@ -111,6 +119,8 @@ export const cancelChat = commands.cancelChat;
 export const getSyncStatus = commands.syncStatus;
 export const getServerAiStatus = checkedCommand(commands.serverAiStatus);
 export const saveServerAiSettings = checkedCommand(commands.saveServerAiSettings);
+export const saveServerAiProvider = checkedCommand(commands.saveServerAiProvider);
+export const probeServerAiProvider = checkedCommand(commands.probeServerAiProvider);
 export const reindexServerAi = checkedCommand(commands.reindexServerAi);
 export const listEntities = (limit = 30) => unwrapCommand(commands.listEntities(limit));
 export const listPages = (limit = 200) => unwrapCommand(commands.listPages(limit));

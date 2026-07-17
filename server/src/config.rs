@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use notes_protocol::{AiProviderSettings, AiProviderSettingsUpdate, CompletionProtocol};
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
@@ -19,14 +20,17 @@ pub struct ServerConfig {
     pub users: Vec<UserConfig>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AiConfig {
-    pub openrouter_api_key: String,
-    pub openrouter_base_url: String,
+    pub retrieval_api_key: String,
+    pub retrieval_base_url: String,
     pub embedding_model: String,
     pub embedding_dimensions: usize,
     pub rerank_model: String,
+    pub completion_protocol: CompletionProtocol,
+    pub completion_api_key: String,
+    pub completion_base_url: String,
     pub chat_model: String,
     pub extraction_model: String,
     pub automatic_embeddings: bool,
@@ -37,11 +41,14 @@ pub struct AiConfig {
 impl Default for AiConfig {
     fn default() -> Self {
         Self {
-            openrouter_api_key: String::new(),
-            openrouter_base_url: notes_ai::config::DEFAULT_OPENROUTER_BASE_URL.into(),
+            retrieval_api_key: String::new(),
+            retrieval_base_url: notes_ai::config::DEFAULT_OPENROUTER_BASE_URL.into(),
             embedding_model: "qwen/qwen3-embedding-8b".into(),
             embedding_dimensions: 4096,
             rerank_model: "cohere/rerank-v3.5".into(),
+            completion_protocol: CompletionProtocol::Openai,
+            completion_api_key: String::new(),
+            completion_base_url: notes_ai::config::DEFAULT_OPENROUTER_BASE_URL.into(),
             chat_model: "google/gemini-3.1-flash-lite".into(),
             extraction_model: "google/gemini-3.1-flash-lite".into(),
             automatic_embeddings: true,
@@ -78,23 +85,7 @@ impl ServerConfig {
             bail!("max_blob_bytes must be positive");
         }
         if let Some(ai) = &self.ai {
-            if ai.openrouter_api_key.trim().is_empty() {
-                bail!("ai.openrouter_api_key cannot be empty");
-            }
-            notes_ai::config::validate_http_base_url(&ai.openrouter_base_url)?;
-            if ai.embedding_dimensions == 0 {
-                bail!("ai.embedding_dimensions must be positive");
-            }
-            for (name, value) in [
-                ("embedding_model", &ai.embedding_model),
-                ("rerank_model", &ai.rerank_model),
-                ("chat_model", &ai.chat_model),
-                ("extraction_model", &ai.extraction_model),
-            ] {
-                if value.trim().is_empty() {
-                    bail!("ai.{name} cannot be empty");
-                }
-            }
+            ai.validate()?;
         }
         let mut user_ids = std::collections::HashSet::new();
         let mut tokens = std::collections::HashSet::new();
@@ -123,6 +114,72 @@ impl ServerConfig {
             }
         }
         Ok(())
+    }
+}
+
+impl AiConfig {
+    pub fn validate(&self) -> Result<()> {
+        if self.retrieval_api_key.trim().is_empty() {
+            bail!("AI retrieval API key cannot be empty");
+        }
+        if self.completion_api_key.trim().is_empty() {
+            bail!("AI completion API key cannot be empty");
+        }
+        notes_ai::config::validate_http_base_url(&self.retrieval_base_url)?;
+        notes_ai::config::validate_http_base_url(&self.completion_base_url)?;
+        if self.embedding_dimensions == 0 {
+            bail!("AI embedding dimensions must be positive");
+        }
+        for (name, value) in [
+            ("embedding model", &self.embedding_model),
+            ("rerank model", &self.rerank_model),
+            ("chat model", &self.chat_model),
+            ("extraction model", &self.extraction_model),
+        ] {
+            if value.trim().is_empty() {
+                bail!("AI {name} cannot be empty");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn public_settings(&self) -> AiProviderSettings {
+        AiProviderSettings {
+            retrieval_base_url: self.retrieval_base_url.clone(),
+            retrieval_api_key_configured: !self.retrieval_api_key.is_empty(),
+            embedding_model: self.embedding_model.clone(),
+            embedding_dimensions: self.embedding_dimensions,
+            rerank_model: self.rerank_model.clone(),
+            completion_protocol: self.completion_protocol,
+            completion_base_url: self.completion_base_url.clone(),
+            completion_api_key_configured: !self.completion_api_key.is_empty(),
+            chat_model: self.chat_model.clone(),
+            extraction_model: self.extraction_model.clone(),
+        }
+    }
+
+    pub fn applying(&self, update: AiProviderSettingsUpdate) -> Self {
+        Self {
+            retrieval_api_key: update
+                .retrieval_api_key
+                .filter(|secret| !secret.trim().is_empty())
+                .unwrap_or_else(|| self.retrieval_api_key.clone()),
+            retrieval_base_url: update.retrieval_base_url,
+            embedding_model: update.embedding_model,
+            embedding_dimensions: update.embedding_dimensions,
+            rerank_model: update.rerank_model,
+            completion_protocol: update.completion_protocol,
+            completion_api_key: update
+                .completion_api_key
+                .filter(|secret| !secret.trim().is_empty())
+                .unwrap_or_else(|| self.completion_api_key.clone()),
+            completion_base_url: update.completion_base_url,
+            chat_model: update.chat_model,
+            extraction_model: update.extraction_model,
+            automatic_embeddings: self.automatic_embeddings,
+            entity_extraction_enabled: self.entity_extraction_enabled,
+            query_rewriting_enabled: self.query_rewriting_enabled,
+        }
     }
 }
 
@@ -166,7 +223,8 @@ mod tests {
     #[test]
     fn rejects_invalid_ai_configuration() {
         let ai = AiConfig {
-            openrouter_api_key: "test-key".into(),
+            retrieval_api_key: "test-key".into(),
+            completion_api_key: "test-key".into(),
             ..AiConfig::default()
         };
         let config = ServerConfig {
@@ -185,5 +243,36 @@ mod tests {
             }],
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn provider_updates_preserve_write_only_secrets() {
+        let current = AiConfig {
+            retrieval_api_key: "retrieval-secret".into(),
+            completion_api_key: "completion-secret".into(),
+            ..AiConfig::default()
+        };
+        let mut public = current.public_settings();
+        public.chat_model = "custom-chat".into();
+        let updated = current.applying(AiProviderSettingsUpdate {
+            retrieval_base_url: public.retrieval_base_url,
+            retrieval_api_key: None,
+            embedding_model: public.embedding_model,
+            embedding_dimensions: public.embedding_dimensions,
+            rerank_model: public.rerank_model,
+            completion_protocol: public.completion_protocol,
+            completion_base_url: public.completion_base_url,
+            completion_api_key: None,
+            chat_model: public.chat_model,
+            extraction_model: public.extraction_model,
+        });
+
+        assert_eq!(updated.retrieval_api_key, "retrieval-secret");
+        assert_eq!(updated.completion_api_key, "completion-secret");
+        assert_eq!(updated.chat_model, "custom-chat");
+        let serialized =
+            serde_json::to_string(&updated.public_settings()).expect("public settings");
+        assert!(!serialized.contains("retrieval-secret"));
+        assert!(!serialized.contains("completion-secret"));
     }
 }

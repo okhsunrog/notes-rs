@@ -5,11 +5,14 @@ snapshot_every_ops = 10000
 max_blob_bytes = 1073741824
 
 [ai]
-openrouter_api_key = "replace-with-a-secret"
-openrouter_base_url = "https://openrouter.ai/api/v1"
+retrieval_api_key = "replace-with-an-openrouter-key"
+retrieval_base_url = "https://openrouter.ai/api/v1"
 embedding_model = "qwen/qwen3-embedding-8b"
 embedding_dimensions = 4096
 rerank_model = "cohere/rerank-v3.5"
+completion_protocol = "openai"
+completion_api_key = "replace-with-an-openrouter-or-compatible-key"
+completion_base_url = "https://openrouter.ai/api/v1"
 chat_model = "google/gemini-3.1-flash-lite"
 extraction_model = "google/gemini-3.1-flash-lite"
 automatic_embeddings = true

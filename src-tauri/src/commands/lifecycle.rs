@@ -59,6 +59,33 @@ pub async fn save_server_ai_settings(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn save_server_ai_provider(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    settings: AiProviderSettingsUpdate,
+) -> CommandResult<AiIndexStatus> {
+    let status = remote_ai(&state)?
+        .update_ai_provider(settings)
+        .await
+        .map_err(err)?;
+    emit_domain(&app, DomainEvent::ServerAiChanged);
+    Ok(status)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn probe_server_ai_provider(
+    state: State<'_, AppState>,
+    settings: AiProviderSettingsUpdate,
+) -> CommandResult<AiProviderProbeResult> {
+    remote_ai(&state)?
+        .probe_ai_provider(settings)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn reindex_server_ai(
     app: AppHandle,
     state: State<'_, AppState>,

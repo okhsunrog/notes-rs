@@ -3,7 +3,10 @@ use base64::Engine;
 use notes_core::Connection;
 use notes_core::db::{self, Node, SearchHit};
 use notes_core::{NodeKind, ReorderDirection};
-use notes_protocol::{AiIndexStatus, AiRuntimeSettings, ChatEvent, ChatTurn};
+use notes_protocol::{
+    AiIndexStatus, AiProviderProbeResult, AiProviderSettingsUpdate, AiRuntimeSettings, ChatEvent,
+    ChatTurn,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -206,6 +209,22 @@ fn err<E: std::fmt::Display + 'static>(error: E) -> CommandError {
             };
             return CommandError::new(code, message);
         }
+        if let Some(error) = notes_sync::transport_error(error) {
+            let code = match error {
+                notes_sync::TransportError::Unauthorized => CommandErrorCode::Unavailable,
+                notes_sync::TransportError::Conflict(_) => CommandErrorCode::Conflict,
+                notes_sync::TransportError::Http { status: 400, .. } => {
+                    CommandErrorCode::InvalidInput
+                }
+                notes_sync::TransportError::Http { status: 404, .. } => CommandErrorCode::NotFound,
+                notes_sync::TransportError::Http { status: 409, .. } => CommandErrorCode::Conflict,
+                notes_sync::TransportError::Http { status, .. } if *status >= 500 => {
+                    CommandErrorCode::Unavailable
+                }
+                notes_sync::TransportError::Http { .. } => CommandErrorCode::Internal,
+            };
+            return CommandError::new(code, message);
+        }
         if notes_sync::is_transport_failure(error) {
             return CommandError::new(CommandErrorCode::Unavailable, message);
         }
@@ -258,6 +277,14 @@ mod tests {
             ))
             .code,
             CommandErrorCode::Unavailable
+        ));
+        assert!(matches!(
+            err(anyhow::Error::from(notes_sync::TransportError::Http {
+                status: 400,
+                message: "invalid provider configuration".into(),
+            }))
+            .code,
+            CommandErrorCode::InvalidInput
         ));
     }
 }

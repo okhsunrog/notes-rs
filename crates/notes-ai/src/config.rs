@@ -1,6 +1,7 @@
 //! Typed AI configuration primitives shared by desktop and server hosts.
 
 use anyhow::{Context, Result, bail};
+pub use notes_protocol::CompletionProtocol;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -61,15 +62,6 @@ macro_rules! config_enum {
     };
 }
 
-config_enum!(CompletionProtocol {
-    Openai => ["openai"],
-    Anthropic => ["anthropic"],
-});
-config_enum!(ExtractionProtocol {
-    Inherit => ["inherit"],
-    Openai => ["openai"],
-    Anthropic => ["anthropic"],
-});
 config_enum!(EmbeddingProvider {
     Openrouter => ["openrouter"],
     Openai => ["openai"],
@@ -135,18 +127,6 @@ pub fn completion_config(
         }
         CompletionProtocol::Anthropic => Ok(llm_relay::ClientConfig::anthropic(api_key, model)
             .base_url(base_url.unwrap_or_else(|| "https://api.anthropic.com".into()))),
-    }
-}
-
-impl From<ExtractionProtocol> for CompletionProtocol {
-    fn from(value: ExtractionProtocol) -> Self {
-        match value {
-            ExtractionProtocol::Openai => Self::Openai,
-            ExtractionProtocol::Anthropic => Self::Anthropic,
-            ExtractionProtocol::Inherit => {
-                unreachable!("inherit is resolved before selecting a completion transport")
-            }
-        }
     }
 }
 

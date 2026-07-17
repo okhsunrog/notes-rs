@@ -24,6 +24,61 @@ pub enum AiGenerationState {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionProtocol {
+    Openai,
+    Anthropic,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AiProviderSettings {
+    pub retrieval_base_url: String,
+    pub retrieval_api_key_configured: bool,
+    pub embedding_model: String,
+    pub embedding_dimensions: usize,
+    pub rerank_model: String,
+    pub completion_protocol: CompletionProtocol,
+    pub completion_base_url: String,
+    pub completion_api_key_configured: bool,
+    pub chat_model: String,
+    pub extraction_model: String,
+}
+
+/// Complete non-secret provider configuration plus optional write-only secrets.
+/// A missing secret preserves the currently stored value.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AiProviderSettingsUpdate {
+    pub retrieval_base_url: String,
+    pub retrieval_api_key: Option<String>,
+    pub embedding_model: String,
+    pub embedding_dimensions: usize,
+    pub rerank_model: String,
+    pub completion_protocol: CompletionProtocol,
+    pub completion_base_url: String,
+    pub completion_api_key: Option<String>,
+    pub chat_model: String,
+    pub extraction_model: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AiProbeCheck {
+    pub ok: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AiProviderProbeResult {
+    pub embeddings: AiProbeCheck,
+    pub reranking: AiProbeCheck,
+    pub chat: AiProbeCheck,
+    pub extraction: AiProbeCheck,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AiRuntimeSettings {
     pub automatic_embeddings: bool,
@@ -34,12 +89,7 @@ pub struct AiRuntimeSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AiIndexStatus {
-    pub embedding_provider_id: String,
-    pub embedding_model: String,
-    pub embedding_dimensions: usize,
-    pub rerank_model: String,
-    pub chat_model: String,
-    pub extraction_model: String,
+    pub provider: AiProviderSettings,
     pub generation_id: uuid::Uuid,
     pub generation_state: AiGenerationState,
     pub settings: AiRuntimeSettings,

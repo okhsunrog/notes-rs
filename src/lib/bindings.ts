@@ -18,6 +18,8 @@ export const commands = {
 	syncStatus: () => __TAURI_INVOKE<SyncStatus>("sync_status"),
 	serverAiStatus: () => typedError<AiIndexStatus, CommandError>(__TAURI_INVOKE("server_ai_status")),
 	saveServerAiSettings: (settings: AiRuntimeSettings) => typedError<AiIndexStatus, CommandError>(__TAURI_INVOKE("save_server_ai_settings", { settings })),
+	saveServerAiProvider: (settings: AiProviderSettingsUpdate) => typedError<AiIndexStatus, CommandError>(__TAURI_INVOKE("save_server_ai_provider", { settings })),
+	probeServerAiProvider: (settings: AiProviderSettingsUpdate) => typedError<AiProviderProbeResult, CommandError>(__TAURI_INVOKE("probe_server_ai_provider", { settings })),
 	reindexServerAi: () => typedError<AiIndexStatus, CommandError>(__TAURI_INVOKE("reindex_server_ai")),
 	loadSettings: () => typedError<SettingsSnapshot, CommandError>(__TAURI_INVOKE("load_settings")),
 	saveSettings: (update: SettingsUpdate) => typedError<SettingsSnapshot, CommandError>(__TAURI_INVOKE("save_settings", { update })),
@@ -137,12 +139,7 @@ export const events = {
 export type AiGenerationState = "building" | "active" | "retired";
 
 export type AiIndexStatus = {
-	embeddingProviderId: string,
-	embeddingModel: string,
-	embeddingDimensions: number,
-	rerankModel: string,
-	chatModel: string,
-	extractionModel: string,
+	provider: AiProviderSettings,
 	generationId: string,
 	generationState: AiGenerationState,
 	settings: AiRuntimeSettings,
@@ -152,6 +149,48 @@ export type AiIndexStatus = {
 	sourceNodes: number,
 	pendingExtractions: number,
 	failedExtractions: number,
+};
+
+export type AiProbeCheck = {
+	ok: boolean,
+	message: string,
+};
+
+export type AiProviderProbeResult = {
+	embeddings: AiProbeCheck,
+	reranking: AiProbeCheck,
+	chat: AiProbeCheck,
+	extraction: AiProbeCheck,
+};
+
+export type AiProviderSettings = {
+	retrievalBaseUrl: string,
+	retrievalApiKeyConfigured: boolean,
+	embeddingModel: string,
+	embeddingDimensions: number,
+	rerankModel: string,
+	completionProtocol: CompletionProtocol,
+	completionBaseUrl: string,
+	completionApiKeyConfigured: boolean,
+	chatModel: string,
+	extractionModel: string,
+};
+
+/**
+ *  Complete non-secret provider configuration plus optional write-only secrets.
+ *  A missing secret preserves the currently stored value.
+ */
+export type AiProviderSettingsUpdate = {
+	retrievalBaseUrl: string,
+	retrievalApiKey: string | null,
+	embeddingModel: string,
+	embeddingDimensions: number,
+	rerankModel: string,
+	completionProtocol: CompletionProtocol,
+	completionBaseUrl: string,
+	completionApiKey: string | null,
+	chatModel: string,
+	extractionModel: string,
 };
 
 export type AiRuntimeSettings = {
@@ -175,6 +214,8 @@ export type CommandError = {
 };
 
 export type CommandErrorCode = "invalid_input" | "not_found" | "conflict" | "unavailable" | "internal";
+
+export type CompletionProtocol = "openai" | "anthropic";
 
 export type CreatedNote = {
 	page: Node,

@@ -10,6 +10,7 @@ import {
 import { queryKeys } from "@/lib/query";
 import { cn } from "@/lib/utils";
 import { QueueMetric, SettingsSection, ToggleField } from "./settings-controls";
+import { ServerAiProviderForm } from "./server-ai-provider-form";
 
 type Props = {
   enabled: boolean;
@@ -58,7 +59,7 @@ export function ServerAiSettingsSection({ enabled, onError, onMessage }: Props) 
   return (
     <SettingsSection
       title="Server AI"
-      description="Inspect and control the server-owned retrieval index. Provider credentials and vectors never live on this device."
+      description="Inspect and control the server-owned retrieval index. Provider credentials and vectors are never stored on this device."
     >
       {!enabled ? (
         <p className="rounded-2xl border border-border/60 bg-background/55 p-4 text-sm text-muted-foreground">
@@ -133,12 +134,19 @@ export function ServerAiSettingsSection({ enabled, onError, onMessage }: Props) 
             onChange={(queryRewriting) => update({ queryRewriting })}
           />
 
+          <ServerAiProviderForm
+            key={JSON.stringify(status.provider)}
+            provider={status.provider}
+            onError={onError}
+            onMessage={onMessage}
+          />
+
           <div className="grid gap-1 rounded-2xl border border-border/60 bg-background/55 p-4 text-xs text-muted-foreground sm:grid-cols-2">
-            <span>Embedding: {status.embeddingModel}</span>
-            <span>Dimensions: {status.embeddingDimensions}</span>
-            <span>Reranker: {status.rerankModel}</span>
-            <span>Chat: {status.chatModel}</span>
-            <span>Extraction: {status.extractionModel}</span>
+            <span>Embedding: {status.provider.embeddingModel}</span>
+            <span>Dimensions: {status.provider.embeddingDimensions}</span>
+            <span>Reranker: {status.provider.rerankModel}</span>
+            <span>Chat: {status.provider.chatModel}</span>
+            <span>Extraction: {status.provider.extractionModel}</span>
             <span className="truncate" title={status.generationId}>
               Generation: {status.generationId}
             </span>

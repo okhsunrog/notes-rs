@@ -16,6 +16,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::sync_status,
             commands::server_ai_status,
             commands::save_server_ai_settings,
+            commands::save_server_ai_provider,
+            commands::probe_server_ai_provider,
             commands::reindex_server_ai,
             commands::load_settings,
             commands::save_settings,

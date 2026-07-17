@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use notes_core::db::SearchHit;
 use notes_protocol::{
-    AcceptedOps, AiIndexStatus, AiRuntimeSettings, BootstrapRequest, ChatEvent, ChatTurn, OpsBatch,
-    PushOps, SequencedOp, ServerInfo,
+    AcceptedOps, AiIndexStatus, AiProviderProbeResult, AiProviderSettingsUpdate, AiRuntimeSettings,
+    BootstrapRequest, ChatEvent, ChatTurn, OpsBatch, PushOps, SequencedOp, ServerInfo,
 };
 use reqwest::StatusCode;
 use serde::Serialize;
@@ -42,10 +42,16 @@ impl TransportError {
 }
 
 pub fn is_transport_failure(error: &anyhow::Error) -> bool {
-    error.downcast_ref::<TransportError>().is_some()
+    transport_error(error).is_some()
         || error
             .chain()
             .any(|cause| cause.downcast_ref::<reqwest::Error>().is_some())
+}
+
+pub fn transport_error(error: &anyhow::Error) -> Option<&TransportError> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<TransportError>())
 }
 
 #[derive(Clone)]
@@ -97,6 +103,20 @@ impl HttpTransport {
 
     pub async fn update_ai_settings(&self, settings: AiRuntimeSettings) -> Result<AiIndexStatus> {
         self.put_json("v1/ai/status", &settings).await
+    }
+
+    pub async fn update_ai_provider(
+        &self,
+        settings: AiProviderSettingsUpdate,
+    ) -> Result<AiIndexStatus> {
+        self.put_json("v1/ai/provider", &settings).await
+    }
+
+    pub async fn probe_ai_provider(
+        &self,
+        settings: AiProviderSettingsUpdate,
+    ) -> Result<AiProviderProbeResult> {
+        self.post_json("v1/ai/provider/probe", &settings).await
     }
 
     pub async fn reindex_ai(&self) -> Result<AiIndexStatus> {
