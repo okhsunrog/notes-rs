@@ -347,25 +347,7 @@ pub async fn get_or_create_page_by_title(conn: &Connection, title: String) -> Re
     if trimmed.is_empty() {
         return Err(crate::CoreError::invalid("page title is empty").into());
     }
-    let found = conn
-        .call({
-            let t = trimmed.clone();
-            move |c| -> rusqlite::Result<Option<Node>> {
-                let sql = format!(
-                    "SELECT {NODE_COLUMNS} FROM nodes
-                     WHERE kind = 'page' AND lower(title) = lower(?1)
-                     LIMIT 1"
-                );
-                let mut stmt = c.prepare(&sql)?;
-                let mut rows = stmt.query([&t])?;
-                if let Some(r) = rows.next()? {
-                    Ok(Some(row_to_node(r)?))
-                } else {
-                    Ok(None)
-                }
-            }
-        })
-        .await?;
+    let found = get_page_by_title(conn, trimmed.clone()).await?;
     if let Some(n) = found {
         return Ok(n);
     }

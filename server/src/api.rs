@@ -681,16 +681,7 @@ async fn user_references_blob(user: &UserState, hash: &str) -> Result<bool, ApiE
 }
 
 fn validate_blob_hash(hash: &str) -> Result<(), ApiError> {
-    if hash.len() != 64
-        || !hash
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-    {
-        return Err(ApiError::bad_request(
-            "blob hash must be 64 lowercase hexadecimal characters",
-        ));
-    }
-    Ok(())
+    notes_core::validate_blob_hash(hash).map_err(|error| ApiError::bad_request(error.to_string()))
 }
 
 fn blob_path(data_dir: &FilePath, hash: &str) -> PathBuf {

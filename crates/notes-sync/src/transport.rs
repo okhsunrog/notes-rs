@@ -239,7 +239,7 @@ impl HttpTransport {
     }
 
     pub async fn upload_blob(&self, hash: &str, path: &Path) -> Result<()> {
-        validate_blob_hash(hash)?;
+        notes_core::validate_blob_hash(hash)?;
         let file = tokio::fs::File::open(path)
             .await
             .with_context(|| format!("opening attachment {}", path.display()))?;
@@ -255,7 +255,7 @@ impl HttpTransport {
     }
 
     pub async fn download_blob(&self, hash: &str, path: &Path, maximum: u64) -> Result<()> {
-        validate_blob_hash(hash)?;
+        notes_core::validate_blob_hash(hash)?;
         let response = self
             .client
             .get(self.endpoint(&format!("v1/blobs/{hash}"))?)
@@ -383,17 +383,6 @@ fn normalize_base_url(mut url: Url) -> Result<Url> {
         url.set_path(&path);
     }
     Ok(url)
-}
-
-fn validate_blob_hash(hash: &str) -> Result<()> {
-    if hash.len() != 64
-        || !hash
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-    {
-        bail!("blob hash must be 64 lowercase hexadecimal characters");
-    }
-    Ok(())
 }
 
 async fn decode_json<T: DeserializeOwned>(response: reqwest::Response) -> Result<T> {

@@ -16,6 +16,6 @@ pub use operation::{
     SnapshotTombstone, SyncSnapshot, acknowledge_server_op, acknowledge_server_ops, apply,
     apply_batch, apply_sequenced, apply_sequenced_batch, configure_sync,
     content_references_changed, export_sync_snapshot, import_sync_snapshot, local_ops,
-    pending_outbox, sync_cursor,
+    pending_outbox, sync_cursor, validate_blob_hash,
 };
 pub use sqlite::Connection;

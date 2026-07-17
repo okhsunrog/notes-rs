@@ -740,7 +740,7 @@ fn validate(operation: &Op) -> CoreResult<()> {
     Ok(())
 }
 
-fn validate_blob_hash(hash: &str) -> CoreResult<()> {
+pub fn validate_blob_hash(hash: &str) -> CoreResult<()> {
     if hash.len() != 64
         || !hash
             .bytes()
