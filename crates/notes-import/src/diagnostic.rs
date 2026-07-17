@@ -21,6 +21,20 @@ pub enum DiagnosticCode {
     NonCanonicalContinuationIndentation,
     UnclosedFence,
     PreservedMacro,
+    EmptyPageTitle,
+    MultiplePageTitles,
+    DuplicatePageIdentity,
+    DuplicatePageTitle,
+    DuplicateJournalDate,
+    DuplicateTargetUuid,
+    InvalidBlockUuid,
+    MultipleBlockIdentityProperties,
+    DuplicateBlockUuid,
+    UnresolvedPageReference,
+    AmbiguousPageReference,
+    InvalidBlockReference,
+    UnresolvedBlockReference,
+    UnsupportedNestedWikilink,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +71,39 @@ pub struct ImportDiagnostic {
 }
 
 impl ImportDiagnostic {
+    pub(crate) fn error(
+        code: DiagnosticCode,
+        relative_path: Option<String>,
+        message: impl Into<String>,
+        remediation: Option<String>,
+    ) -> Self {
+        Self {
+            severity: DiagnosticSeverity::Error,
+            code,
+            relative_path,
+            range: None,
+            message: message.into(),
+            remediation,
+        }
+    }
+
+    pub(crate) fn error_at(
+        code: DiagnosticCode,
+        relative_path: impl Into<String>,
+        range: SourceRange,
+        message: impl Into<String>,
+        remediation: Option<String>,
+    ) -> Self {
+        Self {
+            severity: DiagnosticSeverity::Error,
+            code,
+            relative_path: Some(relative_path.into()),
+            range: Some(range),
+            message: message.into(),
+            remediation,
+        }
+    }
+
     pub(crate) fn warning(
         code: DiagnosticCode,
         relative_path: Option<String>,

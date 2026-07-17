@@ -3426,6 +3426,8 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 2.0.18",
+ "unicode-normalization",
+ "uuid",
 ]
 
 [[package]]

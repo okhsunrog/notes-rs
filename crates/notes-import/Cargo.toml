@@ -11,6 +11,8 @@ description = "Pure, deterministic import planning for external notes graphs"
 serde.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+unicode-normalization.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

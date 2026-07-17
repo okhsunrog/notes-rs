@@ -8,6 +8,8 @@ mod config;
 mod diagnostic;
 mod manifest;
 mod parser;
+mod prepare;
+mod prepared;
 mod scanner;
 mod source;
 
@@ -21,6 +23,18 @@ pub use diagnostic::{
 pub use manifest::{DocumentFormat, GraphManifest, ManifestEntry, Sha256Digest, SourceKind};
 pub use parser::{
     LogseqParseError, LogseqParseErrorCode, decode_logseq_page_title, parse_logseq_markdown,
+};
+pub use prepare::{
+    PrepareImportError, PrepareImportErrorCode, PrepareLimits, prepare_import,
+    prepare_import_with_limits,
+};
+pub use prepared::{
+    IMPORT_PLANNER_VERSION, IdentityContext, ImportBlock, ImportBlockIdentity, ImportBlockMapping,
+    ImportBlockProvenance, ImportBlockSource, ImportIdentityMaps, ImportPage, ImportPageKind,
+    ImportPageProvenance, ImportPageSource, ImportProvenance, ImportReference, ImportReferenceKind,
+    ImportReferenceOwner, ImportReferenceResolution, ImportReferenceTargetKind,
+    ImportReferenceUnresolvedReason, ImportReport, ImportRerunDecision, ImportTaskMapping,
+    ImportTaskState, LogseqTaskMarker, PreparedImport, compare_import_provenance,
 };
 pub use scanner::{
     GraphScanReport, ManifestVerification, ScanError, ScanErrorCode, ScanLimits, scan_logseq_graph,

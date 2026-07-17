@@ -27,6 +27,12 @@ pub struct ScanLimits {
     pub max_total_bytes: u64,
     /// Maximum byte size of any individual source file.
     pub max_file_bytes: u64,
+    /// Maximum byte size of a page or journal document. This deliberately
+    /// does not constrain assets or drawings.
+    pub max_document_bytes: u64,
+    /// Maximum combined byte size of page and journal documents. Assets and
+    /// drawings use only the independent file/global scan budgets.
+    pub max_total_document_bytes: u64,
     /// Additional, tighter limit for `logseq/config.edn`.
     pub max_config_bytes: u64,
 }
@@ -37,6 +43,8 @@ impl Default for ScanLimits {
             max_entries: 100_000,
             max_total_bytes: 256 * 1024 * 1024 * 1024,
             max_file_bytes: 16 * 1024 * 1024 * 1024,
+            max_document_bytes: 64 * 1024 * 1024,
+            max_total_document_bytes: 1024 * 1024 * 1024,
             max_config_bytes: 4 * 1024 * 1024,
         }
     }
@@ -46,6 +54,7 @@ impl Default for ScanLimits {
 struct ScanBudget {
     inspected_entries: u64,
     total_bytes: u64,
+    total_document_bytes: u64,
 }
 
 #[derive(Debug, Default)]
@@ -99,8 +108,42 @@ impl ScanBudget {
         Ok(())
     }
 
+    fn check_document_candidate(
+        &self,
+        relative_path: &str,
+        size_bytes: u64,
+        kind: SourceKind,
+        limits: &ScanLimits,
+    ) -> Result<(), ScanError> {
+        if matches!(kind, SourceKind::Page | SourceKind::Journal)
+            && size_bytes > limits.max_document_bytes
+        {
+            return Err(ScanError::DocumentTooLarge {
+                relative_path: relative_path.to_owned(),
+                limit_bytes: limits.max_document_bytes,
+            });
+        }
+        if matches!(kind, SourceKind::Page | SourceKind::Journal)
+            && self
+                .total_document_bytes
+                .checked_add(size_bytes)
+                .is_none_or(|total| total > limits.max_total_document_bytes)
+        {
+            return Err(ScanError::TotalDocumentBytesLimitExceeded {
+                limit_bytes: limits.max_total_document_bytes,
+            });
+        }
+        Ok(())
+    }
+
     fn record_bytes(&mut self, size_bytes: u64) {
         self.total_bytes += size_bytes;
+    }
+
+    fn record_document_bytes(&mut self, kind: SourceKind, size_bytes: u64) {
+        if matches!(kind, SourceKind::Page | SourceKind::Journal) {
+            self.total_document_bytes += size_bytes;
+        }
     }
 
     fn remaining_bytes(&self, limits: &ScanLimits) -> u64 {
@@ -143,6 +186,8 @@ pub enum ScanErrorCode {
     EntryLimitExceeded,
     TotalBytesLimitExceeded,
     FileTooLarge,
+    DocumentTooLarge,
+    TotalDocumentBytesLimitExceeded,
     ConfigTooLarge,
     InvalidConfig,
     Io,
@@ -177,6 +222,13 @@ pub enum ScanError {
         relative_path: String,
         limit_bytes: u64,
     },
+    #[error("source document {relative_path} exceeds the {limit_bytes}-byte parse safety limit")]
+    DocumentTooLarge {
+        relative_path: String,
+        limit_bytes: u64,
+    },
+    #[error("source documents exceed the configured total size limit of {limit_bytes} bytes")]
+    TotalDocumentBytesLimitExceeded { limit_bytes: u64 },
     #[error("Logseq config exceeds the {limit_bytes}-byte safety limit")]
     ConfigTooLarge { limit_bytes: u64 },
     #[error("invalid Logseq config: {source}")]
@@ -208,6 +260,10 @@ impl ScanError {
             Self::EntryLimitExceeded { .. } => ScanErrorCode::EntryLimitExceeded,
             Self::TotalBytesLimitExceeded { .. } => ScanErrorCode::TotalBytesLimitExceeded,
             Self::FileTooLarge { .. } => ScanErrorCode::FileTooLarge,
+            Self::DocumentTooLarge { .. } => ScanErrorCode::DocumentTooLarge,
+            Self::TotalDocumentBytesLimitExceeded { .. } => {
+                ScanErrorCode::TotalDocumentBytesLimitExceeded
+            }
             Self::ConfigTooLarge { .. } => ScanErrorCode::ConfigTooLarge,
             Self::InvalidConfig { .. } => ScanErrorCode::InvalidConfig,
             Self::Io { .. } => ScanErrorCode::Io,
@@ -561,7 +617,7 @@ fn scan_source_directory(
                 SourceKind::Config | SourceKind::Asset | SourceKind::Drawing => None,
             };
             let (size_bytes, sha256) =
-                hash_file(root, &path, &relative, limits, &accumulator.budget)?;
+                hash_file(root, &path, &relative, kind, limits, &accumulator.budget)?;
             accumulator.entries.push(ManifestEntry {
                 kind,
                 document_format,
@@ -570,6 +626,7 @@ fn scan_source_directory(
                 sha256,
             });
             accumulator.budget.record_bytes(size_bytes);
+            accumulator.budget.record_document_bytes(kind, size_bytes);
         }
     }
     Ok(())
@@ -654,6 +711,7 @@ fn hash_file(
     root: &Path,
     path: &Path,
     relative_path: &str,
+    kind: SourceKind,
     limits: &ScanLimits,
     budget: &ScanBudget,
 ) -> Result<(u64, Sha256Digest), ScanError> {
@@ -664,6 +722,7 @@ fn hash_file(
         });
     }
     budget.check_candidate(relative_path, before.len(), None, limits)?;
+    budget.check_document_candidate(relative_path, before.len(), kind, limits)?;
     let mut file = File::open(path).map_err(|error| io_error("open", path, error))?;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
@@ -684,6 +743,7 @@ fn hash_file(
             .checked_add(read as u64)
             .ok_or_else(|| io_error("hash", path, io::Error::other("file is too large")))?;
         budget.check_candidate(relative_path, size, None, limits)?;
+        budget.check_document_candidate(relative_path, size, kind, limits)?;
         hasher.update(&buffer[..read]);
     }
     let after = fs::symlink_metadata(path).map_err(|error| io_error("inspect", path, error))?;

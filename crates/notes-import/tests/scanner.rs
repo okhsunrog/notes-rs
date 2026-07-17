@@ -265,6 +265,75 @@ fn per_file_limit_is_typed_and_exact_boundary_is_allowed() {
 }
 
 #[test]
+fn document_limit_is_separate_typed_and_allows_the_exact_boundary() {
+    let temp = graph_with_page("five.md", b"12345");
+    let failing = ScanLimits {
+        max_document_bytes: 4,
+        ..ScanLimits::default()
+    };
+    let error = scan_logseq_graph_with_limits(temp.path(), &failing).expect_err("document limit");
+    assert_eq!(error.code(), ScanErrorCode::DocumentTooLarge);
+    assert!(matches!(
+        error,
+        ScanError::DocumentTooLarge {
+            relative_path,
+            limit_bytes: 4,
+        } if relative_path == "pages/five.md"
+    ));
+
+    let exact = ScanLimits {
+        max_document_bytes: 5,
+        ..ScanLimits::default()
+    };
+    scan_logseq_graph_with_limits(temp.path(), &exact).expect("exact document boundary");
+}
+
+#[test]
+fn document_limit_does_not_shrink_the_asset_limit() {
+    let temp = TempDir::new().expect("temp dir");
+    fs::create_dir_all(temp.path().join("assets")).expect("create assets");
+    fs::write(temp.path().join("assets/five.bin"), b"12345").expect("write asset");
+    let limits = ScanLimits {
+        max_document_bytes: 1,
+        max_file_bytes: 5,
+        ..ScanLimits::default()
+    };
+
+    let report = scan_logseq_graph_with_limits(temp.path(), &limits).expect("scan asset");
+    assert!(report.manifest.entries().iter().any(|entry| {
+        entry.kind == SourceKind::Asset
+            && entry.relative_path == "assets/five.bin"
+            && entry.size_bytes == 5
+    }));
+}
+
+#[test]
+fn total_document_limit_is_independent_from_asset_bytes() {
+    let temp = TempDir::new().expect("temp dir");
+    fs::create_dir_all(temp.path().join("pages")).expect("create pages");
+    fs::create_dir_all(temp.path().join("assets")).expect("create assets");
+    fs::write(temp.path().join("pages/one.md"), b"123").expect("write first page");
+    fs::write(temp.path().join("pages/two.md"), b"456").expect("write second page");
+    fs::write(
+        temp.path().join("assets/large.bin"),
+        b"asset bytes do not count",
+    )
+    .expect("write asset");
+    let limits = ScanLimits {
+        max_total_document_bytes: 5,
+        ..ScanLimits::default()
+    };
+
+    let error =
+        scan_logseq_graph_with_limits(temp.path(), &limits).expect_err("combined document limit");
+    assert_eq!(error.code(), ScanErrorCode::TotalDocumentBytesLimitExceeded);
+    assert!(matches!(
+        error,
+        ScanError::TotalDocumentBytesLimitExceeded { limit_bytes: 5 }
+    ));
+}
+
+#[test]
 fn total_bytes_limit_is_typed() {
     let temp = graph_with_page("five.md", b"12345");
     let limits = ScanLimits {
