@@ -14,6 +14,7 @@ local-models = ["dep:fastembed"]
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+chrono.workspace = true
 fastembed = { workspace = true, optional = true }
 futures.workspace = true
 llm-relay.workspace = true
@@ -21,15 +22,19 @@ notes-core.workspace = true
 notes-protocol.workspace = true
 reqwest.workspace = true
 rig.workspace = true
+rusqlite.workspace = true
+rusqlite_migration.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 specta.workspace = true
 specta-typescript.workspace = true
-sha1.workspace = true
+sha2.workspace = true
+sqlite-vec.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
-uuid.workspace = true
+tempfile.workspace = true

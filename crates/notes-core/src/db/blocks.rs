@@ -324,6 +324,23 @@ pub async fn get_node_by_uuid(conn: &Connection, uuid: uuid::Uuid) -> Result<Opt
     .await
 }
 
+pub async fn get_nodes_by_uuids(conn: &Connection, uuids: Vec<uuid::Uuid>) -> Result<Vec<Node>> {
+    if uuids.is_empty() {
+        return Ok(Vec::new());
+    }
+    conn.call(move |database| {
+        let placeholders = std::iter::repeat_n("?", uuids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("SELECT {NODE_COLUMNS} FROM nodes WHERE uuid IN ({placeholders})");
+        let mut statement = database.prepare(&sql)?;
+        statement
+            .query_map(rusqlite::params_from_iter(uuids), row_to_node)?
+            .collect::<Result<Vec<_>, _>>()
+    })
+    .await
+}
+
 /// Find a page by case-insensitive title or create one. Used to eagerly
 /// materialize `[[Wikilink]]` targets so backlinks work the moment the link
 /// is typed.

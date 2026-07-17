@@ -1,28 +1,13 @@
+use crate::store::{AiStore, ExtractedEdge, IndexJob};
 use anyhow::Result;
-use notes_core::{Connection, FailureKind, db};
+use notes_core::operation::{EdgeAdd, EdgeRemove, NodeCreate, NodeSetContent};
+use notes_core::{Connection, NodeKind, OpKind, Origin};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use sha1::{Digest, Sha1};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::time::{Duration, sleep};
-
-/// Stable change-detection hash of (title, content). Sha1 is fine here —
-/// we're not protecting against adversarial collisions, just detecting
-/// "is this the same text the LLM already saw?".
-fn content_hash(title: Option<&str>, content: &str) -> String {
-    let mut h = Sha1::new();
-    h.update(title.unwrap_or("").as_bytes());
-    h.update([0x1f]); // delimiter so "ab|c" and "a|bc" don't collide
-    h.update(content.as_bytes());
-    let bytes = h.finalize();
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes.as_ref() as &[u8] {
-        use std::fmt::Write;
-        let _ = write!(out, "{b:02x}");
-    }
-    out
-}
 
 const PREAMBLE: &str = r#"
 Extract named entities and their relations from the user's note.
@@ -44,20 +29,15 @@ If the note has no extractable entities, return empty arrays. Do not invent.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExtractedEntity {
-    /// Canonical name of the entity.
     pub name: String,
-    /// One-sentence description in the same language as the source.
     pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExtractedRelation {
-    /// Source entity name (must match one in `entities`).
     pub src: String,
-    /// Destination entity name (must match one in `entities`).
     pub dst: String,
-    /// Relation kind (snake_case verb phrase): uses, part_of, depends_on, developed_by, …
     pub kind: String,
 }
 
@@ -72,52 +52,13 @@ pub struct EntityExtractor {
     config: llm_relay::ClientConfig,
 }
 
-fn classify_failure(error: &anyhow::Error) -> (FailureKind, bool) {
-    if let Some(error) = error.downcast_ref::<llm_relay::LlmError>() {
-        return match error {
-            llm_relay::LlmError::ApiError { status, .. }
-                if matches!(*status, 408 | 429) || *status >= 500 =>
-            {
-                (FailureKind::Transient, false)
-            }
-            llm_relay::LlmError::ApiError {
-                status: 401 | 403, ..
-            } => (FailureKind::Auth, true),
-            llm_relay::LlmError::ApiError { .. } => (FailureKind::ProviderRequest, true),
-            llm_relay::LlmError::InvalidStructuredOutput { .. }
-            | llm_relay::LlmError::ParseResponse(_) => (FailureKind::Schema, false),
-            llm_relay::LlmError::Config(_) | llm_relay::LlmError::ResponseTooLarge { .. } => {
-                (FailureKind::Configuration, true)
-            }
-            llm_relay::LlmError::Request(request) => {
-                if request.is_timeout() || request.is_connect() {
-                    (FailureKind::Network, false)
-                } else if request
-                    .status()
-                    .is_some_and(|status| status.is_client_error())
-                {
-                    (FailureKind::ProviderRequest, true)
-                } else {
-                    (FailureKind::Network, false)
-                }
-            }
-            llm_relay::LlmError::Client(_) => (FailureKind::Configuration, true),
-            llm_relay::LlmError::EmptyResponse
-            | llm_relay::LlmError::Conversion(_)
-            | llm_relay::LlmError::Stream(_) => (FailureKind::ProviderResponse, false),
-        };
-    }
-    (FailureKind::Configuration, true)
-}
-
 impl EntityExtractor {
     pub fn new(config: llm_relay::ClientConfig) -> Self {
         Self { config }
     }
 
     pub async fn extract(&self, text: String) -> Result<ExtractionResult> {
-        let config = self.config.clone().max_tokens(2_048);
-        let client = llm_relay::LlmClient::new(config)?;
+        let client = llm_relay::LlmClient::new(self.config.clone().max_tokens(2_048))?;
         let response = client
             .complete_structured::<ExtractionResult>(&text, "entity_extraction", Some(PREAMBLE))
             .await?;
@@ -131,7 +72,8 @@ impl EntityExtractor {
 }
 
 pub fn spawn_worker(
-    conn: Connection,
+    notes: Connection,
+    store: Arc<AiStore>,
     extractor: Arc<EntityExtractor>,
     on_entities_changed: Arc<dyn Fn() + Send + Sync>,
     on_status_changed: Arc<dyn Fn() + Send + Sync>,
@@ -140,12 +82,12 @@ pub fn spawn_worker(
     tokio::spawn(async move {
         loop {
             if !paused.load(Ordering::Acquire) {
-                match tick(&conn, &extractor, on_entities_changed.as_ref()).await {
+                match tick(&notes, &store, &extractor, on_entities_changed.as_ref()).await {
                     Ok(true) => on_status_changed(),
                     Ok(false) => {}
-                    Err(e) => {
+                    Err(error) => {
                         on_status_changed();
-                        tracing::warn!(error = ?e, "extract worker tick failed");
+                        tracing::warn!(?error, "extract worker tick failed");
                     }
                 }
             }
@@ -155,58 +97,62 @@ pub fn spawn_worker(
 }
 
 async fn tick(
-    conn: &Connection,
+    notes: &Connection,
+    store: &AiStore,
     extractor: &EntityExtractor,
     on_entities_changed: &(dyn Fn() + Send + Sync),
 ) -> Result<bool> {
-    let batch = db::take_pending_extractions(conn, 1).await?;
-    let changed = !batch.is_empty();
-    for (node_id, title, content) in batch {
-        let meaningful_text = format!("{}\n{content}", title.as_deref().unwrap_or(""));
-        if meaningful_text.trim().chars().count() < 3 {
-            db::finish_extraction(conn, node_id).await?;
+    let stale_sources = store
+        .reconcile_extractions(notes, notes_core::sync_cursor(notes).await?)
+        .await?;
+    for source_uuid in stale_sources {
+        let removals = store.extraction_removals(source_uuid, &[]).await?;
+        let kinds = removals
+            .into_iter()
+            .map(|edge| {
+                OpKind::EdgeRemove(EdgeRemove {
+                    src_uuid: edge.src_uuid,
+                    dst_uuid: edge.dst_uuid,
+                    edge_kind: edge.kind,
+                })
+            })
+            .collect::<Vec<_>>();
+        if !kinds.is_empty() {
+            let operations = notes_core::local_ops(notes, kinds).await?;
+            notes_core::apply_batch(notes, &operations, Origin::Local).await?;
+            on_entities_changed();
+        }
+        store.forget_extraction_source(source_uuid).await?;
+    }
+    let jobs = store.take_extraction_jobs(1).await?;
+    let changed = !jobs.is_empty();
+    for job in jobs {
+        if job.input_text.trim().chars().count() < 3 {
+            store.finish_extraction(&job, Vec::new()).await?;
             continue;
         }
-        let new_hash = content_hash(title.as_deref(), &content);
-        // Skip the LLM call if (title, content) is identical to the last
-        // successful extraction — typo-fix cycles re-fire the update trigger
-        // but produce no semantic change worth extracting again.
-        let prev_hash = db::get_last_extracted_hash(conn, node_id).await?;
-        if prev_hash.as_deref() == Some(new_hash.as_str()) {
-            db::finish_extraction(conn, node_id).await?;
-            continue;
-        }
-        match extractor.extract(meaningful_text).await {
+        match extractor.extract(job.input_text.clone()).await {
             Ok(result) => {
-                match apply(conn, node_id, title.clone(), content.clone(), result).await {
-                    Ok(()) => {
-                        db::set_last_extracted_hash(conn, node_id, new_hash).await?;
-                        db::finish_extraction(conn, node_id).await?;
-                        // A replacement can add or remove the final mention,
-                        // so refresh even when the new result is empty.
-                        on_entities_changed();
-                    }
-                    Err(e) => {
-                        tracing::warn!(node_id, error = ?e, "applying extraction failed");
-                        // If the source changed while the request was in flight,
-                        // its update trigger already replaced this queue row.
-                        if !e.to_string().contains("source changed") {
-                            db::record_extraction_failure(
-                                conn,
-                                node_id,
-                                FailureKind::Apply,
-                                &e.to_string(),
-                                true,
-                            )
-                            .await?;
-                        }
-                    }
+                if !store.extraction_job_is_current(notes, &job).await? {
+                    continue;
+                }
+                if let Err(error) = apply_extraction(notes, store, &job, result).await {
+                    tracing::warn!(node_uuid = %job.node_uuid, ?error, "applying extraction failed");
+                    store
+                        .record_extraction_failure(&job, &error.to_string(), true)
+                        .await?;
+                } else {
+                    on_entities_changed();
                 }
             }
-            Err(e) => {
-                tracing::warn!(node_id, error = ?e, "extraction failed; will retry with backoff");
-                let (kind, terminal) = classify_failure(&e);
-                db::record_extraction_failure(conn, node_id, kind, &e.to_string(), terminal)
+            Err(error) => {
+                tracing::warn!(node_uuid = %job.node_uuid, ?error, "extraction failed");
+                store
+                    .record_extraction_failure(
+                        &job,
+                        &error.to_string(),
+                        crate::failure::provider_failure_is_terminal(&error),
+                    )
                     .await?;
             }
         }
@@ -214,32 +160,110 @@ async fn tick(
     Ok(changed)
 }
 
-async fn apply(
-    conn: &Connection,
-    source_id: i64,
-    expected_title: Option<String>,
-    expected_content: String,
+async fn apply_extraction(
+    notes: &Connection,
+    store: &AiStore,
+    job: &IndexJob,
     result: ExtractionResult,
 ) -> Result<()> {
-    let entities = result
-        .entities
-        .into_iter()
-        .map(|entity| (entity.name, entity.description))
-        .collect();
-    let relations = result
-        .relations
-        .into_iter()
-        .map(|relation| (relation.src, relation.dst, relation.kind))
-        .collect();
-    db::replace_extracted_edges(
-        conn,
-        source_id,
-        expected_title,
-        expected_content,
-        entities,
-        relations,
+    let now = chrono::Utc::now().timestamp();
+    let mut kinds = Vec::new();
+    let mut entities = HashMap::<String, uuid::Uuid>::new();
+    let mut desired_edges = Vec::new();
+    for entity in result.entities {
+        let name = entity.name.trim();
+        if name.is_empty() || name.chars().count() > 200 {
+            continue;
+        }
+        let key = name.to_lowercase();
+        let uuid = entity_uuid(&key);
+        let description = entity
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|description| !description.is_empty())
+            .unwrap_or_default()
+            .to_owned();
+        match notes_core::db::get_node_by_uuid(notes, uuid).await? {
+            None => kinds.push(OpKind::NodeCreate(NodeCreate {
+                uuid,
+                node_kind: NodeKind::Entity,
+                title: Some(name.to_owned()),
+                content: description,
+                content_json: None,
+                parent_uuid: None,
+                position: None,
+                created_at: now,
+            })),
+            Some(existing) if !description.is_empty() && existing.content != description => {
+                kinds.push(OpKind::NodeSetContent(NodeSetContent {
+                    uuid,
+                    content: description,
+                    content_json: None,
+                }));
+            }
+            Some(_) => {}
+        }
+        entities.insert(key, uuid);
+        desired_edges.push(ExtractedEdge {
+            src_uuid: job.node_uuid,
+            dst_uuid: uuid,
+            kind: "mentions".into(),
+        });
+    }
+    for relation in result.relations {
+        let Some(&src_uuid) = entities.get(&relation.src.trim().to_lowercase()) else {
+            continue;
+        };
+        let Some(&dst_uuid) = entities.get(&relation.dst.trim().to_lowercase()) else {
+            continue;
+        };
+        let kind = relation.kind.trim().to_lowercase();
+        if src_uuid == dst_uuid || kind.is_empty() || kind.chars().count() > 64 {
+            continue;
+        }
+        desired_edges.push(ExtractedEdge {
+            src_uuid,
+            dst_uuid,
+            kind: format!("ai:{kind}"),
+        });
+    }
+    desired_edges.sort_by(|left, right| {
+        (&left.src_uuid, &left.dst_uuid, &left.kind).cmp(&(
+            &right.src_uuid,
+            &right.dst_uuid,
+            &right.kind,
+        ))
+    });
+    desired_edges.dedup();
+    for edge in store
+        .extraction_removals(job.node_uuid, &desired_edges)
+        .await?
+    {
+        kinds.push(OpKind::EdgeRemove(EdgeRemove {
+            src_uuid: edge.src_uuid,
+            dst_uuid: edge.dst_uuid,
+            edge_kind: edge.kind,
+        }));
+    }
+    for edge in &desired_edges {
+        kinds.push(OpKind::EdgeAdd(EdgeAdd {
+            src_uuid: edge.src_uuid,
+            dst_uuid: edge.dst_uuid,
+            edge_kind: edge.kind.clone(),
+            weight: 1.0,
+        }));
+    }
+    let operations = notes_core::local_ops(notes, kinds).await?;
+    notes_core::apply_batch(notes, &operations, Origin::Local).await?;
+    store.finish_extraction(job, desired_edges).await
+}
+
+fn entity_uuid(normalized_name: &str) -> uuid::Uuid {
+    uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_URL,
+        format!("notes-rs:entity:{normalized_name}").as_bytes(),
     )
-    .await
 }
 
 #[cfg(test)]
@@ -258,5 +282,11 @@ mod tests {
                 .to_string()
                 .contains("expected struct ExtractedEntity")
         );
+    }
+
+    #[test]
+    fn entity_identity_is_case_insensitive_and_stable() {
+        assert_eq!(entity_uuid("rust"), entity_uuid("rust"));
+        assert_ne!(entity_uuid("rust"), entity_uuid("tauri"));
     }
 }

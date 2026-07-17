@@ -30,7 +30,7 @@ struct SourceState {
 
 async fn database() -> (tempfile::TempDir, Connection) {
     let directory = tempfile::tempdir().expect("temporary directory");
-    let connection = db::open(directory.path().join("notes.db"), "test", 8)
+    let connection = db::open(directory.path().join("notes.db"))
         .await
         .expect("open test database");
     (directory, connection)

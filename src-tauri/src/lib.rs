@@ -142,7 +142,7 @@ pub fn run() {
             });
 
             tauri::async_runtime::spawn(async move {
-                match db::open(&db_path, "client:no-ai", 1).await {
+                match db::open(&db_path).await {
                     Ok(conn) => {
                         handle.manage(commands::AppState {
                             conn: conn.clone(),

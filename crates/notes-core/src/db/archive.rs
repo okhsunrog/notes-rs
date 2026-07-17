@@ -24,30 +24,12 @@ pub async fn export_archive(conn: &Connection) -> Result<DataArchive> {
                 })?
                 .collect::<Result<Vec<_>, _>>()?
         };
-        let entity_descriptions = {
-            let mut statement = database.prepare(
-                "SELECT source_node_id, entity_node_id, description, created_at
-                   FROM entity_descriptions
-                  ORDER BY source_node_id, entity_node_id",
-            )?;
-            statement
-                .query_map([], |row| {
-                    Ok(EntityDescriptionRecord {
-                        source_node_id: row.get(0)?,
-                        entity_node_id: row.get(1)?,
-                        description: row.get(2)?,
-                        created_at: row.get(3)?,
-                    })
-                })?
-                .collect::<Result<Vec<_>, _>>()?
-        };
         Ok(DataArchive {
             format: "notes-rs".into(),
             version: 1,
             exported_at: chrono::Utc::now().timestamp(),
             nodes,
             edges,
-            entity_descriptions,
             files: std::collections::BTreeMap::new(),
         })
     })
@@ -62,48 +44,7 @@ pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<(
     let kinds = archive_transition_kinds(&current, &archive)?;
     apply_local(conn, kinds).await?;
 
-    let target_nodes = archive
-        .nodes
-        .iter()
-        .map(|node| (node.id, node.uuid))
-        .collect::<std::collections::HashMap<_, _>>();
-    let descriptions = archive
-        .entity_descriptions
-        .into_iter()
-        .filter_map(|description| {
-            Some((
-                *target_nodes.get(&description.source_node_id)?,
-                *target_nodes.get(&description.entity_node_id)?,
-                description.description,
-                description.created_at,
-            ))
-        })
-        .collect::<Vec<_>>();
-    conn.call(move |database| -> rusqlite::Result<()> {
-        let transaction = database.transaction()?;
-        transaction.execute("DELETE FROM entity_descriptions", [])?;
-        for (source_uuid, entity_uuid, description, created_at) in descriptions {
-            transaction.execute(
-                "INSERT OR IGNORE INTO entity_descriptions
-                   (source_node_id, entity_node_id, description, created_at)
-                 SELECT source.id, entity.id, ?3, ?4 FROM nodes source, nodes entity
-                  WHERE source.uuid = ?1 AND entity.uuid = ?2",
-                rusqlite::params![source_uuid, entity_uuid, description, created_at],
-            )?;
-        }
-        transaction.execute_batch(
-            "DELETE FROM extracted_edge_sources;
-             UPDATE nodes SET last_extracted_hash = NULL
-               WHERE kind IN ('page', 'block');
-             INSERT OR REPLACE INTO extract_queue(node_id, enqueued_at, retry_count, last_attempt)
-               SELECT id, unixepoch(), 0, NULL FROM nodes WHERE kind IN ('page', 'block');
-             INSERT OR REPLACE INTO embed_queue(node_id, enqueued_at, retry_count, last_attempt)
-               SELECT id, unixepoch(), 0, NULL FROM nodes;",
-        )?;
-        transaction.commit()?;
-        Ok(())
-    })
-    .await
+    Ok(())
 }
 
 fn archive_transition_kinds(current: &DataArchive, target: &DataArchive) -> Result<Vec<OpKind>> {

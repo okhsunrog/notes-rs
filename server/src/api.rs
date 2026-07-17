@@ -227,7 +227,7 @@ async fn search(
         .ai
         .as_ref()
         .ok_or_else(|| ApiError::unavailable("server AI is not configured"))?;
-    ai.search(&user.0.notes, request.query, request.limit)
+    ai.search(&user.0.id, request.query, request.limit)
         .await
         .map(Json)
         .map_err(|error| {
@@ -254,7 +254,7 @@ async fn chat(
     let cancellation_for_emit = cancelled.clone();
     let error_emitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let error_for_emit = error_emitted.clone();
-    let connection = user.0.notes.clone();
+    let user_id = user.0.id.clone();
     tokio::spawn(async move {
         let event_sender = sender.clone();
         let emit = move |event| {
@@ -267,7 +267,7 @@ async fn chat(
         };
         if let Err(error) = ai
             .chat(
-                connection,
+                &user_id,
                 request.history,
                 request.message,
                 request.allow_writes,

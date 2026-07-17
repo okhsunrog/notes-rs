@@ -1,17 +1,28 @@
 use crate::config::AiConfig;
+use crate::state::UserRegistry;
 use anyhow::{Context, Result, bail};
 use notes_ai::agent;
-use notes_ai::embed::{EmbedderBackend, RerankBackend};
+use notes_ai::embed::EmbedderBackend;
+use notes_ai::retrieval::RetrievalPipeline;
+use notes_ai::store::{AiStore, embedding_identity_fingerprint};
 use notes_core::Connection;
 use notes_core::db::{self, SearchHit};
 use notes_protocol::{ChatEvent, ChatTurn};
+use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone)]
+struct UserAi {
+    notes: Connection,
+    store: Arc<AiStore>,
+    retrieval: RetrievalPipeline,
+}
+
+#[derive(Clone)]
 pub struct AiRuntime {
-    pub embedder: Arc<dyn EmbedderBackend>,
-    pub reranker: Arc<dyn RerankBackend>,
+    users: Arc<HashMap<String, UserAi>>,
     chat: llm_relay::ClientConfig,
     extraction: llm_relay::ClientConfig,
     entity_extraction_enabled: bool,
@@ -19,7 +30,7 @@ pub struct AiRuntime {
 }
 
 impl AiRuntime {
-    pub fn new(config: &AiConfig) -> Result<Self> {
+    pub async fn open(config: &AiConfig, registry: &UserRegistry, data_dir: &Path) -> Result<Self> {
         let embedder = notes_ai::embed::make_openrouter_embedder(
             config.openrouter_api_key.clone(),
             &config.openrouter_base_url,
@@ -43,86 +54,93 @@ impl AiRuntime {
             Some(config.openrouter_api_key.clone()),
             config.extraction_model.clone(),
         )?;
-        Ok(Self {
-            embedder,
-            reranker,
+        let identity = embedding_identity_fingerprint(
+            &config.openrouter_base_url,
+            &config.embedding_model,
+            config.embedding_dimensions,
+        );
+        let mut users = HashMap::new();
+        for user in registry.users() {
+            let store = Arc::new(
+                AiStore::open(
+                    data_dir.join("users").join(&user.id).join("ai.db"),
+                    identity.clone(),
+                    config.embedding_dimensions,
+                )
+                .await
+                .with_context(|| format!("opening AI store for {}", user.id))?,
+            );
+            let retrieval = RetrievalPipeline::new(
+                user.notes.clone(),
+                store.clone(),
+                embedder.clone(),
+                reranker.clone(),
+            );
+            users.insert(
+                user.id.clone(),
+                UserAi {
+                    notes: user.notes.clone(),
+                    store,
+                    retrieval,
+                },
+            );
+        }
+        let runtime = Self {
+            users: Arc::new(users),
             chat,
             extraction,
             entity_extraction_enabled: config.entity_extraction_enabled,
             query_rewriting_enabled: config.query_rewriting_enabled,
-        })
+        };
+        runtime.spawn_workers(embedder);
+        Ok(runtime)
     }
 
-    pub fn spawn_workers(&self, connection: Connection) {
-        let paused = Arc::new(AtomicBool::new(false));
-        notes_ai::embed::spawn_worker(
-            connection.clone(),
-            self.embedder.clone(),
-            Arc::new(|| {}),
-            paused.clone(),
-        );
-        if self.entity_extraction_enabled {
-            notes_ai::extract::spawn_worker(
-                connection,
-                Arc::new(notes_ai::extract::EntityExtractor::new(
-                    self.extraction.clone(),
-                )),
+    fn spawn_workers(&self, embedder: Arc<dyn EmbedderBackend>) {
+        for user in self.users.values() {
+            let paused = Arc::new(AtomicBool::new(false));
+            notes_ai::embed::spawn_worker(
+                user.notes.clone(),
+                user.store.clone(),
+                embedder.clone(),
                 Arc::new(|| {}),
-                Arc::new(|| {}),
-                paused,
+                paused.clone(),
             );
+            if self.entity_extraction_enabled {
+                notes_ai::extract::spawn_worker(
+                    user.notes.clone(),
+                    user.store.clone(),
+                    Arc::new(notes_ai::extract::EntityExtractor::new(
+                        self.extraction.clone(),
+                    )),
+                    Arc::new(|| {}),
+                    Arc::new(|| {}),
+                    paused,
+                );
+            }
         }
     }
 
-    pub async fn search(
-        &self,
-        connection: &Connection,
-        query: String,
-        limit: u32,
-    ) -> Result<Vec<SearchHit>> {
+    fn user(&self, user_id: &str) -> Result<&UserAi> {
+        self.users
+            .get(user_id)
+            .with_context(|| format!("AI runtime is unavailable for user {user_id}"))
+    }
+
+    pub async fn search(&self, user_id: &str, query: String, limit: u32) -> Result<Vec<SearchHit>> {
         if query.trim().is_empty() || query.chars().count() > 4_096 {
             bail!("query must contain 1 to 4096 characters");
         }
         if !(1..=100).contains(&limit) {
             bail!("limit must be between 1 and 100");
         }
-        let embedding = self
-            .embedder
-            .embed_query(query.clone())
-            .await
-            .context("embedding search query")?;
-        let pool = limit.saturating_mul(4).max(32);
-        let candidates = db::search_hybrid(connection, query.clone(), embedding, pool).await?;
-        if candidates.is_empty() {
-            return Ok(Vec::new());
-        }
-        let documents = candidates
-            .iter()
-            .map(|hit| {
-                format!(
-                    "{}\n{}",
-                    hit.node.title.as_deref().unwrap_or_default(),
-                    hit.node.content
-                )
-            })
-            .collect();
-        let ranked = self.reranker.rerank(query, documents).await?;
-        Ok(ranked
-            .into_iter()
-            .take(limit as usize)
-            .filter_map(|(index, score)| {
-                candidates.get(index).map(|candidate| SearchHit {
-                    node: candidate.node.clone(),
-                    score: f64::from(score),
-                })
-            })
-            .collect())
+        self.user(user_id)?.retrieval.retrieve(query, limit).await
     }
 
     #[allow(clippy::too_many_arguments)]
     pub async fn chat(
         &self,
-        connection: Connection,
+        user_id: &str,
         history: Vec<ChatTurn>,
         message: String,
         allow_writes: bool,
@@ -130,8 +148,9 @@ impl AiRuntime {
         cancelled: Arc<AtomicBool>,
         emit: impl Fn(ChatEvent) + Send + Sync + 'static,
     ) -> Result<String> {
+        let user = self.user(user_id)?;
         let active_node_id = match active_node_uuid {
-            Some(uuid) => db::get_node_by_uuid(&connection, uuid)
+            Some(uuid) => db::get_node_by_uuid(&user.notes, uuid)
                 .await?
                 .map(|node| node.id),
             None => None,
@@ -140,9 +159,7 @@ impl AiRuntime {
             bail!("chat request was cancelled");
         }
         agent::run_chat_stream_with_config(
-            connection,
-            self.embedder.clone(),
-            self.reranker.clone(),
+            user.retrieval.clone(),
             history,
             message,
             allow_writes,

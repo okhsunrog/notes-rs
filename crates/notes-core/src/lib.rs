@@ -8,7 +8,7 @@ pub mod sqlite;
 pub mod stem;
 
 pub use hlc::Hlc;
-pub use model::{BackgroundQueue, FailureKind, NodeKind, ReorderDirection};
+pub use model::{NodeKind, ReorderDirection};
 pub use operation::{
     ApplyOutcome, Op, OpKind, Origin, SnapshotAttachment, SnapshotEdge, SnapshotNode,
     SnapshotTombstone, SyncSnapshot, acknowledge_server_op, acknowledge_server_ops, apply,

@@ -1,4 +1,4 @@
-use crate::embed::{EmbedderBackend, RerankBackend};
+use crate::retrieval::{RetrievalPipeline, node_documents, select_reranked_hits};
 use anyhow::Context;
 use futures::StreamExt;
 use llm_relay::RigClient;
@@ -207,9 +207,7 @@ fn looks_contextual(q: &str) -> bool {
 
 #[derive(Clone)]
 pub struct SearchAgentic {
-    pub conn: Connection,
-    pub embedder: Arc<dyn EmbedderBackend>,
-    pub reranker: Arc<dyn RerankBackend>,
+    pub retrieval: RetrievalPipeline,
     pub rewriter: QueryRewriter,
 }
 
@@ -264,97 +262,16 @@ impl Tool for SearchAgentic {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         validate_search_args(&args)?;
         let query = self.rewriter.rewrite(&args.query).await;
-        let emb = self
-            .embedder
-            .embed_query(query.clone())
+        self.retrieval
+            .retrieve(query, args.limit)
             .await
-            .map_err(into_tool_err)?;
-        // Pool floor: at low `limit` (e.g. 3) the default `limit*4 = 12` is
-        // too narrow when BM25 and vector channels disagree. Widen the rerank
-        // input so we don't starve the reranker of plausible candidates.
-        let pool = args.limit.saturating_mul(4).max(RERANK_POOL_MIN);
-        let candidates = db::search_hybrid(&self.conn, query.clone(), emb, pool)
-            .await
-            .map_err(into_tool_err)?;
-        if candidates.is_empty() {
-            return Ok(Vec::new());
-        }
-        let docs: Vec<String> = candidates
-            .iter()
-            .map(|h| {
-                format!(
-                    "{}\n{}",
-                    h.node.title.as_deref().unwrap_or(""),
-                    h.node.content
-                )
-            })
-            .collect();
-        let scored = self
-            .reranker
-            .rerank(query, docs)
-            .await
-            .map_err(into_tool_err)?;
-        // Score floor: BGE-reranker scores below ~RELEVANCE_FLOOR are
-        // effectively irrelevant — passing them to the agent invites
-        // hallucinate-by-citation. Returning empty when nothing clears the
-        // bar gives the model a clean "nothing found" signal.
-        Ok(scored
-            .into_iter()
-            .filter(|(_, s)| *s as f64 >= RELEVANCE_FLOOR)
-            .take(args.limit as usize)
-            .filter_map(|(idx, score)| {
-                candidates.get(idx).map(|candidate| SearchHit {
-                    node: candidate.node.clone(),
-                    score: score as f64,
-                })
-            })
-            .collect())
+            .map_err(into_tool_err)
     }
 }
 
-const RERANK_POOL_MIN: u32 = 32;
-const RELEVANCE_FLOOR: f64 = 0.30;
 /// Cap on the merged seeds+neighbors pool before reranking. The reranker is
 /// the per-query cost bottleneck; ~64 docs is fine, ~512 is sluggish.
 const EXPAND_POOL_MAX: usize = 64;
-const LOW_CONFIDENCE_FALLBACK_LIMIT: usize = 4;
-
-fn select_reranked_hits(
-    scored: Vec<(usize, f32)>,
-    candidates: &[Node],
-    limit: usize,
-) -> Vec<SearchHit> {
-    let confident: Vec<SearchHit> = scored
-        .iter()
-        .filter(|(_, score)| *score as f64 >= RELEVANCE_FLOOR)
-        .take(limit)
-        .filter_map(|(index, score)| {
-            candidates.get(*index).cloned().map(|node| SearchHit {
-                node,
-                score: *score as f64,
-            })
-        })
-        .collect();
-    if !confident.is_empty() {
-        return confident;
-    }
-
-    // Cross-language and broad inventory-like queries can produce uniformly
-    // low reranker scores even when semantic retrieval found the right notes.
-    // Returning a small, explicitly low-scored fallback lets the agent inspect
-    // real content instead of falsely claiming that the notebook is empty.
-    scored
-        .into_iter()
-        .take(limit.min(LOW_CONFIDENCE_FALLBACK_LIMIT))
-        .filter_map(|(index, score)| {
-            candidates.get(index).cloned().map(|node| SearchHit {
-                node,
-                score: score as f64,
-            })
-        })
-        .collect()
-}
-
 // ───────────────────────── search_and_expand ─────────────────────────
 
 /// Hybrid search + 1-hop graph expansion + rerank. The default retrieval
@@ -364,9 +281,7 @@ fn select_reranked_hits(
 /// graph actually do work for the model instead of being decoration.
 #[derive(Clone)]
 pub struct SearchAndExpand {
-    pub conn: Connection,
-    pub embedder: Arc<dyn EmbedderBackend>,
-    pub reranker: Arc<dyn RerankBackend>,
+    pub retrieval: RetrievalPipeline,
     pub rewriter: QueryRewriter,
 }
 
@@ -394,13 +309,13 @@ impl Tool for SearchAndExpand {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         validate_search_args(&args)?;
         let query = self.rewriter.rewrite(&args.query).await;
-        let emb = self
-            .embedder
-            .embed_query(query.clone())
-            .await
-            .map_err(into_tool_err)?;
-        let seed_pool = args.limit.saturating_mul(4).max(RERANK_POOL_MIN);
-        let seeds = db::search_hybrid(&self.conn, query.clone(), emb, seed_pool)
+        let seed_pool = args
+            .limit
+            .saturating_mul(4)
+            .max(crate::retrieval::RERANK_POOL_MIN);
+        let seeds = self
+            .retrieval
+            .hybrid_candidates(query.clone(), seed_pool)
             .await
             .map_err(into_tool_err)?;
         if seeds.is_empty() {
@@ -416,7 +331,7 @@ impl Tool for SearchAndExpand {
             if pool.len() >= EXPAND_POOL_MAX {
                 break;
             }
-            let neigh = db::neighbors(&self.conn, s.node.id, 1)
+            let neigh = db::neighbors(self.retrieval.notes(), s.node.id, 1)
                 .await
                 .map_err(into_tool_err)?;
             for n in neigh {
@@ -426,13 +341,18 @@ impl Tool for SearchAndExpand {
                 pool.entry(n.id).or_insert(n);
             }
         }
-        let candidates: Vec<Node> = pool.into_values().collect();
-        let docs: Vec<String> = candidates
+        let candidates = pool
+            .into_values()
+            .map(|node| SearchHit { node, score: 0.0 })
+            .collect::<Vec<_>>();
+        let nodes = candidates
             .iter()
-            .map(|n| format!("{}\n{}", n.title.as_deref().unwrap_or(""), n.content))
-            .collect();
+            .map(|candidate| candidate.node.clone())
+            .collect::<Vec<_>>();
+        let docs = node_documents(&nodes);
         let scored = self
-            .reranker
+            .retrieval
+            .reranker()
             .rerank(query, docs)
             .await
             .map_err(into_tool_err)?;
@@ -883,13 +803,12 @@ impl Tool for LinkNodes {
 
 fn build_agent<M: CompletionModel + 'static>(
     model: M,
-    conn: Connection,
-    embedder: Arc<dyn EmbedderBackend>,
-    reranker: Arc<dyn RerankBackend>,
+    retrieval: RetrievalPipeline,
     rewriter: QueryRewriter,
     allow_writes: bool,
     active_node_id: Option<i64>,
 ) -> Result<rig::agent::Agent<M>, AgentError> {
+    let conn = retrieval.notes().clone();
     let preamble = active_node_id.map_or_else(
         || SYSTEM_PROMPT.to_string(),
         |id| {
@@ -903,15 +822,11 @@ fn build_agent<M: CompletionModel + 'static>(
         .preamble(&preamble)
         .max_tokens(2048)
         .tool(SearchAndExpand {
-            conn: conn.clone(),
-            embedder: embedder.clone(),
-            reranker: reranker.clone(),
+            retrieval: retrieval.clone(),
             rewriter: rewriter.clone(),
         })
         .tool(SearchAgentic {
-            conn: conn.clone(),
-            embedder,
-            reranker,
+            retrieval,
             rewriter,
         })
         .tool(ListPages { conn: conn.clone() })
@@ -929,64 +844,6 @@ fn build_agent<M: CompletionModel + 'static>(
     Ok(builder.build())
 }
 
-pub async fn run_chat_with_config(
-    conn: Connection,
-    embedder: Arc<dyn EmbedderBackend>,
-    reranker: Arc<dyn RerankBackend>,
-    message: String,
-    config: llm_relay::ClientConfig,
-) -> Result<String, AgentError> {
-    match config
-        .rig_client()
-        .map_err(anyhow::Error::from)
-        .map_err(AgentError::from)?
-    {
-        RigClient::OpenAi(client) => {
-            run_chat_with_model(
-                client.completion_model(&config.model),
-                conn,
-                embedder,
-                reranker,
-                message,
-            )
-            .await
-        }
-        RigClient::Anthropic(client) => {
-            run_chat_with_model(
-                client.completion_model(&config.model),
-                conn,
-                embedder,
-                reranker,
-                message,
-            )
-            .await
-        }
-    }
-}
-
-async fn run_chat_with_model<M: CompletionModel + 'static>(
-    model: M,
-    conn: Connection,
-    embedder: Arc<dyn EmbedderBackend>,
-    reranker: Arc<dyn RerankBackend>,
-    message: String,
-) -> Result<String, AgentError> {
-    let agent = build_agent(
-        model,
-        conn,
-        embedder,
-        reranker,
-        QueryRewriter::empty(),
-        false,
-        None,
-    )?;
-    agent
-        .prompt(message)
-        .max_turns(8)
-        .await
-        .map_err(|e| AgentError(format!("{e:#}")))
-}
-
 fn chat_turn_message(turn: ChatTurn) -> Message {
     match turn {
         ChatTurn::User { text } => Message::user(text),
@@ -996,9 +853,7 @@ fn chat_turn_message(turn: ChatTurn) -> Message {
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_chat_stream_with_config(
-    conn: Connection,
-    embedder: Arc<dyn EmbedderBackend>,
-    reranker: Arc<dyn RerankBackend>,
+    retrieval: RetrievalPipeline,
     history: Vec<ChatTurn>,
     message: String,
     allow_writes: bool,
@@ -1033,9 +888,7 @@ pub async fn run_chat_stream_with_config(
         RigClient::OpenAi(client) => {
             run_chat_stream_with_model(
                 client.completion_model(&config.model),
-                conn,
-                embedder,
-                reranker,
+                retrieval,
                 history,
                 message,
                 allow_writes,
@@ -1050,9 +903,7 @@ pub async fn run_chat_stream_with_config(
         RigClient::Anthropic(client) => {
             run_chat_stream_with_model(
                 client.completion_model(&config.model),
-                conn,
-                embedder,
-                reranker,
+                retrieval,
                 history,
                 message,
                 allow_writes,
@@ -1070,9 +921,7 @@ pub async fn run_chat_stream_with_config(
 #[allow(clippy::too_many_arguments)]
 async fn run_chat_stream_with_model<M: CompletionModel + 'static>(
     model: M,
-    conn: Connection,
-    embedder: Arc<dyn EmbedderBackend>,
-    reranker: Arc<dyn RerankBackend>,
+    retrieval: RetrievalPipeline,
     history: Vec<ChatTurn>,
     message: String,
     allow_writes: bool,
@@ -1083,15 +932,7 @@ async fn run_chat_stream_with_model<M: CompletionModel + 'static>(
     query_rewriting_enabled: bool,
 ) -> Result<String, AgentError> {
     let rewriter = QueryRewriter::new(&history, query_rewriting_enabled, query_rewriter_config);
-    let agent = build_agent(
-        model,
-        conn,
-        embedder,
-        reranker,
-        rewriter,
-        allow_writes,
-        active_node_id,
-    )?;
+    let agent = build_agent(model, retrieval, rewriter, allow_writes, active_node_id)?;
     let history: Vec<Message> = history.into_iter().map(chat_turn_message).collect();
 
     let mut stream = agent
@@ -1246,9 +1087,13 @@ mod tests {
                 updated_at: 0,
             },
         ];
+        let candidates = candidates
+            .into_iter()
+            .map(|node| SearchHit { node, score: 0.0 })
+            .collect::<Vec<_>>();
         let hits = select_reranked_hits(vec![(1, 0.02), (0, 0.01)], &candidates, 8);
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].node.id, 2);
-        assert!(hits[0].score < RELEVANCE_FLOOR);
+        assert!(hits[0].score < crate::retrieval::RELEVANCE_FLOOR);
     }
 }

@@ -1,4 +1,4 @@
-use crate::model::{BackgroundQueue, FailureKind, NodeKind, ReorderDirection};
+use crate::model::{NodeKind, ReorderDirection};
 use crate::operation::{
     self, AttachmentAdd, AttachmentRemove, EdgeAdd, EdgeRemove, NodeCreate, NodeDelete, NodeMove,
     NodeSetContent, NodeSetTitle, OpKind, Origin,
@@ -6,10 +6,8 @@ use crate::operation::{
 use crate::sqlite::Connection;
 use anyhow::{Context, Result};
 use rusqlite::OptionalExtension;
-use rusqlite::ffi::sqlite3_auto_extension;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::sync::Once;
 
 mod archive;
 mod attachments;
@@ -18,7 +16,6 @@ mod graph;
 mod history;
 mod migrations;
 mod nodes;
-mod queues;
 mod search;
 
 pub use archive::*;
@@ -27,26 +24,9 @@ pub use blocks::*;
 pub use graph::*;
 pub use history::*;
 pub use nodes::*;
-pub use queues::*;
 pub use search::*;
 
-static VEC_INIT: Once = Once::new();
-
-fn register_sqlite_vec() {
-    VEC_INIT.call_once(|| unsafe {
-        type ExtensionEntry = unsafe extern "C" fn(
-            *mut rusqlite::ffi::sqlite3,
-            *mut *mut std::os::raw::c_char,
-            *const rusqlite::ffi::sqlite3_api_routines,
-        ) -> std::os::raw::c_int;
-        sqlite3_auto_extension(Some(std::mem::transmute::<*const (), ExtensionEntry>(
-            sqlite_vec::sqlite3_vec_init as *const (),
-        )));
-    });
-}
-
-pub async fn open(path: impl AsRef<Path>, embedder_id: &str, ndims: usize) -> Result<Connection> {
-    register_sqlite_vec();
+pub async fn open(path: impl AsRef<Path>) -> Result<Connection> {
     let conn = Connection::open(path.as_ref())
         .await
         .context("opening sqlite database")?;
@@ -58,74 +38,8 @@ pub async fn open(path: impl AsRef<Path>, embedder_id: &str, ndims: usize) -> Re
         Ok(())
     })
     .await?;
-    migrations::migrate(&conn, ndims).await?;
-    cleanup_orphan_entities(&conn).await?;
-    check_embedder_compat(&conn, embedder_id, ndims).await?;
+    migrations::migrate(&conn).await?;
     Ok(conn)
-}
-
-async fn check_embedder_compat(conn: &Connection, embedder_id: &str, ndims: usize) -> Result<()> {
-    let id = embedder_id.to_string();
-    let stored = conn
-        .call(move |c| -> rusqlite::Result<Option<(String, i64)>> {
-            let mut stmt = c.prepare("SELECT provider, ndims FROM embed_meta WHERE id = 1")?;
-            let mut rows = stmt.query([])?;
-            if let Some(r) = rows.next()? {
-                Ok(Some((r.get(0)?, r.get(1)?)))
-            } else {
-                Ok(None)
-            }
-        })
-        .await?;
-    match stored {
-        None => {
-            let id2 = id.clone();
-            conn.call(move |c| -> rusqlite::Result<()> {
-                c.execute(
-                    "INSERT INTO embed_meta(id, provider, ndims) VALUES (1, ?1, ?2)",
-                    rusqlite::params![id2, ndims as i64],
-                )?;
-                Ok(())
-            })
-            .await?;
-            Ok(())
-        }
-        Some((p, n)) if p == id && n as usize == ndims => Ok(()),
-        Some((p, n)) => {
-            tracing::warn!(
-                old_provider = %p,
-                old_ndims = n,
-                new_provider = %id,
-                new_ndims = ndims,
-                "embedder changed — rebuilding vec_nodes and re-enqueueing all embeddings",
-            );
-            let id2 = id.clone();
-            let ndims_u = ndims;
-            conn.call(move |c| -> rusqlite::Result<()> {
-                let tx = c.transaction()?;
-                tx.execute_batch("DROP TABLE IF EXISTS vec_nodes;")?;
-                tx.execute_batch(&format!(
-                    "CREATE VIRTUAL TABLE vec_nodes USING vec0(embedding float[{ndims_u}]);"
-                ))?;
-                tx.execute("DELETE FROM embed_queue", [])?;
-                tx.execute(
-                    "INSERT INTO embed_queue(node_id, enqueued_at)
-                     SELECT id, unixepoch() FROM nodes
-                     WHERE kind IN ('block', 'page')
-                       AND (content != '' OR title IS NOT NULL)",
-                    [],
-                )?;
-                tx.execute(
-                    "UPDATE embed_meta SET provider = ?1, ndims = ?2 WHERE id = 1",
-                    rusqlite::params![id2, ndims_u as i64],
-                )?;
-                tx.commit()?;
-                Ok(())
-            })
-            .await?;
-            Ok(())
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
@@ -252,17 +166,7 @@ pub struct DataArchive {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
     #[serde(default)]
-    pub entity_descriptions: Vec<EntityDescriptionRecord>,
-    #[serde(default)]
     pub files: std::collections::BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EntityDescriptionRecord {
-    pub source_node_id: i64,
-    pub entity_node_id: i64,
-    pub description: String,
-    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, specta::Type)]
@@ -280,7 +184,7 @@ mod tests {
 
     async fn temporary_database() -> (tempfile::NamedTempFile, Connection) {
         let database = tempfile::NamedTempFile::new().expect("create temporary database");
-        let connection = open(database.path(), "test:4d", 4)
+        let connection = open(database.path())
             .await
             .expect("open temporary database");
         (database, connection)
@@ -335,234 +239,6 @@ mod tests {
                 .expect("punctuation-only search")
                 .is_empty()
         );
-    }
-
-    #[tokio::test]
-    async fn replacing_extraction_removes_stale_mentions_and_relations() {
-        let (_database, connection) = temporary_database().await;
-        let source = create_node(
-            &connection,
-            NodeKind::Page,
-            Some("Source".into()),
-            String::new(),
-            None,
-        )
-        .await
-        .expect("create source");
-        replace_extracted_edges(
-            &connection,
-            source.id,
-            source.title.clone(),
-            source.content.clone(),
-            vec![
-                ("Rust".into(), Some("language".into())),
-                ("Tauri".into(), Some("framework".into())),
-            ],
-            vec![("Tauri".into(), "Rust".into(), "uses".into())],
-        )
-        .await
-        .expect("apply extraction");
-
-        replace_extracted_edges(
-            &connection,
-            source.id,
-            source.title.clone(),
-            source.content.clone(),
-            Vec::new(),
-            Vec::new(),
-        )
-        .await
-        .expect("clear extraction");
-        let generated_edges: i64 = connection
-            .call(|database| {
-                database.query_row(
-                    "SELECT COUNT(*) FROM edges
-                     WHERE kind = 'mentions' OR kind = 'uses'",
-                    [],
-                    |row| row.get(0),
-                )
-            })
-            .await
-            .expect("count generated edges");
-        assert_eq!(generated_edges, 0);
-    }
-
-    #[tokio::test]
-    async fn deleting_the_last_extraction_source_removes_orphan_entities() {
-        let (_database, connection) = temporary_database().await;
-        let page = create_node(
-            &connection,
-            NodeKind::Page,
-            Some("Source".into()),
-            "Entity source".into(),
-            None,
-        )
-        .await
-        .expect("create source page");
-        replace_extracted_edges(
-            &connection,
-            page.id,
-            page.title.clone(),
-            page.content.clone(),
-            vec![
-                ("Alpha".into(), Some("First".into())),
-                ("Beta".into(), None),
-            ],
-            vec![("Alpha".into(), "Beta".into(), "related".into())],
-        )
-        .await
-        .expect("extract entities");
-        assert_eq!(
-            list_entities(&connection, 10)
-                .await
-                .expect("list entities")
-                .len(),
-            2
-        );
-
-        delete_page(&connection, page.id)
-            .await
-            .expect("delete page");
-
-        assert!(
-            list_entities(&connection, 10)
-                .await
-                .expect("list entities after delete")
-                .is_empty()
-        );
-        assert!(
-            graph_snapshot(&connection, None)
-                .await
-                .expect("graph after delete")
-                .nodes
-                .is_empty()
-        );
-    }
-
-    #[tokio::test]
-    async fn entity_descriptions_keep_source_provenance() {
-        let (_database, connection) = temporary_database().await;
-        let first = create_node(
-            &connection,
-            NodeKind::Page,
-            Some("First".into()),
-            "Rust note".into(),
-            None,
-        )
-        .await
-        .expect("create first source");
-        let second = create_node(
-            &connection,
-            NodeKind::Page,
-            Some("Second".into()),
-            "Another Rust note".into(),
-            None,
-        )
-        .await
-        .expect("create second source");
-
-        for (source, description) in [
-            (&first, "A systems language"),
-            (&second, "A memory-safe language"),
-        ] {
-            replace_extracted_edges(
-                &connection,
-                source.id,
-                source.title.clone(),
-                source.content.clone(),
-                vec![("Rust".into(), Some(description.into()))],
-                Vec::new(),
-            )
-            .await
-            .expect("apply extraction");
-        }
-
-        let content = connection
-            .call(|database| {
-                database.query_row(
-                    "SELECT content FROM nodes WHERE kind = 'entity' AND title = 'Rust'",
-                    [],
-                    |row| row.get::<_, String>(0),
-                )
-            })
-            .await
-            .expect("read merged entity description");
-        assert!(content.contains("A systems language"));
-        assert!(content.contains("A memory-safe language"));
-
-        replace_extracted_edges(
-            &connection,
-            second.id,
-            second.title.clone(),
-            second.content.clone(),
-            Vec::new(),
-            Vec::new(),
-        )
-        .await
-        .expect("clear second extraction");
-        let content = connection
-            .call(|database| {
-                database.query_row(
-                    "SELECT content FROM nodes WHERE kind = 'entity' AND title = 'Rust'",
-                    [],
-                    |row| row.get::<_, String>(0),
-                )
-            })
-            .await
-            .expect("read remaining entity description");
-        assert_eq!(content, "A systems language");
-    }
-
-    #[tokio::test]
-    async fn stale_extraction_cannot_attach_entities_to_a_changed_source() {
-        let (_database, connection) = temporary_database().await;
-        let source = create_node(
-            &connection,
-            NodeKind::Page,
-            Some("Before".into()),
-            "old content".into(),
-            None,
-        )
-        .await
-        .expect("create source");
-        update_node(
-            &connection,
-            source.id,
-            Some("After".into()),
-            "new content".into(),
-            None,
-        )
-        .await
-        .expect("change source");
-
-        let error = replace_extracted_edges(
-            &connection,
-            source.id,
-            source.title,
-            source.content,
-            vec![("Stale entity".into(), None)],
-            Vec::new(),
-        )
-        .await
-        .expect_err("stale result must be rejected");
-        assert!(error.to_string().contains("source changed"));
-        assert!(
-            get_page_by_title(&connection, "Stale entity".into())
-                .await
-                .expect("query stale entity")
-                .is_none()
-        );
-        let entity_count: i64 = connection
-            .call(|database| {
-                database.query_row(
-                    "SELECT COUNT(*) FROM nodes WHERE kind = 'entity'",
-                    [],
-                    |row| row.get(0),
-                )
-            })
-            .await
-            .expect("count entities");
-        assert_eq!(entity_count, 0);
     }
 
     #[tokio::test]
@@ -927,98 +603,6 @@ mod tests {
                 .expect("query attachment")
                 .is_none()
         );
-    }
-
-    #[tokio::test]
-    async fn background_queue_controls_report_retry_and_clear_work() {
-        let (_database, connection) = temporary_database().await;
-        let page = create_node(
-            &connection,
-            NodeKind::Page,
-            Some("Queued".into()),
-            "content".into(),
-            None,
-        )
-        .await
-        .expect("create queued page");
-        record_embedding_failure(
-            &connection,
-            vec![page.id],
-            FailureKind::Network,
-            "connection timed out",
-            false,
-        )
-        .await
-        .expect("record embedding failure");
-        record_extraction_failure(
-            &connection,
-            page.id,
-            FailureKind::ProviderRequest,
-            "model unavailable",
-            true,
-        )
-        .await
-        .expect("record extraction failure");
-        let status = queue_status(&connection).await.expect("read queue status");
-        assert_eq!(status.embeddings_pending, 1);
-        assert_eq!(status.embeddings_failed, 1);
-        assert_eq!(status.extractions_pending, 1);
-        assert_eq!(status.extractions_failed, 1);
-        assert_eq!(status.failures.len(), 2);
-        assert!(
-            status
-                .failures
-                .iter()
-                .any(|failure| failure.terminal && failure.last_error == "model unavailable")
-        );
-
-        retry_background_jobs(&connection)
-            .await
-            .expect("retry queues");
-        let status = queue_status(&connection)
-            .await
-            .expect("read retried queues");
-        assert_eq!(status.embeddings_pending, 1);
-        assert_eq!(status.embeddings_failed, 0);
-        assert_eq!(status.extractions_pending, 1);
-        assert_eq!(status.extractions_failed, 0);
-        assert!(status.failures.is_empty());
-
-        record_extraction_failure(
-            &connection,
-            page.id,
-            FailureKind::Schema,
-            "invalid JSON",
-            false,
-        )
-        .await
-        .expect("record first schema mismatch");
-        record_extraction_failure(
-            &connection,
-            page.id,
-            FailureKind::Schema,
-            "invalid JSON again",
-            false,
-        )
-        .await
-        .expect("record second schema mismatch");
-        let status = queue_status(&connection)
-            .await
-            .expect("read terminal schema failure");
-        assert!(status.failures[0].terminal);
-        assert_eq!(status.failures[0].failure_kind, FailureKind::Schema);
-
-        clear_background_jobs(&connection)
-            .await
-            .expect("clear queues");
-        let status = queue_status(&connection)
-            .await
-            .expect("read cleared queues");
-        assert_eq!(status.embeddings_pending, 0);
-        assert_eq!(status.embeddings_failed, 0);
-        assert_eq!(status.extractions_pending, 0);
-        assert_eq!(status.extractions_failed, 0);
-        assert!(status.failures.is_empty());
     }
 
     #[tokio::test]

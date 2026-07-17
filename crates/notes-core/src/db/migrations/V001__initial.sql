@@ -8,7 +8,6 @@ CREATE TABLE nodes (
   body_stemmed TEXT NOT NULL DEFAULT '',
   parent_id INTEGER REFERENCES nodes(id) ON DELETE CASCADE,
   position REAL,
-  last_extracted_hash TEXT,
   content_hlc TEXT,
   title_hlc TEXT,
   structure_hlc TEXT,
@@ -29,21 +28,6 @@ CREATE TABLE edges (
 );
 CREATE INDEX idx_edges_src ON edges(src, kind);
 CREATE INDEX idx_edges_dst ON edges(dst, kind);
-
-CREATE TABLE extracted_edge_sources (
-  source_node_id INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
-  edge_id INTEGER NOT NULL REFERENCES edges(id) ON DELETE CASCADE,
-  PRIMARY KEY(source_node_id, edge_id)
-);
-CREATE TABLE entity_descriptions (
-  source_node_id INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
-  entity_node_id INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
-  description TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  PRIMARY KEY(source_node_id, entity_node_id)
-);
-CREATE INDEX idx_entity_descriptions_entity
-  ON entity_descriptions(entity_node_id, created_at DESC);
 
 CREATE TABLE history_undo (
   id INTEGER PRIMARY KEY,
@@ -129,57 +113,9 @@ CREATE TRIGGER nodes_au AFTER UPDATE ON nodes BEGIN
   INSERT INTO nodes_fts(rowid, body_stemmed) VALUES (new.id, new.body_stemmed);
 END;
 
-CREATE TABLE embed_meta (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  provider TEXT NOT NULL,
-  ndims INTEGER NOT NULL
-);
-CREATE TABLE embed_queue (
-  node_id INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
-  enqueued_at INTEGER NOT NULL,
-  retry_count INTEGER NOT NULL DEFAULT 0,
-  last_attempt INTEGER,
-  last_error TEXT,
-  failure_kind TEXT,
-  terminal INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE extract_queue (
-  node_id INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
-  enqueued_at INTEGER NOT NULL,
-  retry_count INTEGER NOT NULL DEFAULT 0,
-  last_attempt INTEGER,
-  last_error TEXT,
-  failure_kind TEXT,
-  terminal INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TRIGGER nodes_ai_extract
-AFTER INSERT ON nodes WHEN new.kind IN ('block', 'page') BEGIN
-  INSERT OR REPLACE INTO extract_queue(node_id, enqueued_at)
-  VALUES(new.id, unixepoch());
-END;
-CREATE TRIGGER nodes_au_extract
-AFTER UPDATE OF content, title ON nodes WHEN new.kind IN ('block', 'page') BEGIN
-  INSERT OR REPLACE INTO extract_queue(node_id, enqueued_at)
-  VALUES(new.id, unixepoch());
-END;
-
 CREATE UNIQUE INDEX idx_entity_title
   ON nodes(kind, lower(title))
   WHERE kind = 'entity' AND title IS NOT NULL;
 CREATE UNIQUE INDEX idx_page_title
   ON nodes(kind, lower(title))
   WHERE kind = 'page' AND title IS NOT NULL;
-
-CREATE TRIGGER nodes_ai_embed AFTER INSERT ON nodes BEGIN
-  INSERT OR REPLACE INTO embed_queue(node_id, enqueued_at)
-  VALUES(new.id, unixepoch());
-END;
-CREATE TRIGGER nodes_au_embed AFTER UPDATE OF content, title ON nodes BEGIN
-  INSERT OR REPLACE INTO embed_queue(node_id, enqueued_at)
-  VALUES(new.id, unixepoch());
-END;
-CREATE TRIGGER nodes_au_embed_parent AFTER UPDATE OF parent_id ON nodes BEGIN
-  INSERT OR REPLACE INTO embed_queue(node_id, enqueued_at)
-  VALUES(new.id, unixepoch());
-END;

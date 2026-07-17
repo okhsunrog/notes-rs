@@ -12,17 +12,12 @@ use anyhow::Result;
 
 pub async fn build_state(config: &ServerConfig) -> Result<AppState> {
     let registry = UserRegistry::open(config).await?;
-    let ai = config
-        .ai
-        .as_ref()
-        .map(ai::AiRuntime::new)
-        .transpose()?
-        .map(std::sync::Arc::new);
-    if let Some(ai) = &ai {
-        for user in registry.users() {
-            ai.spawn_workers(user.notes.clone());
-        }
-    }
+    let ai = match &config.ai {
+        Some(ai) => Some(std::sync::Arc::new(
+            ai::AiRuntime::open(ai, &registry, &config.data_dir).await?,
+        )),
+        None => None,
+    };
     Ok(AppState {
         registry,
         data_dir: config.data_dir.clone(),

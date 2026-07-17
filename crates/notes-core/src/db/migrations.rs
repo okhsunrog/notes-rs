@@ -6,7 +6,7 @@ fn migrations() -> Migrations<'static> {
     Migrations::new(vec![M::up(include_str!("migrations/V001__initial.sql"))])
 }
 
-pub(super) async fn migrate(connection: &Connection, ndims: usize) -> Result<()> {
+pub(super) async fn migrate(connection: &Connection) -> Result<()> {
     connection
         .call(|database| {
             migrations()
@@ -15,20 +15,7 @@ pub(super) async fn migrate(connection: &Connection, ndims: usize) -> Result<()>
         })
         .await
         .context("applying embedded database migrations")?;
-    ensure_vector_table(connection, ndims).await
-}
-
-/// sqlite-vec requires the vector width in DDL, so this is deliberately the
-/// only schema construction that remains dynamic Rust code.
-async fn ensure_vector_table(connection: &Connection, ndims: usize) -> Result<()> {
-    connection
-        .call(move |database| {
-            database.execute_batch(&format!(
-                "CREATE VIRTUAL TABLE IF NOT EXISTS vec_nodes USING vec0(embedding float[{ndims}]);"
-            ))
-        })
-        .await
-        .context("creating sqlite-vec table")
+    Ok(())
 }
 
 #[cfg(test)]

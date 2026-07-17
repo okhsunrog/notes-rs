@@ -95,26 +95,3 @@ string_enum! {
         Down => "down",
     }
 }
-
-string_enum! {
-    #[serde(rename_all = "lowercase")]
-    pub enum BackgroundQueue {
-        Embedding => "embedding",
-        Extraction => "extraction",
-    }
-}
-
-string_enum! {
-    #[serde(rename_all = "snake_case")]
-    pub enum FailureKind {
-        Unknown => "unknown",
-        Transient => "transient",
-        Auth => "auth",
-        ProviderRequest => "provider_request",
-        Schema => "schema",
-        Configuration => "configuration",
-        Network => "network",
-        ProviderResponse => "provider_response",
-        Apply => "apply",
-    }
-}

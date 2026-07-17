@@ -46,7 +46,7 @@ async fn bootstraps_and_fanouts_operations_over_the_real_network_protocol() {
     transport.health().await.expect("health");
 
     let left_directory = tempfile::tempdir().expect("left directory");
-    let left = notes_core::db::open(left_directory.path().join("notes.db"), "test", 8)
+    let left = notes_core::db::open(left_directory.path().join("notes.db"))
         .await
         .expect("left database");
     notes_core::db::create_node(
@@ -68,7 +68,7 @@ async fn bootstraps_and_fanouts_operations_over_the_real_network_protocol() {
     assert_eq!(server_snapshot.nodes.len(), 1);
 
     let right_directory = tempfile::tempdir().expect("right directory");
-    let right = notes_core::db::open(right_directory.path().join("notes.db"), "test", 8)
+    let right = notes_core::db::open(right_directory.path().join("notes.db"))
         .await
         .expect("right database");
     notes_core::import_sync_snapshot(&right, transport.snapshot().await.expect("snapshot"))

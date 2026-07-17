@@ -1,4 +1,5 @@
 use crate::config::{EmbeddingProvider, RerankProvider};
+use crate::store::AiStore;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 #[cfg(feature = "local-models")]
@@ -6,7 +7,7 @@ use fastembed::{
     EmbeddingModel as FeModel, InitOptions, RerankInitOptions, RerankerModel, TextEmbedding,
     TextRerank,
 };
-use notes_core::{Connection, FailureKind, db};
+use notes_core::Connection;
 use rig::embeddings::EmbeddingModel;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -643,47 +644,9 @@ impl RerankBackend for OpenRouterReranker {
 
 // ───────────────────────── worker ─────────────────────────
 
-fn classify_embedding_failure(error: &anyhow::Error) -> (FailureKind, bool) {
-    for cause in error.chain() {
-        if let Some(request) = cause.downcast_ref::<reqwest::Error>() {
-            if request.is_timeout() || request.is_connect() {
-                return (FailureKind::Network, false);
-            }
-            if let Some(status) = request.status() {
-                return if matches!(status.as_u16(), 408 | 429) || status.is_server_error() {
-                    (FailureKind::Transient, false)
-                } else if matches!(status.as_u16(), 401 | 403) {
-                    (FailureKind::Auth, true)
-                } else {
-                    (FailureKind::ProviderRequest, true)
-                };
-            }
-        }
-        if let Some(relay) = cause.downcast_ref::<llm_relay::LlmError>() {
-            return match relay {
-                llm_relay::LlmError::ApiError { status, .. }
-                    if matches!(*status, 408 | 429) || *status >= 500 =>
-                {
-                    (FailureKind::Transient, false)
-                }
-                llm_relay::LlmError::ApiError {
-                    status: 401 | 403, ..
-                } => (FailureKind::Auth, true),
-                llm_relay::LlmError::ApiError { .. } => (FailureKind::ProviderRequest, true),
-                llm_relay::LlmError::Config(_)
-                | llm_relay::LlmError::Client(_)
-                | llm_relay::LlmError::ResponseTooLarge { .. } => {
-                    (FailureKind::Configuration, true)
-                }
-                _ => (FailureKind::ProviderResponse, false),
-            };
-        }
-    }
-    (FailureKind::ProviderResponse, false)
-}
-
 pub fn spawn_worker(
-    conn: Connection,
+    notes: Connection,
+    store: Arc<AiStore>,
     embedder: Arc<dyn EmbedderBackend>,
     on_status_changed: Arc<dyn Fn() + Send + Sync>,
     paused: Arc<AtomicBool>,
@@ -691,7 +654,7 @@ pub fn spawn_worker(
     tokio::spawn(async move {
         loop {
             if !paused.load(Ordering::Acquire) {
-                match tick(&conn, embedder.as_ref()).await {
+                match tick(&notes, &store, embedder.as_ref()).await {
                     Ok(true) => on_status_changed(),
                     Ok(false) => {}
                     Err(e) => {
@@ -705,26 +668,33 @@ pub fn spawn_worker(
     });
 }
 
-async fn tick(conn: &Connection, embedder: &dyn EmbedderBackend) -> Result<bool> {
-    let batch = db::take_pending_embeddings(conn, 16).await?;
-    if batch.is_empty() {
+async fn tick(notes: &Connection, store: &AiStore, embedder: &dyn EmbedderBackend) -> Result<bool> {
+    let source_seq = notes_core::sync_cursor(notes).await?;
+    let source_nodes = store.reconcile(notes, source_seq).await?;
+    let jobs = store.take_jobs(16).await?;
+    if jobs.is_empty() {
         return Ok(false);
     }
-    let original_inputs = batch
+    let texts = jobs
         .iter()
-        .cloned()
-        .collect::<std::collections::HashMap<_, _>>();
-    let (ids, texts): (Vec<i64>, Vec<String>) = batch.into_iter().unzip();
+        .map(|job| job.input_text.clone())
+        .collect::<Vec<_>>();
     let embs = match embedder.embed_passages(texts).await {
         Ok(embeddings) => embeddings,
         Err(error) => {
-            let (kind, terminal) = classify_embedding_failure(&error);
-            db::record_embedding_failure(conn, ids.clone(), kind, &error.to_string(), terminal)
+            store
+                .record_failure(
+                    jobs.iter()
+                        .map(|job| (job.node_uuid, job.input_hash.clone()))
+                        .collect(),
+                    &error.to_string(),
+                    crate::failure::provider_failure_is_terminal(&error),
+                )
                 .await?;
             return Err(error.context("embedding batch failed; retry scheduled with backoff"));
         }
     };
-    let valid = embs.len() == ids.len()
+    let valid = embs.len() == jobs.len()
         && embs
             .iter()
             .all(|embedding| embedding.len() == embedder.ndims());
@@ -732,25 +702,26 @@ async fn tick(conn: &Connection, embedder: &dyn EmbedderBackend) -> Result<bool>
         let error = format!(
             "embedding provider returned {} vectors for {} nodes or an unexpected dimension (expected {})",
             embs.len(),
-            ids.len(),
+            jobs.len(),
             embedder.ndims()
         );
-        db::record_embedding_failure(conn, ids.clone(), FailureKind::Schema, &error, true).await?;
+        store
+            .record_failure(
+                jobs.iter()
+                    .map(|job| (job.node_uuid, job.input_hash.clone()))
+                    .collect(),
+                &error,
+                true,
+            )
+            .await?;
         anyhow::bail!(error);
     }
-    // A structural Undo/import can replace nodes while a network request is
-    // in flight. Only commit vectors whose current composed input is exactly
-    // the text sent to the provider.
-    let current_inputs = db::take_pending_embeddings(conn, ids.len().max(16) as u32)
-        .await?
-        .into_iter()
-        .collect::<std::collections::HashMap<_, _>>();
-    let items: Vec<(i64, Vec<f32>)> = ids
+    let items = jobs
         .into_iter()
         .zip(embs)
-        .filter(|(id, _)| current_inputs.get(id) == original_inputs.get(id))
+        .map(|(job, embedding)| (job.node_uuid, job.input_hash, embedding))
         .collect();
-    db::write_embeddings(conn, items).await?;
+    store.write_embeddings(source_nodes, items).await?;
     Ok(true)
 }
 

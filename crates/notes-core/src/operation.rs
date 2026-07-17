@@ -502,8 +502,7 @@ pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> 
     conn.call(move |database| {
         let transaction = database.transaction()?;
         transaction.execute_batch(
-            "DELETE FROM vec_nodes;
-             DELETE FROM nodes;
+            "DELETE FROM nodes;
              DELETE FROM tombstones;
              DELETE FROM edge_lww;
              DELETE FROM attachment_lww;
@@ -885,7 +884,6 @@ fn apply_one(
                     )
                     .optional()?;
                 if let Some(deleted_id) = deleted_id {
-                    db::cleanup_extraction_source_tx(transaction, deleted_id)?;
                     let root_id = root_uuid
                         .as_ref()
                         .filter(|root_uuid| **root_uuid != payload.uuid)
@@ -1087,7 +1085,6 @@ fn adopt_page_stub(
     // All relevant foreign keys are repaired before commit. Deferral allows
     // the primary-key change and its references to be updated atomically.
     transaction.execute_batch("PRAGMA defer_foreign_keys = ON;")?;
-    transaction.execute("DELETE FROM vec_nodes WHERE rowid = ?1", [stub_id])?;
     transaction.execute(
         "UPDATE nodes SET id = ?2, uuid = ?3 WHERE id = ?1",
         rusqlite::params![stub_id, canonical_id, canonical_uuid],
@@ -1096,11 +1093,6 @@ fn adopt_page_stub(
         "UPDATE nodes SET parent_id = ?2 WHERE parent_id = ?1",
         "UPDATE edges SET src = ?2 WHERE src = ?1",
         "UPDATE edges SET dst = ?2 WHERE dst = ?1",
-        "UPDATE extracted_edge_sources SET source_node_id = ?2 WHERE source_node_id = ?1",
-        "UPDATE entity_descriptions SET source_node_id = ?2 WHERE source_node_id = ?1",
-        "UPDATE entity_descriptions SET entity_node_id = ?2 WHERE entity_node_id = ?1",
-        "UPDATE embed_queue SET node_id = ?2 WHERE node_id = ?1",
-        "UPDATE extract_queue SET node_id = ?2 WHERE node_id = ?1",
     ] {
         transaction.execute(sql, rusqlite::params![stub_id, canonical_id])?;
     }
@@ -1624,7 +1616,7 @@ mod tests {
 
     async fn database() -> (tempfile::TempDir, Connection) {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let connection = db::open(directory.path().join("notes.db"), "test", 8)
+        let connection = db::open(directory.path().join("notes.db"))
             .await
             .expect("open test database");
         (directory, connection)

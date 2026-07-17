@@ -50,16 +50,8 @@ impl UserRegistry {
         let mut states = HashMap::new();
         let mut tokens = HashMap::new();
         for user in &config.users {
-            let state = Arc::new(
-                UserState::open(
-                    user,
-                    &config.data_dir,
-                    &config.storage.embedding_provider_id,
-                    config.storage.embedding_dimensions,
-                    config.snapshot_every_ops,
-                )
-                .await?,
-            );
+            let state =
+                Arc::new(UserState::open(user, &config.data_dir, config.snapshot_every_ops).await?);
             states.insert(user.id.clone(), state.clone());
             for token in &user.tokens {
                 tokens.insert(token.clone(), state.clone());
@@ -102,25 +94,15 @@ fn spawn_local_outbox_publisher(user: Arc<UserState>) {
 }
 
 impl UserState {
-    async fn open(
-        user: &UserConfig,
-        data_dir: &Path,
-        embedding_provider_id: &str,
-        embedding_dimensions: usize,
-        snapshot_every_ops: u64,
-    ) -> Result<Self> {
+    async fn open(user: &UserConfig, data_dir: &Path, snapshot_every_ops: u64) -> Result<Self> {
         let user_dir = data_dir.join("users").join(&user.id);
         let snapshot_dir = user_dir.join("snapshots");
         tokio::fs::create_dir_all(&snapshot_dir)
             .await
             .with_context(|| format!("creating user directory for {}", user.id))?;
-        let notes = notes_core::db::open(
-            user_dir.join("notes.db"),
-            embedding_provider_id,
-            embedding_dimensions,
-        )
-        .await
-        .with_context(|| format!("opening notes replica for {}", user.id))?;
+        let notes = notes_core::db::open(user_dir.join("notes.db"))
+            .await
+            .with_context(|| format!("opening notes replica for {}", user.id))?;
         let oplog = Oplog::open(&user_dir.join("oplog.db"))
             .await
             .with_context(|| format!("opening oplog for {}", user.id))?;

@@ -205,7 +205,7 @@ mod tests {
 
     async fn client(name: &str) -> (tempfile::TempDir, Connection, SyncClient) {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let connection = db::open(directory.path().join("notes.db"), "test", 8)
+        let connection = db::open(directory.path().join("notes.db"))
             .await
             .expect("open database");
         let client = SyncClient::enable(connection.clone(), &format!("loopback://{name}"))
@@ -365,7 +365,7 @@ mod tests {
 
     async fn database_for_snapshot() -> (tempfile::TempDir, Connection) {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let connection = db::open(directory.path().join("notes.db"), "test", 8)
+        let connection = db::open(directory.path().join("notes.db"))
             .await
             .expect("open snapshot database");
         (directory, connection)

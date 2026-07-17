@@ -1,0 +1,1067 @@
+use anyhow::{Context, Result, bail};
+use async_trait::async_trait;
+use notes_core::Connection;
+use rusqlite::OptionalExtension;
+use rusqlite::ffi::sqlite3_auto_extension;
+use rusqlite_migration::{M, Migrations};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::Path;
+use std::sync::Once;
+
+const INPUT_FORMAT_VERSION: u32 = 1;
+const MAX_ATTEMPTS: i64 = 8;
+const BACKOFF_BASE_SECS: i64 = 5;
+
+static VEC_INIT: Once = Once::new();
+
+fn register_sqlite_vec() {
+    VEC_INIT.call_once(|| unsafe {
+        type ExtensionEntry = unsafe extern "C" fn(
+            *mut rusqlite::ffi::sqlite3,
+            *mut *mut std::os::raw::c_char,
+            *const rusqlite::ffi::sqlite3_api_routines,
+        ) -> std::os::raw::c_int;
+        sqlite3_auto_extension(Some(std::mem::transmute::<*const (), ExtensionEntry>(
+            sqlite_vec::sqlite3_vec_init as *const (),
+        )));
+    });
+}
+
+fn migrations() -> Migrations<'static> {
+    Migrations::new(vec![M::up(include_str!(
+        "store/migrations/V001__initial.sql"
+    ))])
+}
+
+#[derive(Debug, Clone)]
+pub struct IndexJob {
+    pub node_uuid: uuid::Uuid,
+    pub input_hash: String,
+    pub input_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExtractedEdge {
+    pub src_uuid: uuid::Uuid,
+    pub dst_uuid: uuid::Uuid,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct VectorMatch {
+    pub node_uuid: uuid::Uuid,
+    pub distance: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexStatus {
+    pub identity: String,
+    pub dimensions: usize,
+    pub generation_id: uuid::Uuid,
+    pub generation_status: String,
+    pub paused: bool,
+    pub pending: u64,
+    pub failed: u64,
+    pub indexed: u64,
+    pub source_nodes: u64,
+}
+
+#[async_trait]
+pub trait VectorStore: Send + Sync {
+    async fn search(&self, embedding: Vec<f32>, limit: u32) -> Result<Vec<VectorMatch>>;
+}
+
+#[derive(Clone)]
+pub struct AiStore {
+    connection: Connection,
+    identity: String,
+    dimensions: usize,
+    generation_id: uuid::Uuid,
+    table_name: String,
+}
+
+impl AiStore {
+    pub async fn open(path: impl AsRef<Path>, identity: String, dimensions: usize) -> Result<Self> {
+        if dimensions == 0 {
+            bail!("embedding dimensions must be positive");
+        }
+        register_sqlite_vec();
+        let connection = Connection::open(path.as_ref())
+            .await
+            .context("opening server AI database")?;
+        connection
+            .call(|database| {
+                database.pragma_update(None, "journal_mode", "WAL")?;
+                database.pragma_update(None, "synchronous", "NORMAL")?;
+                database.pragma_update(None, "foreign_keys", "ON")?;
+                migrations()
+                    .to_latest(database)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+            })
+            .await
+            .context("applying server AI database migrations")?;
+
+        let configured_identity = identity.clone();
+        let (generation_id, table_name) = connection
+            .call(move |database| {
+                let existing = database
+                    .query_row(
+                        "SELECT id, table_name FROM index_generations
+                         WHERE identity = ?1 AND dimensions = ?2
+                           AND status IN ('building', 'active')
+                         ORDER BY status = 'active' DESC, created_at DESC LIMIT 1",
+                        rusqlite::params![configured_identity, dimensions as i64],
+                        |row| Ok((row.get::<_, uuid::Uuid>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .optional()?;
+                if let Some(existing) = existing {
+                    return Ok(existing);
+                }
+                let generation_id = uuid::Uuid::now_v7();
+                let table_name = vector_table_name(generation_id);
+                database.execute(
+                    "INSERT INTO index_generations
+                       (id, identity, dimensions, table_name, status, created_at)
+                     VALUES (?1, ?2, ?3, ?4, 'building', unixepoch())",
+                    rusqlite::params![
+                        generation_id,
+                        configured_identity,
+                        dimensions as i64,
+                        table_name
+                    ],
+                )?;
+                Ok((generation_id, table_name))
+            })
+            .await?;
+        ensure_vector_table(&connection, &table_name, dimensions).await?;
+        Ok(Self {
+            connection,
+            identity,
+            dimensions,
+            generation_id,
+            table_name,
+        })
+    }
+
+    pub fn identity(&self) -> &str {
+        &self.identity
+    }
+
+    pub fn dimensions(&self) -> usize {
+        self.dimensions
+    }
+
+    pub async fn reconcile(&self, notes: &Connection, source_seq: u64) -> Result<u64> {
+        let documents = index_documents(notes).await?;
+        let source_nodes = documents.len() as u64;
+        let generation_id = self.generation_id;
+        let table_name = self.table_name.clone();
+        self.connection
+            .call(move |database| {
+                let transaction = database.transaction()?;
+                let current = {
+                    let mut statement = transaction.prepare(
+                        "SELECT node_uuid, input_hash FROM generation_vectors
+                         WHERE generation_id = ?1",
+                    )?;
+                    statement
+                        .query_map([generation_id], |row| {
+                            Ok((row.get::<_, uuid::Uuid>(0)?, row.get::<_, String>(1)?))
+                        })?
+                        .collect::<Result<HashMap<_, _>, _>>()?
+                };
+                let present = documents.keys().copied().collect::<HashSet<_>>();
+                for (node_uuid, document) in documents {
+                    if current.get(&node_uuid) == Some(&document.input_hash) {
+                        transaction.execute(
+                            "DELETE FROM embedding_jobs
+                             WHERE generation_id = ?1 AND node_uuid = ?2",
+                            rusqlite::params![generation_id, node_uuid],
+                        )?;
+                        continue;
+                    }
+                    transaction.execute(
+                        "INSERT INTO embedding_jobs
+                           (generation_id, node_uuid, input_hash, input_text, source_seq,
+                            enqueued_at, retry_count, last_attempt, last_error, terminal)
+                         VALUES (?1, ?2, ?3, ?4, ?5, unixepoch(), 0, NULL, NULL, 0)
+                         ON CONFLICT(generation_id, node_uuid) DO UPDATE SET
+                           input_hash = excluded.input_hash,
+                           input_text = excluded.input_text,
+                           source_seq = excluded.source_seq,
+                           enqueued_at = excluded.enqueued_at,
+                           retry_count = CASE
+                             WHEN embedding_jobs.input_hash = excluded.input_hash
+                             THEN embedding_jobs.retry_count ELSE 0 END,
+                           last_attempt = CASE
+                             WHEN embedding_jobs.input_hash = excluded.input_hash
+                             THEN embedding_jobs.last_attempt ELSE NULL END,
+                           last_error = CASE
+                             WHEN embedding_jobs.input_hash = excluded.input_hash
+                             THEN embedding_jobs.last_error ELSE NULL END,
+                           terminal = CASE
+                             WHEN embedding_jobs.input_hash = excluded.input_hash
+                             THEN embedding_jobs.terminal ELSE 0 END",
+                        rusqlite::params![
+                            generation_id,
+                            node_uuid,
+                            document.input_hash,
+                            document.text,
+                            source_seq as i64
+                        ],
+                    )?;
+                }
+                let stale = {
+                    let mut statement = transaction.prepare(
+                        "SELECT node_uuid, vector_rowid FROM generation_vectors
+                         WHERE generation_id = ?1",
+                    )?;
+                    statement
+                        .query_map([generation_id], |row| {
+                            Ok((row.get::<_, uuid::Uuid>(0)?, row.get::<_, i64>(1)?))
+                        })?
+                        .filter_map(|row| match row {
+                            Ok((uuid, rowid)) if !present.contains(&uuid) => {
+                                Some(Ok((uuid, rowid)))
+                            }
+                            Ok(_) => None,
+                            Err(error) => Some(Err(error)),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                };
+                for (node_uuid, vector_rowid) in stale {
+                    transaction.execute(
+                        &format!("DELETE FROM {table_name} WHERE rowid = ?1"),
+                        [vector_rowid],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM generation_vectors
+                         WHERE generation_id = ?1 AND node_uuid = ?2",
+                        rusqlite::params![generation_id, node_uuid],
+                    )?;
+                }
+                let stale_jobs = {
+                    let mut statement = transaction
+                        .prepare("SELECT node_uuid FROM embedding_jobs WHERE generation_id = ?1")?;
+                    statement
+                        .query_map([generation_id], |row| row.get::<_, uuid::Uuid>(0))?
+                        .filter_map(|row| match row {
+                            Ok(uuid) if !present.contains(&uuid) => Some(Ok(uuid)),
+                            Ok(_) => None,
+                            Err(error) => Some(Err(error)),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                };
+                for node_uuid in stale_jobs {
+                    transaction.execute(
+                        "DELETE FROM embedding_jobs
+                         WHERE generation_id = ?1 AND node_uuid = ?2",
+                        rusqlite::params![generation_id, node_uuid],
+                    )?;
+                }
+                transaction.commit()?;
+                Ok(())
+            })
+            .await?;
+        Ok(source_nodes)
+    }
+
+    pub async fn take_jobs(&self, limit: u32) -> Result<Vec<IndexJob>> {
+        let generation_id = self.generation_id;
+        self.connection
+            .call(move |database| {
+                let mut statement = database.prepare(
+                    "SELECT node_uuid, input_hash, input_text FROM embedding_jobs
+                     WHERE generation_id = ?1 AND terminal = 0 AND retry_count < ?3
+                       AND (last_attempt IS NULL
+                            OR unixepoch() - last_attempt >= ?4 * (1 << retry_count))
+                     ORDER BY enqueued_at, node_uuid LIMIT ?2",
+                )?;
+                statement
+                    .query_map(
+                        rusqlite::params![
+                            generation_id,
+                            limit as i64,
+                            MAX_ATTEMPTS,
+                            BACKOFF_BASE_SECS
+                        ],
+                        |row| {
+                            Ok(IndexJob {
+                                node_uuid: row.get(0)?,
+                                input_hash: row.get(1)?,
+                                input_text: row.get(2)?,
+                            })
+                        },
+                    )?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .await
+    }
+
+    pub async fn reconcile_extractions(
+        &self,
+        notes: &Connection,
+        source_seq: u64,
+    ) -> Result<Vec<uuid::Uuid>> {
+        let documents = extraction_documents(notes).await?;
+        self.connection
+            .call(move |database| {
+                let transaction = database.transaction()?;
+                let completed = {
+                    let mut statement = transaction
+                        .prepare("SELECT node_uuid, input_hash FROM extraction_state")?;
+                    statement
+                        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                        .collect::<Result<HashMap<uuid::Uuid, String>, _>>()?
+                };
+                let present = documents.keys().copied().collect::<HashSet<_>>();
+                for (node_uuid, document) in documents {
+                    if completed.get(&node_uuid) == Some(&document.input_hash) {
+                        transaction.execute(
+                            "DELETE FROM extraction_jobs WHERE node_uuid = ?1",
+                            [node_uuid],
+                        )?;
+                        continue;
+                    }
+                    transaction.execute(
+                        "INSERT INTO extraction_jobs
+                           (node_uuid, input_hash, input_text, source_seq, enqueued_at,
+                            retry_count, last_attempt, last_error, terminal)
+                         VALUES (?1, ?2, ?3, ?4, unixepoch(), 0, NULL, NULL, 0)
+                         ON CONFLICT(node_uuid) DO UPDATE SET
+                           input_hash = excluded.input_hash,
+                           input_text = excluded.input_text,
+                           source_seq = excluded.source_seq,
+                           enqueued_at = excluded.enqueued_at,
+                           retry_count = CASE WHEN extraction_jobs.input_hash = excluded.input_hash
+                             THEN extraction_jobs.retry_count ELSE 0 END,
+                           last_attempt = CASE WHEN extraction_jobs.input_hash = excluded.input_hash
+                             THEN extraction_jobs.last_attempt ELSE NULL END,
+                           last_error = CASE WHEN extraction_jobs.input_hash = excluded.input_hash
+                             THEN extraction_jobs.last_error ELSE NULL END,
+                           terminal = CASE WHEN extraction_jobs.input_hash = excluded.input_hash
+                             THEN extraction_jobs.terminal ELSE 0 END",
+                        rusqlite::params![
+                            node_uuid,
+                            document.input_hash,
+                            document.text,
+                            source_seq as i64
+                        ],
+                    )?;
+                }
+                let stale_sources = {
+                    let mut statement = transaction.prepare(
+                        "SELECT node_uuid FROM extraction_state
+                         UNION SELECT source_uuid FROM extraction_edges",
+                    )?;
+                    statement
+                        .query_map([], |row| row.get::<_, uuid::Uuid>(0))?
+                        .filter_map(|row| match row {
+                            Ok(uuid) if !present.contains(&uuid) => Some(Ok(uuid)),
+                            Ok(_) => None,
+                            Err(error) => Some(Err(error)),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                };
+                let stale_jobs = {
+                    let mut statement =
+                        transaction.prepare("SELECT node_uuid FROM extraction_jobs")?;
+                    statement
+                        .query_map([], |row| row.get::<_, uuid::Uuid>(0))?
+                        .filter_map(|row| match row {
+                            Ok(uuid) if !present.contains(&uuid) => Some(Ok(uuid)),
+                            Ok(_) => None,
+                            Err(error) => Some(Err(error)),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                };
+                for node_uuid in stale_jobs {
+                    transaction.execute(
+                        "DELETE FROM extraction_jobs WHERE node_uuid = ?1",
+                        [node_uuid],
+                    )?;
+                }
+                transaction.commit()?;
+                Ok(stale_sources)
+            })
+            .await
+    }
+
+    pub async fn forget_extraction_source(&self, source_uuid: uuid::Uuid) -> Result<()> {
+        self.connection
+            .call(move |database| {
+                let transaction = database.transaction()?;
+                transaction.execute(
+                    "DELETE FROM extraction_edges WHERE source_uuid = ?1",
+                    [source_uuid],
+                )?;
+                transaction.execute(
+                    "DELETE FROM extraction_state WHERE node_uuid = ?1",
+                    [source_uuid],
+                )?;
+                transaction.execute(
+                    "DELETE FROM extraction_jobs WHERE node_uuid = ?1",
+                    [source_uuid],
+                )?;
+                transaction.commit()
+            })
+            .await
+    }
+
+    pub async fn take_extraction_jobs(&self, limit: u32) -> Result<Vec<IndexJob>> {
+        self.connection
+            .call(move |database| {
+                let mut statement = database.prepare(
+                    "SELECT node_uuid, input_hash, input_text FROM extraction_jobs
+                     WHERE terminal = 0 AND retry_count < 5
+                       AND (last_attempt IS NULL
+                            OR unixepoch() - last_attempt >= 30 * (1 << retry_count))
+                     ORDER BY enqueued_at, node_uuid LIMIT ?1",
+                )?;
+                statement
+                    .query_map([limit], |row| {
+                        Ok(IndexJob {
+                            node_uuid: row.get(0)?,
+                            input_hash: row.get(1)?,
+                            input_text: row.get(2)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .await
+    }
+
+    pub async fn record_extraction_failure(
+        &self,
+        job: &IndexJob,
+        error: &str,
+        terminal: bool,
+    ) -> Result<()> {
+        let node_uuid = job.node_uuid;
+        let input_hash = job.input_hash.clone();
+        let error = error.chars().take(2_000).collect::<String>();
+        self.connection
+            .call(move |database| {
+                database.execute(
+                    "UPDATE extraction_jobs
+                     SET retry_count = retry_count + 1, last_attempt = unixepoch(),
+                         last_error = ?3,
+                         terminal = CASE WHEN ?4 THEN 1
+                           WHEN retry_count + 1 >= 5 THEN 1 ELSE 0 END
+                     WHERE node_uuid = ?1 AND input_hash = ?2",
+                    rusqlite::params![node_uuid, input_hash, error, terminal],
+                )?;
+                Ok(())
+            })
+            .await
+    }
+
+    pub async fn extraction_job_is_current(
+        &self,
+        notes: &Connection,
+        job: &IndexJob,
+    ) -> Result<bool> {
+        let node = notes_core::db::get_node_by_uuid(notes, job.node_uuid).await?;
+        Ok(node.is_some_and(|node| {
+            extraction_input(node.title.as_deref(), &node.content).input_hash == job.input_hash
+        }))
+    }
+
+    pub async fn extraction_removals(
+        &self,
+        source_uuid: uuid::Uuid,
+        desired: &[ExtractedEdge],
+    ) -> Result<Vec<ExtractedEdge>> {
+        let desired = desired.iter().cloned().collect::<HashSet<_>>();
+        self.connection
+            .call(move |database| {
+                let previous = {
+                    let mut statement = database.prepare(
+                        "SELECT src_uuid, dst_uuid, kind FROM extraction_edges
+                         WHERE source_uuid = ?1",
+                    )?;
+                    statement
+                        .query_map([source_uuid], |row| {
+                            Ok(ExtractedEdge {
+                                src_uuid: row.get(0)?,
+                                dst_uuid: row.get(1)?,
+                                kind: row.get(2)?,
+                            })
+                        })?
+                        .collect::<Result<HashSet<_>, _>>()?
+                };
+                let mut removable = Vec::new();
+                for edge in previous.difference(&desired) {
+                    let other_sources = database.query_row(
+                        "SELECT COUNT(*) FROM extraction_edges
+                         WHERE source_uuid != ?1 AND src_uuid = ?2 AND dst_uuid = ?3 AND kind = ?4",
+                        rusqlite::params![source_uuid, edge.src_uuid, edge.dst_uuid, edge.kind],
+                        |row| row.get::<_, i64>(0),
+                    )?;
+                    if other_sources == 0 {
+                        removable.push(edge.clone());
+                    }
+                }
+                Ok(removable)
+            })
+            .await
+    }
+
+    pub async fn finish_extraction(&self, job: &IndexJob, edges: Vec<ExtractedEdge>) -> Result<()> {
+        let source_uuid = job.node_uuid;
+        let input_hash = job.input_hash.clone();
+        self.connection
+            .call(move |database| {
+                let transaction = database.transaction()?;
+                let current = transaction
+                    .query_row(
+                        "SELECT source_seq FROM extraction_jobs
+                         WHERE node_uuid = ?1 AND input_hash = ?2",
+                        rusqlite::params![source_uuid, input_hash],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()?;
+                let Some(source_seq) = current else {
+                    return Ok(());
+                };
+                transaction.execute(
+                    "DELETE FROM extraction_edges WHERE source_uuid = ?1",
+                    [source_uuid],
+                )?;
+                for edge in &edges {
+                    transaction.execute(
+                        "INSERT INTO extraction_edges(source_uuid, src_uuid, dst_uuid, kind)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        rusqlite::params![source_uuid, edge.src_uuid, edge.dst_uuid, edge.kind],
+                    )?;
+                }
+                transaction.execute(
+                    "INSERT INTO extraction_state(node_uuid, input_hash, source_seq)
+                     VALUES (?1, ?2, ?3)
+                     ON CONFLICT(node_uuid) DO UPDATE SET
+                       input_hash = excluded.input_hash, source_seq = excluded.source_seq",
+                    rusqlite::params![source_uuid, input_hash, source_seq],
+                )?;
+                transaction.execute(
+                    "DELETE FROM extraction_jobs WHERE node_uuid = ?1 AND input_hash = ?2",
+                    rusqlite::params![source_uuid, input_hash],
+                )?;
+                transaction.commit()?;
+                Ok(())
+            })
+            .await
+    }
+
+    pub async fn record_failure(
+        &self,
+        jobs: Vec<(uuid::Uuid, String)>,
+        error: &str,
+        terminal: bool,
+    ) -> Result<()> {
+        let generation_id = self.generation_id;
+        let error = error.chars().take(2_000).collect::<String>();
+        self.connection
+            .call(move |database| {
+                let transaction = database.transaction()?;
+                for (node_uuid, input_hash) in jobs {
+                    transaction.execute(
+                        "UPDATE embedding_jobs
+                         SET retry_count = retry_count + 1, last_attempt = unixepoch(),
+                             last_error = ?4, terminal = ?5
+                         WHERE generation_id = ?1 AND node_uuid = ?2 AND input_hash = ?3",
+                        rusqlite::params![generation_id, node_uuid, input_hash, error, terminal],
+                    )?;
+                }
+                transaction.commit()
+            })
+            .await
+    }
+
+    pub async fn write_embeddings(
+        &self,
+        source_nodes: u64,
+        items: Vec<(uuid::Uuid, String, Vec<f32>)>,
+    ) -> Result<()> {
+        let generation_id = self.generation_id;
+        let dimensions = self.dimensions;
+        let table_name = self.table_name.clone();
+        self.connection
+            .call(move |database| {
+                let transaction = database.transaction()?;
+                for (node_uuid, input_hash, embedding) in items {
+                    if embedding.len() != dimensions {
+                        return Err(rusqlite::Error::InvalidParameterName(format!(
+                            "embedding for {node_uuid} has dimension {}, expected {dimensions}",
+                            embedding.len()
+                        )));
+                    }
+                    let still_current = transaction
+                        .query_row(
+                            "SELECT source_seq FROM embedding_jobs
+                             WHERE generation_id = ?1 AND node_uuid = ?2 AND input_hash = ?3",
+                            rusqlite::params![generation_id, node_uuid, input_hash],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .optional()?;
+                    let Some(source_seq) = still_current else {
+                        continue;
+                    };
+                    let rowid = match transaction
+                        .query_row(
+                            "SELECT vector_rowid FROM generation_vectors
+                             WHERE generation_id = ?1 AND node_uuid = ?2",
+                            rusqlite::params![generation_id, node_uuid],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .optional()?
+                    {
+                        Some(rowid) => rowid,
+                        None => next_vector_rowid(&transaction, generation_id)?,
+                    };
+                    let blob = embedding
+                        .iter()
+                        .flat_map(|value| value.to_le_bytes())
+                        .collect::<Vec<_>>();
+                    transaction.execute(
+                        &format!("DELETE FROM {table_name} WHERE rowid = ?1"),
+                        [rowid],
+                    )?;
+                    transaction.execute(
+                        &format!("INSERT INTO {table_name}(rowid, embedding) VALUES (?1, ?2)"),
+                        rusqlite::params![rowid, blob],
+                    )?;
+                    transaction.execute(
+                        "INSERT INTO generation_vectors
+                           (generation_id, node_uuid, vector_rowid, input_hash, source_seq)
+                         VALUES (?1, ?2, ?3, ?4, ?5)
+                         ON CONFLICT(generation_id, node_uuid) DO UPDATE SET
+                           vector_rowid = excluded.vector_rowid,
+                           input_hash = excluded.input_hash,
+                           source_seq = excluded.source_seq",
+                        rusqlite::params![generation_id, node_uuid, rowid, input_hash, source_seq],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM embedding_jobs
+                         WHERE generation_id = ?1 AND node_uuid = ?2 AND input_hash = ?3",
+                        rusqlite::params![generation_id, node_uuid, input_hash],
+                    )?;
+                }
+                let pending = transaction.query_row(
+                    "SELECT COUNT(*) FROM embedding_jobs WHERE generation_id = ?1",
+                    [generation_id],
+                    |row| row.get::<_, i64>(0).map(|value| value as u64),
+                )?;
+                let indexed = transaction.query_row(
+                    "SELECT COUNT(*) FROM generation_vectors WHERE generation_id = ?1",
+                    [generation_id],
+                    |row| row.get::<_, i64>(0).map(|value| value as u64),
+                )?;
+                if pending == 0 && indexed == source_nodes {
+                    transaction.execute(
+                        "UPDATE index_generations SET status = 'retired'
+                         WHERE status = 'active' AND id != ?1",
+                        [generation_id],
+                    )?;
+                    transaction.execute(
+                        "UPDATE index_generations
+                         SET status = 'active', activated_at = unixepoch() WHERE id = ?1",
+                        [generation_id],
+                    )?;
+                }
+                transaction.commit()
+            })
+            .await
+    }
+
+    pub async fn status(&self, source_nodes: u64) -> Result<IndexStatus> {
+        let generation_id = self.generation_id;
+        let identity = self.identity.clone();
+        let dimensions = self.dimensions;
+        self.connection
+            .call(move |database| {
+                let status = database.query_row(
+                    "SELECT status FROM index_generations WHERE id = ?1",
+                    [generation_id],
+                    |row| row.get::<_, String>(0),
+                )?;
+                let paused = database.query_row(
+                    "SELECT paused FROM index_control WHERE singleton = 1",
+                    [],
+                    |row| Ok(row.get::<_, i64>(0)? != 0),
+                )?;
+                let (pending, failed) = database.query_row(
+                    "SELECT COUNT(*), COALESCE(SUM(retry_count > 0), 0)
+                     FROM embedding_jobs WHERE generation_id = ?1",
+                    [generation_id],
+                    |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64)),
+                )?;
+                let indexed = database.query_row(
+                    "SELECT COUNT(*) FROM generation_vectors WHERE generation_id = ?1",
+                    [generation_id],
+                    |row| row.get::<_, i64>(0).map(|value| value as u64),
+                )?;
+                Ok(IndexStatus {
+                    identity,
+                    dimensions,
+                    generation_id,
+                    generation_status: status,
+                    paused,
+                    pending,
+                    failed,
+                    indexed,
+                    source_nodes,
+                })
+            })
+            .await
+    }
+}
+
+#[async_trait]
+impl VectorStore for AiStore {
+    async fn search(&self, embedding: Vec<f32>, limit: u32) -> Result<Vec<VectorMatch>> {
+        if embedding.len() != self.dimensions {
+            bail!(
+                "query embedding has dimension {}, expected {}",
+                embedding.len(),
+                self.dimensions
+            );
+        }
+        let generation_id = self.generation_id;
+        let table_name = self.table_name.clone();
+        let blob = embedding
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        self.connection
+            .call(move |database| {
+                let active = database.query_row(
+                    "SELECT status = 'active' FROM index_generations WHERE id = ?1",
+                    [generation_id],
+                    |row| row.get::<_, bool>(0),
+                )?;
+                if !active {
+                    return Ok(Vec::new());
+                }
+                let mut statement = database.prepare(&format!(
+                    "SELECT mapping.node_uuid, vectors.distance
+                     FROM {table_name} vectors
+                     JOIN generation_vectors mapping
+                       ON mapping.generation_id = ?3
+                      AND mapping.vector_rowid = vectors.rowid
+                     WHERE vectors.embedding MATCH ?1 AND k = ?2
+                     ORDER BY vectors.distance"
+                ))?;
+                statement
+                    .query_map(
+                        rusqlite::params![blob, limit as i64, generation_id],
+                        |row| {
+                            Ok(VectorMatch {
+                                node_uuid: row.get(0)?,
+                                distance: row.get(1)?,
+                            })
+                        },
+                    )?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .await
+    }
+}
+
+struct IndexDocument {
+    text: String,
+    input_hash: String,
+}
+
+type DocumentChainRow = (uuid::Uuid, i32, Option<String>, String);
+
+async fn index_documents(notes: &Connection) -> Result<BTreeMap<uuid::Uuid, IndexDocument>> {
+    let rows = notes
+        .call(|database| {
+            let mut statement = database.prepare(
+                "WITH RECURSIVE chain(qid, uuid, parent_id, title, content, depth) AS (
+                   SELECT n.id, n.uuid, n.parent_id, n.title, n.content, 0
+                   FROM nodes n WHERE n.kind IN ('page', 'block')
+                   UNION ALL
+                   SELECT chain.qid, chain.uuid, parent.parent_id, parent.title,
+                          parent.content, chain.depth + 1
+                   FROM chain JOIN nodes parent ON parent.id = chain.parent_id
+                 )
+                 SELECT uuid, depth, title, content FROM chain ORDER BY uuid, depth",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?
+                .collect::<Result<Vec<DocumentChainRow>, _>>()
+        })
+        .await?;
+    let mut chains = BTreeMap::<uuid::Uuid, Vec<(i32, Option<String>, String)>>::new();
+    for (uuid, depth, title, content) in rows {
+        chains
+            .entry(uuid)
+            .or_default()
+            .push((depth, title, content));
+    }
+    Ok(chains
+        .into_iter()
+        .filter_map(|(uuid, chain)| {
+            let text = compose_text(&chain);
+            if text.trim().is_empty() {
+                return None;
+            }
+            let mut digest = Sha256::new();
+            digest.update(INPUT_FORMAT_VERSION.to_le_bytes());
+            digest.update(text.as_bytes());
+            Some((
+                uuid,
+                IndexDocument {
+                    input_hash: format!("{:x}", digest.finalize()),
+                    text,
+                },
+            ))
+        })
+        .collect())
+}
+
+async fn extraction_documents(notes: &Connection) -> Result<BTreeMap<uuid::Uuid, IndexDocument>> {
+    let rows = notes
+        .call(|database| {
+            let mut statement = database.prepare(
+                "SELECT uuid, title, content FROM nodes WHERE kind IN ('page', 'block')",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, uuid::Uuid>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(uuid, title, content)| (uuid, extraction_input(title.as_deref(), &content)))
+        .collect())
+}
+
+fn extraction_input(title: Option<&str>, content: &str) -> IndexDocument {
+    let text = format!("{}\n{content}", title.unwrap_or_default());
+    let mut digest = Sha256::new();
+    digest.update(b"notes-rs:extraction-input:v1\0");
+    digest.update(text.as_bytes());
+    IndexDocument {
+        text,
+        input_hash: format!("{:x}", digest.finalize()),
+    }
+}
+
+fn compose_text(chain: &[(i32, Option<String>, String)]) -> String {
+    let mut parts = Vec::new();
+    let mut titles = chain
+        .iter()
+        .filter_map(|(depth, title, _)| {
+            (*depth > 0)
+                .then_some((*depth, title.as_deref()?.trim()))
+                .filter(|(_, title)| !title.is_empty())
+        })
+        .collect::<Vec<_>>();
+    titles.sort_by_key(|(depth, _)| std::cmp::Reverse(*depth));
+    if !titles.is_empty() {
+        parts.push(
+            titles
+                .into_iter()
+                .map(|(_, title)| title)
+                .collect::<Vec<_>>()
+                .join(" > "),
+        );
+    }
+    if let Some((_, _, parent_content)) = chain.iter().find(|(depth, _, _)| *depth == 1) {
+        let excerpt = parent_content
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(200)
+            .collect::<String>();
+        if !excerpt.is_empty() {
+            parts.push(excerpt);
+        }
+    }
+    if let Some((_, title, content)) = chain.iter().find(|(depth, _, _)| *depth == 0) {
+        if let Some(title) = title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+        {
+            parts.push(title.to_owned());
+        }
+        if !content.trim().is_empty() {
+            parts.push(content.clone());
+        }
+    }
+    parts.join("\n")
+}
+
+fn vector_table_name(generation_id: uuid::Uuid) -> String {
+    format!("vec_{}", generation_id.simple())
+}
+
+async fn ensure_vector_table(
+    connection: &Connection,
+    table_name: &str,
+    dimensions: usize,
+) -> Result<()> {
+    let table_name = table_name.to_owned();
+    connection
+        .call(move |database| {
+            database.execute_batch(&format!(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS {table_name}
+                 USING vec0(embedding float[{dimensions}]);"
+            ))
+        })
+        .await
+        .context("creating generation vector table")
+}
+
+fn next_vector_rowid(
+    transaction: &rusqlite::Transaction<'_>,
+    generation_id: uuid::Uuid,
+) -> rusqlite::Result<i64> {
+    transaction.query_row(
+        "SELECT COALESCE(MAX(vector_rowid), 0) + 1
+         FROM generation_vectors WHERE generation_id = ?1",
+        [generation_id],
+        |row| row.get(0),
+    )
+}
+
+pub fn embedding_identity_fingerprint(endpoint: &str, model: &str, dimensions: usize) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"notes-rs:embedding-identity:v1\0");
+    digest.update(endpoint.trim_end_matches('/').as_bytes());
+    digest.update([0]);
+    digest.update(model.as_bytes());
+    digest.update([0]);
+    digest.update(dimensions.to_le_bytes());
+    digest.update([0]);
+    digest.update(b"cosine:provider-normalized:input-v1");
+    format!("sha256:{:x}", digest.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notes_core::NodeKind;
+
+    #[test]
+    fn ai_schema_migration_is_valid() {
+        migrations().validate().expect("valid AI migrations");
+    }
+
+    #[test]
+    fn identity_changes_with_endpoint_model_or_dimensions() {
+        let base = embedding_identity_fingerprint("https://example.test/v1", "embed", 8);
+        assert_ne!(
+            base,
+            embedding_identity_fingerprint("https://other.test/v1", "embed", 8)
+        );
+        assert_ne!(
+            base,
+            embedding_identity_fingerprint("https://example.test/v1", "other", 8)
+        );
+        assert_ne!(
+            base,
+            embedding_identity_fingerprint("https://example.test/v1", "embed", 16)
+        );
+    }
+
+    #[tokio::test]
+    async fn generation_indexes_uuid_keyed_documents_and_activates_atomically() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let notes = notes_core::db::open(directory.path().join("notes.db"))
+            .await
+            .expect("notes database");
+        let node = notes_core::db::create_node(
+            &notes,
+            NodeKind::Page,
+            Some("Indexed".into()),
+            "document".into(),
+            None,
+        )
+        .await
+        .expect("create note");
+        let store = AiStore::open(directory.path().join("ai.db"), "identity".into(), 2)
+            .await
+            .expect("AI store");
+        let source_nodes = store.reconcile(&notes, 1).await.expect("reconcile");
+        let jobs = store.take_jobs(16).await.expect("jobs");
+        assert_eq!(jobs.len(), 1);
+        store
+            .write_embeddings(
+                source_nodes,
+                vec![(
+                    jobs[0].node_uuid,
+                    jobs[0].input_hash.clone(),
+                    vec![0.25, 0.75],
+                )],
+            )
+            .await
+            .expect("write embedding");
+        let status = store.status(source_nodes).await.expect("status");
+        assert_eq!(status.generation_status, "active");
+        assert_eq!(status.indexed, 1);
+        let matches = store.search(vec![0.25, 0.75], 4).await.expect("search");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].node_uuid, node.uuid);
+    }
+
+    #[tokio::test]
+    async fn stale_embedding_result_cannot_replace_a_newer_job() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let notes = notes_core::db::open(directory.path().join("notes.db"))
+            .await
+            .expect("notes database");
+        let node = notes_core::db::create_node(
+            &notes,
+            NodeKind::Page,
+            Some("Before".into()),
+            "old content".into(),
+            None,
+        )
+        .await
+        .expect("create note");
+        let store = AiStore::open(directory.path().join("ai.db"), "identity".into(), 2)
+            .await
+            .expect("AI store");
+        let source_nodes = store.reconcile(&notes, 1).await.expect("first reconcile");
+        let stale_job = store.take_jobs(1).await.expect("old job").remove(0);
+
+        notes_core::db::update_node(
+            &notes,
+            node.id,
+            node.title.clone(),
+            "new content".into(),
+            None,
+        )
+        .await
+        .expect("change note");
+        store.reconcile(&notes, 2).await.expect("second reconcile");
+        let current_job = store.take_jobs(1).await.expect("new job").remove(0);
+        assert_ne!(stale_job.input_hash, current_job.input_hash);
+
+        store
+            .write_embeddings(
+                source_nodes,
+                vec![(stale_job.node_uuid, stale_job.input_hash, vec![1.0, 0.0])],
+            )
+            .await
+            .expect("ignore stale result");
+        let status = store.status(source_nodes).await.expect("status");
+        assert_eq!(status.indexed, 0);
+        assert_eq!(status.pending, 1);
+        assert_eq!(status.generation_status, "building");
+    }
+}
