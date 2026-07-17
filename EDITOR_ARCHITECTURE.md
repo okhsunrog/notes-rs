@@ -1,7 +1,7 @@
 # Editor and Page Presentation Architecture
 
-Status: accepted on 2026-07-17. The durable layout/presentation boundary is implemented; editor,
-renderer, Document adapter, and pane work remain pending.
+Status: accepted on 2026-07-17. The durable layout/presentation boundary and shared semantic
+renderer are implemented; editor, Document adapter, and pane work remain pending.
 
 This decision defines how notes-rs presents and edits the same typed page/block model as an
 outliner and as a continuous Markdown document. It deliberately separates durable content from
@@ -139,9 +139,9 @@ All editing and rendering surfaces must share one documented dialect:
 - explicitly registered future extensions such as properties or transclusion.
 
 The CodeMirror/Lezer grammar and the semantic renderer must have parity tests over the supported
-dialect. The current regex-only authored-note renderer is temporary and will be replaced by one
-AST-based renderer shared by Outline preview, Document Reading, linked preview panes, search
-excerpts, and any other authored-content preview.
+dialect. The authored-note and AI surfaces now share one AST-based renderer; Document Reading,
+linked preview panes, search excerpts, and future extensions must reuse that boundary instead of
+introducing another Markdown implementation.
 
 Unsupported or incomplete inline syntax must remain recoverable in a block's source text. The
 visual editor must not silently drop unknown Markdown merely because it does not decorate it.
@@ -256,7 +256,8 @@ changes remain localized.
 
 1. **Completed:** replace persisted `PageView` with `PageLayout = Outline | Document`; remove
    Reading from schema, operations, snapshots, archives, RPC, and sync.
-2. Introduce the shared Markdown dialect and AST renderer.
+2. **Completed:** introduce the shared Markdown dialect and AST renderer and remove the old regex
+   renderer.
 3. Complete the CodeMirror spike and define the editor and versioned `DocumentCodec` contracts.
 4. Replace the active Outline textarea while preserving current block operations and conflict UI.
 5. Implement the continuous Document session and automatic segmentation fixtures.
