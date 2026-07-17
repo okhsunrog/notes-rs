@@ -38,6 +38,12 @@ import {
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { BlockChildren } from "./block-tree";
 import { BlockEdit, type BlockEditHandle } from "./block-edit";
+import {
+  resolveBlockEditKey,
+  splitEditorContent,
+  type BlockEditKeyEvent,
+  type BlockEditPasteEvent,
+} from "./block-edit-model";
 import { useOutliner } from "./outliner-store";
 import { nextSibling, prevSibling } from "./keyboard";
 import { RenderedBlock } from "./rendered-block";
@@ -303,14 +309,17 @@ export function BlockNode({ block, depth, ordinal }: Props) {
   }, [trigger]);
 
   const onDraftChange = (value: string, caret: number) => {
+    const changed = draftRef.current !== value;
     draftRef.current = value;
-    setDraftLen(value.length);
-    setSaveState("dirty");
-    clearTimer();
-    timer.current = setTimeout(() => {
-      timer.current = null;
-      void flush();
-    }, AUTOSAVE_MS);
+    if (changed) {
+      setDraftLen(value.length);
+      setSaveState("dirty");
+      clearTimer();
+      timer.current = setTimeout(() => {
+        timer.current = null;
+        void flush();
+      }, AUTOSAVE_MS);
+    }
     const t = detectTrigger(value, caret);
     if (!t) {
       if (trigger) closeAutocomplete();
@@ -362,39 +371,37 @@ export function BlockNode({ block, depth, ordinal }: Props) {
     void flush();
   };
 
-  const onPaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const text = e.clipboardData.getData("text/plain");
-    if (!text) return;
-    const paragraphs = text
+  const onPaste = (event: BlockEditPasteEvent) => {
+    if (event.isComposing || !event.text) return false;
+    const paragraphs = event.text
       .split(/\n[ \t]*(?:\n[ \t]*)+/)
       .map((p) => p.trim())
       .filter((p) => p.length > 0);
-    if (paragraphs.length < 2) return; // single paragraph → default paste
-    e.preventDefault();
+    if (paragraphs.length < 2) return false; // single paragraph → native CM paste
     closeAutocomplete();
 
     // Splice paragraph 0 into the current block at the caret.
-    const el = e.currentTarget;
-    const selStart = el.selectionStart;
-    const selEnd = el.selectionEnd;
-    editRef.current?.replaceRange(selStart, selEnd, paragraphs[0]);
+    editRef.current?.replaceRange(event.selectionStart, event.selectionEnd, paragraphs[0]);
 
     clearTimer();
-    try {
-      const parts = [draftRef.current, ...paragraphs.slice(1)].map(blockContent);
-      const changed = await splitBlock(block.uuid, parts);
-      await invalidateChildren(containerUuid);
-      store.setEditing(lastOrderedBlock(changed)?.uuid ?? block.uuid);
-    } catch (error) {
-      console.error("paste split failed", error);
-      setSaveState("error");
-      return;
-    }
+    void (async () => {
+      try {
+        const parts = [draftRef.current, ...paragraphs.slice(1)].map(blockContent);
+        const changed = await splitBlock(block.uuid, parts);
+        await invalidateChildren(containerUuid);
+        store.setEditing(lastOrderedBlock(changed)?.uuid ?? block.uuid);
+      } catch (error) {
+        console.error("paste split failed", error);
+        setSaveState("error");
+        return;
+      }
 
-    if (!localStorage.getItem("outliner.paste-split.notified")) {
-      toast.info("Each paragraph became a separate block.", { duration: 4000 });
-      localStorage.setItem("outliner.paste-split.notified", "1");
-    }
+      if (!localStorage.getItem("outliner.paste-split.notified")) {
+        toast.info("Each paragraph became a separate block.", { duration: 4000 });
+        localStorage.setItem("outliner.paste-split.notified", "1");
+      }
+    })();
+    return true;
   };
 
   /** Split this block's full content on blank-line paragraph breaks. Used by
@@ -441,9 +448,7 @@ export function BlockNode({ block, depth, ordinal }: Props) {
     }
     clearTimer();
     const markdown = draftRef.current;
-    const parts = [markdown.slice(0, selectionStart), markdown.slice(selectionEnd)].map(
-      blockContent,
-    );
+    const parts = splitEditorContent(markdown, selectionStart, selectionEnd).map(blockContent);
     try {
       const changed = await splitBlock(block.uuid, parts);
       await invalidateChildren(containerUuid);
@@ -522,82 +527,60 @@ export function BlockNode({ block, depth, ordinal }: Props) {
     }
   };
 
-  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.nativeEvent.isComposing) return;
+  const onKeyDown = (event: BlockEditKeyEvent) => {
+    const resolution = resolveBlockEditKey(event, {
+      autocompleteOpen: trigger !== null,
+      autocompleteHasItems: acItems.length > 0,
+      draftEmpty: draftRef.current.length === 0,
+    });
+    if (resolution.closeAutocomplete) closeAutocomplete();
 
-    // While the autocomplete menu is open, it captures navigation keys.
-    if (trigger) {
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
+    switch (resolution.action) {
+      case "native":
+        return false;
+      case "next-autocomplete":
         setAcIdx((i) => (acItems.length ? (i + 1) % acItems.length : 0));
-        return;
-      }
-      if (e.key === "ArrowUp") {
-        e.preventDefault();
+        return true;
+      case "previous-autocomplete":
         setAcIdx((i) => (acItems.length ? (i - 1 + acItems.length) % acItems.length : 0));
-        return;
-      }
-      if (e.key === "Enter" || e.key === "Tab") {
-        if (acItems.length > 0) {
-          e.preventDefault();
-          acceptAutocomplete(acIdx);
-          return;
-        }
-        // Empty results: close and let the key do its normal thing for Enter.
+        return true;
+      case "accept-autocomplete":
+        acceptAutocomplete(acIdx);
+        return true;
+      case "close-autocomplete":
         closeAutocomplete();
-        if (e.key === "Tab") {
-          e.preventDefault();
-          return;
-        }
-      }
-      if (e.key === "Escape") {
-        e.preventDefault();
-        closeAutocomplete();
-        return;
-      }
-      // Any other key falls through (so typing continues to update the query).
-    }
-
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault();
-      toggleCollapsed();
-      return;
-    }
-    if ((e.ctrlKey || e.metaKey) && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
-      e.preventDefault();
-      void onReorder(e.key === "ArrowUp" ? "up" : "down");
-      return;
-    }
-    if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
-      e.preventDefault();
-      void onEnter(e.currentTarget.selectionStart, e.currentTarget.selectionEnd);
-      return;
-    }
-    if (e.key === "Backspace" && draftRef.current.length === 0) {
-      e.preventDefault();
-      void onBackspaceEmpty();
-      return;
-    }
-    if (e.key === "Tab") {
-      e.preventDefault();
-      if (e.shiftKey) void onShiftTab();
-      else void onTab();
-      return;
-    }
-    if (e.key === "ArrowUp" && e.currentTarget.selectionStart === 0) {
-      e.preventDefault();
-      onUpDown("up");
-      return;
-    }
-    if (e.key === "ArrowDown" && e.currentTarget.selectionEnd === e.currentTarget.value.length) {
-      e.preventDefault();
-      onUpDown("down");
-      return;
-    }
-    if (e.key === "Escape") {
-      e.preventDefault();
-      void flush();
-      store.setEditing(null);
+        return true;
+      case "collapse":
+        toggleCollapsed();
+        return true;
+      case "reorder-up":
+        void onReorder("up");
+        return true;
+      case "reorder-down":
+        void onReorder("down");
+        return true;
+      case "split":
+        void onEnter(event.selectionStart, event.selectionEnd);
+        return true;
+      case "delete-empty":
+        void onBackspaceEmpty();
+        return true;
+      case "indent":
+        void onTab();
+        return true;
+      case "outdent":
+        void onShiftTab();
+        return true;
+      case "move-previous":
+        onUpDown("up");
+        return true;
+      case "move-next":
+        onUpDown("down");
+        return true;
+      case "stop-editing":
+        void flush();
+        store.setEditing(null);
+        return true;
     }
   };
 
