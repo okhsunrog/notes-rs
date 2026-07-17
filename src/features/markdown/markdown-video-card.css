@@ -1,0 +1,59 @@
+.markdown-video-card {
+  display: inline-flex;
+  max-width: min(100%, 24rem);
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.5rem 0.625rem;
+  border: 1px solid color-mix(in oklch, var(--border) 82%, transparent);
+  border-radius: calc(var(--radius) + 0.125rem);
+  background: color-mix(in oklch, var(--muted) 64%, transparent);
+  color: var(--foreground);
+  text-decoration: none;
+  vertical-align: middle;
+}
+
+.markdown-video-card:hover {
+  border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
+  background: color-mix(in oklch, var(--accent) 72%, transparent);
+}
+
+.markdown-video-card:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.markdown-video-card__icon {
+  display: inline-grid;
+  width: 2rem;
+  height: 2rem;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--primary) 16%, transparent);
+  color: var(--primary);
+}
+
+.markdown-video-card__copy {
+  display: inline-flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  line-height: 1.25;
+}
+
+.markdown-video-card__title {
+  font-weight: 650;
+}
+
+.markdown-video-card__host {
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 0.78rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.markdown-video-card__open {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+}

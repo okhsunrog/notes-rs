@@ -19,6 +19,7 @@ export {
   MarkdownLink,
   MarkdownPre,
   MarkdownTable,
+  MarkdownVideoLinkCard,
 } from "./markdown-components";
 export {
   MarkdownRenderer,
@@ -26,6 +27,7 @@ export {
   type MarkdownRenderMode,
 } from "./markdown-renderer";
 export { remarkNotesLinks, splitNotesText } from "./remark-notes-links";
+export { parseLogseqVideoMacro, remarkLogseqVideo } from "./remark-logseq-video";
 export {
   MAX_MATH_DOCUMENT_CHARS,
   MAX_MATH_EXPRESSION_CHARS,

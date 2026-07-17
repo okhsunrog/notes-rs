@@ -61,6 +61,66 @@ describe("MarkdownRenderer", () => {
     expect(html).not.toContain('data-markdown-link="block"');
   });
 
+  it("renders Logseq video macros as privacy-safe external link cards", () => {
+    const html = render("Before {{video https://video.example/watch?private=token-value}} after");
+
+    expect(html).toContain('class="markdown-video-card"');
+    expect(html).toContain('aria-label="Open video from video.example"');
+    expect(html).toContain('data-markdown-link="external"');
+    expect(html).toContain('href="https://video.example/watch?private=token-value"');
+    expect(html).toContain("video.example");
+    expect(html).not.toContain(">token-value<");
+    expect(html).not.toContain("<iframe");
+    expect(html).not.toContain("<video");
+    expect(html).not.toContain("<img");
+    expect(html).not.toContain("autoplay");
+  });
+
+  it("accepts standard and legacy Logseq Markdown-link video wrappers", () => {
+    const html = render(
+      "{{video [Watch](https://video.example/standard)}}\n\n{{video [Watch](https://video.example/legacy}}",
+    );
+
+    expect(html.match(/class="markdown-video-card"/g)).toHaveLength(2);
+    expect(html).toContain('href="https://video.example/standard"');
+    expect(html).toContain('href="https://video.example/legacy"');
+    expect(html).not.toContain("{{video");
+  });
+
+  it("keeps unsupported and malformed video macros visible and inert", () => {
+    const html = render(
+      "{{video javascript:alert(1)}} {{video [Watch](file:///etc/passwd)}} {{video relative.mov}}",
+    );
+
+    expect(html.match(/<code>/g)).toHaveLength(3);
+    expect(html).toContain("{{video javascript:alert(1)}}");
+    expect(html).toContain("{{video [Watch](file:///etc/passwd)}}");
+    expect(html).toContain("{{video relative.mov}}");
+    expect(html).not.toContain("href=");
+    expect(html).not.toContain("<iframe");
+    expect(html).not.toContain("<video");
+  });
+
+  it("does not interpret Logseq video macros inside code", () => {
+    const html = render(
+      "`{{video https://video.example/inline}}`\n\n```text\n{{video https://video.example/fenced}}\n```",
+    );
+
+    expect(html).not.toContain("markdown-video-card");
+    expect(html).toContain("{{video https://video.example/inline}}");
+    expect(html).toContain("{{video https://video.example/fenced}}");
+    expect(html).not.toContain('href="https://video.example');
+  });
+
+  it("does not create a nested video link inside an ordinary Markdown link", () => {
+    const html = render("[{{video https://video.example/nested}}](https://example.com)");
+
+    expect(html).not.toContain("markdown-video-card");
+    expect(html.match(/<a /g)).toHaveLength(1);
+    expect(html).toContain('href="https://example.com/"');
+    expect(html).toContain("{{video https://video.example/nested}}");
+  });
+
   it("drops raw HTML and renders unsafe links as inert text", () => {
     const html = render(
       '<script>alert("boom")</script><svg><a xlink:href="javascript:alert(2)">x</a></svg>\n\n[unsafe](javascript:alert(1)) [encoded](jav&#x61;script:alert(2)) [safe](https://example.com)',

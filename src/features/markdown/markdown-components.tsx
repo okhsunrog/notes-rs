@@ -1,4 +1,4 @@
-import { Check, Copy } from "lucide-react";
+import { Check, Copy, ExternalLink, Play } from "lucide-react";
 import {
   type AnchorHTMLAttributes,
   type CSSProperties,
@@ -65,6 +65,48 @@ export function MarkdownLink({
     >
       {children}
     </a>
+  );
+}
+
+interface MarkdownVideoLinkCardProps {
+  context: MarkdownRenderContext;
+  href?: string;
+  onOpenLink?: MarkdownOpenHandler;
+}
+
+/** Privacy-safe Logseq video representation: an inert app-opened URL intent. */
+export function MarkdownVideoLinkCard({
+  context,
+  href = "",
+  onOpenLink,
+}: MarkdownVideoLinkCardProps) {
+  const classified = classifyMarkdownUrl(href);
+  if (
+    classified.kind !== "allowed" ||
+    classified.target.kind !== "external" ||
+    classified.target.protocol === "mailto"
+  ) {
+    return <code data-markdown-video="blocked">{"{{video …}}"}</code>;
+  }
+
+  const hostname = new URL(classified.href).hostname.replace(/^www\./i, "");
+  return (
+    <MarkdownLink
+      aria-label={`Open video from ${hostname}`}
+      className="markdown-video-card"
+      context={context}
+      href={classified.href}
+      onOpenLink={onOpenLink}
+    >
+      <span aria-hidden="true" className="markdown-video-card__icon">
+        <Play size={16} />
+      </span>
+      <span className="markdown-video-card__copy">
+        <span className="markdown-video-card__title">Video</span>
+        <span className="markdown-video-card__host">{hostname}</span>
+      </span>
+      <ExternalLink aria-hidden="true" className="markdown-video-card__open" size={15} />
+    </MarkdownLink>
   );
 }
 

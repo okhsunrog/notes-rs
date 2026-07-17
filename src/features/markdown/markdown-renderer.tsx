@@ -1,4 +1,5 @@
 import "katex/dist/katex.min.css";
+import "./markdown-video-card.css";
 
 import { useMemo } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
@@ -16,7 +17,9 @@ import {
   MarkdownLink,
   MarkdownPre,
   MarkdownTable,
+  MarkdownVideoLinkCard,
 } from "./markdown-components";
+import { remarkLogseqVideo } from "./remark-logseq-video";
 import { remarkMathLimits } from "./remark-math-limits";
 import { remarkNotesLinks } from "./remark-notes-links";
 import type { MarkdownOpenHandler, MarkdownRenderContext } from "./types";
@@ -49,9 +52,11 @@ const INLINE_BLOCK_ELEMENTS = [
 
 const MARKDOWN_SANITIZE_SCHEMA: MarkdownSanitizeSchema = {
   ...defaultSchema,
+  tagNames: [...(defaultSchema.tagNames ?? []), "notes-video"],
   attributes: {
     ...defaultSchema.attributes,
     code: [...(defaultSchema.attributes?.code ?? []), ["className", "math-inline", "math-display"]],
+    "notes-video": ["href"],
   },
   protocols: {
     ...defaultSchema.protocols,
@@ -81,20 +86,28 @@ export function MarkdownRenderer({
   resolveImage,
 }: MarkdownRendererProps) {
   const components = useMemo<Components>(
-    () => ({
-      a: (props) => <MarkdownLink {...props} context={context} onOpenLink={onOpenLink} />,
-      code: (props) => <MarkdownCode {...props} inlineRenderer={mode === "inline"} />,
-      img: (props) => (
-        <MarkdownImage
-          {...props}
-          context={context}
-          inline={mode === "inline"}
-          resolveImage={resolveImage}
-        />
-      ),
-      pre: MarkdownPre,
-      table: MarkdownTable,
-    }),
+    () =>
+      ({
+        a: (props) => <MarkdownLink {...props} context={context} onOpenLink={onOpenLink} />,
+        code: (props) => <MarkdownCode {...props} inlineRenderer={mode === "inline"} />,
+        img: (props) => (
+          <MarkdownImage
+            {...props}
+            context={context}
+            inline={mode === "inline"}
+            resolveImage={resolveImage}
+          />
+        ),
+        "notes-video": (props: { href?: unknown }) => (
+          <MarkdownVideoLinkCard
+            context={context}
+            href={typeof props.href === "string" ? props.href : undefined}
+            onOpenLink={onOpenLink}
+          />
+        ),
+        pre: MarkdownPre,
+        table: MarkdownTable,
+      }) as Components,
     [context, mode, onOpenLink, resolveImage],
   );
   const inline = mode === "inline";
@@ -124,7 +137,7 @@ export function MarkdownRenderer({
           },
         ],
       ]}
-      remarkPlugins={[remarkGfm, remarkMath, remarkMathLimits, remarkNotesLinks]}
+      remarkPlugins={[remarkGfm, remarkMath, remarkMathLimits, remarkLogseqVideo, remarkNotesLinks]}
       skipHtml
       unwrapDisallowed={inline}
       urlTransform={safeMarkdownUrlTransform}
