@@ -7,7 +7,7 @@
 use std::{
     fmt,
     fs::{self, File},
-    io::{self, BufReader, Read, Write},
+    io::{self, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -188,6 +188,32 @@ pub struct InstallResult {
     pub outcome: InstallOutcome,
 }
 
+/// A verified blob and the same file handle whose bytes were hashed.
+///
+/// Keeping the verified handle open avoids a path re-open race between
+/// integrity validation and streaming it to an archive or remote peer.
+#[derive(Debug)]
+pub struct VerifiedBlob {
+    /// Verified metadata for the open file.
+    pub blob: BlobInfo,
+    file: File,
+}
+
+impl VerifiedBlob {
+    /// Borrows the verified file positioned at byte zero.
+    #[must_use]
+    pub const fn file(&self) -> &File {
+        &self.file
+    }
+
+    /// Consumes the wrapper and returns the verified file positioned at byte
+    /// zero.
+    #[must_use]
+    pub fn into_file(self) -> File {
+        self.file
+    }
+}
+
 /// A synchronous content-addressed filesystem store.
 #[derive(Debug, Clone)]
 pub struct BlobStore {
@@ -298,6 +324,7 @@ impl BlobStore {
 
         match fs::hard_link(temporary.path(), &target) {
             Ok(()) => {
+                close_temporary(temporary, &temporary_path)?;
                 sync_directory(shard)?;
                 Ok(InstallResult {
                     blob: BlobInfo {
@@ -310,6 +337,8 @@ impl BlobStore {
             }
             Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
                 self.verify_existing(&target, expected_hash, size)?;
+                close_temporary(temporary, &temporary_path)?;
+                sync_directory(shard)?;
                 Ok(InstallResult {
                     blob: BlobInfo {
                         hash: expected_hash,
@@ -327,30 +356,50 @@ impl BlobStore {
         }
     }
 
-    /// Opens an installed blob after rejecting symlinks and non-files.
-    pub fn open(&self, hash: BlobHash) -> Result<File, BlobStoreError> {
+    /// Opens and verifies a blob on one handle, rejecting files larger than
+    /// `max_bytes`. The returned handle is rewound for bounded streaming.
+    pub fn open_verified(
+        &self,
+        hash: BlobHash,
+        max_bytes: u64,
+    ) -> Result<VerifiedBlob, BlobStoreError> {
         let path = self.path_for(hash);
-        ensure_regular_file(&path)?;
-        File::open(&path).map_err(|source| BlobStoreError::Io {
-            operation: "open blob",
-            path,
-            source,
+        let mut file = open_regular_file(&path)?;
+        let size = file_metadata(&file, &path)?.len();
+        if size > max_bytes {
+            return Err(BlobStoreError::TooLarge { limit: max_bytes });
+        }
+        let (actual_hash, actual_size) = hash_reader(BufReader::new(&file), &path)?;
+        if actual_size != size {
+            return Err(BlobStoreError::ExistingSizeMismatch {
+                path,
+                expected: size,
+                actual: actual_size,
+            });
+        }
+        if actual_hash != hash {
+            return Err(BlobStoreError::CorruptBlob {
+                path: path.clone(),
+                expected: hash,
+                actual: actual_hash,
+            });
+        }
+        file.seek(SeekFrom::Start(0))
+            .map_err(|source| BlobStoreError::Io {
+                operation: "rewind verified blob",
+                path: path.clone(),
+                source,
+            })?;
+        Ok(VerifiedBlob {
+            blob: BlobInfo { hash, size, path },
+            file,
         })
     }
 
     /// Reads and hashes an installed blob to verify its content-addressed name.
     pub fn verify(&self, hash: BlobHash) -> Result<BlobInfo, BlobStoreError> {
-        let path = self.path_for(hash);
-        let file = self.open(hash)?;
-        let (actual_hash, size) = hash_reader(BufReader::new(file), &path)?;
-        if actual_hash != hash {
-            return Err(BlobStoreError::CorruptBlob {
-                path,
-                expected: hash,
-                actual: actual_hash,
-            });
-        }
-        Ok(BlobInfo { hash, size, path })
+        self.open_verified(hash, u64::MAX)
+            .map(|verified| verified.blob)
     }
 
     fn ensure_shard(&self, shard: &Path) -> Result<(), BlobStoreError> {
@@ -366,7 +415,8 @@ impl BlobStore {
         expected_hash: BlobHash,
         expected_size: u64,
     ) -> Result<(), BlobStoreError> {
-        let metadata = ensure_regular_file(path)?;
+        let file = open_regular_file(path)?;
+        let metadata = file_metadata(&file, path)?;
         if metadata.len() != expected_size {
             return Err(BlobStoreError::ExistingSizeMismatch {
                 path: path.to_path_buf(),
@@ -374,11 +424,6 @@ impl BlobStore {
                 actual: metadata.len(),
             });
         }
-        let file = File::open(path).map_err(|source| BlobStoreError::Io {
-            operation: "open existing blob",
-            path: path.to_path_buf(),
-            source,
-        })?;
         let (actual_hash, actual_size) = hash_reader(BufReader::new(file), path)?;
         if actual_size != expected_size {
             return Err(BlobStoreError::ExistingSizeMismatch {
@@ -408,7 +453,7 @@ fn ensure_directory(path: &Path) -> Result<(), BlobStoreError> {
         }
         Ok(_) => Ok(()),
         Err(source) if source.kind() == io::ErrorKind::NotFound => match fs::create_dir(path) {
-            Ok(()) => Ok(()),
+            Ok(()) => sync_created_directory(path),
             Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
                 let metadata = fs::symlink_metadata(path).map_err(|source| BlobStoreError::Io {
                     operation: "inspect concurrently created directory",
@@ -438,7 +483,7 @@ fn ensure_directory(path: &Path) -> Result<(), BlobStoreError> {
     }
 }
 
-fn ensure_regular_file(path: &Path) -> Result<fs::Metadata, BlobStoreError> {
+fn open_regular_file(path: &Path) -> Result<File, BlobStoreError> {
     let metadata = fs::symlink_metadata(path).map_err(|source| {
         if source.kind() == io::ErrorKind::NotFound {
             BlobStoreError::NotFound {
@@ -458,7 +503,39 @@ fn ensure_regular_file(path: &Path) -> Result<fs::Metadata, BlobStoreError> {
             expected: "a regular non-symlink file",
         });
     }
-    Ok(metadata)
+    let file = File::open(path).map_err(|source| BlobStoreError::Io {
+        operation: "open blob",
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let opened = file_metadata(&file, path)?;
+    if !opened.is_file() || !same_file(&metadata, &opened) {
+        return Err(BlobStoreError::UnsafeFilesystemEntry {
+            path: path.to_path_buf(),
+            expected: "the same regular non-symlink file that was inspected",
+        });
+    }
+    Ok(file)
+}
+
+fn file_metadata(file: &File, path: &Path) -> Result<fs::Metadata, BlobStoreError> {
+    file.metadata().map_err(|source| BlobStoreError::Io {
+        operation: "inspect open blob",
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+#[cfg(unix)]
+fn same_file(before: &fs::Metadata, opened: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    before.dev() == opened.dev() && before.ino() == opened.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file(before: &fs::Metadata, opened: &fs::Metadata) -> bool {
+    before.len() == opened.len()
 }
 
 fn copy_and_hash(
@@ -536,9 +613,51 @@ fn sync_directory(path: &Path) -> Result<(), BlobStoreError> {
         })
 }
 
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> Result<(), BlobStoreError> {
+#[cfg(windows)]
+fn sync_directory(path: &Path) -> Result<(), BlobStoreError> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    // FILE_FLAG_BACKUP_SEMANTICS is required to obtain a directory handle.
+    // FILE_FLAG_OPEN_REPARSE_POINT ensures a reparse point is opened rather
+    // than followed after the earlier symlink check.
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_SHARE_READ_WRITE_DELETE: u32 = 0x0000_0007;
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(FILE_SHARE_READ_WRITE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|source| BlobStoreError::Io {
+            operation: "sync blob directory",
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn sync_directory(path: &Path) -> Result<(), BlobStoreError> {
+    Err(BlobStoreError::UnsupportedDurability {
+        path: path.to_path_buf(),
+    })
+}
+
+fn sync_created_directory(path: &Path) -> Result<(), BlobStoreError> {
+    sync_directory(path)?;
+    if let Some(parent) = path.parent() {
+        sync_directory(parent)?;
+    }
     Ok(())
+}
+
+fn close_temporary(temporary: tempfile::NamedTempFile, path: &Path) -> Result<(), BlobStoreError> {
+    temporary.close().map_err(|source| BlobStoreError::Io {
+        operation: "remove published temporary blob",
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 /// Filesystem and validation failures from [`BlobStore`].
@@ -587,4 +706,8 @@ pub enum BlobStoreError {
     /// A stored file was too large to represent its length.
     #[error("stored blob at {path} is too large")]
     StoredBlobTooLarge { path: PathBuf },
+    /// This target cannot provide the crash-durability contract required
+    /// before committing blob metadata.
+    #[error("crash-durable directory synchronization is unsupported at {path}")]
+    UnsupportedDurability { path: PathBuf },
 }

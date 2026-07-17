@@ -98,13 +98,36 @@ fn installs_opens_and_verifies_a_blob() {
 
     let mut bytes = Vec::new();
     store
-        .open(hash)
-        .expect("open blob")
+        .open_verified(hash, CONTENT.len() as u64)
+        .expect("open verified blob")
+        .into_file()
         .read_to_end(&mut bytes)
         .expect("read blob");
     assert_eq!(bytes, CONTENT);
     assert_eq!(store.verify(hash).expect("verify blob"), installed.blob);
     assert_eq!(incoming_files(&store, hash), 0);
+}
+
+#[test]
+fn verified_open_is_bounded_and_rewinds_the_hashed_handle() {
+    let (_directory, store) = store();
+    let hash = BlobHash::digest(CONTENT);
+    store
+        .install_reader(Cursor::new(CONTENT), hash, CONTENT.len() as u64)
+        .expect("install blob");
+
+    assert!(matches!(
+        store.open_verified(hash, 4),
+        Err(BlobStoreError::TooLarge { limit: 4 })
+    ));
+    let mut bytes = Vec::new();
+    store
+        .open_verified(hash, CONTENT.len() as u64)
+        .expect("open verified blob")
+        .into_file()
+        .read_to_end(&mut bytes)
+        .expect("stream verified bytes");
+    assert_eq!(bytes, CONTENT);
 }
 
 #[test]
