@@ -8,9 +8,10 @@ use notes_core::{
     ExternalPageId, JournalDate, OrderKey, PageAlias, PageLayout, TaskState,
 };
 use notes_import::{
-    DiagnosticSeverity, DocumentFormat, IdentityContext, ImportBlockSource, ImportDiagnostic,
-    ImportMediaOwner, ImportPageKind, ImportTaskState, MaterializedMediaBlob,
-    MediaMaterializationPlan, PreparedImport, SourceKind,
+    DiagnosticSeverity, DocumentFormat, DrawingConversionPublication, DrawingConversionStatus,
+    IdentityContext, ImportBlockSource, ImportDiagnostic, ImportMediaKind, ImportMediaOwner,
+    ImportMediaResolution, ImportPageKind, ImportTaskState, LoadDrawingConversionErrorCode,
+    MaterializedMediaBlob, MediaMaterializationPlan, PreparedImport, SourceKind,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
@@ -27,6 +28,7 @@ struct LogseqImportSession {
     source_root: PathBuf,
     prepared: PreparedImport,
     scan_diagnostics: Vec<ImportDiagnostic>,
+    drawing_conversions: Option<DrawingConversionPublication>,
     static_commit_allowed: bool,
 }
 
@@ -189,7 +191,9 @@ pub struct LogseqImportReportSummary {
     pub unresolved_reference_count: u64,
     pub media_reference_count: u64,
     pub markdown_image_count: u64,
-    pub deferred_excalidraw_count: u64,
+    pub drawing_conversion_state: LogseqDrawingConversionState,
+    pub prepared_excalidraw_count: u64,
+    pub preserved_excalidraw_count: u64,
     pub local_media_reference_count: u64,
     pub inline_media_reference_count: u64,
     pub blocked_remote_media_reference_count: u64,
@@ -205,6 +209,14 @@ pub struct LogseqImportReportSummary {
     pub diagnostic_count: u64,
     pub diagnostics_truncated: bool,
     pub diagnostics: Vec<ImportDiagnostic>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum LogseqDrawingConversionState {
+    Absent,
+    Prepared,
+    Invalid,
 }
 
 #[derive(Debug, Clone, Serialize, specta::Type)]
@@ -359,6 +371,7 @@ pub async fn prepare_logseq_import(
 
         let prepared = prepared_graph.prepared;
         let scan_diagnostics = prepared_graph.scan_diagnostics;
+        let drawing_conversions = select_drawing_conversions(&state, &source_root, &prepared);
         let destination = if existing_receipt.is_some() {
             LogseqImportDestination::ExistingReceipt
         } else if destination_empty {
@@ -410,7 +423,7 @@ pub async fn prepare_logseq_import(
             destination,
             blockers,
             can_commit,
-            report: summarize_report(&prepared, &scan_diagnostics),
+            report: summarize_report(&prepared, &scan_diagnostics, &drawing_conversions),
         };
         sessions
             .state
@@ -421,6 +434,7 @@ pub async fn prepare_logseq_import(
             source_root,
             prepared,
             scan_diagnostics,
+            drawing_conversions: drawing_conversions.publication,
             static_commit_allowed,
         });
         send_import_progress(&on_progress, LogseqImportStage::Complete, 1, 1);
@@ -484,6 +498,7 @@ pub async fn commit_logseq_import(
         let source_root = session.source_root;
         let prepared = session.prepared;
         let scan_diagnostics = session.scan_diagnostics;
+        let drawing_conversions = session.drawing_conversions;
         let worker_progress = on_progress.clone();
         send_import_progress(&on_progress, LogseqImportStage::Verifying, 0, 1);
         let (batch, blobs) = tauri::async_runtime::spawn_blocking(move || {
@@ -498,7 +513,15 @@ pub async fn commit_logseq_import(
             }
             send_import_progress(&worker_progress, LogseqImportStage::Verifying, 1, 1);
             send_import_progress(&worker_progress, LogseqImportStage::Materializing, 0, 1);
-            let materialized = notes_import::materialize_source_media(&prepared, &source_root)?;
+            let materialized = if let Some(publication) = drawing_conversions.as_ref() {
+                notes_import::materialize_source_media_with_drawing_conversions(
+                    &prepared,
+                    &source_root,
+                    publication,
+                )?
+            } else {
+                notes_import::materialize_source_media(&prepared, &source_root)?
+            };
             match notes_import::verify_logseq_manifest(
                 &source_root,
                 &prepared.provenance.source_manifest,
@@ -1119,9 +1142,116 @@ fn read_manifest_document(
     Ok(bytes)
 }
 
+struct DrawingConversionSelection {
+    publication: Option<DrawingConversionPublication>,
+    state: LogseqDrawingConversionState,
+    prepared_count: u64,
+    preserved_count: u64,
+}
+
+fn select_drawing_conversions(
+    state: &AppState,
+    source_root: &Path,
+    prepared: &PreparedImport,
+) -> DrawingConversionSelection {
+    let total = prepared.report.legacy_excalidraw_count;
+    let publication_root = state
+        .blob_store
+        .root()
+        .join("logseq-drawing-conversions")
+        .join(prepared.provenance.source_manifest.sha256().to_string());
+    let publication = match notes_import::load_drawing_conversion_publication(&publication_root) {
+        Ok(publication) => publication,
+        Err(error)
+            if matches!(
+                error.code(),
+                LoadDrawingConversionErrorCode::RootNotFound
+                    | LoadDrawingConversionErrorCode::BundleNotFound
+            ) =>
+        {
+            return DrawingConversionSelection {
+                publication: None,
+                state: LogseqDrawingConversionState::Absent,
+                prepared_count: 0,
+                preserved_count: total,
+            };
+        }
+        Err(error) => {
+            tracing::warn!(
+                code = ?error.code(),
+                "ignoring an invalid Logseq drawing conversion publication"
+            );
+            return DrawingConversionSelection {
+                publication: None,
+                state: LogseqDrawingConversionState::Invalid,
+                prepared_count: 0,
+                preserved_count: total,
+            };
+        }
+    };
+    let source_root = match std::fs::canonicalize(source_root) {
+        Ok(root) => root,
+        Err(error) => {
+            tracing::warn!(%error, "could not canonicalize the Logseq graph for drawing conversion");
+            return DrawingConversionSelection {
+                publication: None,
+                state: LogseqDrawingConversionState::Invalid,
+                prepared_count: 0,
+                preserved_count: total,
+            };
+        }
+    };
+    if publication.bundle().source_root.manifest_sha256
+        != prepared.provenance.source_manifest.sha256()
+        || publication.root().starts_with(&source_root)
+        || source_root.starts_with(publication.root())
+    {
+        tracing::warn!("ignoring a Logseq drawing conversion publication for another source");
+        return DrawingConversionSelection {
+            publication: None,
+            state: LogseqDrawingConversionState::Invalid,
+            prepared_count: 0,
+            preserved_count: total,
+        };
+    }
+    let entries = publication
+        .bundle()
+        .drawings
+        .iter()
+        .map(|entry| (entry.source.relative_path.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let prepared_count = prepared
+        .media_references
+        .iter()
+        .filter(|reference| reference.kind == ImportMediaKind::LegacyExcalidraw)
+        .filter(|reference| {
+            let ImportMediaResolution::LocalManifest {
+                relative_path,
+                size_bytes,
+                sha256,
+            } = &reference.resolution
+            else {
+                return false;
+            };
+            entries.get(relative_path.as_str()).is_some_and(|entry| {
+                entry.source.size_bytes == *size_bytes
+                    && entry.source.sha256 == *sha256
+                    && entry.status == DrawingConversionStatus::Converted
+            })
+        })
+        .count() as u64;
+    DrawingConversionSelection {
+        publication: Some(publication),
+        state: LogseqDrawingConversionState::Prepared,
+        prepared_count,
+        preserved_count: total.saturating_sub(prepared_count),
+    }
+}
+
 fn summarize_report(
     prepared: &PreparedImport,
     scan_diagnostics: &[ImportDiagnostic],
+    drawing_conversions: &DrawingConversionSelection,
 ) -> LogseqImportReportSummary {
     let report = &prepared.report;
     let diagnostic_count = report.diagnostics.len() as u64 + scan_diagnostics.len() as u64;
@@ -1148,7 +1278,9 @@ fn summarize_report(
         unresolved_reference_count: report.unresolved_reference_count,
         media_reference_count: report.media_reference_count,
         markdown_image_count: report.markdown_image_count,
-        deferred_excalidraw_count: report.legacy_excalidraw_count,
+        drawing_conversion_state: drawing_conversions.state,
+        prepared_excalidraw_count: drawing_conversions.prepared_count,
+        preserved_excalidraw_count: drawing_conversions.preserved_count,
         local_media_reference_count: report.local_media_reference_count,
         inline_media_reference_count: report.inline_media_reference_count,
         blocked_remote_media_reference_count: report.blocked_remote_media_reference_count,
@@ -1376,6 +1508,7 @@ mod tests {
             source_root: fixture("basic"),
             prepared: graph.prepared,
             scan_diagnostics: graph.scan_diagnostics,
+            drawing_conversions: None,
             static_commit_allowed: true,
         });
         let (_session, committing) = begin_commit(&sessions, session_uuid).expect("begin commit");
@@ -1418,8 +1551,68 @@ mod tests {
             expected_maximum_depth >= 4,
             "the real-corpus smoke must exercise a meaningfully nested page"
         );
-        let materialized = notes_import::materialize_source_media(&graph.prepared, &source_root)
-            .expect("materialize real media");
+        let publication_root =
+            PathBuf::from(std::env::var_os("HOME").expect("HOME for drawing publication"))
+                .join(".local/share/dev.okhsunrog.notes-rs/logseq-drawing-conversions")
+                .join(
+                    graph
+                        .prepared
+                        .provenance
+                        .source_manifest
+                        .sha256()
+                        .to_string(),
+                );
+        let drawing_publication =
+            notes_import::load_drawing_conversion_publication(&publication_root)
+                .expect("load the prepared real-corpus drawing publication");
+        let converted_drawing_count = drawing_publication
+            .bundle()
+            .drawings
+            .iter()
+            .filter(|entry| entry.status == DrawingConversionStatus::Converted)
+            .count();
+        let converted_drawing_hashes = drawing_publication
+            .bundle()
+            .drawings
+            .iter()
+            .filter_map(|entry| entry.output.as_ref().map(|output| output.sha256))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(converted_drawing_count, 4);
+        assert_eq!(
+            drawing_publication
+                .bundle()
+                .drawings
+                .iter()
+                .filter(|entry| entry.status == DrawingConversionStatus::SkippedEmpty)
+                .count(),
+            1
+        );
+        let materialized = notes_import::materialize_source_media_with_drawing_conversions(
+            &graph.prepared,
+            &source_root,
+            &drawing_publication,
+        )
+        .expect("materialize real media and converted drawings");
+        assert_eq!(converted_drawing_hashes.len(), converted_drawing_count);
+        let materialized_png_hashes = materialized
+            .attachments
+            .iter()
+            .filter(|attachment| attachment.mime == "image/png")
+            .map(|attachment| attachment.sha256)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            converted_drawing_hashes.is_subset(&materialized_png_hashes),
+            "missing converted drawing hashes; diagnostics: {:?}",
+            materialized.diagnostics
+        );
+        assert!(
+            materialized
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.issue
+                    != notes_import::MediaMaterializationIssue::DrawingConversionFailed),
+            "the verified real-corpus publication must not silently preserve a failed drawing"
+        );
         let expected_attachment_count = materialized.attachments.len();
         let expected_blobs = materialized
             .blobs
@@ -1493,8 +1686,12 @@ mod tests {
 
         let second = prepare_selected_graph(&source_root, identity, &ignored_progress())
             .expect("prepare exact rerun");
-        let materialized = notes_import::materialize_source_media(&second.prepared, &source_root)
-            .expect("materialize exact rerun");
+        let materialized = notes_import::materialize_source_media_with_drawing_conversions(
+            &second.prepared,
+            &source_root,
+            &drawing_publication,
+        )
+        .expect("materialize exact rerun with the same drawing publication");
         let (batch, _) =
             build_external_import_batch(second.prepared, second.scan_diagnostics, materialized)
                 .expect("build exact rerun");

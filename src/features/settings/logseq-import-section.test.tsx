@@ -23,7 +23,9 @@ function preview(): LogseqImportPreview {
       unresolvedReferenceCount: 4,
       mediaReferenceCount: 14,
       markdownImageCount: 10,
-      deferredExcalidrawCount: 3,
+      drawingConversionState: "absent",
+      preparedExcalidrawCount: 0,
+      preservedExcalidrawCount: 3,
       localMediaReferenceCount: 10,
       inlineMediaReferenceCount: 1,
       blockedRemoteMediaReferenceCount: 2,
@@ -92,10 +94,34 @@ describe("Logseq import settings UI", () => {
     expect(html).toContain("512");
     expect(html).toContain("64");
     expect(html).toContain("14");
-    expect(html).toContain("3 Excalidraw drawings deferred");
+    expect(html).toContain("3 Excalidraw drawings preserved as source");
+    expect(html).toContain("No matching conversion publication is available");
     expect(html).toContain("Logseq import is only available for an empty local workspace.");
     expect(html).toContain("A page reference could not be resolved.");
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>.*Import graph/s);
+  });
+
+  it("distinguishes prepared drawing artifacts from preserved source references", () => {
+    const prepared = preview();
+    prepared.report.drawingConversionState = "prepared";
+    prepared.report.preparedExcalidrawCount = 2;
+    prepared.report.preservedExcalidrawCount = 1;
+    const state: LogseqImportState = {
+      phase: "preview",
+      runId: 2,
+      preview: prepared,
+      progress: null,
+      diagnostics: prepared.report.diagnostics,
+      diagnosticsTotal: prepared.report.diagnosticCount,
+      diagnosticsLoading: false,
+      discarding: false,
+      error: null,
+    };
+
+    const html = renderToStaticMarkup(<LogseqImportSectionView state={state} {...callbacks} />);
+    expect(html).toContain("2 Excalidraw drawings prepared as PNG");
+    expect(html).toContain("1 drawing reference will keep the original source syntax");
+    expect(html).toContain("verified again during commit");
   });
 
   it("offers to open the imported page from the receipt", () => {

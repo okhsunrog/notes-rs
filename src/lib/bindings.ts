@@ -332,6 +332,8 @@ export type JournalDate = string;
  */
 export type JournalListLimit = number;
 
+export type LogseqDrawingConversionState = "absent" | "prepared" | "invalid";
+
 export type LogseqImportAvailability = { status: "available" } | { status: "unavailable"; reason: LogseqImportUnavailableReason };
 
 export type LogseqImportBlocker = "empty_import" | "non_empty_workspace" | "blocking_diagnostics" | "alias_collision" | "existing_import_changed" | "background_ai_enabled" | "server_ai_status_unavailable";
@@ -369,7 +371,9 @@ export type LogseqImportReportSummary = {
 	unresolvedReferenceCount: number,
 	mediaReferenceCount: number,
 	markdownImageCount: number,
-	deferredExcalidrawCount: number,
+	drawingConversionState: LogseqDrawingConversionState,
+	preparedExcalidrawCount: number,
+	preservedExcalidrawCount: number,
 	localMediaReferenceCount: number,
 	inlineMediaReferenceCount: number,
 	blockedRemoteMediaReferenceCount: number,

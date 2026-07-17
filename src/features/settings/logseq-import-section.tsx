@@ -130,6 +130,8 @@ function Preview({ state, hasMoreDiagnostics, onLoadMoreDiagnostics }: ViewProps
   if (state.phase !== "preview" && state.phase !== "committing") return null;
   const { preview, diagnostics } = state;
   const report = preview.report;
+  const preservedDrawingLabel =
+    report.preservedExcalidrawCount === 1 ? "drawing reference" : "drawing references";
 
   return (
     <div className="space-y-4">
@@ -184,25 +186,34 @@ function Preview({ state, hasMoreDiagnostics, onLoadMoreDiagnostics }: ViewProps
         <span>{report.preservedBlockUuidCount.toLocaleString()} block UUIDs preserved</span>
       </div>
 
-      <div
-        className={cn(
-          "flex items-start gap-3 rounded-xl border p-3 text-sm",
-          report.deferredExcalidrawCount > 0
-            ? "border-amber-500/35 bg-amber-500/5"
-            : "border-border/55 bg-background/55",
-        )}
-      >
-        <Image className="mt-0.5 size-4 shrink-0 text-amber-600" />
-        <div>
-          <p className="font-medium">
-            {report.deferredExcalidrawCount.toLocaleString()} Excalidraw drawings deferred
-          </p>
-          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-            Drawings stay identified in the report but are not converted into note content by this
-            importer yet.
-          </p>
+      {report.preparedExcalidrawCount + report.preservedExcalidrawCount > 0 && (
+        <div
+          className={cn(
+            "flex items-start gap-3 rounded-xl border p-3 text-sm",
+            report.drawingConversionState !== "prepared" || report.preservedExcalidrawCount > 0
+              ? "border-amber-500/35 bg-amber-500/5"
+              : "border-border/55 bg-background/55",
+          )}
+        >
+          <Image className="mt-0.5 size-4 shrink-0 text-amber-600" />
+          <div>
+            <p className="font-medium">
+              {report.drawingConversionState === "prepared"
+                ? `${report.preparedExcalidrawCount.toLocaleString()} Excalidraw drawings prepared as PNG`
+                : report.drawingConversionState === "invalid"
+                  ? "Drawing conversion publication ignored"
+                  : `${report.preservedExcalidrawCount.toLocaleString()} Excalidraw drawings preserved as source`}
+            </p>
+            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+              {report.drawingConversionState === "prepared"
+                ? `${report.preservedExcalidrawCount.toLocaleString()} ${preservedDrawingLabel} will keep the original source syntax. PNG artifacts are verified again during commit.`
+                : report.drawingConversionState === "invalid"
+                  ? "The conversion publication is invalid and will be ignored; original drawing references remain recoverable."
+                  : "No matching conversion publication is available; original drawing references remain recoverable."}
+            </p>
+          </div>
         </div>
-      </div>
+      )}
 
       {preview.blockers.length > 0 && (
         <div role="alert" className="rounded-xl border border-destructive/35 bg-destructive/5 p-3">
