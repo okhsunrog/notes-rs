@@ -624,7 +624,7 @@ Planning estimates stay separate from actual duration.
 | --- | --------------------------------------------- | ----------- | --------------- | ------------------------- | ------------------------- | -------- | ---------- | -------------------------------- | ----------------------------------------- |
 | R0  | Roadmap, corpus, and architecture audit       | complete    | 00:40           | 2026-07-17T17:14:04+03:00 | 2026-07-17T17:41:01+03:00 | 00:26:57 | >=00:26:57 | `ca35c95`                        | `vp check`, 17 frontend and 76 Rust tests |
 | A1  | Background AI defaults off                    | complete    | 00:25           | 2026-07-17T17:42:27+03:00 | 2026-07-17T17:44:51+03:00 | 00:02:24 | 00:02:24   | `37d82ca`, cloud-forge `c46bd2f` | 19 AI and 13 server tests; scoped Clippy  |
-| A2  | `PageView` to `PageLayout`                    | in progress | 01:20           | 2026-07-17T17:45:44+03:00 | —                         | —        | —          | —                                | —                                         |
+| A2  | `PageView` to `PageLayout`                    | complete    | 01:20           | 2026-07-17T17:45:44+03:00 | 2026-07-17T17:54:47+03:00 | 00:09:03 | 00:09:03   | `6d66fb1`                       | 29 frontend; 89 Rust; Clippy; build       |
 | B1  | Workspace and Journal identity                | planned     | 01:30           | —                         | —                         | —        | —          | —                                | —                                         |
 | B2  | Journal services and minimum UI               | planned     | 01:15           | —                         | —                         | —        | —          | —                                | —                                         |
 | B3  | Task state and attachment-reference semantics | planned     | 01:00           | —                         | —                         | —        | —          | —                                | —                                         |
@@ -656,7 +656,7 @@ is recorded as soon as an interval stops; the feature-ledger totals are calculat
 | ---------- | ----- | ------------------------- | ------------------------- | --------------- | -------------------------------------------------------------------------------------------------------- |
 | R0         | root  | 2026-07-17T17:14:04+03:00 | 2026-07-17T17:41:01+03:00 | 00:26:57        | Baseline verification, corpus audits, and roadmap design; parallel audit intervals were not instrumented |
 | A1         | root  | 2026-07-17T17:42:27+03:00 | 2026-07-17T17:44:51+03:00 | 00:02:24        | Disabled unattended embeddings and entity extraction defaults; updated deployment bootstrap              |
-| A2         | root  | 2026-07-17T17:45:44+03:00 | —                         | —               | Replace durable PageView with PageLayout and local Reading presentation                                  |
+| A2         | root  | 2026-07-17T17:45:44+03:00 | 2026-07-17T17:54:47+03:00 | 00:09:03        | Replaced durable PageView with PageLayout and local Reading presentation; binding drift remained clean   |
 
 ### Session summaries
 
