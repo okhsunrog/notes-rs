@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+  "crates/notes-blob",
   "crates/notes-core",
   "crates/notes-ai",
   "crates/notes-import",
@@ -33,6 +34,7 @@ llm-relay = { git = "https://github.com/okhsunrog/llm-relay", rev = "57b0cabe41a
   "streaming",
 ] }
 notes-ai = { path = "crates/notes-ai" }
+notes-blob = { path = "crates/notes-blob" }
 notes-core = { path = "crates/notes-core" }
 notes-protocol = { path = "crates/notes-protocol" }
 notes-sync = { path = "crates/notes-sync" }

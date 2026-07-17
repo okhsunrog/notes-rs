@@ -3402,6 +3402,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "notes-blob"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "notes-core"
 version = "0.1.0"
 dependencies = [
