@@ -7,6 +7,7 @@
 mod config;
 mod diagnostic;
 mod manifest;
+mod materialize;
 mod media;
 mod parser;
 mod prepare;
@@ -22,6 +23,12 @@ pub use diagnostic::{
     DiagnosticCode, DiagnosticSeverity, ImportDiagnostic, SourcePosition, SourceRange,
 };
 pub use manifest::{DocumentFormat, GraphManifest, ManifestEntry, Sha256Digest, SourceKind};
+pub use materialize::{
+    MaterializeMediaError, MaterializeMediaErrorCode, MaterializedMediaAttachment,
+    MaterializedMediaBlob, MediaMaterializationDiagnostic, MediaMaterializationIssue,
+    MediaMaterializationLimits, MediaMaterializationPlan, MediaRewrite, PreservedMediaReason,
+    PreservedMediaReference, materialize_source_media, materialize_source_media_with_limits,
+};
 pub use parser::{
     LogseqParseError, LogseqParseErrorCode, decode_logseq_page_title, parse_logseq_markdown,
 };
