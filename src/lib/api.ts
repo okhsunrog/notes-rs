@@ -19,6 +19,7 @@ import type {
   ContentRevision,
   CreatedNote,
   DocumentRevision,
+  DocumentUnitDraft,
   GraphEdge,
   GraphItem,
   GraphSnapshot,
@@ -71,6 +72,7 @@ export type {
   ContentRevision,
   CreatedNote,
   DocumentRevision,
+  DocumentUnitDraft,
   GraphEdge,
   GraphItem,
   GraphSnapshot,
@@ -255,6 +257,7 @@ export const undo = checkedCommand(commands.undo);
 export const redo = checkedCommand(commands.redo);
 export const getPage = checkedCommand(commands.getPage);
 export const getPageDocument = checkedCommand(commands.getPageDocument);
+export const replacePageDocument = checkedCommand(commands.replacePageDocument);
 export const getBlock = checkedCommand(commands.getBlock);
 export const getContainingPage = checkedCommand(commands.getContainingPage);
 export const listBlockChildren = checkedCommand(commands.listBlockChildren);

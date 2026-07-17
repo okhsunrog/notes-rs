@@ -57,6 +57,7 @@ export const commands = {
 	revision: DocumentRevision,
 	blocks: Block[],
 } | null, CommandError>(__TAURI_INVOKE("get_page_document", { uuid })),
+	replacePageDocument: (pageUuid: string, expectedRevision: DocumentRevision, units: DocumentUnitDraft[]) => typedError<PageDocumentSnapshot, CommandError>(__TAURI_INVOKE("replace_page_document", { pageUuid, expectedRevision, units })),
 	getBlock: (uuid: string) => typedError<{
 	uuid: string,
 	pageUuid: string,
@@ -297,6 +298,18 @@ export type DiagnosticSeverity = "info" | "warning" | "error";
  *  framing remains an implementation detail of the document snapshot service.
  */
 export type DocumentRevision = string;
+
+/**
+ *  One desired semantic unit in a complete document replacement. Existing
+ *  units retain their UUID; new units receive a UUIDv7 only after the complete
+ *  draft graph has passed validation.
+ */
+export type DocumentUnitDraft = {
+	previousUuid: string | null,
+	parentIndex: number | null,
+	style: BlockStyle,
+	markdown: string,
+};
 
 /**
  *  The single frontend invalidation stream for persisted Rust state.

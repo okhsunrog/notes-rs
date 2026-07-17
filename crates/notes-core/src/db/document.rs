@@ -1,11 +1,22 @@
-use super::{BLOCK_COLUMNS, Block, row_to_block};
-use crate::{CoreError, CoreResult, DocumentRevision, Hlc, sqlite::Connection};
+use super::{BLOCK_COLUMNS, Block, apply_local_action_in_transaction, row_to_block};
+use crate::operation::{
+    BlockCreate, BlockDelete, BlockMove, BlockSetMarkdown, BlockSetStyle, OpKind,
+};
+use crate::{
+    BlockStyle, CoreError, CoreResult, DocumentRevision, Hlc, OrderKey, sqlite::Connection,
+};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 const DOCUMENT_REVISION_DOMAIN: &[u8] = b"notes-rs/page-document/v1";
+
+/// Semantic limits for one atomic continuous-document edit. They bound IPC
+/// decoding work, operation batches, history rows, and pathological tree input.
+pub const MAX_DOCUMENT_UNITS: usize = 20_000;
+pub const MAX_DOCUMENT_MARKDOWN_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_DOCUMENT_DEPTH: u32 = 128;
 
 /// One transactionally consistent, deterministic projection of a page's
 /// complete current block tree.
@@ -15,6 +26,31 @@ pub struct PageDocumentSnapshot {
     pub page_uuid: uuid::Uuid,
     pub revision: DocumentRevision,
     pub blocks: Vec<Block>,
+}
+
+/// One desired semantic unit in a complete document replacement. Existing
+/// units retain their UUID; new units receive a UUIDv7 only after the complete
+/// draft graph has passed validation.
+#[derive(Debug, Clone, Deserialize, PartialEq, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentUnitDraft {
+    pub previous_uuid: Option<uuid::Uuid>,
+    pub parent_index: Option<u32>,
+    pub style: BlockStyle,
+    pub markdown: String,
+}
+
+/// Host-only mutation metadata used to emit precise Tauri invalidations while
+/// the public document intent returns only its fresh snapshot.
+#[derive(Debug)]
+pub struct PageDocumentReplaceOutcome {
+    pub snapshot: PageDocumentSnapshot,
+    pub changed: bool,
+    pub block_uuids: Vec<uuid::Uuid>,
+    pub deleted_block_uuids: Vec<uuid::Uuid>,
+    pub container_uuids: Vec<uuid::Uuid>,
+    pub structure_changed: bool,
+    pub graph_changed: bool,
 }
 
 #[derive(Debug)]
@@ -43,6 +79,435 @@ pub async fn get_page_document(
         },
     )
     .await
+}
+
+/// Atomically replace one page's complete current block document when the
+/// caller still owns the exact snapshot revision it edited.
+pub async fn replace_page_document(
+    conn: &Connection,
+    page_uuid: uuid::Uuid,
+    expected_revision: DocumentRevision,
+    units: Vec<DocumentUnitDraft>,
+) -> anyhow::Result<PageDocumentSnapshot> {
+    Ok(
+        replace_page_document_with_outcome(conn, page_uuid, expected_revision, units)
+            .await?
+            .snapshot,
+    )
+}
+
+#[doc(hidden)]
+pub async fn replace_page_document_with_outcome(
+    conn: &Connection,
+    page_uuid: uuid::Uuid,
+    expected_revision: DocumentRevision,
+    units: Vec<DocumentUnitDraft>,
+) -> anyhow::Result<PageDocumentReplaceOutcome> {
+    conn.call_domain(move |database| -> CoreResult<PageDocumentReplaceOutcome> {
+        let transaction = database.transaction()?;
+        let current = read_page_document(&transaction, page_uuid)?
+            .ok_or_else(|| CoreError::not_found("page was not found"))?;
+        if current.revision != expected_revision {
+            return Err(CoreError::conflict(
+                "page document changed since editing began",
+            ));
+        }
+
+        validate_document_units(&transaction, page_uuid, &current, &units)?;
+        let plan = plan_document_replace(page_uuid, &current, units);
+        if plan.kinds.is_empty() {
+            transaction.commit()?;
+            return Ok(PageDocumentReplaceOutcome {
+                snapshot: current,
+                changed: false,
+                block_uuids: Vec::new(),
+                deleted_block_uuids: Vec::new(),
+                container_uuids: Vec::new(),
+                structure_changed: false,
+                graph_changed: false,
+            });
+        }
+
+        apply_local_action_in_transaction(&transaction, "edit document", plan.kinds)?;
+        let snapshot = read_page_document(&transaction, page_uuid)?
+            .ok_or_else(|| CoreError::not_found("edited page disappeared"))?;
+        transaction.commit()?;
+        Ok(PageDocumentReplaceOutcome {
+            snapshot,
+            changed: true,
+            block_uuids: plan.block_uuids.into_iter().collect(),
+            deleted_block_uuids: plan.deleted_block_uuids.into_iter().collect(),
+            container_uuids: plan.container_uuids.into_iter().collect(),
+            structure_changed: plan.structure_changed,
+            graph_changed: plan.graph_changed,
+        })
+    })
+    .await
+}
+
+struct DocumentReplacePlan {
+    kinds: Vec<OpKind>,
+    block_uuids: BTreeSet<uuid::Uuid>,
+    deleted_block_uuids: BTreeSet<uuid::Uuid>,
+    container_uuids: BTreeSet<uuid::Uuid>,
+    structure_changed: bool,
+    graph_changed: bool,
+}
+
+#[derive(Debug)]
+struct DesiredUnit {
+    uuid: uuid::Uuid,
+    parent_uuid: Option<uuid::Uuid>,
+    order_key: Option<OrderKey>,
+    style: BlockStyle,
+    markdown: String,
+    existing: bool,
+}
+
+fn validate_document_units(
+    transaction: &rusqlite::Transaction<'_>,
+    page_uuid: uuid::Uuid,
+    current: &PageDocumentSnapshot,
+    units: &[DocumentUnitDraft],
+) -> CoreResult<()> {
+    if units.len() > MAX_DOCUMENT_UNITS {
+        return Err(CoreError::invalid(format!(
+            "page document exceeds the {MAX_DOCUMENT_UNITS} unit limit"
+        )));
+    }
+
+    let mut markdown_bytes = 0_usize;
+    let mut depths = Vec::with_capacity(units.len());
+    let mut previous_uuids = HashSet::with_capacity(units.len());
+    let current_uuids = current
+        .blocks
+        .iter()
+        .map(|block| block.uuid)
+        .collect::<HashSet<_>>();
+    for (index, unit) in units.iter().enumerate() {
+        markdown_bytes = markdown_bytes
+            .checked_add(unit.markdown.len())
+            .ok_or_else(|| CoreError::invalid("page document Markdown size overflow"))?;
+        if markdown_bytes > MAX_DOCUMENT_MARKDOWN_BYTES {
+            return Err(CoreError::invalid(format!(
+                "page document exceeds the {MAX_DOCUMENT_MARKDOWN_BYTES} byte Markdown limit"
+            )));
+        }
+
+        let depth = match unit.parent_index {
+            None => 1,
+            Some(parent_index) => {
+                let parent_index = usize::try_from(parent_index).map_err(|_| {
+                    CoreError::invalid("document parent index does not fit this platform")
+                })?;
+                if parent_index >= index {
+                    return Err(CoreError::invalid(
+                        "document parent index must reference an earlier unit",
+                    ));
+                }
+                depths[parent_index] + 1
+            }
+        };
+        if depth > MAX_DOCUMENT_DEPTH {
+            return Err(CoreError::invalid(format!(
+                "page document exceeds the {MAX_DOCUMENT_DEPTH} level depth limit"
+            )));
+        }
+        depths.push(depth);
+
+        let Some(previous_uuid) = unit.previous_uuid else {
+            continue;
+        };
+        if !previous_uuids.insert(previous_uuid) {
+            return Err(CoreError::invalid(
+                "document contains a duplicate previous block UUID",
+            ));
+        }
+        if current_uuids.contains(&previous_uuid) {
+            continue;
+        }
+        let owner = transaction
+            .query_row(
+                "SELECT page_uuid FROM blocks WHERE uuid = ?1",
+                [previous_uuid],
+                |row| row.get::<_, uuid::Uuid>(0),
+            )
+            .optional()?;
+        return match owner {
+            Some(owner) if owner != page_uuid => Err(CoreError::invalid(
+                "document previous block belongs to a different page",
+            )),
+            _ => Err(CoreError::invalid(
+                "document previous block is not current on this page",
+            )),
+        };
+    }
+    Ok(())
+}
+
+fn plan_document_replace(
+    page_uuid: uuid::Uuid,
+    current: &PageDocumentSnapshot,
+    units: Vec<DocumentUnitDraft>,
+) -> DocumentReplacePlan {
+    let current_by_uuid = current
+        .blocks
+        .iter()
+        .map(|block| (block.uuid, block))
+        .collect::<HashMap<_, _>>();
+    let assigned_uuids = units
+        .iter()
+        .map(|unit| unit.previous_uuid.unwrap_or_else(uuid::Uuid::now_v7))
+        .collect::<Vec<_>>();
+    let mut desired = units
+        .into_iter()
+        .enumerate()
+        .map(|(index, unit)| {
+            let uuid = unit.previous_uuid.unwrap_or(assigned_uuids[index]);
+            let parent_uuid = unit
+                .parent_index
+                .map(|parent_index| assigned_uuids[parent_index as usize]);
+            DesiredUnit {
+                uuid,
+                parent_uuid,
+                order_key: None,
+                style: unit.style,
+                markdown: unit.markdown,
+                existing: current_by_uuid.contains_key(&uuid),
+            }
+        })
+        .collect::<Vec<_>>();
+    assign_desired_order_keys(&mut desired, current, &current_by_uuid);
+    let desired_uuids = desired
+        .iter()
+        .filter(|unit| unit.existing)
+        .map(|unit| unit.uuid)
+        .collect::<HashSet<_>>();
+    let now = chrono::Utc::now().timestamp();
+    let mut kinds = Vec::new();
+    let mut block_uuids = BTreeSet::new();
+    let mut deleted_block_uuids = BTreeSet::new();
+    let mut container_uuids = BTreeSet::new();
+    let mut structure_changed = false;
+    let mut graph_changed = false;
+
+    // Parent indices are strictly earlier, so this emits all creates in the
+    // required parent-before-child order before any retained block moves.
+    for unit in desired.iter().filter(|unit| !unit.existing) {
+        kinds.push(OpKind::BlockCreate(BlockCreate {
+            uuid: unit.uuid,
+            page_uuid,
+            parent_uuid: unit.parent_uuid,
+            order_key: unit
+                .order_key
+                .clone()
+                .expect("every desired unit receives an order key"),
+            style: unit.style,
+            markdown: unit.markdown.clone(),
+            created_at: now,
+        }));
+        block_uuids.insert(unit.uuid);
+        container_uuids.insert(unit.parent_uuid.unwrap_or(page_uuid));
+        structure_changed = true;
+        graph_changed = true;
+    }
+
+    for unit in desired.iter().filter(|unit| unit.existing) {
+        let current_block = current_by_uuid[&unit.uuid];
+        if current_block.markdown != unit.markdown {
+            graph_changed |= crate::operation::content_references_changed(
+                &current_block.markdown,
+                &unit.markdown,
+            );
+            kinds.push(OpKind::BlockSetMarkdown(BlockSetMarkdown {
+                uuid: unit.uuid,
+                markdown: unit.markdown.clone(),
+            }));
+            block_uuids.insert(unit.uuid);
+            container_uuids.insert(current_block.parent_uuid.unwrap_or(current_block.page_uuid));
+        }
+        if current_block.style != unit.style {
+            kinds.push(OpKind::BlockSetStyle(BlockSetStyle {
+                uuid: unit.uuid,
+                style: unit.style,
+            }));
+            block_uuids.insert(unit.uuid);
+            container_uuids.insert(current_block.parent_uuid.unwrap_or(current_block.page_uuid));
+        }
+    }
+
+    // Moves precede deletes so retained descendants can leave parents which
+    // disappear from the desired document.
+    for unit in desired.iter().filter(|unit| unit.existing) {
+        let current_block = current_by_uuid[&unit.uuid];
+        let order_key = unit
+            .order_key
+            .as_ref()
+            .expect("every desired unit receives an order key");
+        if current_block.parent_uuid != unit.parent_uuid || current_block.order_key != *order_key {
+            kinds.push(OpKind::BlockMove(BlockMove {
+                uuid: unit.uuid,
+                page_uuid,
+                parent_uuid: unit.parent_uuid,
+                order_key: order_key.clone(),
+            }));
+            block_uuids.insert(unit.uuid);
+            container_uuids.insert(current_block.parent_uuid.unwrap_or(current_block.page_uuid));
+            container_uuids.insert(unit.parent_uuid.unwrap_or(page_uuid));
+            structure_changed = true;
+        }
+    }
+
+    // Current snapshot order is preorder; reversing it gives child-before-
+    // parent deletion and therefore parent-before-child inverse creation.
+    for block in current
+        .blocks
+        .iter()
+        .rev()
+        .filter(|block| !desired_uuids.contains(&block.uuid))
+    {
+        kinds.push(OpKind::BlockDelete(BlockDelete {
+            uuid: block.uuid,
+            page_uuid,
+        }));
+        block_uuids.insert(block.uuid);
+        deleted_block_uuids.insert(block.uuid);
+        container_uuids.insert(block.parent_uuid.unwrap_or(page_uuid));
+        structure_changed = true;
+        graph_changed = true;
+    }
+
+    DocumentReplacePlan {
+        kinds,
+        block_uuids,
+        deleted_block_uuids,
+        container_uuids,
+        structure_changed,
+        graph_changed,
+    }
+}
+
+/// Preserve every existing key when the retained siblings keep their parent
+/// and relative order. New or actually rearranged units consume deterministic
+/// gaps between those stable anchors; only a group without sufficient key
+/// space is rebalanced as a whole.
+fn assign_desired_order_keys(
+    desired: &mut [DesiredUnit],
+    current: &PageDocumentSnapshot,
+    current_by_uuid: &HashMap<uuid::Uuid, &Block>,
+) {
+    let mut groups = HashMap::<Option<uuid::Uuid>, Vec<usize>>::new();
+    for (index, unit) in desired.iter().enumerate() {
+        groups.entry(unit.parent_uuid).or_default().push(index);
+    }
+
+    for (parent_uuid, indices) in groups {
+        let stable_candidates = indices
+            .iter()
+            .filter_map(|index| {
+                let unit = &desired[*index];
+                current_by_uuid
+                    .get(&unit.uuid)
+                    .filter(|block| block.parent_uuid == parent_uuid)
+                    .map(|_| unit.uuid)
+            })
+            .collect::<HashSet<_>>();
+        let desired_stable_order = indices
+            .iter()
+            .map(|index| desired[*index].uuid)
+            .filter(|uuid| stable_candidates.contains(uuid))
+            .collect::<Vec<_>>();
+        let current_stable_order = current
+            .blocks
+            .iter()
+            .filter(|block| {
+                block.parent_uuid == parent_uuid && stable_candidates.contains(&block.uuid)
+            })
+            .map(|block| block.uuid)
+            .collect::<Vec<_>>();
+
+        if desired_stable_order == current_stable_order {
+            for index in &indices {
+                let unit = &mut desired[*index];
+                if stable_candidates.contains(&unit.uuid) {
+                    unit.order_key = Some(current_by_uuid[&unit.uuid].order_key.clone());
+                }
+            }
+        }
+
+        if !fill_order_key_gaps(desired, &indices) {
+            for (ordinal, index) in indices.iter().enumerate() {
+                desired[*index].order_key = Some(OrderKey::from_ordinal(ordinal + 1));
+            }
+        }
+    }
+}
+
+fn fill_order_key_gaps(desired: &mut [DesiredUnit], indices: &[usize]) -> bool {
+    let mut segment_start = 0;
+    while segment_start < indices.len() {
+        if desired[indices[segment_start]].order_key.is_some() {
+            segment_start += 1;
+            continue;
+        }
+
+        let segment_end = (segment_start + 1..indices.len())
+            .find(|position| desired[indices[*position]].order_key.is_some())
+            .unwrap_or(indices.len());
+        let lower = segment_start.checked_sub(1).map(|position| {
+            desired[indices[position]]
+                .order_key
+                .as_ref()
+                .expect("preceding desired key is assigned")
+                .value()
+        });
+        let upper = indices.get(segment_end).map(|index| {
+            desired[*index]
+                .order_key
+                .as_ref()
+                .expect("following desired key is assigned")
+                .value()
+        });
+        let Some(keys) = order_keys_between(lower, upper, segment_end - segment_start) else {
+            return false;
+        };
+        for (position, key) in (segment_start..segment_end).zip(keys) {
+            desired[indices[position]].order_key = Some(key);
+        }
+        segment_start = segment_end;
+    }
+    true
+}
+
+fn order_keys_between(
+    lower: Option<u64>,
+    upper: Option<u64>,
+    count: usize,
+) -> Option<Vec<OrderKey>> {
+    if count == 0 {
+        return Some(Vec::new());
+    }
+
+    // Coordinates reserve zero and 2^64 + 1 as virtual bounds around the
+    // complete u64 key space. This also permits a real key of zero.
+    let lower = lower.map_or(0, |value| u128::from(value) + 1);
+    let upper = upper.map_or(u128::from(u64::MAX) + 2, |value| u128::from(value) + 1);
+    if upper <= lower || upper - lower - 1 < count as u128 {
+        return None;
+    }
+    let span = upper - lower;
+    let divisor = count as u128 + 1;
+    let mut keys = Vec::with_capacity(count);
+    for index in 1..=count as u128 {
+        let coordinate = lower + span * index / divisor;
+        let value = u64::try_from(coordinate - 1).ok()?;
+        keys.push(
+            format!("{value:016X}")
+                .parse()
+                .expect("formatted u64 is a valid order key"),
+        );
+    }
+    Some(keys)
 }
 
 fn read_page_document(

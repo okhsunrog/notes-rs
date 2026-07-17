@@ -34,7 +34,11 @@ pub use blocks::{
     list_block_children, move_block, move_block_in_direction, outdent_block, reorder_block,
     set_block_content, set_block_content_if_revision, set_block_style, set_task_state, split_block,
 };
-pub use document::{PageDocumentSnapshot, get_page_document};
+pub use document::{
+    DocumentUnitDraft, MAX_DOCUMENT_DEPTH, MAX_DOCUMENT_MARKDOWN_BYTES, MAX_DOCUMENT_UNITS,
+    PageDocumentReplaceOutcome, PageDocumentSnapshot, get_page_document, replace_page_document,
+    replace_page_document_with_outcome,
+};
 pub use graph::{find_backlinks, graph_snapshot, neighbors, read_ancestors, read_subtree};
 pub use history::{HistoryStatus, history_status, redo_history, undo_history};
 pub use journals::{

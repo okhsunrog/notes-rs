@@ -37,6 +37,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::append_to_journal,
             commands::get_page,
             commands::get_page_document,
+            commands::replace_page_document,
             commands::get_block,
             commands::set_block_content,
             commands::set_block_style,

@@ -95,6 +95,70 @@ pub async fn get_page_document(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn replace_page_document(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    page_uuid: uuid::Uuid,
+    expected_revision: DocumentRevision,
+    units: Vec<db::DocumentUnitDraft>,
+) -> CommandResult<db::PageDocumentSnapshot> {
+    let outcome =
+        db::replace_page_document_with_outcome(&state.conn, page_uuid, expected_revision, units)
+            .await
+            .map_err(err)?;
+    if outcome.changed {
+        let deleted = outcome
+            .deleted_block_uuids
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        let changed = outcome
+            .block_uuids
+            .iter()
+            .copied()
+            .filter(|uuid| !deleted.contains(uuid))
+            .collect::<Vec<_>>();
+        if !changed.is_empty() {
+            emit_domain(
+                &app,
+                DomainEvent::BlocksChanged {
+                    block_uuids: changed,
+                    container_uuids: outcome.container_uuids.clone(),
+                },
+            );
+        }
+        if !outcome.deleted_block_uuids.is_empty() {
+            emit_domain(
+                &app,
+                DomainEvent::BlocksDeleted {
+                    block_uuids: outcome.deleted_block_uuids.clone(),
+                    container_uuids: outcome.container_uuids.clone(),
+                },
+            );
+        }
+        if outcome.structure_changed {
+            emit_domain(
+                &app,
+                DomainEvent::StructureChanged {
+                    block_uuids: outcome.block_uuids.clone(),
+                },
+            );
+        }
+        if outcome.graph_changed {
+            emit_domain(
+                &app,
+                DomainEvent::GraphChanged {
+                    content_uuids: outcome.block_uuids.clone(),
+                },
+            );
+        }
+        emit_domain(&app, DomainEvent::HistoryChanged);
+    }
+    Ok(outcome.snapshot)
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn get_containing_page(
     state: State<'_, AppState>,
     block_uuid: uuid::Uuid,
