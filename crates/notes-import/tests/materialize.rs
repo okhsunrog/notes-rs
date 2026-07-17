@@ -1,4 +1,5 @@
 use std::fs;
+use std::sync::Arc;
 
 use data_url::DataUrl;
 use notes_import::{
@@ -31,7 +32,8 @@ fn materializes_local_and_inline_bytes_deduplicates_and_targets_preamble_block()
         1,
         "equal canonical bytes are deduplicated"
     );
-    assert_eq!(first.blobs[0].bytes, png);
+    assert_eq!(&*first.blobs[0].bytes, png.as_slice());
+    assert_eq!(Arc::strong_count(&first.blobs[0].bytes), 1);
     assert_eq!(first.blobs[0].size_bytes, 69);
     assert_eq!(
         first.attachments.len(),
@@ -66,7 +68,11 @@ fn materializes_local_and_inline_bytes_deduplicates_and_targets_preamble_block()
     let preamble_rewrite = first
         .rewrites
         .iter()
-        .find(|rewrite| rewrite.expected_markdown.starts_with("![preamble]"))
+        .find(|rewrite| {
+            prepared.media_references[rewrite.reference_index as usize]
+                .owner_markdown_spelling
+                .starts_with("![preamble]")
+        })
         .expect("preamble rewrite");
     assert_eq!(preamble_rewrite.markdown_block_uuid, preamble.uuid);
     assert!(matches!(
@@ -84,7 +90,11 @@ fn materializes_local_and_inline_bytes_deduplicates_and_targets_preamble_block()
     let titled = first
         .rewrites
         .iter()
-        .find(|rewrite| rewrite.expected_markdown.starts_with("![local]"))
+        .find(|rewrite| {
+            prepared.media_references[rewrite.reference_index as usize]
+                .owner_markdown_spelling
+                .starts_with("![local]")
+        })
         .expect("titled local image");
     assert_eq!(
         titled.replacement_markdown,
@@ -107,23 +117,17 @@ fn preserves_preclassified_remote_missing_and_unsafe_references_verbatim() {
         "classification diagnostics already exist"
     );
     assert_eq!(plan.preserved_references.len(), 3);
-    for (preserved, reference) in plan
-        .preserved_references
-        .iter()
-        .zip(&prepared.media_references)
-    {
+    for preserved in &plan.preserved_references {
         assert_eq!(preserved.reason, PreservedMediaReason::AlreadyClassified);
-        assert_eq!(preserved.raw_spelling, reference.raw_spelling);
-        assert_eq!(
-            preserved.owner_markdown_spelling,
-            reference.owner_markdown_spelling
-        );
-        assert_eq!(preserved.resolution, reference.resolution);
+        let original = &prepared.media_references[preserved.reference_index as usize];
+        assert_eq!(preserved.owner, original.owner);
+        assert!(!original.raw_spelling.is_empty());
+        assert!(!original.owner_markdown_spelling.is_empty());
     }
 }
 
 #[test]
-fn rejects_changed_missing_and_non_file_sources_without_partial_rewrites() {
+fn changed_missing_and_non_file_sources_are_fatal() {
     for mutation in ["changed", "missing", "directory"] {
         let graph = graph(
             "- ![asset](../assets/value.bin)\n",
@@ -140,23 +144,15 @@ fn rejects_changed_missing_and_non_file_sources_without_partial_rewrites() {
             }
             _ => unreachable!(),
         }
-        let plan = materialize_source_media(&prepared, graph.path()).expect("safe rejection");
-        assert!(plan.blobs.is_empty());
-        assert!(plan.attachments.is_empty());
-        assert!(plan.rewrites.is_empty());
-        assert_eq!(plan.preserved_references.len(), 1);
-        assert_eq!(
-            plan.preserved_references[0].reason,
-            PreservedMediaReason::MaterializationFailed
-        );
+        let error = materialize_source_media(&prepared, graph.path()).expect_err("fatal drift");
         let expected = match mutation {
             "changed" => MediaMaterializationIssue::SourceChanged,
             "missing" => MediaMaterializationIssue::SourceNotFound,
             "directory" => MediaMaterializationIssue::SourceNotRegularFile,
             _ => unreachable!(),
         };
-        assert_eq!(plan.diagnostics[0].issue, expected);
-        assert!(!plan.diagnostics[0].message.contains("value.bin"));
+        assert_eq!(error.reference_issue(), Some(expected));
+        assert_eq!(error.code(), MaterializeMediaErrorCode::ReferenceFailed);
     }
 }
 
@@ -180,13 +176,11 @@ fn repeats_path_traversal_defense_even_for_a_mutated_prepared_plan() {
         sha256: digest(b"outside"),
     };
 
-    let plan = materialize_source_media(&prepared, graph.path()).expect("safe rejection");
+    let error = materialize_source_media(&prepared, graph.path()).expect_err("fatal traversal");
     assert_eq!(
-        plan.diagnostics[0].issue,
-        MediaMaterializationIssue::PathEscape
+        error.reference_issue(),
+        Some(MediaMaterializationIssue::PathEscape)
     );
-    assert!(plan.blobs.is_empty());
-    assert!(plan.rewrites.is_empty());
     let _ = fs::remove_file(outside);
 }
 
@@ -207,12 +201,11 @@ fn rejects_source_and_root_symlinks_instead_of_following_them() {
     fs::remove_file(&asset).expect("remove source");
     symlink(&outside, &asset).expect("replace with symlink");
 
-    let plan = materialize_source_media(&prepared, graph.path()).expect("safe rejection");
+    let error = materialize_source_media(&prepared, graph.path()).expect_err("fatal symlink");
     assert_eq!(
-        plan.diagnostics[0].issue,
-        MediaMaterializationIssue::SymlinkNotAllowed
+        error.reference_issue(),
+        Some(MediaMaterializationIssue::SymlinkNotAllowed)
     );
-    assert!(plan.rewrites.is_empty());
 
     let root_link_parent = TempDir::new().expect("link parent");
     let root_link = root_link_parent.path().join("graph-link");
@@ -225,7 +218,7 @@ fn rejects_source_and_root_symlinks_instead_of_following_them() {
 }
 
 #[test]
-fn independently_enforces_per_blob_total_blob_and_count_limits() {
+fn materialization_limits_are_fatal_and_preflighted_before_source_reads() {
     let graph = graph(
         "- ![a](../assets/a.bin) ![b](../assets/b.bin)\n",
         &[("assets/a.bin", b"aa"), ("assets/b.bin", b"bb")],
@@ -240,14 +233,10 @@ fn independently_enforces_per_blob_total_blob_and_count_limits() {
             ..MediaMaterializationLimits::default()
         },
     )
-    .expect("bounded plan");
-    assert!(per_blob.blobs.is_empty());
-    assert_eq!(per_blob.preserved_references.len(), 2);
-    assert!(
-        per_blob
-            .diagnostics
-            .iter()
-            .all(|diagnostic| diagnostic.issue == MediaMaterializationIssue::BlobTooLarge)
+    .expect_err("per-blob budget is fatal");
+    assert_eq!(
+        per_blob.reference_issue(),
+        Some(MediaMaterializationIssue::BlobTooLarge)
     );
 
     let total = materialize_source_media_with_limits(
@@ -258,13 +247,10 @@ fn independently_enforces_per_blob_total_blob_and_count_limits() {
             ..MediaMaterializationLimits::default()
         },
     )
-    .expect("bounded plan");
-    assert_eq!(total.blobs.len(), 1);
-    assert_eq!(total.rewrites.len(), 1);
-    assert_eq!(total.preserved_references.len(), 1);
+    .expect_err("total budget is fatal");
     assert_eq!(
-        total.diagnostics[0].issue,
-        MediaMaterializationIssue::TotalBlobBytesExceeded
+        total.reference_issue(),
+        Some(MediaMaterializationIssue::TotalBlobBytesExceeded)
     );
 
     let count = materialize_source_media_with_limits(
@@ -275,11 +261,25 @@ fn independently_enforces_per_blob_total_blob_and_count_limits() {
             ..MediaMaterializationLimits::default()
         },
     )
-    .expect("bounded plan");
-    assert_eq!(count.blobs.len(), 1);
+    .expect_err("blob count is fatal");
     assert_eq!(
-        count.diagnostics[0].issue,
-        MediaMaterializationIssue::BlobLimitExceeded
+        count.reference_issue(),
+        Some(MediaMaterializationIssue::BlobLimitExceeded)
+    );
+
+    fs::remove_file(graph.path().join("assets/a.bin")).expect("remove first source");
+    let preflight = materialize_source_media_with_limits(
+        &prepared,
+        graph.path(),
+        &MediaMaterializationLimits {
+            max_total_blob_bytes: 1,
+            ..MediaMaterializationLimits::default()
+        },
+    )
+    .expect_err("budget must fail before filesystem read");
+    assert_eq!(
+        preflight.reference_issue(),
+        Some(MediaMaterializationIssue::TotalBlobBytesExceeded)
     );
 }
 
@@ -294,27 +294,22 @@ fn revalidates_inline_hash_and_owner_markdown_before_rewrite() {
     } else {
         panic!("expected inline reference");
     }
-    let plan = materialize_source_media(&wrong_hash, graph.path()).expect("safe rejection");
+    let error = materialize_source_media(&wrong_hash, graph.path()).expect_err("fatal hash drift");
     assert_eq!(
-        plan.diagnostics[0].issue,
-        MediaMaterializationIssue::SourceChanged
+        error.reference_issue(),
+        Some(MediaMaterializationIssue::SourceChanged)
     );
-    assert!(plan.rewrites.is_empty());
 
     let mut wrong_owner = prepare(&graph);
     wrong_owner.pages[0].blocks[0]
         .markdown
         .replace_range(0..1, "x");
-    let plan = materialize_source_media(&wrong_owner, graph.path()).expect("safe rejection");
+    let error =
+        materialize_source_media(&wrong_owner, graph.path()).expect_err("fatal owner drift");
     assert_eq!(
-        plan.diagnostics[0].issue,
-        MediaMaterializationIssue::InvalidPreparedReference
+        error.reference_issue(),
+        Some(MediaMaterializationIssue::InvalidPreparedReference)
     );
-    assert!(
-        plan.blobs.is_empty(),
-        "failed rewrites leave no installable bytes"
-    );
-    assert!(plan.attachments.is_empty());
 }
 
 #[test]
@@ -331,15 +326,120 @@ fn cache_never_reuses_bytes_for_conflicting_prepared_evidence() {
     };
     *sha256 = Sha256Digest::from_bytes([0x77; 32]);
 
-    let plan = materialize_source_media(&prepared, graph.path()).expect("safe materialization");
+    let error =
+        materialize_source_media(&prepared, graph.path()).expect_err("conflicting evidence");
+    assert_eq!(
+        error.reference_issue(),
+        Some(MediaMaterializationIssue::SourceChanged)
+    );
+}
+
+#[test]
+fn equal_bytes_under_different_paths_share_one_retained_arc_and_one_blob_budget() {
+    let bytes = b"identical media";
+    let graph = graph(
+        "- ![first](../assets/first.bin) ![second](../assets/second.bin)\n",
+        &[("assets/first.bin", bytes), ("assets/second.bin", bytes)],
+    );
+    let prepared = prepare(&graph);
+    let plan = materialize_source_media_with_limits(
+        &prepared,
+        graph.path(),
+        &MediaMaterializationLimits {
+            max_total_blob_bytes: bytes.len() as u64,
+            max_blobs: 1,
+            ..MediaMaterializationLimits::default()
+        },
+    )
+    .expect("content-addressed budget counts retained bytes once");
+
     assert_eq!(plan.blobs.len(), 1);
-    assert_eq!(plan.attachments.len(), 1);
-    assert_eq!(plan.rewrites.len(), 1);
-    assert_eq!(plan.preserved_references[0].reference_index, 1);
+    assert_eq!(
+        plan.attachments.len(),
+        1,
+        "same owner and hash is one attachment"
+    );
+    assert_eq!(plan.rewrites.len(), 2);
+    assert_eq!(Arc::strong_count(&plan.blobs[0].bytes), 1);
+    assert_eq!(&*plan.blobs[0].bytes, bytes);
+}
+
+#[test]
+fn legacy_excalidraw_is_deferred_and_preserved_raw() {
+    let graph = graph(
+        "- [[draws/diagram.excalidraw]]\n",
+        &[("draws/diagram.excalidraw", br#"{"type":"excalidraw"}"#)],
+    );
+    let prepared = prepare(&graph);
+    let plan = materialize_source_media(&prepared, graph.path()).expect("deferred drawing");
+
+    assert!(plan.blobs.is_empty());
+    assert!(plan.attachments.is_empty());
+    assert!(plan.rewrites.is_empty());
+    assert_eq!(plan.preserved_references.len(), 1);
+    assert_eq!(
+        plan.preserved_references[0].reason,
+        PreservedMediaReason::DeferredConversion
+    );
     assert_eq!(
         plan.diagnostics[0].issue,
-        MediaMaterializationIssue::SourceChanged
+        MediaMaterializationIssue::DeferredExcalidrawConversion
     );
+    let original =
+        &prepared.media_references[plan.preserved_references[0].reference_index as usize];
+    assert_eq!(original.raw_spelling, "[[draws/diagram.excalidraw]]");
+}
+
+#[test]
+fn rewrite_matches_commonmark_escaped_angle_destination_and_reference_title() {
+    let graph = graph(
+        "- ![angled](<../assets/a\\>b.png> \"Angle title\")\n- ![referenced][asset]\n  \n  [asset]: ../assets/reference.png \"Reference title\"\n",
+        &[
+            ("assets/a>b.png", b"angled"),
+            ("assets/reference.png", b"referenced"),
+        ],
+    );
+    let prepared = prepare(&graph);
+    let plan = materialize_source_media(&prepared, graph.path()).expect("materialize syntax");
+
+    let angled = plan
+        .rewrites
+        .iter()
+        .find(|rewrite| {
+            prepared.media_references[rewrite.reference_index as usize]
+                .owner_markdown_spelling
+                .starts_with("![angled]")
+        })
+        .expect("angled rewrite");
+    assert_eq!(
+        angled.replacement_markdown,
+        format!("![angled](<{}> \"Angle title\")", angled.attachment_uri)
+    );
+    let referenced = plan
+        .rewrites
+        .iter()
+        .find(|rewrite| {
+            prepared.media_references[rewrite.reference_index as usize].owner_markdown_spelling
+                == "![referenced][asset]"
+        })
+        .expect("reference-style rewrite");
+    assert_eq!(
+        referenced.replacement_markdown,
+        format!(
+            "![referenced]({} \"Reference title\")",
+            referenced.attachment_uri
+        )
+    );
+}
+
+#[test]
+fn duplicate_prepared_identities_are_fatal_before_materialization() {
+    let graph = graph("- first\n- second\n", &[]);
+    let mut prepared = prepare(&graph);
+    prepared.pages[0].blocks[1].uuid = prepared.pages[0].blocks[0].uuid;
+    let error =
+        materialize_source_media(&prepared, graph.path()).expect_err("duplicate block UUID");
+    assert_eq!(error.code(), MaterializeMediaErrorCode::InvalidPreparedPlan);
 }
 
 #[test]

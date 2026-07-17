@@ -28,6 +28,7 @@ pub use materialize::{
     MaterializedMediaBlob, MediaMaterializationDiagnostic, MediaMaterializationIssue,
     MediaMaterializationLimits, MediaMaterializationPlan, MediaRewrite, PreservedMediaReason,
     PreservedMediaReference, materialize_source_media, materialize_source_media_with_limits,
+    materialized_attachment_uuid,
 };
 pub use parser::{
     LogseqParseError, LogseqParseErrorCode, decode_logseq_page_title, parse_logseq_markdown,

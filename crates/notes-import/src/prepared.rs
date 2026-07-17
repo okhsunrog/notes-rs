@@ -143,7 +143,13 @@ pub struct ImportMediaReference {
     pub raw_spelling: String,
     /// Exact token expected at `owner_markdown_range` before a later rewrite.
     pub owner_markdown_spelling: String,
+    /// Resolved CommonMark title. This is needed when a reference-style image
+    /// is canonicalized into a direct `notes-attachment:` destination.
+    pub title: String,
     pub owner_markdown_range: ImportMarkdownRange,
+    /// Exact destination bytes in the final owner Markdown for a direct image.
+    /// Reference-style images intentionally have no in-token destination.
+    pub owner_markdown_destination_range: Option<ImportMarkdownRange>,
     pub source_range: SourceRange,
     pub resolution: ImportMediaResolution,
 }

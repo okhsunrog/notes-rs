@@ -1,7 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use data_url::DataUrl;
 use data_url::forgiving_base64::DecodeError;
@@ -51,7 +52,7 @@ impl Default for MediaMaterializationLimits {
 pub struct MaterializedMediaBlob {
     pub sha256: Sha256Digest,
     pub size_bytes: u64,
-    pub bytes: Vec<u8>,
+    pub bytes: Arc<[u8]>,
 }
 
 /// Metadata for one owner/blob pair. Its UUID intentionally matches
@@ -72,8 +73,9 @@ pub struct MaterializedMediaAttachment {
 ///
 /// Rewrites are sorted by block UUID and then by descending byte offset, so a
 /// caller can apply each block's entries in order without invalidating later
-/// ranges. `expected_markdown` must still be compared immediately before the
-/// replacement is applied.
+/// ranges. The caller must use `reference_index` to compare the corresponding
+/// `PreparedImport::media_references` spelling immediately before applying it;
+/// the potentially very large source token is deliberately not copied here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaRewrite {
@@ -83,7 +85,6 @@ pub struct MediaRewrite {
     pub attachment_owner: ImportMediaOwner,
     pub markdown_block_uuid: Uuid,
     pub markdown_range: ImportMarkdownRange,
-    pub expected_markdown: String,
     pub replacement_markdown: String,
 }
 
@@ -104,6 +105,7 @@ pub enum MediaMaterializationIssue {
     RewriteLimitExceeded,
     InvalidInlineData,
     ConflictingRewrite,
+    DeferredExcalidrawConversion,
 }
 
 /// A non-fatal failure. The corresponding source token remains unchanged.
@@ -121,18 +123,16 @@ pub struct MediaMaterializationDiagnostic {
 #[serde(rename_all = "snake_case")]
 pub enum PreservedMediaReason {
     AlreadyClassified,
-    MaterializationFailed,
+    DeferredConversion,
 }
 
-/// Exact source spellings retained for every reference that was not rewritten.
+/// A lightweight pointer to a reference whose exact source spellings remain in
+/// `PreparedImport::media_references` and must be retained unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreservedMediaReference {
     pub reference_index: u64,
     pub owner: ImportMediaOwner,
-    pub raw_spelling: String,
-    pub owner_markdown_spelling: String,
-    pub resolution: ImportMediaResolution,
     pub reason: PreservedMediaReason,
 }
 
@@ -152,6 +152,8 @@ pub enum MaterializeMediaErrorCode {
     RootNotDirectory,
     RootSymlinkNotAllowed,
     InvalidLimits,
+    InvalidPreparedPlan,
+    ReferenceFailed,
     Io,
 }
 
@@ -165,6 +167,15 @@ pub enum MaterializeMediaError {
     RootSymlinkNotAllowed { path: PathBuf },
     #[error("media materialization limits must all be non-zero")]
     InvalidLimits,
+    #[error("prepared import contains inconsistent page or block identities")]
+    InvalidPreparedPlan,
+    #[error("media reference {reference_index} failed materialization: {issue:?}")]
+    ReferenceFailed {
+        reference_index: u64,
+        source_document_path: String,
+        source_range: SourceRange,
+        issue: MediaMaterializationIssue,
+    },
     #[error("could not inspect graph root {path}: {source}")]
     Io {
         path: PathBuf,
@@ -181,7 +192,17 @@ impl MaterializeMediaError {
             Self::RootNotDirectory { .. } => MaterializeMediaErrorCode::RootNotDirectory,
             Self::RootSymlinkNotAllowed { .. } => MaterializeMediaErrorCode::RootSymlinkNotAllowed,
             Self::InvalidLimits => MaterializeMediaErrorCode::InvalidLimits,
+            Self::InvalidPreparedPlan => MaterializeMediaErrorCode::InvalidPreparedPlan,
+            Self::ReferenceFailed { .. } => MaterializeMediaErrorCode::ReferenceFailed,
             Self::Io { .. } => MaterializeMediaErrorCode::Io,
+        }
+    }
+
+    #[must_use]
+    pub const fn reference_issue(&self) -> Option<MediaMaterializationIssue> {
+        match self {
+            Self::ReferenceFailed { issue, .. } => Some(*issue),
+            _ => None,
         }
     }
 }
@@ -189,7 +210,7 @@ impl MaterializeMediaError {
 #[derive(Debug, Clone)]
 struct CanonicalMedia {
     sha256: Sha256Digest,
-    bytes: Vec<u8>,
+    bytes: Arc<[u8]>,
     filename: String,
     mime: String,
 }
@@ -207,16 +228,12 @@ struct MaterializationState {
     rewrites: Vec<MediaRewrite>,
     preserved_references: Vec<PreservedMediaReference>,
     diagnostics: Vec<MediaMaterializationDiagnostic>,
-    local_cache: BTreeMap<LocalCacheKey, Result<CanonicalMedia, MediaMaterializationIssue>>,
     total_blob_bytes: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct LocalCacheKey {
-    relative_path: String,
-    expected_size: u64,
-    expected_sha256: Sha256Digest,
-    kind: ImportMediaKind,
+struct MarkdownOwnerIndex<'prepared> {
+    blocks: HashMap<Uuid, &'prepared str>,
+    preamble_blocks: HashMap<Uuid, Uuid>,
 }
 
 /// Materializes classified local and inline media using conservative defaults.
@@ -237,35 +254,72 @@ pub fn materialize_source_media_with_limits(
 ) -> Result<MediaMaterializationPlan, MaterializeMediaError> {
     validate_limits(limits)?;
     let source_root = validate_root(source_root.as_ref())?;
+    let owners = MarkdownOwnerIndex::new(prepared)?;
     let mut state = MaterializationState::default();
 
     for (index, reference) in prepared.media_references.iter().enumerate() {
         let reference_index = index as u64;
+        if reference.kind == ImportMediaKind::LegacyExcalidraw {
+            preserve(
+                &mut state,
+                reference_index,
+                reference,
+                PreservedMediaReason::DeferredConversion,
+            );
+            state.diagnostics.push(MediaMaterializationDiagnostic {
+                reference_index,
+                source_document_path: reference.relative_path.clone(),
+                source_range: reference.source_range,
+                issue: MediaMaterializationIssue::DeferredExcalidrawConversion,
+                message: issue_message(MediaMaterializationIssue::DeferredExcalidrawConversion),
+            });
+            continue;
+        }
         let result = match &reference.resolution {
             ImportMediaResolution::LocalManifest {
                 relative_path,
                 size_bytes,
                 sha256,
-            } => materialize_local(
-                &source_root,
-                relative_path,
-                *size_bytes,
-                *sha256,
-                reference.kind,
-                limits,
-                &mut state.local_cache,
-            ),
+            } => {
+                preflight_reference(reference, *sha256, *size_bytes, limits, &state)
+                    .map_err(|issue| reference_error(reference_index, reference, issue))?;
+                let existing = state.blobs.get(sha256).map(|blob| Arc::clone(&blob.bytes));
+                materialize_local(
+                    &source_root,
+                    relative_path,
+                    *size_bytes,
+                    *sha256,
+                    reference.kind,
+                    limits,
+                    existing,
+                )
+            }
             ImportMediaResolution::InlineData {
                 mime,
                 decoded_size_bytes,
                 decoded_sha256,
-            } => materialize_inline(
-                reference,
-                *mime,
-                *decoded_size_bytes,
-                *decoded_sha256,
-                limits,
-            ),
+            } => {
+                preflight_reference(
+                    reference,
+                    *decoded_sha256,
+                    *decoded_size_bytes,
+                    limits,
+                    &state,
+                )
+                .map_err(|issue| reference_error(reference_index, reference, issue))?;
+                let existing = state
+                    .blobs
+                    .get(decoded_sha256)
+                    .map(|blob| Arc::clone(&blob.bytes));
+                materialize_inline(
+                    reference,
+                    *mime,
+                    *decoded_size_bytes,
+                    *decoded_sha256,
+                    limits,
+                    existing,
+                )
+            }
             ImportMediaResolution::RemoteBlocked { .. }
             | ImportMediaResolution::Missing { .. }
             | ImportMediaResolution::Blocked { .. }
@@ -280,26 +334,18 @@ pub fn materialize_source_media_with_limits(
             }
         };
 
-        let media = match result {
-            Ok(media) => media,
-            Err(issue) => {
-                reject(&mut state, reference_index, reference, issue);
-                continue;
-            }
-        };
-        if let Err(issue) = add_materialized_reference(
-            prepared,
-            reference_index,
-            reference,
-            media,
-            limits,
-            &mut state,
-        ) {
-            reject(&mut state, reference_index, reference, issue);
-        }
+        let media = result.map_err(|issue| reference_error(reference_index, reference, issue))?;
+        add_materialized_reference(&owners, reference_index, reference, media, &mut state)
+            .map_err(|issue| reference_error(reference_index, reference, issue))?;
     }
 
-    remove_conflicting_rewrites(prepared, &mut state);
+    validate_non_overlapping_rewrites(&state.rewrites).map_err(|reference_index| {
+        reference_error(
+            reference_index,
+            &prepared.media_references[reference_index as usize],
+            MediaMaterializationIssue::ConflictingRewrite,
+        )
+    })?;
     state.rewrites.sort_by(|left, right| {
         left.markdown_block_uuid
             .cmp(&right.markdown_block_uuid)
@@ -321,6 +367,58 @@ pub fn materialize_source_media_with_limits(
     })
 }
 
+impl<'prepared> MarkdownOwnerIndex<'prepared> {
+    fn new(prepared: &'prepared PreparedImport) -> Result<Self, MaterializeMediaError> {
+        let mut blocks = HashMap::new();
+        let mut preamble_blocks = HashMap::new();
+        let mut object_uuids = HashSet::new();
+        for page in &prepared.pages {
+            if !object_uuids.insert(page.uuid) {
+                return Err(MaterializeMediaError::InvalidPreparedPlan);
+            }
+            let mut preamble = None;
+            for block in &page.blocks {
+                if block.page_uuid != page.uuid
+                    || !object_uuids.insert(block.uuid)
+                    || blocks.insert(block.uuid, block.markdown.as_str()).is_some()
+                {
+                    return Err(MaterializeMediaError::InvalidPreparedPlan);
+                }
+                if matches!(block.provenance.source, ImportBlockSource::Preamble)
+                    && preamble.replace(block.uuid).is_some()
+                {
+                    return Err(MaterializeMediaError::InvalidPreparedPlan);
+                }
+            }
+            if let Some(block_uuid) = preamble {
+                preamble_blocks.insert(page.uuid, block_uuid);
+            }
+        }
+        Ok(Self {
+            blocks,
+            preamble_blocks,
+        })
+    }
+
+    fn markdown_block(
+        &self,
+        owner: ImportMediaOwner,
+    ) -> Result<(Uuid, &'prepared str), MediaMaterializationIssue> {
+        let block_uuid = match owner {
+            ImportMediaOwner::Block { block_uuid } => block_uuid,
+            ImportMediaOwner::Page { page_uuid } => *self
+                .preamble_blocks
+                .get(&page_uuid)
+                .ok_or(MediaMaterializationIssue::InvalidPreparedReference)?,
+        };
+        self.blocks
+            .get(&block_uuid)
+            .copied()
+            .map(|markdown| (block_uuid, markdown))
+            .ok_or(MediaMaterializationIssue::InvalidPreparedReference)
+    }
+}
+
 fn validate_limits(limits: &MediaMaterializationLimits) -> Result<(), MaterializeMediaError> {
     if limits.max_blob_bytes == 0
         || limits.max_total_blob_bytes == 0
@@ -331,6 +429,53 @@ fn validate_limits(limits: &MediaMaterializationLimits) -> Result<(), Materializ
         return Err(MaterializeMediaError::InvalidLimits);
     }
     Ok(())
+}
+
+fn preflight_reference(
+    reference: &ImportMediaReference,
+    sha256: Sha256Digest,
+    size_bytes: u64,
+    limits: &MediaMaterializationLimits,
+    state: &MaterializationState,
+) -> Result<(), MediaMaterializationIssue> {
+    if size_bytes > limits.max_blob_bytes {
+        return Err(MediaMaterializationIssue::BlobTooLarge);
+    }
+    if !state.blobs.contains_key(&sha256) {
+        if state.blobs.len() as u64 >= limits.max_blobs {
+            return Err(MediaMaterializationIssue::BlobLimitExceeded);
+        }
+        let next_total = state
+            .total_blob_bytes
+            .checked_add(size_bytes)
+            .ok_or(MediaMaterializationIssue::TotalBlobBytesExceeded)?;
+        if next_total > limits.max_total_blob_bytes {
+            return Err(MediaMaterializationIssue::TotalBlobBytesExceeded);
+        }
+    }
+    let attachment_uuid = materialized_attachment_uuid(reference.owner, sha256);
+    if !state.attachments.contains_key(&attachment_uuid)
+        && state.attachments.len() as u64 >= limits.max_attachments
+    {
+        return Err(MediaMaterializationIssue::AttachmentLimitExceeded);
+    }
+    if state.rewrites.len() as u64 >= limits.max_rewrites {
+        return Err(MediaMaterializationIssue::RewriteLimitExceeded);
+    }
+    Ok(())
+}
+
+fn reference_error(
+    reference_index: u64,
+    reference: &ImportMediaReference,
+    issue: MediaMaterializationIssue,
+) -> MaterializeMediaError {
+    MaterializeMediaError::ReferenceFailed {
+        reference_index,
+        source_document_path: reference.relative_path.clone(),
+        source_range: reference.source_range,
+        issue,
+    }
 }
 
 fn validate_root(source_root: &Path) -> Result<PathBuf, MaterializeMediaError> {
@@ -372,27 +517,17 @@ fn materialize_local(
     expected_sha256: Sha256Digest,
     kind: ImportMediaKind,
     limits: &MediaMaterializationLimits,
-    cache: &mut BTreeMap<LocalCacheKey, Result<CanonicalMedia, MediaMaterializationIssue>>,
+    existing_blob: Option<Arc<[u8]>>,
 ) -> Result<CanonicalMedia, MediaMaterializationIssue> {
-    let key = LocalCacheKey {
-        relative_path: relative_path.to_owned(),
-        expected_size,
-        expected_sha256,
-        kind,
-    };
-    if let Some(cached) = cache.get(&key) {
-        return cached.clone();
-    }
-    let result = read_local(
+    read_local(
         source_root,
         relative_path,
         expected_size,
         expected_sha256,
         kind,
         limits,
-    );
-    cache.insert(key, result.clone());
-    result
+        existing_blob,
+    )
 }
 
 fn read_local(
@@ -402,6 +537,7 @@ fn read_local(
     expected_sha256: Sha256Digest,
     kind: ImportMediaKind,
     limits: &MediaMaterializationLimits,
+    existing_blob: Option<Arc<[u8]>>,
 ) -> Result<CanonicalMedia, MediaMaterializationIssue> {
     if expected_size > limits.max_blob_bytes {
         return Err(MediaMaterializationIssue::BlobTooLarge);
@@ -427,6 +563,7 @@ fn read_local(
         return Err(MediaMaterializationIssue::SourceChanged);
     }
     let mut file = File::open(&canonical).map_err(map_source_io)?;
+    verify_open_file_beneath_root(&file, source_root)?;
     let bytes = read_bounded(&mut file, limits.max_blob_bytes)?;
     if bytes.len() as u64 != expected_size {
         return Err(MediaMaterializationIssue::SourceChanged);
@@ -443,12 +580,36 @@ fn read_local(
         .last()
         .cloned()
         .ok_or(MediaMaterializationIssue::PathEscape)?;
+    let bytes = existing_blob.unwrap_or_else(|| Arc::from(bytes));
     Ok(CanonicalMedia {
         sha256,
         mime: canonical_mime(kind, &filename, &bytes).to_owned(),
         filename,
         bytes,
     })
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn verify_open_file_beneath_root(
+    file: &File,
+    source_root: &Path,
+) -> Result<(), MediaMaterializationIssue> {
+    use std::os::fd::AsRawFd;
+
+    let opened_path =
+        fs::canonicalize(format!("/proc/self/fd/{}", file.as_raw_fd())).map_err(map_source_io)?;
+    if !opened_path.starts_with(source_root) {
+        return Err(MediaMaterializationIssue::PathEscape);
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn verify_open_file_beneath_root(
+    _file: &File,
+    _source_root: &Path,
+) -> Result<(), MediaMaterializationIssue> {
+    Ok(())
 }
 
 fn safe_relative_components(relative_path: &str) -> Result<Vec<String>, MediaMaterializationIssue> {
@@ -514,11 +675,12 @@ fn materialize_inline(
     expected_size: u64,
     expected_sha256: Sha256Digest,
     limits: &MediaMaterializationLimits,
+    existing_blob: Option<Arc<[u8]>>,
 ) -> Result<CanonicalMedia, MediaMaterializationIssue> {
     if expected_size > limits.max_blob_bytes {
         return Err(MediaMaterializationIssue::BlobTooLarge);
     }
-    let destination = inline_destination(&reference.owner_markdown_spelling)
+    let destination = direct_destination_spelling(reference)
         .ok_or(MediaMaterializationIssue::InvalidInlineData)?;
     let data_url =
         DataUrl::process(destination).map_err(|_| MediaMaterializationIssue::InvalidInlineData)?;
@@ -560,6 +722,7 @@ fn materialize_inline(
         ImportInlineImageMime::Png => ("png", "image/png"),
         ImportInlineImageMime::Jpeg => ("jpg", "image/jpeg"),
     };
+    let bytes = existing_blob.unwrap_or_else(|| Arc::from(bytes));
     Ok(CanonicalMedia {
         sha256,
         filename: format!("inline-{}.{}", &sha256.to_hex()[..16], extension),
@@ -568,68 +731,46 @@ fn materialize_inline(
     })
 }
 
-fn inline_destination(markdown: &str) -> Option<&str> {
-    let open = markdown.find("](")?.checked_add(2)?;
-    let tail = markdown.get(open..)?;
-    if let Some(tail) = tail.strip_prefix('<') {
-        let end = tail.find('>')?;
-        return tail.get(..end);
-    }
-    let end = tail
-        .char_indices()
-        .find_map(|(index, character)| character.is_ascii_whitespace().then_some(index))
-        .unwrap_or_else(|| tail.find(')').unwrap_or(tail.len()));
-    tail.get(..end)
+fn direct_destination_spelling(reference: &ImportMediaReference) -> Option<&str> {
+    let range = reference.owner_markdown_destination_range?;
+    let start = range
+        .start_byte
+        .checked_sub(reference.owner_markdown_range.start_byte)?;
+    let end = range
+        .end_byte
+        .checked_sub(reference.owner_markdown_range.start_byte)?;
+    reference
+        .owner_markdown_spelling
+        .get(usize::try_from(start).ok()?..usize::try_from(end).ok()?)
 }
 
 fn add_materialized_reference(
-    prepared: &PreparedImport,
+    owners: &MarkdownOwnerIndex<'_>,
     reference_index: u64,
     reference: &ImportMediaReference,
     media: CanonicalMedia,
-    limits: &MediaMaterializationLimits,
     state: &mut MaterializationState,
 ) -> Result<(), MediaMaterializationIssue> {
     let is_new_blob = !state.blobs.contains_key(&media.sha256);
-    let next_total = if is_new_blob {
-        if state.blobs.len() as u64 >= limits.max_blobs {
-            return Err(MediaMaterializationIssue::BlobLimitExceeded);
-        }
-        let next_total = state
-            .total_blob_bytes
-            .checked_add(media.size_bytes())
-            .ok_or(MediaMaterializationIssue::TotalBlobBytesExceeded)?;
-        if next_total > limits.max_total_blob_bytes {
-            return Err(MediaMaterializationIssue::TotalBlobBytesExceeded);
-        }
-        Some(next_total)
-    } else {
-        None
-    };
-
     let attachment_uuid = materialized_attachment_uuid(reference.owner, media.sha256);
     let is_new_attachment = !state.attachments.contains_key(&attachment_uuid);
-    if is_new_attachment && state.attachments.len() as u64 >= limits.max_attachments {
-        return Err(MediaMaterializationIssue::AttachmentLimitExceeded);
-    }
-    if state.rewrites.len() as u64 >= limits.max_rewrites {
-        return Err(MediaMaterializationIssue::RewriteLimitExceeded);
-    }
-    let markdown_block_uuid = markdown_block_uuid(prepared, reference)
-        .ok_or(MediaMaterializationIssue::InvalidPreparedReference)?;
-    validate_expected_markdown(prepared, markdown_block_uuid, reference)?;
+    let (markdown_block_uuid, markdown) = owners.markdown_block(reference.owner)?;
+    validate_expected_markdown(markdown, reference)?;
     let attachment_uri = format!("{ATTACHMENT_SCHEME}{attachment_uuid}");
     let replacement_markdown = replacement_markdown(reference, &media.filename, &attachment_uri)
         .ok_or(MediaMaterializationIssue::InvalidPreparedReference)?;
 
     if is_new_blob {
-        state.total_blob_bytes = next_total.expect("new blob has a checked total");
+        state.total_blob_bytes = state
+            .total_blob_bytes
+            .checked_add(media.size_bytes())
+            .ok_or(MediaMaterializationIssue::TotalBlobBytesExceeded)?;
         state.blobs.insert(
             media.sha256,
             MaterializedMediaBlob {
                 sha256: media.sha256,
                 size_bytes: media.size_bytes(),
-                bytes: media.bytes.clone(),
+                bytes: Arc::clone(&media.bytes),
             },
         );
     }
@@ -654,46 +795,15 @@ fn add_materialized_reference(
         attachment_owner: reference.owner,
         markdown_block_uuid,
         markdown_range: reference.owner_markdown_range,
-        expected_markdown: reference.owner_markdown_spelling.clone(),
         replacement_markdown,
     });
     Ok(())
 }
 
-fn markdown_block_uuid(
-    prepared: &PreparedImport,
-    reference: &ImportMediaReference,
-) -> Option<Uuid> {
-    match reference.owner {
-        ImportMediaOwner::Block { block_uuid } => prepared
-            .pages
-            .iter()
-            .flat_map(|page| &page.blocks)
-            .any(|block| block.uuid == block_uuid)
-            .then_some(block_uuid),
-        ImportMediaOwner::Page { page_uuid } => prepared
-            .pages
-            .iter()
-            .find(|page| page.uuid == page_uuid)?
-            .blocks
-            .iter()
-            .find(|block| matches!(block.provenance.source, ImportBlockSource::Preamble))
-            .map(|block| block.uuid),
-    }
-}
-
 fn validate_expected_markdown(
-    prepared: &PreparedImport,
-    block_uuid: Uuid,
+    markdown: &str,
     reference: &ImportMediaReference,
 ) -> Result<(), MediaMaterializationIssue> {
-    let markdown = prepared
-        .pages
-        .iter()
-        .flat_map(|page| &page.blocks)
-        .find(|block| block.uuid == block_uuid)
-        .map(|block| block.markdown.as_str())
-        .ok_or(MediaMaterializationIssue::InvalidPreparedReference)?;
     let start = usize::try_from(reference.owner_markdown_range.start_byte)
         .map_err(|_| MediaMaterializationIssue::InvalidPreparedReference)?;
     let end = usize::try_from(reference.owner_markdown_range.end_byte)
@@ -711,13 +821,12 @@ fn replacement_markdown(
 ) -> Option<String> {
     let alt = match reference.kind {
         ImportMediaKind::MarkdownImage => {
-            if let Some(rewritten) =
-                rewrite_inline_image_destination(&reference.owner_markdown_spelling, attachment_uri)
-            {
+            if let Some(rewritten) = rewrite_direct_image_destination(reference, attachment_uri) {
                 return Some(rewritten);
             }
+            let title = canonical_title_suffix(&reference.title);
             return Some(format!(
-                "![{}]({attachment_uri})",
+                "![{}]({attachment_uri}{title})",
                 raw_image_alt(&reference.owner_markdown_spelling)?
             ));
         }
@@ -728,52 +837,46 @@ fn replacement_markdown(
     Some(format!("![{alt}]({attachment_uri})"))
 }
 
-fn rewrite_inline_image_destination(markdown: &str, attachment_uri: &str) -> Option<String> {
-    let label_end = image_label_end(markdown)?;
-    let bytes = markdown.as_bytes();
-    let mut cursor = label_end.checked_add(1)?;
-    if bytes.get(cursor) != Some(&b'(') {
-        return None;
+fn rewrite_direct_image_destination(
+    reference: &ImportMediaReference,
+    attachment_uri: &str,
+) -> Option<String> {
+    let range = reference.owner_markdown_destination_range?;
+    let start = usize::try_from(
+        range
+            .start_byte
+            .checked_sub(reference.owner_markdown_range.start_byte)?,
+    )
+    .ok()?;
+    let end = usize::try_from(
+        range
+            .end_byte
+            .checked_sub(reference.owner_markdown_range.start_byte)?,
+    )
+    .ok()?;
+    reference.owner_markdown_spelling.get(start..end)?;
+    Some(replace_range(
+        &reference.owner_markdown_spelling,
+        start,
+        end,
+        attachment_uri,
+    ))
+}
+
+fn canonical_title_suffix(title: &str) -> String {
+    if title.is_empty() {
+        return String::new();
     }
-    cursor += 1;
-    while bytes
-        .get(cursor)
-        .is_some_and(|byte| byte.is_ascii_whitespace())
-    {
-        cursor += 1;
-    }
-    let destination_start = cursor;
-    let destination_end = if bytes.get(cursor) == Some(&b'<') {
-        cursor += 1;
-        let start = cursor;
-        let end = bytes[start..]
-            .iter()
-            .position(|byte| *byte == b'>')?
-            .checked_add(start)?;
-        return Some(replace_range(markdown, start, end, attachment_uri));
-    } else {
-        let mut depth = 0_u64;
-        let mut escaped = false;
-        loop {
-            let byte = *bytes.get(cursor)?;
-            if escaped {
-                escaped = false;
-                cursor += 1;
-                continue;
-            }
-            match byte {
-                b'\\' => escaped = true,
-                b'(' => depth = depth.checked_add(1)?,
-                b')' if depth == 0 => break cursor,
-                b')' => depth -= 1,
-                byte if byte.is_ascii_whitespace() && depth == 0 => break cursor,
-                _ => {}
-            }
-            cursor += 1;
+    let mut output = String::with_capacity(title.len() + 3);
+    output.push_str(" \"");
+    for character in title.chars() {
+        if matches!(character, '\\' | '"') {
+            output.push('\\');
         }
-    };
-    (destination_start < destination_end)
-        .then(|| replace_range(markdown, destination_start, destination_end, attachment_uri))
+        output.push(character);
+    }
+    output.push('"');
+    output
 }
 
 fn replace_range(markdown: &str, start: usize, end: usize, replacement: &str) -> String {
@@ -823,7 +926,10 @@ fn escape_markdown_label(label: &str) -> String {
     output
 }
 
-fn materialized_attachment_uuid(owner: ImportMediaOwner, sha256: Sha256Digest) -> Uuid {
+/// Derives the attachment identity used by the domain layer from import-native
+/// owner and SHA-256 types. Keep this covered by a notes-core contract test.
+#[must_use]
+pub fn materialized_attachment_uuid(owner: ImportMediaOwner, sha256: Sha256Digest) -> Uuid {
     let (kind, uuid) = match owner {
         ImportMediaOwner::Page { page_uuid } => ("page", page_uuid),
         ImportMediaOwner::Block { block_uuid } => ("block", block_uuid),
@@ -867,27 +973,6 @@ fn digest(bytes: &[u8]) -> Sha256Digest {
     Sha256Digest::from_bytes(Sha256::digest(bytes).into())
 }
 
-fn reject(
-    state: &mut MaterializationState,
-    reference_index: u64,
-    reference: &ImportMediaReference,
-    issue: MediaMaterializationIssue,
-) {
-    state.diagnostics.push(MediaMaterializationDiagnostic {
-        reference_index,
-        source_document_path: reference.relative_path.clone(),
-        source_range: reference.source_range,
-        issue,
-        message: issue_message(issue),
-    });
-    preserve(
-        state,
-        reference_index,
-        reference,
-        PreservedMediaReason::MaterializationFailed,
-    );
-}
-
 fn preserve(
     state: &mut MaterializationState,
     reference_index: u64,
@@ -897,9 +982,6 @@ fn preserve(
     state.preserved_references.push(PreservedMediaReference {
         reference_index,
         owner: reference.owner,
-        raw_spelling: reference.raw_spelling.clone(),
-        owner_markdown_spelling: reference.owner_markdown_spelling.clone(),
-        resolution: reference.resolution.clone(),
         reason,
     });
 }
@@ -948,13 +1030,15 @@ fn issue_message(issue: MediaMaterializationIssue) -> &'static str {
         MediaMaterializationIssue::ConflictingRewrite => {
             "media rewrite overlaps another rewrite in the same Markdown block"
         }
+        MediaMaterializationIssue::DeferredExcalidrawConversion => {
+            "legacy Excalidraw reference was preserved until image conversion is available"
+        }
     }
 }
 
-fn remove_conflicting_rewrites(prepared: &PreparedImport, state: &mut MaterializationState) {
-    let mut conflicts = BTreeSet::new();
+fn validate_non_overlapping_rewrites(rewrites: &[MediaRewrite]) -> Result<(), u64> {
     let mut by_block = BTreeMap::<Uuid, Vec<&MediaRewrite>>::new();
-    for rewrite in &state.rewrites {
+    for rewrite in rewrites {
         by_block
             .entry(rewrite.markdown_block_uuid)
             .or_default()
@@ -964,43 +1048,9 @@ fn remove_conflicting_rewrites(prepared: &PreparedImport, state: &mut Materializ
         rewrites.sort_by_key(|rewrite| rewrite.markdown_range.start_byte);
         for pair in rewrites.windows(2) {
             if pair[0].markdown_range.end_byte > pair[1].markdown_range.start_byte {
-                conflicts.insert(pair[0].reference_index);
-                conflicts.insert(pair[1].reference_index);
+                return Err(pair[0].reference_index.min(pair[1].reference_index));
             }
         }
     }
-    if conflicts.is_empty() {
-        return;
-    }
-    state
-        .rewrites
-        .retain(|rewrite| !conflicts.contains(&rewrite.reference_index));
-    for reference_index in conflicts {
-        if let Some(reference) = prepared.media_references.get(reference_index as usize) {
-            reject(
-                state,
-                reference_index,
-                reference,
-                MediaMaterializationIssue::ConflictingRewrite,
-            );
-        }
-    }
-    remove_unreferenced_materialized_entries(state);
-}
-
-fn remove_unreferenced_materialized_entries(state: &mut MaterializationState) {
-    let attachment_uuids = state
-        .rewrites
-        .iter()
-        .map(|rewrite| rewrite.attachment_uuid)
-        .collect::<BTreeSet<_>>();
-    state
-        .attachments
-        .retain(|uuid, _| attachment_uuids.contains(uuid));
-    let hashes = state
-        .attachments
-        .values()
-        .map(|attachment| attachment.sha256)
-        .collect::<BTreeSet<_>>();
-    state.blobs.retain(|hash, _| hashes.contains(hash));
+    Ok(())
 }

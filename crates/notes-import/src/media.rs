@@ -76,6 +76,7 @@ struct ParsedMediaToken {
     destination: String,
     title: String,
     range: Range<usize>,
+    destination_range: Option<Range<usize>>,
 }
 
 pub(crate) fn collect_media(
@@ -277,10 +278,17 @@ fn collect_document_media(
                 kind: source_token.kind,
                 raw_spelling: input.document_source[absolute].to_owned(),
                 owner_markdown_spelling: input.final_markdown[final_token.range.clone()].to_owned(),
+                title: final_token.title.clone(),
                 owner_markdown_range: ImportMarkdownRange {
                     start_byte: final_token.range.start as u64,
                     end_byte: final_token.range.end as u64,
                 },
+                owner_markdown_destination_range: final_token.destination_range.as_ref().map(
+                    |range| ImportMarkdownRange {
+                        start_byte: range.start as u64,
+                        end_byte: range.end as u64,
+                    },
+                ),
                 source_range,
                 resolution,
             });
@@ -307,6 +315,7 @@ fn parse_media_tokens(markdown: &str) -> Vec<ParsedMediaToken> {
                 destination: dest_url.into_string(),
                 title: title.into_string(),
                 range: range.clone(),
+                destination_range: direct_image_destination_range(markdown, &range),
             }),
             Event::Start(Tag::Link {
                 link_type: LinkType::WikiLink { .. },
@@ -318,6 +327,7 @@ fn parse_media_tokens(markdown: &str) -> Vec<ParsedMediaToken> {
                 destination: dest_url.into_string(),
                 title: title.into_string(),
                 range: range.clone(),
+                destination_range: None,
             }),
             _ => None,
         };
@@ -327,6 +337,81 @@ fn parse_media_tokens(markdown: &str) -> Vec<ParsedMediaToken> {
         output.push(token);
     }
     output
+}
+
+fn direct_image_destination_range(markdown: &str, token: &Range<usize>) -> Option<Range<usize>> {
+    let bytes = markdown.as_bytes();
+    if bytes.get(token.start..token.start.checked_add(2)?) != Some(b"![") {
+        return None;
+    }
+    let mut cursor = token.start + 2;
+    let mut label_depth = 0_u64;
+    let mut escaped = false;
+    loop {
+        let byte = *bytes.get(cursor)?;
+        if escaped {
+            escaped = false;
+        } else {
+            match byte {
+                b'\\' => escaped = true,
+                b'[' => label_depth = label_depth.checked_add(1)?,
+                b']' if label_depth == 0 => break,
+                b']' => label_depth -= 1,
+                _ => {}
+            }
+        }
+        cursor += 1;
+    }
+    cursor += 1;
+    if bytes.get(cursor) != Some(&b'(') {
+        return None;
+    }
+    cursor += 1;
+    while bytes
+        .get(cursor)
+        .is_some_and(|byte| byte.is_ascii_whitespace())
+    {
+        cursor += 1;
+    }
+    if bytes.get(cursor) == Some(&b'<') {
+        cursor += 1;
+        let start = cursor;
+        let mut escaped = false;
+        loop {
+            let byte = *bytes.get(cursor)?;
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'>' {
+                return Some(start..cursor);
+            } else if matches!(byte, b'\n' | b'\r' | b'<') {
+                return None;
+            }
+            cursor += 1;
+        }
+    }
+    let start = cursor;
+    let mut depth = 0_u64;
+    let mut escaped = false;
+    loop {
+        let byte = *bytes.get(cursor)?;
+        if escaped {
+            escaped = false;
+        } else {
+            match byte {
+                b'\\' => escaped = true,
+                b'(' => depth = depth.checked_add(1)?,
+                b')' if depth == 0 => return (start < cursor).then_some(start..cursor),
+                b')' => depth -= 1,
+                byte if byte.is_ascii_whitespace() && depth == 0 => {
+                    return (start < cursor).then_some(start..cursor);
+                }
+                _ => {}
+            }
+        }
+        cursor += 1;
+    }
 }
 
 fn same_semantics(left: &ParsedMediaToken, right: &ParsedMediaToken) -> bool {
