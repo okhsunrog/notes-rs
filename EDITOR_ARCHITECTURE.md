@@ -138,6 +138,13 @@ All editing and rendering surfaces must share one documented dialect:
 - typed `BlockStyle` semantics;
 - explicitly registered future extensions such as properties or transclusion.
 
+`BlockStyle` is a closed tagged value. Its `Task { state: TaskState }` variant carries workflow
+state atomically, so neither storage nor RPC can express a task without state or attach state to a
+non-task block. Explicit state selection supports Todo, Doing, Now, Later, Done, Waiting, and
+Cancelled. The checkbox action completes any open state as Done and reopens a terminal state as
+Todo; Reading presentation renders status without mutation controls. Style and task-state updates
+share the same `BlockSetStyle` operation and LWW clock.
+
 The CodeMirror/Lezer grammar and the semantic renderer must have parity tests over the supported
 dialect. The authored-note and AI surfaces now share one AST-based renderer; Document Reading,
 linked preview panes, search excerpts, and future extensions must reuse that boundary instead of

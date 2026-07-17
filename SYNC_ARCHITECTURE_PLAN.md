@@ -159,14 +159,14 @@ tables, views, conversion code, and reset migration counters are not retained.
 
 ## 4. Operation and apply model
 
-The current operation format is version 4. An envelope contains:
+The current operation format is version 5. An envelope contains:
 
 ```text
 op_id: UUIDv7
 workspace_uuid: UUID
 device_id: UUID
 hlc: hybrid logical clock
-format_version: 4
+format_version: 5
 kind + typed payload
 ```
 
