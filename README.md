@@ -40,6 +40,8 @@ The accepted Outline/Document, Live Preview, Reading, and CodeMirror boundary is
 the collapsible AI companion are defined in
 [WORKSPACE_ARCHITECTURE.md](WORKSPACE_ARCHITECTURE.md). The Journal domain, Today/calendar UI, and
 Logseq conversion plan are recorded in [JOURNAL_ARCHITECTURE.md](JOURNAL_ARCHITECTURE.md).
+The ordered implementation stages, validation gates, and measured development timeline live in
+[ROADMAP.md](ROADMAP.md).
 
 ## Development
 
