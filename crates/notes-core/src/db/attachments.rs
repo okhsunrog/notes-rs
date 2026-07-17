@@ -58,7 +58,10 @@ pub async fn attachment_path_ref_count(conn: &Connection, relative_path: String)
     .await
 }
 
-pub async fn delete_attachment(conn: &Connection, id: i64) -> Result<Option<Node>> {
+pub async fn delete_attachment(
+    conn: &Connection,
+    id: i64,
+) -> Result<Option<(Node, Option<uuid::Uuid>)>> {
     let record = conn
         .call(
             move |database| -> rusqlite::Result<Option<AttachmentDeleteRecord>> {
@@ -102,5 +105,5 @@ pub async fn delete_attachment(conn: &Connection, id: i64) -> Result<Option<Node
         OpKind::NodeDelete(NodeDelete { uuid: node.uuid })
     };
     apply_local(conn, vec![kind]).await?;
-    Ok(Some(node))
+    Ok(Some((node, parent_uuid)))
 }

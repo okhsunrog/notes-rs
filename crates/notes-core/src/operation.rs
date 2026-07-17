@@ -1623,6 +1623,12 @@ pub(crate) fn parse_refs(content: &str) -> (Vec<String>, Vec<String>) {
     )
 }
 
+/// Returns whether changing a block from `previous` to `next` changes its
+/// deterministic wikilink or block-reference edges.
+pub fn content_references_changed(previous: &str, next: &str) -> bool {
+    parse_refs(previous) != parse_refs(next)
+}
+
 fn delimited(content: &str, open: &str, close: &str) -> Vec<String> {
     let mut remaining = content;
     let mut values = Vec::new();
@@ -1826,6 +1832,14 @@ mod tests {
             parse_refs("[[ Roadmap ]] [[Roadmap]] ((abc))"),
             (vec!["Roadmap".into()], vec!["abc".into()])
         );
+        assert!(!content_references_changed(
+            "Before [[Roadmap]]",
+            "After [[Roadmap]]"
+        ));
+        assert!(content_references_changed(
+            "Before [[Roadmap]]",
+            "After [[Release]]"
+        ));
     }
 
     #[tokio::test]

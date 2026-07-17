@@ -57,4 +57,34 @@ describe("domain event query invalidation", () => {
 
     expect(client.getQueryState(queryKeys.serverAi)?.isInvalidated).toBe(true);
   });
+
+  it("invalidates structure without refetching graph data", async () => {
+    const client = new QueryClient();
+    client.setQueryData(queryKeys.children("parent-a"), []);
+    client.setQueryData(queryKeys.children("parent-b"), []);
+    client.setQueryData(queryKeys.graph(null), { nodes: [], edges: [] });
+
+    await applyDomainEvent(client, {
+      kind: "structure_changed",
+      node_uuids: ["moved"],
+    });
+
+    expect(client.getQueryState(queryKeys.children("parent-a"))?.isInvalidated).toBe(true);
+    expect(client.getQueryState(queryKeys.children("parent-b"))?.isInvalidated).toBe(true);
+    expect(client.getQueryState(queryKeys.graph(null))?.isInvalidated).toBe(false);
+  });
+
+  it("invalidates only attachments for affected parents", async () => {
+    const client = new QueryClient();
+    client.setQueryData(queryKeys.attachments("parent-a"), []);
+    client.setQueryData(queryKeys.attachments("parent-b"), []);
+
+    await applyDomainEvent(client, {
+      kind: "attachments_changed",
+      parent_uuids: ["parent-a"],
+    });
+
+    expect(client.getQueryState(queryKeys.attachments("parent-a"))?.isInvalidated).toBe(true);
+    expect(client.getQueryState(queryKeys.attachments("parent-b"))?.isInvalidated).toBe(false);
+  });
 });

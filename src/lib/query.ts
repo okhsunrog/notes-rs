@@ -43,9 +43,6 @@ export async function applyDomainEvent(queryClient: QueryClient, event: DomainEv
       const derived = [] as Promise<unknown>[];
       if (event.node_kinds.includes("page")) derived.push(invalidate(queryKeys.pages));
       if (event.node_kinds.includes("entity")) derived.push(invalidate(queryKeys.entities));
-      if (event.node_kinds.includes("attachment")) {
-        derived.push(invalidate(queryKeys.attachmentsRoot));
-      }
       await Promise.all([
         ...event.node_uuids.map((uuid) => invalidate(queryKeys.node(uuid))),
         ...event.parent_uuids.map((uuid) => invalidate(queryKeys.children(uuid))),
@@ -73,6 +70,15 @@ export async function applyDomainEvent(queryClient: QueryClient, event: DomainEv
         invalidate(queryKeys.backlinksRoot),
         invalidate(queryKeys.entities),
       ]);
+      return;
+    case "structure_changed":
+      await Promise.all([
+        ...event.node_uuids.map((uuid) => invalidate(queryKeys.node(uuid))),
+        invalidate(queryKeys.childrenRoot),
+      ]);
+      return;
+    case "attachments_changed":
+      await Promise.all(event.parent_uuids.map((uuid) => invalidate(queryKeys.attachments(uuid))));
       return;
     case "history_changed":
       await invalidate(queryKeys.history);

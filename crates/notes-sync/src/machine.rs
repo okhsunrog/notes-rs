@@ -97,12 +97,21 @@ impl SyncTransport for LoopbackServer {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SyncStats {
     pub pushed: usize,
     pub received: usize,
     pub applied: usize,
     pub cursor: u64,
+    /// Remote operations that changed this replica during the sync pass.
+    /// Hosts use this to invalidate only the affected UI queries.
+    pub applied_operations: Vec<AppliedRemoteOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppliedRemoteOperation {
+    pub operation: Op,
+    pub previous_content: Option<String>,
 }
 
 #[derive(Clone)]
@@ -161,6 +170,7 @@ impl SyncClient {
             total.received += stats.received;
             total.applied += stats.applied;
             total.cursor = stats.cursor;
+            total.applied_operations.extend(stats.applied_operations);
             if stats.pushed < self.batch_size as usize
                 && transport.ops_since(stats.cursor, 1).await?.is_empty()
             {
@@ -184,6 +194,7 @@ impl SyncClient {
             }
             let full_batch = batch.len() == self.batch_size as usize;
             transport.prepare_pull(&batch).await?;
+            let previous_contents = previous_contents(&self.conn, &batch).await?;
             let sequenced = batch
                 .iter()
                 .map(|item| (item.seq, item.envelope.clone()))
@@ -191,11 +202,55 @@ impl SyncClient {
             let outcomes = apply_sequenced_batch(&self.conn, sequenced).await?;
             stats.received += batch.len();
             stats.applied += outcomes.iter().filter(|outcome| outcome.applied).count();
+            stats.applied_operations.extend(
+                batch
+                    .into_iter()
+                    .zip(outcomes)
+                    .filter(|(_, outcome)| outcome.applied)
+                    .map(|(operation, _)| AppliedRemoteOperation {
+                        previous_content: previous_contents
+                            .get(&operation.envelope.op_id)
+                            .cloned()
+                            .flatten(),
+                        operation: operation.envelope,
+                    }),
+            );
             if !full_batch {
                 return Ok(());
             }
         }
     }
+}
+
+async fn previous_contents(
+    connection: &Connection,
+    operations: &[SequencedOp],
+) -> Result<HashMap<uuid::Uuid, Option<String>>> {
+    let content_ops = operations
+        .iter()
+        .filter_map(|operation| match &operation.envelope.kind {
+            notes_core::OpKind::NodeSetContent(payload) => {
+                Some((operation.envelope.op_id, payload.uuid))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if content_ops.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let nodes = notes_core::db::get_nodes_by_uuids(
+        connection,
+        content_ops.iter().map(|(_, uuid)| *uuid).collect(),
+    )
+    .await?;
+    let contents = nodes
+        .into_iter()
+        .map(|node| (node.uuid, node.content))
+        .collect::<HashMap<_, _>>();
+    Ok(content_ops
+        .into_iter()
+        .map(|(op_id, uuid)| (op_id, contents.get(&uuid).cloned()))
+        .collect())
 }
 
 #[cfg(test)]

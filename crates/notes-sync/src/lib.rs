@@ -6,7 +6,7 @@
 mod machine;
 mod transport;
 
-pub use machine::{LoopbackServer, SyncClient, SyncStats, SyncTransport};
+pub use machine::{AppliedRemoteOperation, LoopbackServer, SyncClient, SyncStats, SyncTransport};
 pub use transport::{HttpTransport, SyncSocket, TransportError, is_transport_failure};
 
 pub use notes_core::Hlc;

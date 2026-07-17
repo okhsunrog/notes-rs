@@ -14,7 +14,8 @@ pub use model::{NodeKind, ReorderDirection};
 pub use operation::{
     ApplyOutcome, Op, OpKind, Origin, SnapshotAttachment, SnapshotEdge, SnapshotNode,
     SnapshotTombstone, SyncSnapshot, acknowledge_server_op, acknowledge_server_ops, apply,
-    apply_batch, apply_sequenced, apply_sequenced_batch, configure_sync, export_sync_snapshot,
-    import_sync_snapshot, local_ops, pending_outbox, sync_cursor,
+    apply_batch, apply_sequenced, apply_sequenced_batch, configure_sync,
+    content_references_changed, export_sync_snapshot, import_sync_snapshot, local_ops,
+    pending_outbox, sync_cursor,
 };
 pub use sqlite::Connection;

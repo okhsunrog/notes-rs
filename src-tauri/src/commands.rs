@@ -157,6 +157,12 @@ pub enum DomainEvent {
     GraphChanged {
         node_uuids: Vec<uuid::Uuid>,
     },
+    StructureChanged {
+        node_uuids: Vec<uuid::Uuid>,
+    },
+    AttachmentsChanged {
+        parent_uuids: Vec<uuid::Uuid>,
+    },
     HistoryChanged,
     SettingsChanged,
     SyncStatusChanged,
@@ -187,7 +193,7 @@ async fn node_uuids_for_ids(
     }
 }
 
-async fn emit_nodes_changed(
+pub(crate) async fn emit_nodes_changed(
     app: &AppHandle,
     connection: &Connection,
     nodes: &[Node],
@@ -838,6 +844,12 @@ pub async fn attach_file(
             emit_nodes_changed(&app, &state.conn, std::slice::from_ref(&node), [parent_id]).await;
             emit_domain(
                 &app,
+                DomainEvent::AttachmentsChanged {
+                    parent_uuids: node_uuids_for_ids(&state.conn, [parent_id]).await,
+                },
+            );
+            emit_domain(
+                &app,
                 DomainEvent::GraphChanged {
                     node_uuids: node_uuids_for_ids(&state.conn, [parent_id]).await,
                 },
@@ -890,7 +902,8 @@ pub async fn delete_attachment(
     write_backup(&app, &state.conn, "before-attachment-delete")
         .await
         .map_err(err)?;
-    let Some(node) = db::delete_attachment(&state.conn, id).await.map_err(err)? else {
+    let Some((node, parent_uuid)) = db::delete_attachment(&state.conn, id).await.map_err(err)?
+    else {
         return Ok(false);
     };
     let path = safe_app_data_path(&app, &node.content).map_err(err)?;
@@ -914,6 +927,14 @@ pub async fn delete_attachment(
             node_uuids: vec![node.uuid],
         },
     );
+    if let Some(parent_uuid) = parent_uuid {
+        emit_domain(
+            &app,
+            DomainEvent::AttachmentsChanged {
+                parent_uuids: vec![parent_uuid],
+            },
+        );
+    }
     Ok(true)
 }
 
