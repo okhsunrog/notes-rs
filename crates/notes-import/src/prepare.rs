@@ -6,9 +6,11 @@ use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
+use crate::media::{MediaCollectionError, MediaLimits, MediaOwnerInput, collect_media};
 use crate::prepared::{
     IMPORT_PLANNER_VERSION, IdentityContext, ImportBlock, ImportBlockIdentity, ImportBlockMapping,
-    ImportBlockProvenance, ImportBlockSource, ImportIdentityMaps, ImportPage, ImportPageKind,
+    ImportBlockProvenance, ImportBlockSource, ImportIdentityMaps, ImportMediaKind,
+    ImportMediaOwner, ImportMediaReference, ImportMediaResolution, ImportPage, ImportPageKind,
     ImportPageProvenance, ImportPageSource, ImportProvenance, ImportReference, ImportReferenceKind,
     ImportReferenceOwner, ImportReferenceResolution, ImportReferenceTargetKind,
     ImportReferenceUnresolvedReason, ImportReport, ImportTaskMapping, ImportTaskState,
@@ -16,8 +18,8 @@ use crate::prepared::{
 };
 use crate::{
     DiagnosticCode, DiagnosticSeverity, DocumentFormat, GraphManifest, ImportDiagnostic,
-    LogseqConstructKind, LogseqConstructOwner, LogseqDocumentSource, LogseqSourceBlock,
-    ParsedLogseqDocument, Sha256Digest, SourceKind, SourcePosition, SourceRange,
+    LogseqConstructKind, LogseqConstructOwner, LogseqDocumentSource, LogseqMarkdownSourceLine,
+    LogseqSourceBlock, ParsedLogseqDocument, Sha256Digest, SourceKind, SourcePosition, SourceRange,
 };
 
 const BLOCK_ID_DOMAIN: &[u8] = b"notes-rs/import/logseq/block/v1\0";
@@ -30,6 +32,13 @@ pub struct PrepareLimits {
     pub max_references: u64,
     pub max_references_per_document: u64,
     pub max_reference_bytes: u64,
+    pub max_media_references: u64,
+    pub max_media_references_per_document: u64,
+    pub max_media_reference_bytes: u64,
+    pub max_inline_media_bytes: u64,
+    pub max_inline_image_width: u32,
+    pub max_inline_image_height: u32,
+    pub max_inline_image_pixels: u64,
     pub max_diagnostics: u64,
     pub max_nesting_depth: u64,
 }
@@ -43,6 +52,13 @@ impl Default for PrepareLimits {
             max_references: 2_000_000,
             max_references_per_document: 1_000_000,
             max_reference_bytes: 64 * 1024,
+            max_media_references: 2_000_000,
+            max_media_references_per_document: 1_000_000,
+            max_media_reference_bytes: 48 * 1024 * 1024,
+            max_inline_media_bytes: 32 * 1024 * 1024,
+            max_inline_image_width: 8_192,
+            max_inline_image_height: 8_192,
+            max_inline_image_pixels: 40_000_000,
             max_diagnostics: 2_000_000,
             max_nesting_depth: 1_024,
         }
@@ -64,11 +80,15 @@ pub enum PrepareImportErrorCode {
     ReferenceLimitExceeded,
     TotalReferenceLimitExceeded,
     ReferenceTooLong,
+    MediaReferenceLimitExceeded,
+    TotalMediaReferenceLimitExceeded,
+    MediaReferenceTooLong,
     TotalDocumentBytesLimitExceeded,
     BlockLimitExceeded,
     DocumentBlockLimitExceeded,
     NestingDepthExceeded,
     DiagnosticLimitExceeded,
+    PlanSerialization,
 }
 
 #[derive(Debug, Error)]
@@ -100,6 +120,15 @@ pub enum PrepareImportError {
         relative_path: String,
         limit_bytes: u64,
     },
+    #[error("source document exceeds the {limit} media reference safety limit: {relative_path}")]
+    MediaReferenceLimitExceeded { relative_path: String, limit: u64 },
+    #[error("import exceeds the {limit} media reference preparation safety limit")]
+    TotalMediaReferenceLimitExceeded { limit: u64 },
+    #[error("source media reference exceeds the {limit_bytes}-byte safety limit: {relative_path}")]
+    MediaReferenceTooLong {
+        relative_path: String,
+        limit_bytes: u64,
+    },
     #[error("parsed documents exceed the {limit_bytes}-byte preparation safety limit")]
     TotalDocumentBytesLimitExceeded { limit_bytes: u64 },
     #[error("import exceeds the {limit} block preparation safety limit")]
@@ -112,6 +141,8 @@ pub enum PrepareImportError {
     TotalReferenceLimitExceeded { limit: u64 },
     #[error("import exceeds the {limit} diagnostic preparation safety limit")]
     DiagnosticLimitExceeded { limit: u64 },
+    #[error("deterministic import plan could not be serialized")]
+    PlanSerialization(#[source] serde_json::Error),
 }
 
 impl PrepareImportError {
@@ -135,6 +166,13 @@ impl PrepareImportError {
                 PrepareImportErrorCode::TotalReferenceLimitExceeded
             }
             Self::ReferenceTooLong { .. } => PrepareImportErrorCode::ReferenceTooLong,
+            Self::MediaReferenceLimitExceeded { .. } => {
+                PrepareImportErrorCode::MediaReferenceLimitExceeded
+            }
+            Self::TotalMediaReferenceLimitExceeded { .. } => {
+                PrepareImportErrorCode::TotalMediaReferenceLimitExceeded
+            }
+            Self::MediaReferenceTooLong { .. } => PrepareImportErrorCode::MediaReferenceTooLong,
             Self::TotalDocumentBytesLimitExceeded { .. } => {
                 PrepareImportErrorCode::TotalDocumentBytesLimitExceeded
             }
@@ -144,6 +182,7 @@ impl PrepareImportError {
             }
             Self::NestingDepthExceeded { .. } => PrepareImportErrorCode::NestingDepthExceeded,
             Self::DiagnosticLimitExceeded { .. } => PrepareImportErrorCode::DiagnosticLimitExceeded,
+            Self::PlanSerialization(_) => PrepareImportErrorCode::PlanSerialization,
         }
     }
 }
@@ -171,6 +210,7 @@ struct BlockWork {
     source_range: SourceRange,
     source_content_sha256: Sha256Digest,
     markdown: String,
+    source_lines: Vec<LogseqMarkdownSourceLine>,
     explicit_identity: ExplicitIdentity,
     task: Option<ImportTaskMapping>,
 }
@@ -244,7 +284,32 @@ pub fn prepare_import_with_limits(
     validate_diagnostic_limit(&diagnostics, limits)?;
     let identity_maps = build_identity_maps(&pages, &mut diagnostics);
     validate_diagnostic_limit(&diagnostics, limits)?;
-    let references = collect_references(&pages, &identity_maps, limits, &mut diagnostics)?;
+    let prepared_pages = pages.iter().map(finalize_page).collect::<Vec<_>>();
+    let media_inputs = build_media_inputs(&pages, &prepared_pages);
+    let media = collect_media(
+        &media_inputs,
+        manifest,
+        MediaLimits {
+            max_references: limits.max_media_references,
+            max_references_per_document: limits.max_media_references_per_document,
+            max_reference_bytes: limits.max_media_reference_bytes,
+            max_inline_decoded_bytes: limits.max_inline_media_bytes,
+            max_inline_image_width: limits.max_inline_image_width,
+            max_inline_image_height: limits.max_inline_image_height,
+            max_inline_image_pixels: limits.max_inline_image_pixels,
+            max_diagnostics: limits.max_diagnostics,
+        },
+        &mut diagnostics,
+    )
+    .map_err(map_media_error)?;
+    validate_diagnostic_limit(&diagnostics, limits)?;
+    let references = collect_references(
+        &pages,
+        &identity_maps,
+        &media.references,
+        limits,
+        &mut diagnostics,
+    )?;
     validate_diagnostic_limit(&diagnostics, limits)?;
 
     diagnostics.sort_by(|left, right| {
@@ -258,18 +323,96 @@ pub fn prepare_import_with_limits(
             .then(left.code.cmp(&right.code))
     });
 
-    let prepared_pages = pages.iter().map(finalize_page).collect::<Vec<_>>();
-    let provenance = build_provenance(identity, manifest, &prepared_pages);
-    let report = build_report(&prepared_pages, &references, &diagnostics);
+    let report = build_report(
+        &prepared_pages,
+        &references,
+        &media.references,
+        media.unreferenced_asset_count,
+        media.unreferenced_drawing_count,
+        &diagnostics,
+    );
+    let plan_sha256 = hash_prepared_plan(
+        identity,
+        manifest,
+        &prepared_pages,
+        &references,
+        &media.references,
+        &identity_maps,
+        &report,
+    )?;
+    let provenance = build_provenance(identity, manifest, &prepared_pages, plan_sha256);
 
     Ok(PreparedImport {
         identity,
         pages: prepared_pages,
         references,
+        media_references: media.references,
         identity_maps,
         provenance,
         report,
     })
+}
+
+fn build_media_inputs<'input, 'document: 'input>(
+    pages: &'input [PageWork<'document>],
+    prepared_pages: &'input [ImportPage],
+) -> Vec<MediaOwnerInput<'input>> {
+    let mut inputs = Vec::new();
+    for (page, prepared_page) in pages.iter().zip(prepared_pages) {
+        debug_assert_eq!(page.blocks.len(), prepared_page.blocks.len());
+        for (block, prepared_block) in page.blocks.iter().zip(&prepared_page.blocks) {
+            let owner = match &block.source {
+                ImportBlockSource::Preamble => ImportMediaOwner::Page {
+                    page_uuid: page.uuid,
+                },
+                ImportBlockSource::Structural { .. } => ImportMediaOwner::Block {
+                    block_uuid: block.target_uuid,
+                },
+            };
+            let removed_source_range = match block.explicit_identity {
+                ExplicitIdentity::Candidate { range, .. } => Some(range),
+                ExplicitIdentity::None | ExplicitIdentity::Rejected => None,
+            };
+            inputs.push(MediaOwnerInput {
+                relative_path: &page.document.relative_path,
+                document_source: &page.document.raw_markdown,
+                owner,
+                original_markdown: &block.markdown,
+                final_markdown: &prepared_block.markdown,
+                source_lines: &block.source_lines,
+                removed_source_range,
+            });
+        }
+    }
+    inputs
+}
+
+fn map_media_error(error: MediaCollectionError) -> PrepareImportError {
+    match error {
+        MediaCollectionError::InvalidSourceMapping { relative_path } => {
+            PrepareImportError::InvalidSourceAst { relative_path }
+        }
+        MediaCollectionError::ReferenceLimitExceeded {
+            relative_path,
+            limit,
+        } => PrepareImportError::MediaReferenceLimitExceeded {
+            relative_path,
+            limit,
+        },
+        MediaCollectionError::TotalReferenceLimitExceeded { limit } => {
+            PrepareImportError::TotalMediaReferenceLimitExceeded { limit }
+        }
+        MediaCollectionError::ReferenceTooLong {
+            relative_path,
+            limit_bytes,
+        } => PrepareImportError::MediaReferenceTooLong {
+            relative_path,
+            limit_bytes,
+        },
+        MediaCollectionError::DiagnosticLimitExceeded { limit } => {
+            PrepareImportError::DiagnosticLimitExceeded { limit }
+        }
+    }
 }
 
 fn validate_prepare_limits(
@@ -420,12 +563,30 @@ fn validate_source_ast(document: &ParsedLogseqDocument) -> Result<(), PrepareImp
     let mut sibling_ordinals = BTreeSet::new();
     let mut sibling_sequences = BTreeMap::<Option<u64>, Vec<u64>>::new();
 
+    if let Some(preamble) = &document.preamble
+        && (!range_is_valid(preamble.source_range, &document.raw_markdown)
+            || !validate_markdown_source_lines(
+                &preamble.markdown,
+                &preamble.source_lines,
+                preamble.source_range,
+                &document.raw_markdown,
+            ))
+    {
+        return Err(invalid());
+    }
+
     for (position, block) in document.blocks.iter().enumerate() {
         if index_to_position.insert(block.index, position).is_some()
             || !range_is_valid(block.source_range, &document.raw_markdown)
             || !range_is_valid(block.content_range, &document.raw_markdown)
             || block.content_range.start.byte_offset < block.source_range.start.byte_offset
             || block.content_range.end.byte_offset > block.source_range.end.byte_offset
+            || !validate_markdown_source_lines(
+                &block.markdown,
+                &block.source_lines,
+                block.source_range,
+                &document.raw_markdown,
+            )
             || !sibling_ordinals.insert((block.parent_index, block.sibling_index))
         {
             return Err(invalid());
@@ -483,6 +644,53 @@ fn validate_source_ast(document: &ParsedLogseqDocument) -> Result<(), PrepareImp
         }
     }
     Ok(())
+}
+
+fn validate_markdown_source_lines(
+    markdown: &str,
+    lines: &[LogseqMarkdownSourceLine],
+    owner_range: SourceRange,
+    source: &str,
+) -> bool {
+    if lines.is_empty() {
+        return false;
+    }
+    let mut expected_start = 0_u64;
+    for line in lines {
+        let Ok(markdown_start) = usize::try_from(line.markdown_start_byte) else {
+            return false;
+        };
+        let Ok(markdown_end) = usize::try_from(line.markdown_end_byte) else {
+            return false;
+        };
+        let Ok(source_start) = usize::try_from(line.source_range.start.byte_offset) else {
+            return false;
+        };
+        let Ok(source_end) = usize::try_from(line.source_range.end.byte_offset) else {
+            return false;
+        };
+        if line.markdown_start_byte != expected_start
+            || markdown_start > markdown_end
+            || markdown_end > markdown.len()
+            || !markdown.is_char_boundary(markdown_start)
+            || !markdown.is_char_boundary(markdown_end)
+            || !range_is_valid(line.source_range, source)
+            || line.source_range.start.byte_offset < owner_range.start.byte_offset
+            || line.source_range.end.byte_offset > owner_range.end.byte_offset
+            || source_end.checked_sub(source_start) != Some(markdown_end - markdown_start)
+            || source[source_start..source_end] != markdown[markdown_start..markdown_end]
+        {
+            return false;
+        }
+        expected_start = match line.markdown_end_byte.checked_add(1) {
+            Some(start) => start,
+            None => return false,
+        };
+    }
+    lines.last().is_some_and(|line| {
+        usize::try_from(line.markdown_end_byte).ok() == Some(markdown.len())
+            && markdown.split('\n').count() == lines.len()
+    })
 }
 
 fn range_is_valid(range: SourceRange, source: &str) -> bool {
@@ -601,6 +809,7 @@ fn build_page_work<'document>(
             source_range: preamble.source_range,
             source_content_sha256: content_hash,
             markdown: preamble.markdown.clone(),
+            source_lines: preamble.source_lines.clone(),
             explicit_identity: ExplicitIdentity::None,
             task: None,
         });
@@ -642,6 +851,7 @@ fn build_page_work<'document>(
             source_range: block.source_range,
             source_content_sha256: content_hash,
             markdown: block.markdown.clone(),
+            source_lines: block.source_lines.clone(),
             explicit_identity,
             task,
         });
@@ -1103,6 +1313,7 @@ fn build_identity_maps(
 fn collect_references(
     pages: &[PageWork<'_>],
     identities: &ImportIdentityMaps,
+    media_references: &[ImportMediaReference],
     limits: &PrepareLimits,
     diagnostics: &mut Vec<ImportDiagnostic>,
 ) -> Result<Vec<ImportReference>, PrepareImportError> {
@@ -1110,7 +1321,19 @@ fn collect_references(
     for page in pages {
         let mut source_index =
             SourceCursor::new(&page.document.raw_markdown, &page.document.relative_path);
-        let skipped_ranges = fenced_ranges(page.document);
+        let mut skipped_ranges = fenced_ranges(page.document);
+        skipped_ranges.extend(
+            media_references
+                .iter()
+                .filter(|reference| reference.relative_path == page.document.relative_path)
+                .map(|reference| {
+                    (
+                        reference.source_range.start.byte_offset,
+                        reference.source_range.end.byte_offset,
+                    )
+                }),
+        );
+        skipped_ranges.sort_unstable();
         let mut document_reference_count = 0_u64;
         for block in &page.blocks {
             scan_reference_fragment(
@@ -1598,9 +1821,11 @@ fn build_provenance(
     identity: IdentityContext,
     manifest: &GraphManifest,
     pages: &[ImportPage],
+    plan_sha256: Sha256Digest,
 ) -> ImportProvenance {
     ImportProvenance {
         planner_version: IMPORT_PLANNER_VERSION,
+        plan_sha256,
         source_manifest: manifest.clone(),
         identity_context: identity,
         page_mappings: pages
@@ -1629,9 +1854,53 @@ fn build_provenance(
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreparedPlanHashInput<'input> {
+    planner_version: u32,
+    identity: IdentityContext,
+    source_manifest: &'input GraphManifest,
+    pages: &'input [ImportPage],
+    references: &'input [ImportReference],
+    media_references: &'input [ImportMediaReference],
+    identity_maps: &'input ImportIdentityMaps,
+    report: &'input ImportReport,
+}
+
+fn hash_prepared_plan(
+    identity: IdentityContext,
+    manifest: &GraphManifest,
+    pages: &[ImportPage],
+    references: &[ImportReference],
+    media_references: &[ImportMediaReference],
+    identity_maps: &ImportIdentityMaps,
+    report: &ImportReport,
+) -> Result<Sha256Digest, PrepareImportError> {
+    const DOMAIN: &[u8] = b"notes-rs/import/logseq/prepared-plan/v2\0";
+    let canonical = serde_json::to_vec(&PreparedPlanHashInput {
+        planner_version: IMPORT_PLANNER_VERSION,
+        identity,
+        source_manifest: manifest,
+        pages,
+        references,
+        media_references,
+        identity_maps,
+        report,
+    })
+    .map_err(PrepareImportError::PlanSerialization)?;
+    let mut hasher = Sha256::new();
+    hasher.update(DOMAIN);
+    hasher.update((canonical.len() as u64).to_be_bytes());
+    hasher.update(canonical);
+    Ok(Sha256Digest::from_bytes(hasher.finalize().into()))
+}
+
 fn build_report(
     pages: &[ImportPage],
     references: &[ImportReference],
+    media_references: &[ImportMediaReference],
+    unreferenced_asset_count: u64,
+    unreferenced_drawing_count: u64,
     diagnostics: &[ImportDiagnostic],
 ) -> ImportReport {
     let blocks = pages
@@ -1662,6 +1931,65 @@ fn build_report(
         reference_count: references.len() as u64,
         resolved_reference_count,
         unresolved_reference_count: references.len() as u64 - resolved_reference_count,
+        media_reference_count: media_references.len() as u64,
+        markdown_image_count: media_references
+            .iter()
+            .filter(|reference| reference.kind == ImportMediaKind::MarkdownImage)
+            .count() as u64,
+        legacy_excalidraw_count: media_references
+            .iter()
+            .filter(|reference| reference.kind == ImportMediaKind::LegacyExcalidraw)
+            .count() as u64,
+        local_media_reference_count: media_references
+            .iter()
+            .filter(|reference| {
+                matches!(
+                    reference.resolution,
+                    ImportMediaResolution::LocalManifest { .. }
+                )
+            })
+            .count() as u64,
+        inline_media_reference_count: media_references
+            .iter()
+            .filter(|reference| {
+                matches!(
+                    reference.resolution,
+                    ImportMediaResolution::InlineData { .. }
+                )
+            })
+            .count() as u64,
+        blocked_remote_media_reference_count: media_references
+            .iter()
+            .filter(|reference| {
+                matches!(
+                    reference.resolution,
+                    ImportMediaResolution::RemoteBlocked { .. }
+                )
+            })
+            .count() as u64,
+        missing_media_reference_count: media_references
+            .iter()
+            .filter(|reference| {
+                matches!(reference.resolution, ImportMediaResolution::Missing { .. })
+            })
+            .count() as u64,
+        blocked_unsafe_media_reference_count: media_references
+            .iter()
+            .filter(|reference| {
+                matches!(reference.resolution, ImportMediaResolution::Blocked { .. })
+            })
+            .count() as u64,
+        unsupported_media_reference_count: media_references
+            .iter()
+            .filter(|reference| {
+                matches!(
+                    reference.resolution,
+                    ImportMediaResolution::Unsupported { .. }
+                )
+            })
+            .count() as u64,
+        unreferenced_asset_count,
+        unreferenced_drawing_count,
         preserved_block_uuid_count: blocks
             .iter()
             .filter(|block| {

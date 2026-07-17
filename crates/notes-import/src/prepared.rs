@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::{GraphManifest, ImportDiagnostic, LogseqJournalDate, Sha256Digest, SourceRange};
 
-pub const IMPORT_PLANNER_VERSION: u32 = 1;
+pub const IMPORT_PLANNER_VERSION: u32 = 2;
 
 /// Durable identity inputs owned by the caller, never inferred from a path or
 /// from the current source manifest.
@@ -22,9 +22,130 @@ pub struct PreparedImport {
     pub identity: IdentityContext,
     pub pages: Vec<ImportPage>,
     pub references: Vec<ImportReference>,
+    pub media_references: Vec<ImportMediaReference>,
     pub identity_maps: ImportIdentityMaps,
     pub provenance: ImportProvenance,
     pub report: ImportReport,
+}
+
+/// Attachment ownership is intentionally distinct from ordinary reference
+/// ownership. Preamble media belongs to its page even though preamble text is
+/// represented by a synthetic block in the prepared page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ImportMediaOwner {
+    Page { page_uuid: Uuid },
+    Block { block_uuid: Uuid },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportMediaKind {
+    MarkdownImage,
+    LegacyExcalidraw,
+}
+
+/// Half-open byte range in the final owner Markdown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportMarkdownRange {
+    pub start_byte: u64,
+    pub end_byte: u64,
+}
+
+/// D1 deliberately supports the two inline formats present in the audited
+/// graph. Other data-image MIME types remain typed `Unsupported` until staging
+/// gains matching byte validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportInlineImageMime {
+    Png,
+    Jpeg,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportRemoteMediaScheme {
+    Http,
+    Https,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportMediaBlockedReason {
+    UnsafeScheme,
+    ProtocolRelative,
+    AbsolutePath,
+    WindowsOrUncPath,
+    Backslash,
+    ControlCharacter,
+    QueryOrFragment,
+    MalformedPercentEncoding,
+    InvalidPercentEncodedUtf8,
+    PathEscape,
+    InvalidRelativePath,
+    ManifestKindMismatch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportMediaUnsupportedReason {
+    InvalidDataUrl,
+    InlineMime,
+    InlineEncoding,
+    InlineTooLarge,
+    InlineSignatureMismatch,
+    InlineImageDecode,
+    InlineDimensions,
+    InlinePixelLimit,
+    InlineFragment,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ImportMediaResolution {
+    LocalManifest {
+        relative_path: String,
+        size_bytes: u64,
+        sha256: Sha256Digest,
+    },
+    InlineData {
+        /// Encoded bytes remain in `owner_markdown_spelling`. A later
+        /// materializer must parse that exact token and revalidate both fields
+        /// below before installing a blob; decoded bytes are never retained in
+        /// this pure plan.
+        mime: ImportInlineImageMime,
+        decoded_size_bytes: u64,
+        decoded_sha256: Sha256Digest,
+    },
+    RemoteBlocked {
+        scheme: ImportRemoteMediaScheme,
+    },
+    Missing {
+        attempted_relative_path: String,
+    },
+    Blocked {
+        reason: ImportMediaBlockedReason,
+    },
+    Unsupported {
+        reason: ImportMediaUnsupportedReason,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportMediaReference {
+    /// Source document path, not the referenced media path.
+    pub relative_path: String,
+    pub owner: ImportMediaOwner,
+    pub kind: ImportMediaKind,
+    /// Exact original source token, including original indentation/newlines.
+    pub raw_spelling: String,
+    /// Exact token expected at `owner_markdown_range` before a later rewrite.
+    pub owner_markdown_spelling: String,
+    pub owner_markdown_range: ImportMarkdownRange,
+    pub source_range: SourceRange,
+    pub resolution: ImportMediaResolution,
 }
 
 impl PreparedImport {
@@ -217,6 +338,9 @@ pub enum ImportReferenceUnresolvedReason {
 #[serde(rename_all = "camelCase")]
 pub struct ImportProvenance {
     pub planner_version: u32,
+    /// Digest of the complete deterministic plan payload, including media
+    /// references and the dry-run report, but excluding this provenance field.
+    pub plan_sha256: Sha256Digest,
     /// Full exact immutable source snapshot, not merely its digest.
     pub source_manifest: GraphManifest,
     pub identity_context: IdentityContext,
@@ -252,6 +376,17 @@ pub struct ImportReport {
     pub reference_count: u64,
     pub resolved_reference_count: u64,
     pub unresolved_reference_count: u64,
+    pub media_reference_count: u64,
+    pub markdown_image_count: u64,
+    pub legacy_excalidraw_count: u64,
+    pub local_media_reference_count: u64,
+    pub inline_media_reference_count: u64,
+    pub blocked_remote_media_reference_count: u64,
+    pub missing_media_reference_count: u64,
+    pub blocked_unsafe_media_reference_count: u64,
+    pub unsupported_media_reference_count: u64,
+    pub unreferenced_asset_count: u64,
+    pub unreferenced_drawing_count: u64,
     pub preserved_block_uuid_count: u64,
     pub derived_block_uuid_count: u64,
     pub blocking_diagnostic_count: u64,

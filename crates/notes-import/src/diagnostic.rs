@@ -35,6 +35,10 @@ pub enum DiagnosticCode {
     InvalidBlockReference,
     UnresolvedBlockReference,
     UnsupportedNestedWikilink,
+    MissingMediaSource,
+    RemoteMediaBlocked,
+    UnsafeMediaSource,
+    UnsupportedInlineMedia,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

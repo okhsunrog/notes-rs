@@ -7,6 +7,7 @@
 mod config;
 mod diagnostic;
 mod manifest;
+mod media;
 mod parser;
 mod prepare;
 mod prepared;
@@ -30,11 +31,14 @@ pub use prepare::{
 };
 pub use prepared::{
     IMPORT_PLANNER_VERSION, IdentityContext, ImportBlock, ImportBlockIdentity, ImportBlockMapping,
-    ImportBlockProvenance, ImportBlockSource, ImportIdentityMaps, ImportPage, ImportPageKind,
-    ImportPageProvenance, ImportPageSource, ImportProvenance, ImportReference, ImportReferenceKind,
-    ImportReferenceOwner, ImportReferenceResolution, ImportReferenceTargetKind,
-    ImportReferenceUnresolvedReason, ImportReport, ImportRerunDecision, ImportTaskMapping,
-    ImportTaskState, LogseqTaskMarker, PreparedImport, compare_import_provenance,
+    ImportBlockProvenance, ImportBlockSource, ImportIdentityMaps, ImportInlineImageMime,
+    ImportMarkdownRange, ImportMediaBlockedReason, ImportMediaKind, ImportMediaOwner,
+    ImportMediaReference, ImportMediaResolution, ImportMediaUnsupportedReason, ImportPage,
+    ImportPageKind, ImportPageProvenance, ImportPageSource, ImportProvenance, ImportReference,
+    ImportReferenceKind, ImportReferenceOwner, ImportReferenceResolution,
+    ImportReferenceTargetKind, ImportReferenceUnresolvedReason, ImportRemoteMediaScheme,
+    ImportReport, ImportRerunDecision, ImportTaskMapping, ImportTaskState, LogseqTaskMarker,
+    PreparedImport, compare_import_provenance,
 };
 pub use scanner::{
     GraphScanReport, ManifestVerification, ScanError, ScanErrorCode, ScanLimits, scan_logseq_graph,
@@ -42,5 +46,6 @@ pub use scanner::{
 };
 pub use source::{
     LogseqConstruct, LogseqConstructKind, LogseqConstructOwner, LogseqDocumentSource,
-    LogseqJournalDate, LogseqPreamble, LogseqSourceBlock, ParsedLogseqDocument,
+    LogseqJournalDate, LogseqMarkdownSourceLine, LogseqPreamble, LogseqSourceBlock,
+    ParsedLogseqDocument,
 };

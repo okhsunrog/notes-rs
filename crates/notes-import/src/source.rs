@@ -57,6 +57,11 @@ pub struct LogseqPreamble {
     /// Exact preamble bytes as UTF-8 text.
     pub raw_source: String,
     pub source_range: SourceRange,
+    /// Exact per-line mapping from normalized Markdown bytes back to the
+    /// validated source. Newlines are intentionally not mapped: syntax ranges
+    /// begin and end on line content, and a multi-line range is reconstructed
+    /// from its mapped boundary lines.
+    pub source_lines: Vec<LogseqMarkdownSourceLine>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -76,6 +81,22 @@ pub struct LogseqSourceBlock {
     pub raw_source: String,
     pub source_range: SourceRange,
     pub content_range: SourceRange,
+    /// Exact per-line mapping for `markdown`; structural markers and
+    /// continuation indentation are outside the mapped source ranges.
+    pub source_lines: Vec<LogseqMarkdownSourceLine>,
+}
+
+/// One normalized Markdown line and the exact source text from which it came.
+///
+/// The byte range is owner-local and half-open. Its source range has identical
+/// UTF-8 bytes, so callers can map parser offsets without assuming one global
+/// normalization delta.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogseqMarkdownSourceLine {
+    pub markdown_start_byte: u64,
+    pub markdown_end_byte: u64,
+    pub source_range: SourceRange,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

@@ -7,8 +7,8 @@ use thiserror::Error;
 use crate::{
     DiagnosticCode, DocumentFormat, FileNameFormat, ImportDiagnostic, LogseqConfig,
     LogseqConstruct, LogseqConstructKind, LogseqConstructOwner, LogseqDocumentSource,
-    LogseqJournalDate, LogseqPreamble, LogseqSourceBlock, ManifestEntry, ParsedLogseqDocument,
-    Sha256Digest, SourceKind, SourcePosition, SourceRange,
+    LogseqJournalDate, LogseqMarkdownSourceLine, LogseqPreamble, LogseqSourceBlock, ManifestEntry,
+    ParsedLogseqDocument, Sha256Digest, SourceKind, SourcePosition, SourceRange,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -501,6 +501,7 @@ impl<'source> SourceParser<'source> {
         let source_range = range_to_raw_end(self.source, &line, line.start);
         let content_start = line.start + source_prefix_bytes + structural.body_offset;
         let content_range = range_to_raw_end(self.source, &line, content_start);
+        let markdown_end_byte = structural.body.len() as u64;
         self.blocks.push(BlockBuilder {
             index,
             parent_index,
@@ -512,6 +513,16 @@ impl<'source> SourceParser<'source> {
             raw_source: self.source[line.start..line.end].to_owned(),
             source_range,
             content_range,
+            source_lines: vec![LogseqMarkdownSourceLine {
+                markdown_start_byte: 0,
+                markdown_end_byte,
+                source_range: line_range(
+                    self.source,
+                    &line,
+                    content_start,
+                    content_start + structural.body.len(),
+                ),
+            }],
         });
         self.ancestors.push(Ancestor {
             indentation_columns,
@@ -540,7 +551,25 @@ impl<'source> SourceParser<'source> {
                     && !block.indentation.is_empty()
                     && !line.text.trim().is_empty()
                     && !normalized.canonical;
+                let markdown_start_byte = block.source_lines.last().map_or(0, |line| {
+                    line.markdown_end_byte
+                        .checked_add(1)
+                        .expect("normalized Markdown length fits in u64")
+                });
+                let markdown_end_byte = markdown_start_byte
+                    .checked_add(normalized.text.len() as u64)
+                    .expect("normalized Markdown length fits in u64");
                 block.markdown_lines.push(normalized.text.to_owned());
+                block.source_lines.push(LogseqMarkdownSourceLine {
+                    markdown_start_byte,
+                    markdown_end_byte,
+                    source_range: line_range(
+                        self.source,
+                        &line,
+                        line.start + normalized.stripped_bytes,
+                        line.start + normalized.stripped_bytes + normalized.text.len(),
+                    ),
+                });
                 block
                     .raw_source
                     .push_str(&self.source[line.start..line.end]);
@@ -572,8 +601,27 @@ impl<'source> SourceParser<'source> {
                 markdown_lines: Vec::new(),
                 raw_source: String::new(),
                 source_range: range_to_raw_end(self.source, &line, line.start),
+                source_lines: Vec::new(),
             });
+            let markdown_start_byte = preamble.source_lines.last().map_or(0, |line| {
+                line.markdown_end_byte
+                    .checked_add(1)
+                    .expect("normalized Markdown length fits in u64")
+            });
+            let markdown_end_byte = markdown_start_byte
+                .checked_add(syntax_text.len() as u64)
+                .expect("normalized Markdown length fits in u64");
             preamble.markdown_lines.push(syntax_text.to_owned());
+            preamble.source_lines.push(LogseqMarkdownSourceLine {
+                markdown_start_byte,
+                markdown_end_byte,
+                source_range: line_range(
+                    self.source,
+                    &line,
+                    line.start + source_prefix_bytes,
+                    line.start + source_prefix_bytes + syntax_text.len(),
+                ),
+            });
             preamble
                 .raw_source
                 .push_str(&self.source[line.start..line.end]);
@@ -792,6 +840,7 @@ struct PreambleBuilder {
     markdown_lines: Vec<String>,
     raw_source: String,
     source_range: SourceRange,
+    source_lines: Vec<LogseqMarkdownSourceLine>,
 }
 
 impl PreambleBuilder {
@@ -800,6 +849,7 @@ impl PreambleBuilder {
             markdown: self.markdown_lines.join("\n"),
             raw_source: self.raw_source,
             source_range: self.source_range,
+            source_lines: self.source_lines,
         }
     }
 }
@@ -816,6 +866,7 @@ struct BlockBuilder {
     raw_source: String,
     source_range: SourceRange,
     content_range: SourceRange,
+    source_lines: Vec<LogseqMarkdownSourceLine>,
 }
 
 impl BlockBuilder {
@@ -831,6 +882,7 @@ impl BlockBuilder {
             raw_source: self.raw_source,
             source_range: self.source_range,
             content_range: self.content_range,
+            source_lines: self.source_lines,
         }
     }
 }
