@@ -177,11 +177,13 @@ mod tests {
         let device_id = uuid::Uuid::from_u128(1);
         Op {
             op_id: uuid::Uuid::from_u128(index + 10),
+            workspace_uuid: uuid::Uuid::from_u128(0xC0DE),
             device_id,
             hlc: Hlc::new(index as u64, 0, device_id),
             format_version: FORMAT_VERSION,
             kind: OpKind::PageCreate(PageCreate {
                 uuid: uuid::Uuid::from_u128(index + 100),
+                kind: notes_core::PageKind::Note,
                 title: Some(format!("Page {index}")),
                 layout: PageLayout::Outline,
                 created_at: index as i64,

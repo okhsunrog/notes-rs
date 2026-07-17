@@ -12,6 +12,7 @@ pub struct SequencedOp {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerInfo {
+    pub workspace_uuid: uuid::Uuid,
     pub ai_enabled: bool,
 }
 

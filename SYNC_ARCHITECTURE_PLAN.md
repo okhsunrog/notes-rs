@@ -159,13 +159,14 @@ tables, views, conversion code, and reset migration counters are not retained.
 
 ## 4. Operation and apply model
 
-The current operation format is version 2. An envelope contains:
+The current operation format is version 4. An envelope contains:
 
 ```text
 op_id: UUIDv7
+workspace_uuid: UUID
 device_id: UUID
 hlc: hybrid logical clock
-format_version: 2
+format_version: 4
 kind + typed payload
 ```
 
@@ -173,7 +174,7 @@ The closed operation set is:
 
 | Domain     | Operations                                                                            |
 | ---------- | ------------------------------------------------------------------------------------- |
-| Page       | `page_create`, `page_set_title`, `page_set_view`, `page_delete`                       |
+| Page       | `page_create`, `page_set_title`, `page_set_layout`, `page_delete`                     |
 | Block      | `block_create`, `block_set_markdown`, `block_set_style`, `block_move`, `block_delete` |
 | Attachment | `attachment_add`, `attachment_remove`                                                 |
 
@@ -185,7 +186,8 @@ All local and remote operations use the same apply engine. It provides:
 
 - idempotency through `applied_ops` and operation UUID;
 - one global object kind per UUID, enforced both at the apply boundary and by SQLite triggers;
-- per-field HLC/LWW clocks for page title/view and block Markdown/style/structure;
+- immutable page kind/date identities retained after deletion;
+- per-field HLC/LWW clocks for page title/layout and block Markdown/style/structure;
 - page/block tombstones and attachment presence intents;
 - incarnation boundaries: a newer `PageCreate` cannot accidentally revive blocks or parent intents
   from an older deleted incarnation, regardless of delivery order;
@@ -200,11 +202,12 @@ force a full AI reindex. History is device-local and is cleared by whole-workspa
 
 ## 5. Snapshots and sync protocol
 
-`SyncSnapshot` is also typed and UUID-first. It contains pages, blocks, block-structure intents,
-typed page/block tombstones, attachment intents, format version, and server sequence. There is no
-generic-node compatibility payload. Import validates UUID uniqueness and kind separation, page and
-parent ownership, structure-intent coherence, attachment identity/ownership, and live-versus-
-tombstone exclusivity before replacing any local state.
+`SyncSnapshot` is also typed and UUID-first. It contains the workspace UUID, immutable page
+identities, pages, blocks, block-structure intents, typed page/block tombstones, attachment intents,
+format version, and server sequence. There is no generic-node compatibility payload. Import
+validates UUID uniqueness and kind separation, deterministic Journal identity, page and parent
+ownership, structure-intent coherence, attachment identity/ownership, and live-versus-tombstone
+exclusivity before replacing any local state.
 
 The server exposes:
 
@@ -321,7 +324,8 @@ reverse proxy. Deployment produces a static musl binary rather than a container 
 | Typed `pages` / `blocks` baseline with no generic nodes                | Complete                                    |
 | Typed block styles and provisional three-way page view                 | Complete as a prototype                     |
 | Accepted continuous editor and pane-local view architecture            | Design complete; implementation pending     |
-| Typed Journal identity, surfaces, and Logseq conversion boundary       | Design complete; implementation pending     |
+| Typed Journal/workspace identity and sync/archive invariants           | Complete                                    |
+| Journal product surfaces and Logseq conversion boundary                | In progress                                 |
 | UUIDv7 operations, HLC/LWW apply, tombstones, deterministic structure  | Complete                                    |
 | Action-based inverse-operation undo/redo                               | Complete                                    |
 | Local FTS, refs, backlinks, graph, attachments, archives               | Complete                                    |

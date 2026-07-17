@@ -18,8 +18,9 @@ pub use notes_core::operation::{
     BlockSetStyle, PageCreate, PageDelete, PageSetLayout, PageSetTitle,
 };
 pub use notes_core::{
-    ApplyOutcome, AttachmentOwner, BlockStyle, ObjectKind, Op, OpKind, OrderKey, Origin,
-    PageLayout, SnapshotAttachment, SnapshotBlock, SnapshotPage, SnapshotTombstone, SyncSnapshot,
-    acknowledge_server_op, apply, apply_batch, apply_sequenced, configure_sync,
-    export_sync_snapshot, import_sync_snapshot, pending_outbox, sync_cursor,
+    ApplyOutcome, AttachmentOwner, BlockStyle, JournalDate, ObjectKind, Op, OpKind, OrderKey,
+    Origin, PageKind, PageLayout, SnapshotAttachment, SnapshotBlock, SnapshotPage,
+    SnapshotPageIdentity, SnapshotTombstone, SyncSnapshot, acknowledge_server_op, apply,
+    apply_batch, apply_sequenced, configure_sync, export_sync_snapshot, import_sync_snapshot,
+    pending_outbox, sync_cursor,
 };

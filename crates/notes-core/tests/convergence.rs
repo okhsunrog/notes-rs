@@ -8,6 +8,8 @@ use notes_core::{
 };
 use proptest::prelude::*;
 
+const TEST_WORKSPACE_UUID: uuid::Uuid = uuid::Uuid::from_u128(0xC0DE);
+
 #[derive(Debug, Clone, PartialEq)]
 struct SourceState {
     pages: Vec<PageState>,
@@ -40,6 +42,16 @@ async fn database() -> (tempfile::TempDir, Connection) {
     let connection = db::open(directory.path().join("notes.db"))
         .await
         .expect("open test database");
+    connection
+        .call(|database| {
+            database.execute(
+                "UPDATE workspace SET uuid = ?1 WHERE singleton = 1",
+                [TEST_WORKSPACE_UUID],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("set deterministic workspace");
     (directory, connection)
 }
 
@@ -50,6 +62,7 @@ fn op(index: usize, wall_ms: u64, kind: OpKind) -> Op {
             &uuid::Uuid::NAMESPACE_OID,
             format!("convergence-op-{index}").as_bytes(),
         ),
+        workspace_uuid: TEST_WORKSPACE_UUID,
         device_id,
         hlc: Hlc::new(wall_ms, 0, device_id),
         format_version: notes_core::operation::FORMAT_VERSION,
@@ -210,7 +223,8 @@ proptest! {
             let initial = vec![
                 op(0, 1_000, OpKind::PageCreate(PageCreate {
                     uuid: page,
-                    title: Some("Root".into()),
+                    kind: notes_core::PageKind::Note,
+title: Some("Root".into()),
                     layout: PageLayout::Outline,
                     created_at: 1,
                 })),

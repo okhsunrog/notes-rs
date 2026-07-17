@@ -91,6 +91,94 @@ string_enum! {
     }
 }
 
+/// A calendar day without a timezone or time-of-day component.
+/// The private canonical string keeps the Tauri/Specta wire type simple while
+/// construction, serde, and SQLite reads all pass through strict validation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, specta::Type)]
+#[serde(transparent)]
+pub struct JournalDate(String);
+
+impl JournalDate {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for JournalDate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl FromStr for JournalDate {
+    type Err = ParseEnumError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let bytes = value.as_bytes();
+        let has_canonical_shape = bytes.len() == 10
+            && bytes[4] == b'-'
+            && bytes[7] == b'-'
+            && bytes
+                .iter()
+                .enumerate()
+                .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit());
+        let valid_date = has_canonical_shape
+            && chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                .is_ok_and(|date| date.format("%Y-%m-%d").to_string() == value);
+        if valid_date {
+            Ok(Self(value.to_owned()))
+        } else {
+            Err(ParseEnumError {
+                type_name: "JournalDate",
+                value: value.to_owned(),
+            })
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for JournalDate {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl rusqlite::types::ToSql for JournalDate {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(self.0.as_str().into())
+    }
+}
+
+impl rusqlite::types::FromSql for JournalDate {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        value
+            .as_str()?
+            .parse()
+            .map_err(|error| rusqlite::types::FromSqlError::Other(Box::new(error)))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, specta::Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PageKind {
+    Note,
+    Journal { date: JournalDate },
+}
+
+impl PageKind {
+    pub const fn is_journal(&self) -> bool {
+        matches!(self, Self::Journal { .. })
+    }
+}
+
+pub fn journal_page_uuid(workspace_uuid: uuid::Uuid, date: &JournalDate) -> uuid::Uuid {
+    uuid::Uuid::new_v5(&workspace_uuid, date.as_str().as_bytes())
+}
+
 string_enum! {
     #[serde(rename_all = "lowercase")]
     pub enum ObjectKind {
@@ -257,5 +345,48 @@ mod tests {
                 serde_json::Value::String(style.as_str().into())
             );
         }
+    }
+
+    #[test]
+    fn journal_dates_are_strict_civil_iso_dates() {
+        for valid in ["2024-02-29", "2026-07-17", "9999-12-31"] {
+            let date = valid.parse::<JournalDate>().expect("valid journal date");
+            assert_eq!(date.as_str(), valid);
+            assert_eq!(
+                serde_json::to_string(&date).unwrap(),
+                format!("\"{valid}\"")
+            );
+        }
+        for invalid in [
+            "2023-02-29",
+            "2026-2-03",
+            "2026_07_17",
+            "2026-13-01",
+            " 2026-07-17",
+        ] {
+            assert!(
+                invalid.parse::<JournalDate>().is_err(),
+                "accepted {invalid}"
+            );
+            assert!(serde_json::from_str::<JournalDate>(&format!("\"{invalid}\"")).is_err());
+        }
+    }
+
+    #[test]
+    fn journal_page_identity_depends_only_on_workspace_and_date() {
+        let workspace = uuid::Uuid::from_u128(1);
+        let date = "2026-07-17".parse::<JournalDate>().unwrap();
+        assert_eq!(
+            journal_page_uuid(workspace, &date),
+            journal_page_uuid(workspace, &date)
+        );
+        assert_eq!(
+            journal_page_uuid(workspace, &date),
+            uuid::Uuid::parse_str("17ed8d52-fb7d-5c84-a2f4-1bb93bf969d1").unwrap()
+        );
+        assert_ne!(
+            journal_page_uuid(workspace, &date),
+            journal_page_uuid(uuid::Uuid::from_u128(2), &date)
+        );
     }
 }

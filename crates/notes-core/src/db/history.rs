@@ -153,11 +153,22 @@ fn capture_page(
 ) -> rusqlite::Result<Option<PageCreate>> {
     database
         .query_row(
-            "SELECT title, layout, created_at FROM pages WHERE uuid = ?1",
+            "SELECT title, layout, created_at,
+                    (SELECT page_kind FROM page_identities WHERE page_uuid = pages.uuid),
+                    (SELECT journal_date FROM page_identities WHERE page_uuid = pages.uuid)
+               FROM pages WHERE uuid = ?1",
             [uuid],
             |row| {
+                let page_kind = row.get::<_, String>(3)?;
+                let journal_date = row.get::<_, Option<crate::model::JournalDate>>(4)?;
+                let kind = match (page_kind.as_str(), journal_date) {
+                    ("note", None) => PageKind::Note,
+                    ("journal", Some(date)) => PageKind::Journal { date },
+                    _ => return Err(rusqlite::Error::InvalidQuery),
+                };
                 Ok(PageCreate {
                     uuid,
+                    kind,
                     title: row.get(0)?,
                     layout: row.get(1)?,
                     created_at: row.get(2)?,

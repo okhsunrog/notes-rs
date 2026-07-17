@@ -53,6 +53,7 @@ pub async fn create_page(conn: &Connection, title: String) -> Result<Page> {
         "create page",
         vec![OpKind::PageCreate(PageCreate {
             uuid,
+            kind: PageKind::Note,
             title: Some(title),
             layout: PageLayout::Outline,
             created_at: chrono::Utc::now().timestamp(),
@@ -79,6 +80,11 @@ pub async fn rename_page(
     let page = get_page(conn, uuid)
         .await?
         .ok_or_else(|| crate::CoreError::not_found("page not found"))?;
+    if page.kind.is_journal() {
+        return Err(
+            crate::CoreError::invalid("journal page titles are derived from their date").into(),
+        );
+    }
     let title = title
         .map(|title| title.trim().to_owned())
         .filter(|title| !title.is_empty());
@@ -131,6 +137,7 @@ pub async fn create_note(conn: &Connection) -> Result<CreatedNote> {
         vec![
             OpKind::PageCreate(PageCreate {
                 uuid: page_uuid,
+                kind: PageKind::Note,
                 title: None,
                 layout: PageLayout::Outline,
                 created_at: now,

@@ -33,6 +33,7 @@ export const commands = {
 	createNote: () => typedError<CreatedNote, CommandError>(__TAURI_INVOKE("create_note")),
 	getPage: (uuid: string) => typedError<{
 	uuid: string,
+	kind: PageKind,
 	title: string | null,
 	layout: PageLayout,
 	createdAt: number,
@@ -53,6 +54,7 @@ export const commands = {
 	splitBlock: (uuid: string, parts: BlockContent[]) => typedError<Block[], CommandError>(__TAURI_INVOKE("split_block", { uuid, parts })),
 	getContainingPage: (blockUuid: string) => typedError<{
 	uuid: string,
+	kind: PageKind,
 	title: string | null,
 	layout: PageLayout,
 	createdAt: number,
@@ -92,6 +94,7 @@ export const commands = {
 	getOrCreatePageByTitle: (title: string) => typedError<Page, CommandError>(__TAURI_INVOKE("get_or_create_page_by_title", { title })),
 	getPageByTitle: (title: string) => typedError<{
 	uuid: string,
+	kind: PageKind,
 	title: string | null,
 	layout: PageLayout,
 	createdAt: number,
@@ -258,6 +261,13 @@ export type HistoryStatus = {
 	redoCount: number,
 };
 
+/**
+ *  A calendar day without a timezone or time-of-day component.
+ *  The private canonical string keeps the Tauri/Specta wire type simple while
+ *  construction, serde, and SQLite reads all pass through strict validation.
+ */
+export type JournalDate = string;
+
 export type MobileSystemInfo = {
 	deviceName: string,
 	safeArea: SafeAreaInsets,
@@ -273,11 +283,14 @@ export type OrderKey = string;
 
 export type Page = {
 	uuid: string,
+	kind: PageKind,
 	title: string | null,
 	layout: PageLayout,
 	createdAt: number,
 	updatedAt: number,
 };
+
+export type PageKind = { kind: "note" } | { kind: "journal"; date: JournalDate };
 
 /**
  *  The durable structural layout of a page. Reading is pane-local

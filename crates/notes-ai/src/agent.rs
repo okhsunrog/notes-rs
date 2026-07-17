@@ -955,6 +955,7 @@ mod tests {
         let candidates = vec![
             Content::Page(Page {
                 uuid: uuid::Uuid::from_u128(1),
+                kind: notes_core::PageKind::Note,
                 title: Some("First note".into()),
                 layout: notes_core::PageLayout::Outline,
                 created_at: 0,
@@ -962,6 +963,7 @@ mod tests {
             }),
             Content::Page(Page {
                 uuid: uuid::Uuid::from_u128(2),
+                kind: notes_core::PageKind::Note,
                 title: Some("Second note".into()),
                 layout: notes_core::PageLayout::Outline,
                 created_at: 0,

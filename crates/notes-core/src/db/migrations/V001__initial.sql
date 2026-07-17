@@ -1,3 +1,8 @@
+CREATE TABLE workspace (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  uuid BLOB UNIQUE NOT NULL CHECK (length(uuid) = 16)
+);
+
 CREATE TABLE pages (
   id INTEGER PRIMARY KEY,
   uuid BLOB UNIQUE NOT NULL CHECK (length(uuid) = 16),
@@ -9,11 +14,33 @@ CREATE TABLE pages (
   layout_hlc TEXT,
   existence_hlc TEXT NOT NULL,
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  FOREIGN KEY(uuid) REFERENCES page_identities(page_uuid)
 );
 CREATE UNIQUE INDEX idx_pages_normalized_title
   ON pages(normalized_title) WHERE normalized_title IS NOT NULL;
 CREATE INDEX idx_pages_updated ON pages(updated_at DESC);
+
+-- Page identity outlives the current materialized page so a delayed operation
+-- cannot reuse one UUID with a different immutable kind after deletion.
+CREATE TABLE page_identities (
+  page_uuid BLOB PRIMARY KEY CHECK (length(page_uuid) = 16),
+  page_kind TEXT NOT NULL CHECK (page_kind IN ('note', 'journal')),
+  journal_date TEXT,
+  CHECK ((page_kind = 'note' AND journal_date IS NULL)
+      OR (page_kind = 'journal' AND journal_date IS NOT NULL))
+) WITHOUT ROWID;
+CREATE UNIQUE INDEX idx_page_identities_journal_date
+  ON page_identities(journal_date) WHERE journal_date IS NOT NULL;
+CREATE UNIQUE INDEX idx_page_identities_uuid_date
+  ON page_identities(page_uuid, journal_date);
+
+CREATE TABLE journal_pages (
+  page_uuid BLOB PRIMARY KEY REFERENCES pages(uuid) ON DELETE CASCADE,
+  journal_date TEXT NOT NULL UNIQUE,
+  FOREIGN KEY(page_uuid, journal_date)
+    REFERENCES page_identities(page_uuid, journal_date)
+) WITHOUT ROWID;
 
 CREATE TABLE blocks (
   id INTEGER PRIMARY KEY,
@@ -48,6 +75,7 @@ BEGIN
 END;
 CREATE TRIGGER blocks_uuid_kind_guard BEFORE INSERT ON blocks
 WHEN EXISTS(SELECT 1 FROM pages WHERE uuid = new.uuid)
+  OR EXISTS(SELECT 1 FROM page_identities WHERE page_uuid = new.uuid)
 BEGIN
   SELECT RAISE(ABORT, 'UUID is already used by a page');
 END;

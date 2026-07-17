@@ -1,13 +1,32 @@
 use super::*;
 use crate::operation::{
     AttachmentAdd, AttachmentRemove, BlockCreate, BlockDelete, PageCreate, PageDelete,
+    SnapshotPageIdentity,
 };
+use std::collections::{HashMap, HashSet};
 
 pub const ARCHIVE_FORMAT: &str = "notes-rs";
-pub const ARCHIVE_VERSION: u32 = 3;
+pub const ARCHIVE_VERSION: u32 = 4;
 
 pub async fn export_archive(conn: &Connection) -> Result<DataArchive> {
     conn.call(|database| {
+        let workspace_uuid = database.query_row(
+            "SELECT uuid FROM workspace WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        let page_identities = database
+            .prepare(
+                "SELECT page_uuid, page_kind, journal_date
+                   FROM page_identities ORDER BY page_uuid",
+            )?
+            .query_map([], |row| {
+                Ok(SnapshotPageIdentity {
+                    uuid: row.get(0)?,
+                    kind: operation::page_kind_from_sql(row.get(1)?, row.get(2)?, 1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         let pages = {
             let sql = format!("SELECT {PAGE_COLUMNS} FROM pages ORDER BY uuid");
             database
@@ -59,7 +78,9 @@ pub async fn export_archive(conn: &Connection) -> Result<DataArchive> {
         Ok(DataArchive {
             format: ARCHIVE_FORMAT.into(),
             version: ARCHIVE_VERSION,
+            workspace_uuid,
             exported_at: chrono::Utc::now().timestamp(),
+            page_identities,
             pages,
             blocks,
             attachments,
@@ -77,8 +98,75 @@ pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<(
         ))
         .into());
     }
+    if archive.workspace_uuid.is_nil() {
+        return Err(crate::CoreError::invalid("archive workspace UUID cannot be nil").into());
+    }
+    let mut identities = HashMap::new();
+    let mut journal_dates = HashSet::new();
+    for identity in &archive.page_identities {
+        operation::validate_page_identity(archive.workspace_uuid, identity.uuid, &identity.kind)?;
+        if identities.insert(identity.uuid, &identity.kind).is_some() {
+            return Err(crate::CoreError::invalid(format!(
+                "archive contains duplicate page identity UUID {}",
+                identity.uuid
+            ))
+            .into());
+        }
+        if let PageKind::Journal { date } = &identity.kind
+            && !journal_dates.insert(date)
+        {
+            return Err(crate::CoreError::invalid(format!(
+                "archive contains duplicate journal date {date}"
+            ))
+            .into());
+        }
+    }
+    for page in &archive.pages {
+        if identities
+            .get(&page.uuid)
+            .is_none_or(|kind| *kind != &page.kind)
+        {
+            return Err(crate::CoreError::invalid(format!(
+                "archive page {} is missing its matching immutable identity",
+                page.uuid
+            ))
+            .into());
+        }
+    }
+    for block in &archive.blocks {
+        if identities.contains_key(&block.uuid) {
+            return Err(crate::CoreError::invalid(format!(
+                "archive UUID {} is reserved by both a page identity and a block",
+                block.uuid
+            ))
+            .into());
+        }
+    }
     conn.call_domain(move |database| -> crate::CoreResult<()> {
         let transaction = database.transaction()?;
+        let current_workspace_uuid = transaction_workspace_uuid(&transaction)?;
+        if current_workspace_uuid != archive.workspace_uuid {
+            let has_state: bool = transaction.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM page_identities
+                    UNION ALL SELECT 1 FROM tombstones
+                    UNION ALL SELECT 1 FROM applied_ops
+                    UNION ALL SELECT 1 FROM sync_outbox
+                 )",
+                [],
+                |row| row.get(0),
+            )?;
+            let sync_configured: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sync_meta WHERE key = 'server_url')",
+                [],
+                |row| row.get(0),
+            )?;
+            if has_state || sync_configured {
+                return Err(crate::CoreError::conflict(
+                    "cannot restore an archive from a different workspace into a non-empty or synchronized replica",
+                ));
+            }
+        }
         let current_attachments = transaction
             .prepare("SELECT page_uuid, block_uuid, blob_hash FROM attachments ORDER BY uuid")?
             .query_map([], |row| {
@@ -104,31 +192,43 @@ pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<(
             .query_map([], |row| row.get::<_, uuid::Uuid>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        let mut kinds = current_attachments
+        let mut deletion_kinds = current_attachments
             .into_iter()
             .map(|(owner, blob_hash)| {
                 OpKind::AttachmentRemove(AttachmentRemove { owner, blob_hash })
             })
             .collect::<Vec<_>>();
-        kinds.extend(
+        deletion_kinds.extend(
             current_blocks
                 .into_iter()
                 .map(|(uuid, page_uuid)| OpKind::BlockDelete(BlockDelete { uuid, page_uuid })),
         );
-        kinds.extend(
+        deletion_kinds.extend(
             current_pages
                 .into_iter()
                 .map(|uuid| OpKind::PageDelete(PageDelete { uuid })),
         );
-        kinds.extend(archive.pages.into_iter().map(|page| {
+        operation::apply_local_kinds_in_transaction(&transaction, deletion_kinds)?;
+        if current_workspace_uuid != archive.workspace_uuid {
+            transaction.execute(
+                "UPDATE workspace SET uuid = ?1 WHERE singleton = 1",
+                [archive.workspace_uuid],
+            )?;
+        }
+        for identity in &archive.page_identities {
+            operation::ensure_page_identity(&transaction, identity.uuid, &identity.kind)?;
+        }
+
+        let mut creation_kinds = archive.pages.into_iter().map(|page| {
             OpKind::PageCreate(PageCreate {
                 uuid: page.uuid,
+                kind: page.kind,
                 title: page.title,
                 layout: page.layout,
                 created_at: page.created_at,
             })
-        }));
-        kinds.extend(archive.blocks.into_iter().map(|block| {
+        }).collect::<Vec<_>>();
+        creation_kinds.extend(archive.blocks.into_iter().map(|block| {
             OpKind::BlockCreate(BlockCreate {
                 uuid: block.uuid,
                 page_uuid: block.page_uuid,
@@ -139,7 +239,7 @@ pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<(
                 created_at: block.created_at,
             })
         }));
-        kinds.extend(archive.attachments.into_iter().map(|attachment| {
+        creation_kinds.extend(archive.attachments.into_iter().map(|attachment| {
             OpKind::AttachmentAdd(AttachmentAdd {
                 owner: attachment.owner,
                 blob_hash: attachment.blob_hash,
@@ -148,7 +248,7 @@ pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<(
                 size: attachment.size,
             })
         }));
-        operation::apply_local_kinds_in_transaction(&transaction, kinds)?;
+        operation::apply_local_kinds_in_transaction(&transaction, creation_kinds)?;
         transaction.execute("DELETE FROM history_undo", [])?;
         transaction.execute("DELETE FROM history_redo", [])?;
         transaction.commit()?;

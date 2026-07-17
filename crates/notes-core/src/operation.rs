@@ -1,13 +1,15 @@
 //! Versioned, UUID-addressed page/block operations and the single apply boundary.
 
-use crate::model::{AttachmentOwner, BlockStyle, ObjectKind, OrderKey, PageLayout};
+use crate::model::{
+    AttachmentOwner, BlockStyle, ObjectKind, OrderKey, PageKind, PageLayout, journal_page_uuid,
+};
 use crate::{Connection, CoreError, CoreResult, Hlc};
 use anyhow::{Context, Result};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-pub const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
@@ -18,6 +20,7 @@ pub enum Origin {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Op {
     pub op_id: uuid::Uuid,
+    pub workspace_uuid: uuid::Uuid,
     pub device_id: uuid::Uuid,
     pub hlc: Hlc,
     pub format_version: u32,
@@ -44,6 +47,7 @@ pub enum OpKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PageCreate {
     pub uuid: uuid::Uuid,
+    pub kind: PageKind,
     pub title: Option<String>,
     pub layout: PageLayout,
     pub created_at: i64,
@@ -127,12 +131,20 @@ pub struct ApplyOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SyncSnapshot {
     pub format_version: u32,
+    pub workspace_uuid: uuid::Uuid,
     pub seq: u64,
+    pub page_identities: Vec<SnapshotPageIdentity>,
     pub pages: Vec<SnapshotPage>,
     pub blocks: Vec<SnapshotBlock>,
     pub structures: Vec<SnapshotBlockStructure>,
     pub tombstones: Vec<SnapshotTombstone>,
     pub attachments: Vec<SnapshotAttachment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SnapshotPageIdentity {
+    pub uuid: uuid::Uuid,
+    pub kind: PageKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -147,6 +159,7 @@ pub struct SnapshotBlockStructure {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SnapshotPage {
     pub uuid: uuid::Uuid,
+    pub kind: PageKind,
     pub title: Option<String>,
     pub layout: PageLayout,
     pub title_hlc: Option<Hlc>,
@@ -210,6 +223,7 @@ pub(crate) fn apply_local_kinds_in_transaction(
     kinds: Vec<OpKind>,
 ) -> CoreResult<()> {
     let device_id = meta_or_insert_device_id(transaction)?;
+    let workspace_uuid = crate::db::transaction_workspace_uuid(transaction)?;
     let previous = transaction
         .query_row(
             "SELECT value FROM sync_meta WHERE key = 'last_hlc'",
@@ -225,6 +239,7 @@ pub(crate) fn apply_local_kinds_in_transaction(
         let hlc = Hlc::send(clock.as_ref(), now, device_id);
         let operation = Op {
             op_id: uuid::Uuid::now_v7(),
+            workspace_uuid,
             device_id,
             hlc: hlc.clone(),
             format_version: FORMAT_VERSION,
@@ -450,15 +465,35 @@ pub async fn acknowledge_server_ops(
 
 pub async fn export_sync_snapshot(conn: &Connection, seq: u64) -> Result<SyncSnapshot> {
     conn.call(move |database| {
+        let workspace_uuid = database.query_row(
+            "SELECT uuid FROM workspace WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        let page_identities = database
+            .prepare(
+                "SELECT page_uuid, page_kind, journal_date
+                   FROM page_identities ORDER BY page_uuid",
+            )?
+            .query_map([], |row| {
+                Ok(SnapshotPageIdentity {
+                    uuid: row.get(0)?,
+                    kind: page_kind_from_sql(row.get(1)?, row.get(2)?, 1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         let pages = database
             .prepare(
                 "SELECT uuid, title, layout, title_hlc, layout_hlc, existence_hlc,
-                        created_at, updated_at
+                        created_at, updated_at,
+                        (SELECT page_kind FROM page_identities WHERE page_uuid = pages.uuid),
+                        (SELECT journal_date FROM page_identities WHERE page_uuid = pages.uuid)
                    FROM pages ORDER BY uuid",
             )?
             .query_map([], |row| {
                 Ok(SnapshotPage {
                     uuid: row.get(0)?,
+                    kind: page_kind_from_sql(row.get(8)?, row.get(9)?, 8)?,
                     title: row.get(1)?,
                     layout: row.get(2)?,
                     title_hlc: optional_sql_hlc(row.get(3)?, 3)?,
@@ -532,7 +567,9 @@ pub async fn export_sync_snapshot(conn: &Connection, seq: u64) -> Result<SyncSna
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(SyncSnapshot {
             format_version: FORMAT_VERSION,
+            workspace_uuid,
             seq,
+            page_identities,
             pages,
             blocks,
             structures,
@@ -589,12 +626,30 @@ pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> 
     }
     conn.call_domain(move |database| -> CoreResult<()> {
         let transaction = database.transaction()?;
+        let current_workspace_uuid = crate::db::transaction_workspace_uuid(&transaction)?;
+        if current_workspace_uuid != snapshot.workspace_uuid {
+            let has_source_state: bool = transaction.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM pages
+                    UNION ALL SELECT 1 FROM tombstones
+                    UNION ALL SELECT 1 FROM page_identities
+                 )",
+                [],
+                |row| row.get(0),
+            )?;
+            if has_source_state {
+                return Err(CoreError::conflict(
+                    "snapshot belongs to a different non-empty workspace",
+                ));
+            }
+        }
         transaction.execute_batch(
             "DELETE FROM page_links;
              DELETE FROM block_refs;
              DELETE FROM attachments;
              DELETE FROM blocks;
              DELETE FROM pages;
+             DELETE FROM page_identities;
              DELETE FROM block_structure_lww;
              DELETE FROM attachment_lww;
              DELETE FROM tombstones;
@@ -603,6 +658,13 @@ pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> 
              DELETE FROM history_undo;
              DELETE FROM history_redo;",
         )?;
+        transaction.execute(
+            "UPDATE workspace SET uuid = ?1 WHERE singleton = 1",
+            [snapshot.workspace_uuid],
+        )?;
+        for identity in snapshot.page_identities {
+            insert_page_identity(&transaction, identity.uuid, &identity.kind)?;
+        }
         for page in snapshot.pages {
             let normalized_title = page.title.as_deref().map(crate::model::normalize_title);
             transaction.execute(
@@ -621,6 +683,7 @@ pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> 
                     page.updated_at,
                 ],
             )?;
+            materialize_page_kind(&transaction, page.uuid, &page.kind)?;
         }
         for block in &snapshot.blocks {
             transaction.execute(
@@ -705,8 +768,44 @@ pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> 
 }
 
 fn validate_snapshot(snapshot: &SyncSnapshot) -> CoreResult<()> {
+    if snapshot.workspace_uuid.is_nil() {
+        return Err(CoreError::invalid("snapshot workspace UUID cannot be nil"));
+    }
+    let mut identities = HashMap::new();
+    let mut journal_dates = HashSet::new();
+    for identity in &snapshot.page_identities {
+        validate_page_identity(snapshot.workspace_uuid, identity.uuid, &identity.kind)?;
+        if identities.insert(identity.uuid, &identity.kind).is_some() {
+            return Err(CoreError::invalid(format!(
+                "snapshot contains duplicate page identity UUID {}",
+                identity.uuid
+            )));
+        }
+        if let PageKind::Journal { date } = &identity.kind
+            && !journal_dates.insert(date)
+        {
+            return Err(CoreError::invalid(format!(
+                "snapshot contains duplicate journal date {date}"
+            )));
+        }
+    }
     let mut pages = HashMap::new();
     for page in &snapshot.pages {
+        if identities
+            .get(&page.uuid)
+            .is_none_or(|kind| *kind != &page.kind)
+        {
+            return Err(CoreError::invalid(format!(
+                "snapshot page {} is missing its matching immutable identity",
+                page.uuid
+            )));
+        }
+        if page.kind.is_journal() && page.title.is_some() {
+            return Err(CoreError::invalid(format!(
+                "snapshot journal page {} cannot have a stored title",
+                page.uuid
+            )));
+        }
         if pages.insert(page.uuid, page).is_some() {
             return Err(CoreError::invalid(format!(
                 "snapshot contains duplicate page UUID {}",
@@ -716,9 +815,9 @@ fn validate_snapshot(snapshot: &SyncSnapshot) -> CoreResult<()> {
     }
     let mut blocks = HashMap::new();
     for block in &snapshot.blocks {
-        if pages.contains_key(&block.uuid) {
+        if identities.contains_key(&block.uuid) {
             return Err(CoreError::invalid(format!(
-                "snapshot UUID {} is used by both a page and a block",
+                "snapshot UUID {} is reserved by both a page identity and a block",
                 block.uuid
             )));
         }
@@ -750,7 +849,7 @@ fn validate_snapshot(snapshot: &SyncSnapshot) -> CoreResult<()> {
             ),
             ObjectKind::Block => (
                 blocks.contains_key(&tombstone.uuid),
-                pages.contains_key(&tombstone.uuid),
+                identities.contains_key(&tombstone.uuid),
             ),
         };
         if live || opposite {
@@ -760,6 +859,11 @@ fn validate_snapshot(snapshot: &SyncSnapshot) -> CoreResult<()> {
             )));
         }
         match tombstone.object_kind {
+            ObjectKind::Page if !identities.contains_key(&tombstone.uuid) => {
+                return Err(CoreError::invalid(
+                    "page tombstone is missing its immutable page identity",
+                ));
+            }
             ObjectKind::Page if tombstone.root_page_uuid != Some(tombstone.uuid) => {
                 return Err(CoreError::invalid(
                     "page tombstone root must equal the page UUID",
@@ -934,6 +1038,9 @@ pub async fn apply_batch(
 }
 
 fn validate(operation: &Op) -> CoreResult<()> {
+    if operation.workspace_uuid.is_nil() {
+        return Err(CoreError::invalid("operation workspace UUID cannot be nil"));
+    }
     if operation.format_version != FORMAT_VERSION {
         return Err(CoreError::invalid(format!(
             "unsupported operation format version {}",
@@ -941,7 +1048,15 @@ fn validate(operation: &Op) -> CoreResult<()> {
         )));
     }
     match &operation.kind {
-        OpKind::PageCreate(payload) => validate_title(payload.title.as_deref()),
+        OpKind::PageCreate(payload) => {
+            validate_title(payload.title.as_deref())?;
+            if payload.kind.is_journal() && payload.title.is_some() {
+                return Err(CoreError::invalid(
+                    "journal pages cannot have a stored title",
+                ));
+            }
+            Ok(())
+        }
         OpKind::PageSetTitle(payload) => validate_title(payload.title.as_deref()),
         OpKind::PageSetLayout(_) | OpKind::PageDelete(_) => Ok(()),
         OpKind::BlockCreate(payload) => {
@@ -1009,10 +1124,18 @@ fn apply_one(
     transaction: &rusqlite::Transaction<'_>,
     operation: &Op,
 ) -> CoreResult<Vec<uuid::Uuid>> {
+    let workspace_uuid = crate::db::transaction_workspace_uuid(transaction)?;
+    if operation.workspace_uuid != workspace_uuid {
+        return Err(CoreError::conflict(format!(
+            "operation belongs to workspace {}, but this replica is {}",
+            operation.workspace_uuid, workspace_uuid
+        )));
+    }
     let timestamp = operation_timestamp(operation);
     match &operation.kind {
         OpKind::PageCreate(payload) => {
             ensure_object_kind(transaction, payload.uuid, ObjectKind::Page)?;
+            ensure_page_identity(transaction, payload.uuid, &payload.kind)?;
             if tombstone_dominates(transaction, payload.uuid, &operation.hlc)? {
                 return Ok(vec![payload.uuid]);
             }
@@ -1023,6 +1146,34 @@ fn apply_one(
                     |row| row.get::<_, String>(0),
                 )
                 .optional()?;
+            if payload.kind.is_journal()
+                && let Some(current_existence_hlc) = previous_existence_hlc.as_deref()
+            {
+                // Concurrent offline `ensure_journal` operations target the same
+                // deterministic UUID. The first generation uses the earliest
+                // observed ensure HLC, independently of delivery order. Initial
+                // title/layout clocks follow that floor only while they still
+                // equal the old creation clock, so a real later mutation wins.
+                if operation.hlc.to_string().as_str() < current_existence_hlc {
+                    transaction.execute(
+                        "UPDATE pages
+                            SET existence_hlc = ?2,
+                                title_hlc = CASE WHEN title_hlc = ?3 THEN ?2 ELSE title_hlc END,
+                                layout_hlc = CASE WHEN layout_hlc = ?3 THEN ?2 ELSE layout_hlc END,
+                                created_at = MIN(created_at, ?4),
+                                updated_at = MIN(updated_at, ?5)
+                          WHERE uuid = ?1",
+                        rusqlite::params![
+                            payload.uuid,
+                            operation.hlc.to_string(),
+                            current_existence_hlc,
+                            payload.created_at,
+                            timestamp,
+                        ],
+                    )?;
+                }
+                return Ok(vec![payload.uuid]);
+            }
             let mut affected = vec![payload.uuid];
             if previous_existence_hlc
                 .as_deref()
@@ -1088,6 +1239,7 @@ fn apply_one(
                 "DELETE FROM tombstones WHERE uuid = ?1 AND deleted_hlc < ?2",
                 rusqlite::params![payload.uuid, operation.hlc.to_string()],
             )?;
+            materialize_page_kind(transaction, payload.uuid, &payload.kind)?;
             apply_page_title(
                 transaction,
                 payload.uuid,
@@ -1108,6 +1260,11 @@ fn apply_one(
         }
         OpKind::PageSetTitle(payload) => {
             ensure_object_kind(transaction, payload.uuid, ObjectKind::Page)?;
+            if page_identity(transaction, payload.uuid)?.is_some_and(|kind| kind.is_journal()) {
+                return Err(CoreError::invalid(
+                    "journal page titles are derived from their date",
+                ));
+            }
             if !is_tombstoned(transaction, payload.uuid)? {
                 apply_page_title(
                     transaction,
@@ -1790,13 +1947,119 @@ pub fn content_references_changed(previous: &str, next: &str) -> bool {
     parse_refs(previous) != parse_refs(next)
 }
 
+pub(crate) fn page_kind_from_sql(
+    kind: String,
+    date: Option<crate::model::JournalDate>,
+    column: usize,
+) -> rusqlite::Result<PageKind> {
+    match (kind.as_str(), date) {
+        ("note", None) => Ok(PageKind::Note),
+        ("journal", Some(date)) => Ok(PageKind::Journal { date }),
+        _ => Err(rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid page identity shape: {kind}"),
+            )),
+        )),
+    }
+}
+
+pub(crate) fn validate_page_identity(
+    workspace_uuid: uuid::Uuid,
+    page_uuid: uuid::Uuid,
+    kind: &PageKind,
+) -> CoreResult<()> {
+    if let PageKind::Journal { date } = kind {
+        let expected = journal_page_uuid(workspace_uuid, date);
+        if page_uuid != expected {
+            return Err(CoreError::invalid(format!(
+                "journal {date} must use deterministic UUID {expected}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn page_identity(
+    transaction: &rusqlite::Transaction<'_>,
+    page_uuid: uuid::Uuid,
+) -> rusqlite::Result<Option<PageKind>> {
+    transaction
+        .query_row(
+            "SELECT page_kind, journal_date FROM page_identities WHERE page_uuid = ?1",
+            [page_uuid],
+            |row| page_kind_from_sql(row.get(0)?, row.get(1)?, 0),
+        )
+        .optional()
+}
+
+fn insert_page_identity(
+    transaction: &rusqlite::Transaction<'_>,
+    page_uuid: uuid::Uuid,
+    kind: &PageKind,
+) -> CoreResult<()> {
+    let (kind_name, date) = match kind {
+        PageKind::Note => ("note", None),
+        PageKind::Journal { date } => ("journal", Some(date)),
+    };
+    transaction.execute(
+        "INSERT INTO page_identities(page_uuid, page_kind, journal_date)
+         VALUES (?1, ?2, ?3)",
+        rusqlite::params![page_uuid, kind_name, date],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn ensure_page_identity(
+    transaction: &rusqlite::Transaction<'_>,
+    page_uuid: uuid::Uuid,
+    kind: &PageKind,
+) -> CoreResult<()> {
+    let workspace_uuid = crate::db::transaction_workspace_uuid(transaction)?;
+    validate_page_identity(workspace_uuid, page_uuid, kind)?;
+    if let Some(existing) = page_identity(transaction, page_uuid)? {
+        if existing != *kind {
+            return Err(CoreError::conflict(format!(
+                "page UUID {page_uuid} is already reserved for a different page kind"
+            )));
+        }
+        return Ok(());
+    }
+    insert_page_identity(transaction, page_uuid, kind)
+}
+
+fn materialize_page_kind(
+    transaction: &rusqlite::Transaction<'_>,
+    page_uuid: uuid::Uuid,
+    kind: &PageKind,
+) -> CoreResult<()> {
+    match kind {
+        PageKind::Note => {
+            transaction.execute(
+                "DELETE FROM journal_pages WHERE page_uuid = ?1",
+                [page_uuid],
+            )?;
+        }
+        PageKind::Journal { date } => {
+            transaction.execute(
+                "INSERT INTO journal_pages(page_uuid, journal_date) VALUES (?1, ?2)
+                 ON CONFLICT(page_uuid) DO UPDATE SET journal_date = excluded.journal_date",
+                rusqlite::params![page_uuid, date],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn ensure_object_kind(
     transaction: &rusqlite::Transaction<'_>,
     uuid: uuid::Uuid,
     expected: ObjectKind,
 ) -> CoreResult<()> {
     let page_exists = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pages WHERE uuid = ?1)",
+        "SELECT EXISTS(SELECT 1 FROM page_identities WHERE page_uuid = ?1)",
         [uuid],
         |row| row.get::<_, bool>(0),
     )?;
@@ -2186,6 +2449,7 @@ mod tests {
     fn operation_json_uses_typed_page_variant() {
         let operation = Op {
             op_id: uuid::Uuid::from_u128(2),
+            workspace_uuid: uuid::Uuid::from_u128(1),
             device_id: uuid::Uuid::from_u128(3),
             hlc: Hlc::new(1, 0, uuid::Uuid::from_u128(3)),
             format_version: FORMAT_VERSION,

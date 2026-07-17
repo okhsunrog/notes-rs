@@ -284,6 +284,17 @@ async fn bootstrap_replica(
     if snapshot.seq != 0 {
         bail!("bootstrap snapshot sequence must be zero");
     }
+    if snapshot.page_identities.is_empty()
+        && snapshot.pages.is_empty()
+        && snapshot.blocks.is_empty()
+        && snapshot.tombstones.is_empty()
+        && snapshot.attachments.is_empty()
+    {
+        return Err(notes_core::CoreError::conflict(
+            "an empty client cannot replace the server workspace identity",
+        )
+        .into());
+    }
     if oplog.latest_seq().await? != 0 {
         return Err(notes_core::CoreError::conflict(
             "server workspace has already been initialized",
@@ -291,7 +302,8 @@ async fn bootstrap_replica(
         .into());
     }
     let current = export_sync_snapshot(notes, 0).await?;
-    if !current.pages.is_empty()
+    if !current.page_identities.is_empty()
+        || !current.pages.is_empty()
         || !current.blocks.is_empty()
         || !current.tombstones.is_empty()
         || !current.attachments.is_empty()

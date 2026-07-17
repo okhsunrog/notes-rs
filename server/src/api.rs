@@ -216,10 +216,17 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn info(State(state): State<AppState>) -> Json<ServerInfo> {
-    Json(ServerInfo {
+async fn info(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+) -> Result<Json<ServerInfo>, ApiError> {
+    let workspace_uuid = notes_core::db::workspace_uuid(&user.0.notes)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(ServerInfo {
+        workspace_uuid,
         ai_enabled: state.ai.is_some(),
-    })
+    }))
 }
 
 async fn ai_status(
@@ -751,6 +758,7 @@ mod tests {
     use tower::ServiceExt;
 
     const TOKEN: &str = "test-token-with-at-least-thirty-two-characters";
+    const TEST_WORKSPACE_UUID: uuid::Uuid = uuid::Uuid::from_u128(0xC0DE);
 
     async fn test_app() -> (tempfile::TempDir, Router) {
         let directory = tempfile::tempdir().expect("temporary directory");
@@ -767,6 +775,18 @@ mod tests {
             }],
         };
         let state = crate::build_state(&config).await.expect("server state");
+        for user in state.registry.users() {
+            user.notes
+                .call(|database| {
+                    database.execute(
+                        "UPDATE workspace SET uuid = ?1 WHERE singleton = 1",
+                        [TEST_WORKSPACE_UUID],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .expect("set deterministic workspace");
+        }
         (directory, router(state))
     }
 
@@ -774,6 +794,7 @@ mod tests {
         let device_id = uuid::Uuid::from_u128(1);
         Op {
             op_id: uuid::Uuid::from_u128(index + 10),
+            workspace_uuid: TEST_WORKSPACE_UUID,
             device_id,
             hlc: Hlc::new(index as u64, 0, device_id),
             format_version: notes_sync::FORMAT_VERSION,
@@ -786,6 +807,7 @@ mod tests {
             1,
             OpKind::PageCreate(PageCreate {
                 uuid: page_uuid,
+                kind: notes_core::PageKind::Note,
                 title: Some("Synced page".into()),
                 layout: PageLayout::Outline,
                 created_at: 1,
@@ -969,7 +991,70 @@ mod tests {
             .expect("body")
             .to_bytes();
         let info: ServerInfo = serde_json::from_slice(&body).expect("server info");
+        assert_eq!(info.workspace_uuid, TEST_WORKSPACE_UUID);
         assert!(!info.ai_enabled);
+    }
+
+    #[tokio::test]
+    async fn empty_client_cannot_replace_the_server_workspace_identity() {
+        let (_directory, app) = test_app().await;
+        let snapshot_response = app
+            .clone()
+            .oneshot(
+                authorized(Request::builder())
+                    .uri("/v1/snapshot")
+                    .body(Body::empty())
+                    .expect("snapshot request"),
+            )
+            .await
+            .expect("snapshot response");
+        assert_eq!(snapshot_response.status(), StatusCode::OK);
+        let snapshot = serde_json::from_slice(
+            &snapshot_response
+                .into_body()
+                .collect()
+                .await
+                .expect("snapshot body")
+                .to_bytes(),
+        )
+        .expect("empty server snapshot");
+
+        let response = app
+            .clone()
+            .oneshot(
+                authorized(Request::builder())
+                    .method("POST")
+                    .uri("/v1/bootstrap")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&BootstrapRequest { snapshot })
+                            .expect("bootstrap request JSON"),
+                    ))
+                    .expect("bootstrap request"),
+            )
+            .await
+            .expect("bootstrap response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let info_response = app
+            .oneshot(
+                authorized(Request::builder())
+                    .uri("/v1/info")
+                    .body(Body::empty())
+                    .expect("info request"),
+            )
+            .await
+            .expect("info response");
+        let info: ServerInfo = serde_json::from_slice(
+            &info_response
+                .into_body()
+                .collect()
+                .await
+                .expect("info body")
+                .to_bytes(),
+        )
+        .expect("server info");
+        assert_eq!(info.workspace_uuid, TEST_WORKSPACE_UUID);
     }
 
     #[tokio::test]

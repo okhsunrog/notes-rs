@@ -25,6 +25,7 @@ pub trait SyncTransport: Send {
 /// It models idempotent ingest and one gapless sequence shared by all clients.
 #[derive(Debug, Clone, Default)]
 pub struct LoopbackServer {
+    workspace_uuid: Option<uuid::Uuid>,
     log: Vec<SequencedOp>,
     by_op_id: HashMap<uuid::Uuid, u64>,
 }
@@ -51,23 +52,41 @@ impl LoopbackServer {
             {
                 bail!("loopback oplog contains a duplicate op_id");
             }
+            match server.workspace_uuid {
+                Some(workspace_uuid) if workspace_uuid != item.envelope.workspace_uuid => {
+                    bail!("loopback oplog contains operations from multiple workspaces");
+                }
+                None => server.workspace_uuid = Some(item.envelope.workspace_uuid),
+                Some(_) => {}
+            }
             server.log.push(item);
         }
         Ok(server)
     }
 
-    pub fn ingest(&mut self, envelopes: impl IntoIterator<Item = Op>) -> Vec<SequencedOp> {
+    pub fn ingest(&mut self, envelopes: impl IntoIterator<Item = Op>) -> Result<Vec<SequencedOp>> {
         envelopes
             .into_iter()
             .map(|envelope| {
+                match self.workspace_uuid {
+                    Some(workspace_uuid) if workspace_uuid != envelope.workspace_uuid => {
+                        bail!(
+                            "operation belongs to workspace {}, but the loopback server owns {}",
+                            envelope.workspace_uuid,
+                            workspace_uuid
+                        );
+                    }
+                    None => self.workspace_uuid = Some(envelope.workspace_uuid),
+                    Some(_) => {}
+                }
                 if let Some(seq) = self.by_op_id.get(&envelope.op_id).copied() {
-                    return self.log[(seq - 1) as usize].clone();
+                    return Ok(self.log[(seq - 1) as usize].clone());
                 }
                 let seq = self.log.len() as u64 + 1;
                 let item = SequencedOp { seq, envelope };
                 self.by_op_id.insert(item.envelope.op_id, seq);
                 self.log.push(item.clone());
-                item
+                Ok(item)
             })
             .collect()
     }
@@ -93,7 +112,7 @@ impl SyncTransport for LoopbackServer {
     }
 
     async fn push(&mut self, operations: Vec<Op>) -> Result<Vec<SequencedOp>> {
-        Ok(self.ingest(operations))
+        self.ingest(operations)
     }
 }
 
@@ -275,6 +294,13 @@ mod tests {
         let (_right_dir, right, right_sync) = client("test").await;
         let mut server = LoopbackServer::new();
 
+        let shared_workspace = export_sync_snapshot(&left, 0)
+            .await
+            .expect("export shared workspace identity");
+        import_sync_snapshot(&right, shared_workspace)
+            .await
+            .expect("adopt shared workspace identity");
+
         db::create_page(&left, "Left".into())
             .await
             .expect("left edit");
@@ -327,7 +353,7 @@ mod tests {
         let first = server.log()[0].envelope.clone();
 
         let mut server = LoopbackServer::from_log(server.log().to_vec()).expect("restart server");
-        let duplicate = server.ingest([first]);
+        let duplicate = server.ingest([first]).expect("deduplicate retry");
         assert_eq!(duplicate[0].seq, 1);
         db::create_page(&connection, "After restart".into())
             .await
@@ -343,6 +369,9 @@ mod tests {
     async fn snapshot_bootstrap_plus_tail_replay_matches_full_log() {
         let (_source_dir, source, source_sync) = client("snapshot").await;
         let mut server = LoopbackServer::new();
+        let empty_workspace = export_sync_snapshot(&source, 0)
+            .await
+            .expect("export empty workspace identity");
         let page = db::create_page(&source, "Snapshot".into())
             .await
             .expect("create page");
@@ -370,6 +399,9 @@ mod tests {
             .expect("publish tail");
 
         let (_full_dir, full, full_sync) = client("snapshot").await;
+        import_sync_snapshot(&full, empty_workspace)
+            .await
+            .expect("adopt source workspace identity");
         full_sync
             .sync_until_idle(&mut server)
             .await

@@ -4,6 +4,8 @@ use notes_core::{
     OrderKey, Origin, PageCreate, PageDelete, PageLayout, SnapshotAttachment, SyncSnapshot,
 };
 
+const TEST_WORKSPACE_UUID: uuid::Uuid = uuid::Uuid::from_u128(0xC0DE);
+
 struct TestDatabase {
     _directory: tempfile::TempDir,
     connection: Connection,
@@ -14,6 +16,16 @@ async fn database() -> TestDatabase {
     let connection = db::open(directory.path().join("notes.db"))
         .await
         .expect("open database");
+    connection
+        .call(|database| {
+            database.execute(
+                "UPDATE workspace SET uuid = ?1 WHERE singleton = 1",
+                [TEST_WORKSPACE_UUID],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("set deterministic workspace");
     TestDatabase {
         _directory: directory,
         connection,
@@ -24,6 +36,7 @@ fn op(index: u128, wall_ms: u64, kind: OpKind) -> Op {
     let device_id = uuid::Uuid::from_u128(0xD3A1CE);
     Op {
         op_id: uuid::Uuid::from_u128(0x1000 + index),
+        workspace_uuid: TEST_WORKSPACE_UUID,
         device_id,
         hlc: Hlc::new(wall_ms, 0, device_id),
         format_version: notes_core::operation::FORMAT_VERSION,
@@ -37,6 +50,7 @@ fn page_create(index: u128, page_uuid: uuid::Uuid) -> Op {
         index as u64 + 1,
         OpKind::PageCreate(PageCreate {
             uuid: page_uuid,
+            kind: notes_core::PageKind::Note,
             title: Some(format!("Page {index}")),
             layout: PageLayout::Outline,
             created_at: index as i64,
@@ -157,6 +171,7 @@ async fn snapshots_preserve_raw_structure_intents_and_reobserve_future_hlc() {
             10,
             OpKind::PageCreate(PageCreate {
                 uuid: page_uuid,
+                kind: notes_core::PageKind::Note,
                 title: Some("Future title".into()),
                 layout: PageLayout::Outline,
                 created_at: 1,
@@ -397,7 +412,7 @@ async fn invalid_order_keys_and_attachment_snapshots_are_rejected_before_replaci
             .await
             .expect_err("page and block UUID spaces must not overlap")
             .to_string()
-            .contains("both a page and a block")
+            .contains("page identity and a block")
     );
 
     let mut live_tombstone = snapshot.clone();
@@ -484,6 +499,7 @@ async fn concurrent_same_title_creation_converges_without_rejecting_either_page(
         100,
         OpKind::PageCreate(PageCreate {
             uuid: first_uuid,
+            kind: notes_core::PageKind::Note,
             title: Some("Проект Ёж".into()),
             layout: PageLayout::Outline,
             created_at: 1,
@@ -494,6 +510,7 @@ async fn concurrent_same_title_creation_converges_without_rejecting_either_page(
         200,
         OpKind::PageCreate(PageCreate {
             uuid: second_uuid,
+            kind: notes_core::PageKind::Note,
             title: Some("Проект Ёж".into()),
             layout: PageLayout::Document,
             created_at: 2,
@@ -545,6 +562,7 @@ async fn page_delete_and_delayed_block_create_produce_the_same_tombstones() {
         10,
         OpKind::PageCreate(PageCreate {
             uuid: page_uuid,
+            kind: notes_core::PageKind::Note,
             title: Some("Deleted page".into()),
             layout: PageLayout::Outline,
             created_at: 1,
@@ -603,6 +621,7 @@ async fn page_recreation_is_a_generation_boundary_for_delayed_blocks() {
         10,
         OpKind::PageCreate(PageCreate {
             uuid: page_uuid,
+            kind: notes_core::PageKind::Note,
             title: Some("Initial generation".into()),
             layout: PageLayout::Outline,
             created_at: 1,
@@ -627,6 +646,7 @@ async fn page_recreation_is_a_generation_boundary_for_delayed_blocks() {
         40,
         OpKind::PageCreate(PageCreate {
             uuid: page_uuid,
+            kind: notes_core::PageKind::Note,
             title: Some("Recreated generation".into()),
             layout: PageLayout::Document,
             created_at: 3,
@@ -686,6 +706,7 @@ async fn raw_parent_intent_is_order_independent_across_parent_recreation() {
         1,
         OpKind::PageCreate(PageCreate {
             uuid: page_uuid,
+            kind: notes_core::PageKind::Note,
             title: Some("Structure generations".into()),
             layout: PageLayout::Outline,
             created_at: 1,
@@ -831,6 +852,7 @@ async fn uuid_identity_cannot_change_between_page_and_block_kinds() {
         1,
         OpKind::PageCreate(PageCreate {
             uuid: page_uuid,
+            kind: notes_core::PageKind::Note,
             title: Some("Global UUID".into()),
             layout: PageLayout::Outline,
             created_at: 1,

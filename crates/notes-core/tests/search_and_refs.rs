@@ -3,6 +3,8 @@ use notes_core::{
     BlockCreate, BlockStyle, Connection, Hlc, ObjectKind, Op, OpKind, OrderKey, Origin,
 };
 
+const TEST_WORKSPACE_UUID: uuid::Uuid = uuid::Uuid::from_u128(0xC0DE);
+
 struct TestDatabase {
     _directory: tempfile::TempDir,
     connection: Connection,
@@ -13,6 +15,16 @@ async fn database() -> TestDatabase {
     let connection = db::open(directory.path().join("notes.db"))
         .await
         .expect("open database");
+    connection
+        .call(|database| {
+            database.execute(
+                "UPDATE workspace SET uuid = ?1 WHERE singleton = 1",
+                [TEST_WORKSPACE_UUID],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("set deterministic workspace");
     TestDatabase {
         _directory: directory,
         connection,
@@ -23,6 +35,7 @@ fn remote_op(index: u128, wall_ms: u64, kind: OpKind) -> Op {
     let device_id = uuid::Uuid::from_u128(0xCAFE);
     Op {
         op_id: uuid::Uuid::from_u128(0x10_000 + index),
+        workspace_uuid: TEST_WORKSPACE_UUID,
         device_id,
         hlc: Hlc::new(wall_ms, 0, device_id),
         format_version: notes_core::operation::FORMAT_VERSION,

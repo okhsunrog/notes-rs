@@ -172,8 +172,20 @@ async fn archive_roundtrip_replaces_typed_content_and_resets_incompatible_histor
     let archive = db::export_archive(&source.connection)
         .await
         .expect("export archive");
+    let source_workspace_uuid = archive.workspace_uuid;
 
     let destination = database().await;
+    destination
+        .connection
+        .call(move |database| {
+            database.execute(
+                "UPDATE workspace SET uuid = ?1 WHERE singleton = 1",
+                [source_workspace_uuid],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("align restore workspace");
     db::create_page(&destination.connection, "Stale page".into())
         .await
         .expect("create destination history and stale state");
@@ -224,6 +236,7 @@ async fn archive_roundtrip_replaces_typed_content_and_resets_incompatible_histor
     let roundtrip = db::export_archive(&destination.connection)
         .await
         .expect("re-export archive");
+    assert_eq!(roundtrip.workspace_uuid, source_workspace_uuid);
     assert_archive_semantics(&roundtrip, page.uuid, root.uuid, attachment.uuid);
 }
 
@@ -234,11 +247,54 @@ fn assert_archive_semantics(
     attachment_uuid: uuid::Uuid,
 ) {
     assert_eq!(archive.format, "notes-rs");
-    assert_eq!(archive.version, 3);
+    assert_eq!(archive.version, 4);
+    assert!(
+        archive
+            .page_identities
+            .iter()
+            .any(|identity| identity.uuid == page_uuid),
+        "the archived live page must retain its immutable identity"
+    );
     assert_eq!(archive.pages.len(), 1);
     assert_eq!(archive.pages[0].uuid, page_uuid);
     assert_eq!(archive.blocks.len(), 1);
     assert_eq!(archive.blocks[0].uuid, block_uuid);
     assert_eq!(archive.attachments.len(), 1);
     assert_eq!(archive.attachments[0].uuid, attachment_uuid);
+}
+
+#[tokio::test]
+async fn archive_workspace_identity_cannot_mix_with_existing_state() {
+    let source = database().await;
+    db::create_page(&source.connection, "Source".into())
+        .await
+        .unwrap();
+    let archive = db::export_archive(&source.connection).await.unwrap();
+
+    let destination = database().await;
+    let existing = db::create_page(&destination.connection, "Destination".into())
+        .await
+        .unwrap();
+    let error = db::import_archive(&destination.connection, archive)
+        .await
+        .expect_err("cross-workspace restore must fail");
+    assert!(error.to_string().contains("different workspace"));
+    assert!(
+        db::get_page(&destination.connection, existing.uuid)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn archive_rejects_a_nil_workspace_identity() {
+    let source = database().await;
+    let mut archive = db::export_archive(&source.connection).await.unwrap();
+    archive.workspace_uuid = uuid::Uuid::nil();
+    let destination = database().await;
+    let error = db::import_archive(&destination.connection, archive)
+        .await
+        .expect_err("nil workspace must fail");
+    assert!(error.to_string().contains("cannot be nil"));
 }

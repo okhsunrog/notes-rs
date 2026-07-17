@@ -1,6 +1,7 @@
 # Journal Domain, UI, and Import Architecture
 
-Status: accepted on 2026-07-17. Implementation is pending.
+Status: accepted on 2026-07-17. Journal/workspace identity is implemented; application services,
+product surfaces, and Logseq conversion remain in progress.
 
 This decision defines daily journals as first-class notes-rs domain content and defines the
 loss-aware conversion boundary for the existing Logseq graph. It intentionally adopts the useful
@@ -75,9 +76,12 @@ sync validation. An operation that reuses one page UUID with a conflicting kind/
 Two disconnected replicas may both open or capture into Today before synchronizing. A local UNIQUE
 constraint alone cannot make two independently generated page UUIDs converge.
 
-Each workspace therefore receives a durable `workspace_uuid` when it is created. Bootstrap and
-snapshot import preserve it, and the existing non-empty-workspace mismatch rule rejects an implicit
-merge of different workspace UUIDs.
+Each workspace therefore receives a durable `workspace_uuid` when it is created. It is present in
+every operation envelope, snapshot, archive, and authenticated server-info response. Apply rejects
+foreign operations before mutation. Bootstrap and snapshot import preserve it, and the
+non-empty-workspace mismatch rule rejects an implicit merge of different workspace UUIDs. For an
+empty server and empty client, the server's durable identity is canonical; a fresh client adopts it
+instead of replacing it.
 
 Journal page UUID is deterministically derived from `(workspace_uuid, JournalDate)` with a
 namespaced UUID (UUIDv5). This is a deliberate exception to UUIDv7:
@@ -260,9 +264,10 @@ commit, and stable rerun provenance.
 
 ## 11. Migration sequence
 
-1. Add durable `workspace_uuid`, `JournalDate`, tagged `PageKind`, normalized `journal_pages`, and
-   the clean-baseline/snapshot/archive/operation changes.
-2. Add deterministic journal identity and concurrency tests before UI creation paths.
+1. **Completed:** add durable `workspace_uuid`, `JournalDate`, tagged `PageKind`, normalized
+   `journal_pages`, and the clean-baseline/snapshot/archive/operation changes.
+2. **Completed:** add deterministic journal identity and convergence tests before UI creation
+   paths.
 3. Add `ensure/get/list/append` journal services and generated typed commands/events.
 4. Add Today, calendar navigation, ordinary day editing, Quick Capture, and page-kind filters.
 5. Add the staged Logseq parser, provenance map, dry-run report, and atomic import.

@@ -202,6 +202,10 @@ async fn synchronize_session(
 ) -> Result<()> {
     transport.health().await?;
     initialize_replica(app, connection, transport, data_dir).await?;
+    let server_info = transport.info().await?;
+    if notes_core::db::workspace_uuid(connection).await? != server_info.workspace_uuid {
+        return Err(SyncSessionError::WorkspaceConflict.into());
+    }
     set_connection_state(
         app,
         status,
@@ -292,13 +296,18 @@ async fn initialize_replica(
             notes_core::import_sync_snapshot(connection, server.clone()).await?;
             download_snapshot_blobs(transport, data_dir, &server).await?;
         }
-        (true, true) => {}
+        (true, true) => {
+            // The server's durable empty workspace is canonical. This prevents
+            // successive fresh clients from replacing its Journal namespace.
+            notes_core::import_sync_snapshot(connection, server).await?;
+        }
     }
     Ok(())
 }
 
 fn snapshot_is_empty(snapshot: &SyncSnapshot) -> bool {
-    snapshot.pages.is_empty()
+    snapshot.page_identities.is_empty()
+        && snapshot.pages.is_empty()
         && snapshot.blocks.is_empty()
         && snapshot.structures.is_empty()
         && snapshot.tombstones.is_empty()
@@ -686,7 +695,9 @@ mod tests {
     fn empty_snapshot_has_no_source_records() {
         assert!(snapshot_is_empty(&SyncSnapshot {
             format_version: notes_sync::FORMAT_VERSION,
+            workspace_uuid: uuid::Uuid::from_u128(1),
             seq: 0,
+            page_identities: Vec::new(),
             pages: Vec::new(),
             blocks: Vec::new(),
             structures: Vec::new(),

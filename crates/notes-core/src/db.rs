@@ -1,5 +1,5 @@
 use crate::model::{
-    AttachmentOwner, BlockStyle, ObjectKind, OrderKey, PageLayout, ReorderDirection,
+    AttachmentOwner, BlockStyle, ObjectKind, OrderKey, PageKind, PageLayout, ReorderDirection,
 };
 use crate::operation::{self, OpKind};
 use crate::sqlite::Connection;
@@ -15,6 +15,7 @@ mod history;
 mod migrations;
 mod pages;
 mod search;
+mod workspace;
 
 pub use archive::{export_archive, import_archive};
 pub use attachments::{
@@ -34,6 +35,8 @@ pub use pages::{
     set_page_layout,
 };
 pub use search::{search_blocks_fts, search_fts, search_pages_by_title};
+pub(crate) use workspace::transaction_workspace_uuid;
+pub use workspace::workspace_uuid;
 
 pub async fn open(path: impl AsRef<Path>) -> Result<Connection> {
     let conn = Connection::open(path.as_ref())
@@ -48,6 +51,7 @@ pub async fn open(path: impl AsRef<Path>) -> Result<Connection> {
     })
     .await?;
     migrations::migrate(&conn).await?;
+    workspace::initialize_workspace(&conn).await?;
     Ok(conn)
 }
 
@@ -55,6 +59,7 @@ pub async fn open(path: impl AsRef<Path>) -> Result<Connection> {
 #[serde(rename_all = "camelCase")]
 pub struct Page {
     pub uuid: uuid::Uuid,
+    pub kind: crate::model::PageKind,
     pub title: Option<String>,
     pub layout: PageLayout,
     pub created_at: i64,
@@ -116,15 +121,25 @@ impl Content {
     }
 }
 
-pub(crate) const PAGE_COLUMNS: &str = "uuid, title, layout, created_at, updated_at";
+pub(crate) const PAGE_COLUMNS: &str = "pages.uuid, pages.title, pages.layout, pages.created_at, pages.updated_at, \
+     (SELECT page_kind FROM page_identities WHERE page_uuid = pages.uuid), \
+     (SELECT journal_date FROM page_identities WHERE page_uuid = pages.uuid)";
 pub(crate) const BLOCK_COLUMNS: &str =
     "uuid, page_uuid, parent_uuid, order_key, style, markdown, created_at, updated_at";
 pub(crate) const QUALIFIED_BLOCK_COLUMNS: &str = "blocks.uuid, blocks.page_uuid, blocks.parent_uuid, blocks.order_key, blocks.style, \
      blocks.markdown, blocks.created_at, blocks.updated_at";
 
 pub(crate) fn row_to_page(row: &rusqlite::Row<'_>) -> rusqlite::Result<Page> {
+    let page_kind = row.get::<_, String>(5)?;
+    let journal_date = row.get::<_, Option<crate::model::JournalDate>>(6)?;
+    let kind = match (page_kind.as_str(), journal_date) {
+        ("note", None) => PageKind::Note,
+        ("journal", Some(date)) => PageKind::Journal { date },
+        _ => return Err(rusqlite::Error::InvalidQuery),
+    };
     Ok(Page {
         uuid: row.get(0)?,
+        kind,
         title: row.get(1)?,
         layout: row.get(2)?,
         created_at: row.get(3)?,
@@ -232,7 +247,9 @@ pub struct GraphSnapshot {
 pub struct DataArchive {
     pub format: String,
     pub version: u32,
+    pub workspace_uuid: uuid::Uuid,
     pub exported_at: i64,
+    pub page_identities: Vec<crate::operation::SnapshotPageIdentity>,
     pub pages: Vec<Page>,
     pub blocks: Vec<Block>,
     pub attachments: Vec<Attachment>,
