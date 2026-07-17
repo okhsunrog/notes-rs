@@ -121,6 +121,59 @@ pub async fn rename_page(
         .context("renamed page disappeared")
 }
 
+/// Rename a page only when the caller still represents its current title.
+/// The read, revision comparison, and local operation emission are atomic.
+pub async fn rename_page_if_revision(
+    conn: &Connection,
+    uuid: uuid::Uuid,
+    title: Option<String>,
+    expected_revision: ContentRevision,
+) -> Result<(Page, bool)> {
+    let title = title
+        .map(|title| title.trim().to_owned())
+        .filter(|title| !title.is_empty());
+    conn.call_domain(move |database| -> crate::CoreResult<(Page, bool)> {
+        let transaction = database.transaction()?;
+        let sql = format!("SELECT {PAGE_COLUMNS} FROM pages WHERE uuid = ?1");
+        let page = transaction
+            .query_row(&sql, [uuid], row_to_page)
+            .optional()?
+            .ok_or_else(|| crate::CoreError::not_found("page not found"))?;
+        if page.kind.is_journal() {
+            return Err(crate::CoreError::invalid(
+                "journal page titles are derived from their date",
+            ));
+        }
+        if page.title == title {
+            transaction.commit()?;
+            return Ok((page, false));
+        }
+        if page.title_revision != expected_revision {
+            return Err(crate::CoreError::conflict(
+                "page title changed since editing began",
+            ));
+        }
+        if let Some(title) = title.as_deref() {
+            let normalized_title = crate::model::normalize_title(title);
+            if operation::resolve_page_alias(&transaction, &normalized_title)?
+                .is_some_and(|owner_uuid| owner_uuid != uuid)
+            {
+                return Err(crate::CoreError::conflict(
+                    "another page already owns this title",
+                ));
+            }
+        }
+        operation::apply_local_kinds_in_transaction(
+            &transaction,
+            vec![OpKind::PageSetTitle(PageSetTitle { uuid, title })],
+        )?;
+        let page = transaction.query_row(&sql, [uuid], row_to_page)?;
+        transaction.commit()?;
+        Ok((page, true))
+    })
+    .await
+}
+
 pub async fn set_page_layout(
     conn: &Connection,
     uuid: uuid::Uuid,

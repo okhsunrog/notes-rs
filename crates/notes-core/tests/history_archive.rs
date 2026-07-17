@@ -499,6 +499,7 @@ async fn large_archive_restore_reconciles_deleted_and_created_trees_once() {
             order_key: OrderKey::from_ordinal(1),
             style: BlockStyle::Paragraph,
             markdown: format!("Nested block {ordinal}"),
+            markdown_revision: page.title_revision.clone(),
             created_at: ordinal as i64,
             updated_at: ordinal as i64,
         });

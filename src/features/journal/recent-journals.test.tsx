@@ -8,6 +8,7 @@ describe("RecentJournals", () => {
     kind: { kind: "journal" as const, date: "2026-07-17" },
     title: null,
     layout: "outline" as const,
+    titleRevision: "test-title-revision",
     createdAt: 0,
     updatedAt: 0,
   };

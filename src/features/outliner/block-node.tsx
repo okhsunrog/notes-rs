@@ -207,7 +207,11 @@ export function BlockNode({ block, depth, ordinal }: Props) {
         }
         setSaveState("saving");
         try {
-          const updated = await setBlockContent(current.uuid, blockContent(next));
+          const updated = await setBlockContent(
+            current.uuid,
+            blockContent(next),
+            current.markdownRevision,
+          );
           applyBlockSnapshot(updated);
           // The user may have typed while this save was in flight. Persist that
           // newer draft in the same serialized save loop before reporting clean.

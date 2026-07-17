@@ -7,11 +7,14 @@ pub async fn rename_page(
     state: State<'_, AppState>,
     uuid: uuid::Uuid,
     title: Option<String>,
+    expected_revision: ContentRevision,
 ) -> CommandResult<db::Page> {
-    let page = db::rename_page(&state.conn, uuid, title)
+    let (page, changed) = db::rename_page_if_revision(&state.conn, uuid, title, expected_revision)
         .await
         .map_err(err)?;
-    emit_pages_changed(&app, std::slice::from_ref(&page));
+    if changed {
+        emit_pages_changed(&app, std::slice::from_ref(&page));
+    }
     Ok(page)
 }
 

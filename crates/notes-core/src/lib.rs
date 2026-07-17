@@ -19,8 +19,8 @@ pub use external_import::{
 };
 pub use hlc::Hlc;
 pub use model::{
-    AttachmentOwner, BlockStyle, JournalDate, ObjectKind, OrderKey, PageAlias, PageKind,
-    PageLayout, PageListFilter, ReorderDirection, TaskState, journal_page_uuid,
+    AttachmentOwner, BlockStyle, ContentRevision, JournalDate, ObjectKind, OrderKey, PageAlias,
+    PageKind, PageLayout, PageListFilter, ReorderDirection, TaskState, journal_page_uuid,
 };
 pub use notes_blob::BlobHash;
 pub use operation::{

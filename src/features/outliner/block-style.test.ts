@@ -43,6 +43,7 @@ function block(uuid: string, style: BlockStyle = { kind: "paragraph" }): Block {
     orderKey: `order-${uuid}`,
     style,
     markdown: uuid,
+    markdownRevision: `revision-${uuid}`,
     createdAt: 0,
     updatedAt: 0,
   };

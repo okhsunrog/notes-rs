@@ -11,6 +11,7 @@ function block(uuid: string, orderKey: string): Block {
     orderKey,
     style: { kind: "paragraph" },
     markdown: "",
+    markdownRevision: `revision-${uuid}`,
     createdAt: 0,
     updatedAt: 0,
   };

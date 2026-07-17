@@ -28,7 +28,7 @@ export const commands = {
 	historyStatus: () => typedError<HistoryStatus, CommandError>(__TAURI_INVOKE("history_status")),
 	undo: () => typedError<boolean, CommandError>(__TAURI_INVOKE("undo")),
 	redo: () => typedError<boolean, CommandError>(__TAURI_INVOKE("redo")),
-	renamePage: (uuid: string, title: string | null) => typedError<Page, CommandError>(__TAURI_INVOKE("rename_page", { uuid, title })),
+	renamePage: (uuid: string, title: string | null, expectedRevision: ContentRevision) => typedError<Page, CommandError>(__TAURI_INVOKE("rename_page", { uuid, title, expectedRevision })),
 	setPageLayout: (uuid: string, layout: PageLayout) => typedError<Page, CommandError>(__TAURI_INVOKE("set_page_layout", { uuid, layout })),
 	createNote: () => typedError<CreatedNote, CommandError>(__TAURI_INVOKE("create_note")),
 	ensureJournal: (date: JournalDate) => typedError<Page, CommandError>(__TAURI_INVOKE("ensure_journal", { date })),
@@ -37,6 +37,7 @@ export const commands = {
 	kind: PageKind,
 	title: string | null,
 	layout: PageLayout,
+	titleRevision: ContentRevision,
 	createdAt: number,
 	updatedAt: number,
 } | null, CommandError>(__TAURI_INVOKE("get_journal", { date })),
@@ -47,6 +48,7 @@ export const commands = {
 	kind: PageKind,
 	title: string | null,
 	layout: PageLayout,
+	titleRevision: ContentRevision,
 	createdAt: number,
 	updatedAt: number,
 } | null, CommandError>(__TAURI_INVOKE("get_page", { uuid })),
@@ -57,10 +59,11 @@ export const commands = {
 	orderKey: OrderKey,
 	style: BlockStyle,
 	markdown: string,
+	markdownRevision: ContentRevision,
 	createdAt: number,
 	updatedAt: number,
 } | null, CommandError>(__TAURI_INVOKE("get_block", { uuid })),
-	setBlockContent: (uuid: string, content: BlockContent) => typedError<Block, CommandError>(__TAURI_INVOKE("set_block_content", { uuid, content })),
+	setBlockContent: (uuid: string, content: BlockContent, expectedRevision: ContentRevision) => typedError<Block, CommandError>(__TAURI_INVOKE("set_block_content", { uuid, content, expectedRevision })),
 	setBlockStyle: (uuid: string, style: BlockStyle) => typedError<Block, CommandError>(__TAURI_INVOKE("set_block_style", { uuid, style })),
 	setTaskState: (uuid: string, taskState: TaskState) => typedError<Block, CommandError>(__TAURI_INVOKE("set_task_state", { uuid, taskState })),
 	splitBlock: (uuid: string, parts: BlockContent[]) => typedError<Block[], CommandError>(__TAURI_INVOKE("split_block", { uuid, parts })),
@@ -69,6 +72,7 @@ export const commands = {
 	kind: PageKind,
 	title: string | null,
 	layout: PageLayout,
+	titleRevision: ContentRevision,
 	createdAt: number,
 	updatedAt: number,
 } | null, CommandError>(__TAURI_INVOKE("get_containing_page", { blockUuid })),
@@ -123,6 +127,7 @@ export const commands = {
 	kind: PageKind,
 	title: string | null,
 	layout: PageLayout,
+	titleRevision: ContentRevision,
 	createdAt: number,
 	updatedAt: number,
 } | null, CommandError>(__TAURI_INVOKE("get_page_by_title", { title })),
@@ -230,6 +235,7 @@ export type Block = {
 	orderKey: OrderKey,
 	style: BlockStyle,
 	markdown: string,
+	markdownRevision: ContentRevision,
 	createdAt: number,
 	updatedAt: number,
 };
@@ -259,6 +265,14 @@ export type CommandErrorCode = "invalid_input" | "not_found" | "conflict" | "una
 export type CompletionProtocol = "openai" | "anthropic";
 
 export type Content = { kind: "page"; record: Page } | { kind: "block"; record: Block };
+
+/**
+ *  Opaque revision of one editable content field.
+ *  Revisions use the same canonical HLC representation as the sync engine, but
+ *  callers can only round-trip the value they received from a read. This keeps
+ *  optimistic-concurrency checks typed without exposing HLC parsing to UI code.
+ */
+export type ContentRevision = string;
 
 export type CreatedNote = {
 	page: Page,
@@ -413,6 +427,7 @@ export type Page = {
 	kind: PageKind,
 	title: string | null,
 	layout: PageLayout,
+	titleRevision: ContentRevision,
 	createdAt: number,
 	updatedAt: number,
 };

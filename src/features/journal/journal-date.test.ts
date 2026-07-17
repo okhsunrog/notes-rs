@@ -51,6 +51,7 @@ describe("JournalDate UI boundary", () => {
         kind: { kind: "journal", date: "2026-07-17" },
         title: null,
         layout: "outline",
+        titleRevision: "test-title-revision",
         createdAt: 0,
         updatedAt: 0,
       }),

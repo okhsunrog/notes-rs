@@ -1,6 +1,6 @@
 use crate::model::{
-    AttachmentOwner, BlockStyle, ObjectKind, OrderKey, PageKind, PageLayout, ReorderDirection,
-    TaskState,
+    AttachmentOwner, BlockStyle, ContentRevision, ObjectKind, OrderKey, PageKind, PageLayout,
+    ReorderDirection, TaskState,
 };
 use crate::operation::{self, OpKind};
 use crate::sqlite::Connection;
@@ -31,7 +31,7 @@ pub use attachments::{
 pub use blocks::{
     BlockContent, create_block, delete_block, get_block, get_blocks, indent_block,
     list_block_children, move_block, move_block_in_direction, outdent_block, reorder_block,
-    set_block_content, set_block_style, set_task_state, split_block,
+    set_block_content, set_block_content_if_revision, set_block_style, set_task_state, split_block,
 };
 pub use graph::{find_backlinks, graph_snapshot, neighbors, read_ancestors, read_subtree};
 pub use history::{HistoryStatus, history_status, redo_history, undo_history};
@@ -41,7 +41,7 @@ pub use journals::{
 pub use pages::{
     CreatedNote, DeletedPage, create_note, create_page, delete_page, get_containing_page,
     get_or_create_page_by_title, get_page, get_page_by_title, list_pages, list_pages_filtered,
-    rename_page, set_page_layout,
+    rename_page, rename_page_if_revision, set_page_layout,
 };
 pub use search::{search_blocks_fts, search_fts, search_pages_by_title};
 pub(crate) use workspace::transaction_workspace_uuid;
@@ -71,6 +71,7 @@ pub struct Page {
     pub kind: crate::model::PageKind,
     pub title: Option<String>,
     pub layout: PageLayout,
+    pub title_revision: ContentRevision,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -84,6 +85,7 @@ pub struct Block {
     pub order_key: OrderKey,
     pub style: BlockStyle,
     pub markdown: String,
+    pub markdown_revision: ContentRevision,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -133,11 +135,13 @@ impl Content {
 
 pub(crate) const PAGE_COLUMNS: &str = "pages.uuid, pages.title, pages.layout, pages.created_at, pages.updated_at, \
      (SELECT page_kind FROM page_identities WHERE page_uuid = pages.uuid), \
-     (SELECT journal_date FROM page_identities WHERE page_uuid = pages.uuid)";
-pub(crate) const BLOCK_COLUMNS: &str =
-    "uuid, page_uuid, parent_uuid, order_key, style, markdown, created_at, updated_at";
+     (SELECT journal_date FROM page_identities WHERE page_uuid = pages.uuid), \
+     COALESCE(pages.title_hlc, pages.existence_hlc)";
+pub(crate) const BLOCK_COLUMNS: &str = "uuid, page_uuid, parent_uuid, order_key, style, markdown, created_at, updated_at, \
+     COALESCE(markdown_hlc, existence_hlc)";
 pub(crate) const QUALIFIED_BLOCK_COLUMNS: &str = "blocks.uuid, blocks.page_uuid, blocks.parent_uuid, blocks.order_key, blocks.style, \
-     blocks.markdown, blocks.created_at, blocks.updated_at";
+     blocks.markdown, blocks.created_at, blocks.updated_at, \
+     COALESCE(blocks.markdown_hlc, blocks.existence_hlc)";
 
 pub(crate) fn row_to_page(row: &rusqlite::Row<'_>) -> rusqlite::Result<Page> {
     let page_kind = row.get::<_, String>(5)?;
@@ -152,6 +156,7 @@ pub(crate) fn row_to_page(row: &rusqlite::Row<'_>) -> rusqlite::Result<Page> {
         kind,
         title: row.get(1)?,
         layout: row.get(2)?,
+        title_revision: row.get(7)?,
         created_at: row.get(3)?,
         updated_at: row.get(4)?,
     })
@@ -165,6 +170,7 @@ pub(crate) fn row_to_block(row: &rusqlite::Row<'_>) -> rusqlite::Result<Block> {
         order_key: row.get(3)?,
         style: row.get(4)?,
         markdown: row.get(5)?,
+        markdown_revision: row.get(8)?,
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
     })

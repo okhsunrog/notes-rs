@@ -167,6 +167,46 @@ pub async fn set_block_content(
     ))
 }
 
+/// Update block Markdown only when the caller still represents its current
+/// persisted content. Equal stale writes are accepted as idempotent success.
+pub async fn set_block_content_if_revision(
+    conn: &Connection,
+    uuid: uuid::Uuid,
+    content: BlockContent,
+    expected_revision: ContentRevision,
+) -> Result<(Block, bool, bool)> {
+    conn.call_domain(move |database| -> crate::CoreResult<(Block, bool, bool)> {
+        let transaction = database.transaction()?;
+        let sql = format!("SELECT {BLOCK_COLUMNS} FROM blocks WHERE uuid = ?1");
+        let block = transaction
+            .query_row(&sql, [uuid], row_to_block)
+            .optional()?
+            .ok_or_else(|| crate::CoreError::not_found("block was not found"))?;
+        if block.markdown == content.markdown {
+            transaction.commit()?;
+            return Ok((block, false, false));
+        }
+        if block.markdown_revision != expected_revision {
+            return Err(crate::CoreError::conflict(
+                "block content changed since editing began",
+            ));
+        }
+        let graph_changed =
+            operation::content_references_changed(&block.markdown, &content.markdown);
+        operation::apply_local_kinds_in_transaction(
+            &transaction,
+            vec![OpKind::BlockSetMarkdown(BlockSetMarkdown {
+                uuid,
+                markdown: content.markdown,
+            })],
+        )?;
+        let block = transaction.query_row(&sql, [uuid], row_to_block)?;
+        transaction.commit()?;
+        Ok((block, true, graph_changed))
+    })
+    .await
+}
+
 pub async fn set_block_style(
     conn: &Connection,
     uuid: uuid::Uuid,

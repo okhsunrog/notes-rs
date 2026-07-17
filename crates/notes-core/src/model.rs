@@ -3,6 +3,53 @@ use std::fmt;
 use std::str::FromStr;
 use unicode_normalization::UnicodeNormalization;
 
+/// Opaque revision of one editable content field.
+/// Revisions use the same canonical HLC representation as the sync engine, but
+/// callers can only round-trip the value they received from a read. This keeps
+/// optimistic-concurrency checks typed without exposing HLC parsing to UI code.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, specta::Type)]
+#[serde(transparent)]
+pub struct ContentRevision(#[specta(type = String)] crate::Hlc);
+
+impl fmt::Display for ContentRevision {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for ContentRevision {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value.parse().map(Self)
+    }
+}
+
+impl<'de> Deserialize<'de> for ContentRevision {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl rusqlite::types::ToSql for ContentRevision {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        rusqlite::types::ToSql::to_sql(&self.0)
+    }
+}
+
+impl rusqlite::types::FromSql for ContentRevision {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        value.as_str()?.parse().map_err(|error: anyhow::Error| {
+            rusqlite::types::FromSqlError::Other(error.into_boxed_dyn_error())
+        })
+    }
+}
+
 pub fn normalize_title(title: &str) -> String {
     title.trim().nfkc().flat_map(char::to_lowercase).collect()
 }
@@ -592,6 +639,20 @@ string_enum! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_revisions_roundtrip_canonical_hlc_and_reject_unvalidated_strings() {
+        let wire = "0000018D4A510000-00000002-01900000000070008000000000000001";
+        let revision: ContentRevision = serde_json::from_value(serde_json::json!(wire)).unwrap();
+        assert_eq!(revision.to_string(), wire.to_ascii_lowercase());
+        assert_eq!(
+            serde_json::to_value(revision).unwrap(),
+            wire.to_ascii_lowercase()
+        );
+        assert!(
+            serde_json::from_value::<ContentRevision>(serde_json::json!("revision-7")).is_err()
+        );
+    }
 
     #[test]
     fn block_style_wire_shape_cannot_represent_an_invalid_task() {

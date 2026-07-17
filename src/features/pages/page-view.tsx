@@ -87,7 +87,7 @@ export function PageView({
     }
     setSaveState("saving");
     try {
-      const updated = await renamePage(current.uuid, nextTitle);
+      const updated = await renamePage(current.uuid, nextTitle, current.titleRevision);
       pageRef.current = updated;
       onSavedRef.current(updated);
       setSaveState("saved");

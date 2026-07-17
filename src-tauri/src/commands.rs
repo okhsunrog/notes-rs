@@ -1,7 +1,7 @@
 use anyhow::Context;
 use notes_core::Connection;
 use notes_core::db::{self, Block, Page, SearchHit};
-use notes_core::{BlockStyle, PageLayout, ReorderDirection, TaskState};
+use notes_core::{BlockStyle, ContentRevision, PageLayout, ReorderDirection, TaskState};
 use notes_protocol::{
     AiIndexStatus, AiProviderProbeResult, AiProviderSettingsUpdate, AiRuntimeSettings, ChatEvent,
     ChatTurn,

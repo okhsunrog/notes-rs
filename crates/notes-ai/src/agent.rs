@@ -958,6 +958,9 @@ mod tests {
                 kind: notes_core::PageKind::Note,
                 title: Some("First note".into()),
                 layout: notes_core::PageLayout::Outline,
+                title_revision: "0000000000000000-00000000-00000000000000000000000000000001"
+                    .parse()
+                    .expect("revision"),
                 created_at: 0,
                 updated_at: 0,
             }),
@@ -966,6 +969,9 @@ mod tests {
                 kind: notes_core::PageKind::Note,
                 title: Some("Second note".into()),
                 layout: notes_core::PageLayout::Outline,
+                title_revision: "0000000000000000-00000000-00000000000000000000000000000001"
+                    .parse()
+                    .expect("revision"),
                 created_at: 0,
                 updated_at: 0,
             }),

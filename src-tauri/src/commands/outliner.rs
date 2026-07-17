@@ -54,11 +54,15 @@ pub async fn set_block_content(
     state: State<'_, AppState>,
     uuid: uuid::Uuid,
     content: db::BlockContent,
+    expected_revision: ContentRevision,
 ) -> CommandResult<db::Block> {
-    let (block, graph_changed) = db::set_block_content(&state.conn, uuid, content)
-        .await
-        .map_err(err)?;
-    emit_blocks_changed(&app, std::slice::from_ref(&block), []);
+    let (block, changed, graph_changed) =
+        db::set_block_content_if_revision(&state.conn, uuid, content, expected_revision)
+            .await
+            .map_err(err)?;
+    if changed {
+        emit_blocks_changed(&app, std::slice::from_ref(&block), []);
+    }
     if graph_changed {
         emit_domain(
             &app,

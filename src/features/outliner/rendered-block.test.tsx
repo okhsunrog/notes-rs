@@ -12,6 +12,7 @@ function block(markdown: string, style: BlockStyle = { kind: "paragraph" }): Blo
     orderKey: "a0",
     style,
     markdown,
+    markdownRevision: "test-markdown-revision",
     createdAt: 0,
     updatedAt: 0,
   };
