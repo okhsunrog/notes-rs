@@ -49,13 +49,14 @@ The 2026-07-17 audit found:
 
 - 400 normal page files and 724 journal files, of which 723 journals are non-empty;
 - 1,124 Markdown files, approximately 1.38 MB total, with a largest file of approximately 49 KB;
-- 14,404 structural bullet lines, tabs in 581 files, and 1,033 files without a final newline;
+- 16,902 parsed structural blocks, tabs in 581 files, and 1,033 files without a final newline;
 - 134 task-marker blocks and 131 property lines, including 60 valid unique `id::` UUIDs;
 - 117 files containing fenced code, primarily plain fences plus `sh` and `diff`;
 - 366 wikilinks, one block reference, 72 Markdown images, tables, LaTeX, macros, headings,
   hashtags, logbooks, and ordinary Markdown links;
-- 91 image assets (approximately 48 MB), including five missing references and 31 currently
-  unreferenced assets;
+- 91 image assets (approximately 48 MB): all 60 distinct local references exist, ten references
+  are remote HTTPS images, two are embedded base64 PNGs, and 31 local assets are currently
+  unreferenced;
 - five Excalidraw JSON files: four referenced drawings and one empty orphan. The referenced content
   is 578 free-draw elements and one text element, so a one-time SVG conversion is practical;
 - `:file/name-format :triple-lowbar`, eight namespace page titles, and no decoded title collision;
@@ -347,8 +348,8 @@ feat(import): resolve identities references and provenance
 ### Attachments
 
 - resolve relative assets without allowing path escape;
-- report five currently missing source references and do not import the 31 unreferenced assets by
-  default;
+- report missing source references if found, while the audited corpus currently has none; do not
+  import the 31 unreferenced assets by default;
 - externalize base64 images into content-addressed blobs;
 - preserve remote images as blocked-by-default links that require a user privacy decision;
 - stage immutable blobs before the database transaction; failed DB commit may leave only
@@ -636,7 +637,7 @@ Planning estimates stay separate from actual duration.
 | B3  | Typed task workflow state                    | complete | 01:00           | 2026-07-17T18:54:16+03:00 | 2026-07-17T19:10:56+03:00 | 00:16:40 | 00:19:39   | `def5b97`                        | 53 core; 84 frontend; scoped Clippy; build       |
 | C1  | Logseq scanner/config/manifest               | complete | 01:15           | 2026-07-17T17:45:43+03:00 | 2026-07-17T18:25:57+03:00 | 00:40:14 | 00:22:43   | `64a612e`                        | 24 tests; strict Clippy; real corpus exact smoke |
 | C2  | Logseq structural parser and fixtures        | complete | 02:00           | 2026-07-17T18:27:42+03:00 | 2026-07-17T19:01:19+03:00 | 00:33:37 | 00:32:33   | `5e33209`                        | 46 tests; Clippy; 1,124-file lossless smoke      |
-| C3  | Import identity/reference/provenance mapping | planned  | 01:30           | —                         | —                         | —        | —          | —                                | —                                                |
+| C3  | Import identity/reference/provenance mapping | complete | 01:30           | 2026-07-17T19:02:09+03:00 | 2026-07-17T19:33:02+03:00 | 00:30:53 | 00:30:53   | `69e39eb`                        | 67 crate; 167 workspace; Clippy; corpus dry-run  |
 | D1  | Asset staging and attachment rewrite         | planned  | 01:30           | —                         | —                         | —        | —          | —                                | —                                                |
 | D2  | One-time Excalidraw to SVG conversion        | planned  | 01:00           | —                         | —                         | —        | —          | —                                | —                                                |
 | E1  | Atomic bulk apply and convergence            | planned  | 02:00           | —                         | —                         | —        | —          | —                                | —                                                |
@@ -645,7 +646,7 @@ Planning estimates stay separate from actual duration.
 | F1  | Shared CommonMark/GFM semantic renderer      | complete | 02:00           | 2026-07-17T17:45:48+03:00 | 2026-07-17T18:15:21+03:00 | 00:29:33 | 00:12:23   | `bc31b52`                        | `vp check`; 35 tests; production build           |
 | F2  | Image policy, KaTeX, and highlighted code    | complete | 02:00           | 2026-07-17T18:27:47+03:00 | 2026-07-17T18:58:39+03:00 | 00:30:52 | 00:29:49   | `87ac7d0`                        | 78 frontend; build; 1.917 MB main JS             |
 | F3  | Safe Mermaid rendering                       | planned  | 01:15           | —                         | —                         | —        | —          | —                                | —                                                |
-| G1  | CodeMirror active Outline block              | planned  | 02:30           | —                         | —                         | —        | —          | —                                | —                                                |
+| G1  | CodeMirror active Outline block              | complete | 02:30           | 2026-07-17T19:12:31+03:00 | 2026-07-17T19:24:13+03:00 | 00:11:42 | 00:11:42   | `2a24308`                        | 92 frontend; live WebView; build 2.419 MB        |
 | G2  | Workspace panes and Assistant controller     | planned  | 03:00           | —                         | —                         | —        | —          | —                                | —                                                |
 | G3  | PageSession and linked live Reading pane     | planned  | 02:00           | —                         | —                         | —        | —          | —                                | —                                                |
 | G4  | Continuous DocumentCodec editor              | planned  | 04:00+          | —                         | —                         | —        | —          | —                                | —                                                |
@@ -677,12 +678,16 @@ is recorded as soon as an interval stops; the feature-ledger totals are calculat
 | C2         | agent  | 2026-07-17T18:27:42+03:00 | 2026-07-17T18:41:27+03:00 | 00:13:45        | Added loss-aware structural AST, Journal source classification, typed constructs, fixtures, and tests    |
 | C2         | review | 2026-07-17T18:42:31+03:00 | 2026-07-17T19:00:07+03:00 | 00:17:36        | Fixed CommonMark fences, Unicode complexity, property ranges, BOM/extensions, and ran full-corpus smoke  |
 | C2         | root   | 2026-07-17T19:00:07+03:00 | 2026-07-17T19:01:19+03:00 | 00:01:12        | Reviewed source preservation, reran strict crate gates, removed fixture whitespace, and committed C2     |
+| C3         | agent  | 2026-07-17T19:02:09+03:00 | 2026-07-17T19:31:55+03:00 | 00:29:46        | Added stable identities, task/reference maps, provenance, preparation limits, and real-corpus dry-run    |
+| C3         | root   | 2026-07-17T19:31:55+03:00 | 2026-07-17T19:33:02+03:00 | 00:01:07        | Reviewed contracts, ran strict crate gates, and committed the isolated pure import boundary              |
 | F1         | agent  | 2026-07-17T17:45:48+03:00 | 2026-07-17T17:51:51+03:00 | 00:06:03        | CommonMark/GFM renderer, typed URL policy, and focused security tests                                    |
 | F1         | agent  | 2026-07-17T17:55:21+03:00 | 2026-07-17T18:00:50+03:00 | 00:05:29        | Integrated shared renderer into authored blocks, AI responses, and typed navigation                      |
 | F1         | root   | 2026-07-17T18:14:30+03:00 | 2026-07-17T18:15:21+03:00 | 00:00:51        | Security review, encoded-control hardening, full frontend gate, and commit                               |
 | F2         | agent  | 2026-07-17T18:27:47+03:00 | 2026-07-17T18:44:12+03:00 | 00:16:25        | Added local KaTeX/Shiki, typed attachment image policy, code copy, tables, and security tests            |
 | F2         | review | 2026-07-17T18:45:13+03:00 | 2026-07-17T18:57:58+03:00 | 00:12:45        | Hardened image origins, HTML shape, Shiki workload, KaTeX aggregate limits, and package deduplication    |
 | F2         | root   | 2026-07-17T18:58:00+03:00 | 2026-07-17T18:58:39+03:00 | 00:00:39        | Reviewed security boundaries, staged isolated renderer files, and committed the green production build   |
+| G1         | agent  | 2026-07-17T19:12:31+03:00 | 2026-07-17T19:23:17+03:00 | 00:10:46        | Replaced active textarea with CM6, preserved outliner/IME behavior, added model tests, and inspected live |
+| G1         | root   | 2026-07-17T19:23:17+03:00 | 2026-07-17T19:24:13+03:00 | 00:00:56        | Reviewed editor ownership and shortcuts, reran 92 frontend tests, accepted visible 2 MB bundle warning    |
 
 ### Session summaries
 
