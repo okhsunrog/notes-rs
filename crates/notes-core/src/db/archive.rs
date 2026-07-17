@@ -1,12 +1,16 @@
 use super::*;
 use crate::operation::{
-    AttachmentAdd, AttachmentRemove, BlockCreate, BlockDelete, PageCreate, PageDelete,
-    SnapshotPageIdentity,
+    AttachmentAdd, AttachmentRemove, BlockCreate, BlockDelete, PageAliasSet, PageCreate,
+    PageDelete, SnapshotPageAlias, SnapshotPageIdentity,
+};
+use crate::{
+    ExternalImportDigest, ExternalImportFormat, ExternalImportIdentityContext,
+    ExternalImportReceipt, PageAlias,
 };
 use std::collections::{HashMap, HashSet};
 
 pub const ARCHIVE_FORMAT: &str = "notes-rs";
-pub const ARCHIVE_VERSION: u32 = 5;
+pub const ARCHIVE_VERSION: u32 = 6;
 
 pub async fn export_archive(conn: &Connection) -> Result<DataArchive> {
     conn.call(|database| {
@@ -34,6 +38,22 @@ pub async fn export_archive(conn: &Connection) -> Result<DataArchive> {
                 .query_map([], row_to_page)?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
+        let page_aliases = database
+            .prepare(
+                "SELECT page_uuid, alias, hlc, present
+                   FROM page_alias_lww
+                  WHERE present = 1
+                  ORDER BY page_uuid, alias",
+            )?
+            .query_map([], |row| {
+                Ok(SnapshotPageAlias {
+                    page_uuid: row.get(0)?,
+                    alias: row.get(1)?,
+                    hlc: operation::sql_hlc(row.get(2)?, 2)?,
+                    present: row.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         let blocks = {
             let sql = format!("SELECT {BLOCK_COLUMNS} FROM blocks ORDER BY page_uuid, parent_uuid, order_key, uuid");
             database
@@ -75,15 +95,58 @@ pub async fn export_archive(conn: &Connection) -> Result<DataArchive> {
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
+        let external_import_receipts = database
+            .prepare(
+                "SELECT receipt_uuid, import_format, manifest_digest, plan_digest,
+                        planner_version, identity_workspace_uuid, import_namespace_uuid,
+                        provenance_json, imported_at
+                   FROM external_import_receipts ORDER BY import_format",
+            )?
+            .query_map([], |row| {
+                let format = row
+                    .get::<_, String>(1)?
+                    .parse::<ExternalImportFormat>()
+                    .map_err(|error| {
+                        invalid_archive_column(1, rusqlite::types::Type::Text, error)
+                    })?;
+                let manifest = row.get::<_, Vec<u8>>(2)?;
+                let plan = row.get::<_, Vec<u8>>(3)?;
+                let provenance_json = row.get::<_, String>(7)?;
+                Ok(ExternalImportReceipt {
+                    receipt_uuid: row.get(0)?,
+                    format,
+                    manifest_digest: ExternalImportDigest::from_slice(&manifest)
+                        .map_err(|error| {
+                            invalid_archive_column(2, rusqlite::types::Type::Blob, error)
+                        })?,
+                    plan_digest: ExternalImportDigest::from_slice(&plan)
+                        .map_err(|error| {
+                            invalid_archive_column(3, rusqlite::types::Type::Blob, error)
+                        })?,
+                    planner_version: row.get(4)?,
+                    identity: ExternalImportIdentityContext {
+                        workspace_uuid: row.get(5)?,
+                        import_namespace_uuid: row.get(6)?,
+                    },
+                    provenance: serde_json::from_str(&provenance_json)
+                        .map_err(|error| {
+                            invalid_archive_column(7, rusqlite::types::Type::Text, error)
+                        })?,
+                    imported_at: row.get(8)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(DataArchive {
             format: ARCHIVE_FORMAT.into(),
             version: ARCHIVE_VERSION,
             workspace_uuid,
             exported_at: chrono::Utc::now().timestamp(),
             page_identities,
+            page_aliases,
             pages,
             blocks,
             attachments,
+            external_import_receipts,
             files: Default::default(),
         })
     })
@@ -133,12 +196,36 @@ pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<(
             .into());
         }
     }
+    for alias in &archive.page_aliases {
+        if !identities.contains_key(&alias.page_uuid) {
+            return Err(crate::CoreError::invalid(format!(
+                "archive alias {} references unknown page identity {}",
+                alias.alias, alias.page_uuid
+            ))
+            .into());
+        }
+    }
     for block in &archive.blocks {
         if identities.contains_key(&block.uuid) {
             return Err(crate::CoreError::invalid(format!(
                 "archive UUID {} is reserved by both a page identity and a block",
                 block.uuid
             ))
+            .into());
+        }
+    }
+    let mut receipt_formats = HashSet::new();
+    for receipt in &archive.external_import_receipts {
+        if receipt.receipt_uuid.is_nil()
+            || receipt.identity.import_namespace_uuid.is_nil()
+            || receipt.identity.workspace_uuid != archive.workspace_uuid
+            || receipt.planner_version == 0
+            || !receipt.provenance.is_object()
+            || !receipt_formats.insert(receipt.format)
+        {
+            return Err(crate::CoreError::invalid(
+                "archive contains an invalid or duplicate external import receipt",
+            )
             .into());
         }
     }
@@ -152,6 +239,7 @@ pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<(
                     UNION ALL SELECT 1 FROM tombstones
                     UNION ALL SELECT 1 FROM applied_ops
                     UNION ALL SELECT 1 FROM sync_outbox
+                    UNION ALL SELECT 1 FROM external_import_receipts
                  )",
                 [],
                 |row| row.get(0),
@@ -191,6 +279,10 @@ pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<(
             .prepare("SELECT uuid FROM pages ORDER BY uuid")?
             .query_map([], |row| row.get::<_, uuid::Uuid>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let current_aliases = transaction
+            .prepare("SELECT page_uuid, alias FROM page_alias_lww WHERE present = 1")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<(uuid::Uuid, PageAlias)>>>()?;
 
         let mut deletion_kinds = current_attachments
             .into_iter()
@@ -198,6 +290,15 @@ pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<(
                 OpKind::AttachmentRemove(AttachmentRemove { owner, blob_hash })
             })
             .collect::<Vec<_>>();
+        deletion_kinds.extend(
+            current_aliases.into_iter().map(|(uuid, alias)| {
+                OpKind::PageAliasSet(PageAliasSet {
+                    uuid,
+                    alias,
+                    present: false,
+                })
+            }),
+        );
         deletion_kinds.extend(
             current_blocks
                 .into_iter()
@@ -228,6 +329,13 @@ pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<(
                 created_at: page.created_at,
             })
         }).collect::<Vec<_>>();
+        creation_kinds.extend(archive.page_aliases.into_iter().map(|alias| {
+            OpKind::PageAliasSet(PageAliasSet {
+                uuid: alias.page_uuid,
+                alias: alias.alias,
+                present: alias.present,
+            })
+        }));
         creation_kinds.extend(archive.blocks.into_iter().map(|block| {
             OpKind::BlockCreate(BlockCreate {
                 uuid: block.uuid,
@@ -249,10 +357,41 @@ pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<(
             })
         }));
         operation::apply_local_kinds_in_transaction(&transaction, creation_kinds)?;
+        transaction.execute("DELETE FROM external_import_receipts", [])?;
+        for receipt in archive.external_import_receipts {
+            transaction.execute(
+                "INSERT INTO external_import_receipts(
+                    receipt_uuid, import_format, manifest_digest, plan_digest,
+                    planner_version, identity_workspace_uuid, import_namespace_uuid,
+                    provenance_json, imported_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                rusqlite::params![
+                    receipt.receipt_uuid,
+                    receipt.format.as_str(),
+                    receipt.manifest_digest.as_bytes().as_slice(),
+                    receipt.plan_digest.as_bytes().as_slice(),
+                    receipt.planner_version,
+                    receipt.identity.workspace_uuid,
+                    receipt.identity.import_namespace_uuid,
+                    serde_json::to_string(&receipt.provenance).map_err(|error| {
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                    })?,
+                    receipt.imported_at,
+                ],
+            )?;
+        }
         transaction.execute("DELETE FROM history_undo", [])?;
         transaction.execute("DELETE FROM history_redo", [])?;
         transaction.commit()?;
         Ok(())
     })
     .await
+}
+
+fn invalid_archive_column(
+    column: usize,
+    data_type: rusqlite::types::Type,
+    error: impl std::error::Error + Send + Sync + 'static,
+) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(column, data_type, Box::new(error))
 }

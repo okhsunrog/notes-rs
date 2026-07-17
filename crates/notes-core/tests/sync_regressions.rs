@@ -1,7 +1,8 @@
 use notes_core::db;
 use notes_core::{
-    AttachmentOwner, BlockCreate, BlockMove, BlockStyle, Connection, Hlc, ObjectKind, Op, OpKind,
-    OrderKey, Origin, PageCreate, PageDelete, PageLayout, SnapshotAttachment, SyncSnapshot,
+    AttachmentOwner, BlockCreate, BlockDelete, BlockMove, BlockStyle, Connection, Hlc, ObjectKind,
+    Op, OpKind, OrderKey, Origin, PageCreate, PageDelete, PageLayout, SnapshotAttachment,
+    SyncSnapshot,
 };
 
 const TEST_WORKSPACE_UUID: uuid::Uuid = uuid::Uuid::from_u128(0xC0DE);
@@ -56,6 +57,103 @@ fn page_create(index: u128, page_uuid: uuid::Uuid) -> Op {
             created_at: index as i64,
         }),
     )
+}
+
+#[tokio::test]
+async fn deferred_reference_projection_discards_blocks_deleted_in_the_same_batch() {
+    let block_delete_database = database().await;
+    let page_uuid = uuid::Uuid::from_u128(0xDD01);
+    let block_uuid = uuid::Uuid::from_u128(0xDD02);
+    notes_core::apply_batch(
+        &block_delete_database.connection,
+        &[
+            page_create(1, page_uuid),
+            op(
+                2,
+                2,
+                OpKind::BlockCreate(BlockCreate {
+                    uuid: block_uuid,
+                    page_uuid,
+                    parent_uuid: None,
+                    order_key: OrderKey::first(),
+                    style: BlockStyle::Paragraph,
+                    markdown: "[[Page 1]]".into(),
+                    created_at: 2,
+                }),
+            ),
+            op(
+                3,
+                3,
+                OpKind::BlockDelete(BlockDelete {
+                    uuid: block_uuid,
+                    page_uuid,
+                }),
+            ),
+        ],
+        Origin::Remote,
+    )
+    .await
+    .expect("create then delete block atomically");
+    let counts = block_delete_database
+        .connection
+        .call(|database| {
+            database.query_row(
+                "SELECT (SELECT COUNT(*) FROM blocks), (SELECT COUNT(*) FROM page_links)",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(counts, (0, 0));
+
+    let page_delete_database = database().await;
+    let page_uuid = uuid::Uuid::from_u128(0xDD11);
+    let block_uuid = uuid::Uuid::from_u128(0xDD12);
+    notes_core::apply_batch(
+        &page_delete_database.connection,
+        &[
+            page_create(11, page_uuid),
+            op(
+                12,
+                12,
+                OpKind::BlockCreate(BlockCreate {
+                    uuid: block_uuid,
+                    page_uuid,
+                    parent_uuid: None,
+                    order_key: OrderKey::first(),
+                    style: BlockStyle::Paragraph,
+                    markdown: "[[Page 11]]".into(),
+                    created_at: 12,
+                }),
+            ),
+            op(13, 13, OpKind::PageDelete(PageDelete { uuid: page_uuid })),
+        ],
+        Origin::Remote,
+    )
+    .await
+    .expect("create page subtree then delete page atomically");
+    let counts = page_delete_database
+        .connection
+        .call(|database| {
+            database.query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM pages),
+                   (SELECT COUNT(*) FROM blocks),
+                   (SELECT COUNT(*) FROM page_links)",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(counts, (0, 0, 0));
 }
 
 #[tokio::test]

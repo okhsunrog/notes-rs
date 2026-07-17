@@ -1,6 +1,8 @@
 use notes_core::db::{self, BlockContent, Content, GraphRelation};
 use notes_core::{
-    BlockCreate, BlockStyle, Connection, Hlc, ObjectKind, Op, OpKind, OrderKey, Origin,
+    BlockCreate, BlockStyle, Connection, Hlc, JournalDate, ObjectKind, Op, OpKind, OrderKey,
+    Origin, PageAlias, PageAliasSet, PageCreate, PageDelete, PageKind, PageLayout,
+    journal_page_uuid,
 };
 
 const TEST_WORKSPACE_UUID: uuid::Uuid = uuid::Uuid::from_u128(0xC0DE);
@@ -41,6 +43,243 @@ fn remote_op(index: u128, wall_ms: u64, kind: OpKind) -> Op {
         format_version: notes_core::operation::FORMAT_VERSION,
         kind,
     }
+}
+
+#[tokio::test]
+async fn explicit_alias_lookup_opens_journal_and_survives_delete_recreation() {
+    let database = database().await;
+    let connection = &database.connection;
+    let date = "2026-07-17".parse::<JournalDate>().unwrap();
+    let journal_uuid = journal_page_uuid(TEST_WORKSPACE_UUID, &date);
+    let alias = PageAlias::new("Jul 17th, 2026").unwrap();
+    let source_page = uuid::Uuid::from_u128(0xA11CE);
+    let source_block = uuid::Uuid::from_u128(0xB10C);
+    notes_core::apply_batch(
+        connection,
+        &[
+            remote_op(
+                1,
+                1,
+                OpKind::PageCreate(PageCreate {
+                    uuid: source_page,
+                    kind: PageKind::Note,
+                    title: Some("Source".into()),
+                    layout: PageLayout::Outline,
+                    created_at: 1,
+                }),
+            ),
+            remote_op(
+                2,
+                2,
+                OpKind::PageCreate(PageCreate {
+                    uuid: journal_uuid,
+                    kind: PageKind::Journal { date: date.clone() },
+                    title: None,
+                    layout: PageLayout::Outline,
+                    created_at: 2,
+                }),
+            ),
+            remote_op(
+                3,
+                3,
+                OpKind::PageAliasSet(PageAliasSet {
+                    uuid: journal_uuid,
+                    alias: alias.clone(),
+                    present: true,
+                }),
+            ),
+            remote_op(
+                4,
+                4,
+                OpKind::BlockCreate(BlockCreate {
+                    uuid: source_block,
+                    page_uuid: source_page,
+                    parent_uuid: None,
+                    order_key: OrderKey::first(),
+                    style: BlockStyle::Paragraph,
+                    markdown: "See [[Jul 17th, 2026]]".into(),
+                    created_at: 4,
+                }),
+            ),
+        ],
+        Origin::Remote,
+    )
+    .await
+    .unwrap();
+
+    let by_alias = db::get_page_by_title(connection, " JUL 17TH, 2026 ".into())
+        .await
+        .unwrap()
+        .expect("journal resolves through explicit alias");
+    assert_eq!(by_alias.uuid, journal_uuid);
+    assert_eq!(
+        db::get_or_create_page_by_title(connection, "Jul 17th, 2026".into())
+            .await
+            .unwrap()
+            .uuid,
+        journal_uuid,
+        "alias navigation must not create a duplicate note"
+    );
+
+    notes_core::apply(
+        connection,
+        &remote_op(5, 5, OpKind::PageDelete(PageDelete { uuid: journal_uuid })),
+        Origin::Remote,
+    )
+    .await
+    .unwrap();
+    let target_after_delete = connection
+        .call(move |database| {
+            database.query_row(
+                "SELECT target_page_uuid FROM page_links WHERE source_block_uuid = ?1",
+                [source_block],
+                |row| row.get::<_, Option<uuid::Uuid>>(0),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(target_after_delete, None);
+
+    notes_core::apply(
+        connection,
+        &remote_op(
+            6,
+            6,
+            OpKind::PageCreate(PageCreate {
+                uuid: journal_uuid,
+                kind: PageKind::Journal { date },
+                title: None,
+                layout: PageLayout::Outline,
+                created_at: 6,
+            }),
+        ),
+        Origin::Remote,
+    )
+    .await
+    .unwrap();
+    let target_after_recreate = connection
+        .call(move |database| {
+            database.query_row(
+                "SELECT target_page_uuid FROM page_links WHERE source_block_uuid = ?1",
+                [source_block],
+                |row| row.get::<_, Option<uuid::Uuid>>(0),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(target_after_recreate, Some(journal_uuid));
+}
+
+#[tokio::test]
+async fn colliding_explicit_aliases_are_ambiguous() {
+    let database = database().await;
+    let connection = &database.connection;
+    let first = uuid::Uuid::from_u128(0x101);
+    let second = uuid::Uuid::from_u128(0x102);
+    let alias = PageAlias::new("shared alias").unwrap();
+    notes_core::apply_batch(
+        connection,
+        &[
+            remote_op(
+                10,
+                10,
+                OpKind::PageCreate(PageCreate {
+                    uuid: first,
+                    kind: PageKind::Note,
+                    title: Some("First".into()),
+                    layout: PageLayout::Outline,
+                    created_at: 10,
+                }),
+            ),
+            remote_op(
+                11,
+                11,
+                OpKind::PageCreate(PageCreate {
+                    uuid: second,
+                    kind: PageKind::Note,
+                    title: Some("Second".into()),
+                    layout: PageLayout::Outline,
+                    created_at: 11,
+                }),
+            ),
+            remote_op(
+                12,
+                12,
+                OpKind::PageAliasSet(PageAliasSet {
+                    uuid: first,
+                    alias: alias.clone(),
+                    present: true,
+                }),
+            ),
+            remote_op(
+                13,
+                13,
+                OpKind::PageAliasSet(PageAliasSet {
+                    uuid: second,
+                    alias,
+                    present: true,
+                }),
+            ),
+        ],
+        Origin::Remote,
+    )
+    .await
+    .unwrap();
+    assert!(
+        db::get_page_by_title(connection, "Shared Alias".into())
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    notes_core::apply(
+        connection,
+        &remote_op(
+            14,
+            14,
+            OpKind::PageAliasSet(PageAliasSet {
+                uuid: second,
+                alias: PageAlias::new("shared alias").unwrap(),
+                present: false,
+            }),
+        ),
+        Origin::Remote,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        db::get_page_by_title(connection, "shared alias".into())
+            .await
+            .unwrap()
+            .unwrap()
+            .uuid,
+        first
+    );
+
+    notes_core::apply(
+        connection,
+        &remote_op(
+            15,
+            12,
+            OpKind::PageAliasSet(PageAliasSet {
+                uuid: second,
+                alias: PageAlias::new("shared alias").unwrap(),
+                present: true,
+            }),
+        ),
+        Origin::Remote,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        db::get_page_by_title(connection, "shared alias".into())
+            .await
+            .unwrap()
+            .unwrap()
+            .uuid,
+        first,
+        "an older alias add cannot defeat a newer removal"
+    );
 }
 
 #[tokio::test]

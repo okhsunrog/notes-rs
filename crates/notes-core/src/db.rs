@@ -255,9 +255,11 @@ pub struct DataArchive {
     pub workspace_uuid: uuid::Uuid,
     pub exported_at: i64,
     pub page_identities: Vec<crate::operation::SnapshotPageIdentity>,
+    pub page_aliases: Vec<crate::operation::SnapshotPageAlias>,
     pub pages: Vec<Page>,
     pub blocks: Vec<Block>,
     pub attachments: Vec<Attachment>,
+    pub external_import_receipts: Vec<crate::ExternalImportReceipt>,
     #[serde(default)]
     pub files: std::collections::BTreeMap<String, String>,
 }

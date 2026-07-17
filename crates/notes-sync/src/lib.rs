@@ -15,12 +15,12 @@ pub use notes_core::Hlc;
 pub use notes_core::operation::FORMAT_VERSION;
 pub use notes_core::operation::{
     AttachmentAdd, AttachmentRemove, BlockCreate, BlockDelete, BlockMove, BlockSetMarkdown,
-    BlockSetStyle, PageCreate, PageDelete, PageSetLayout, PageSetTitle,
+    BlockSetStyle, PageAliasSet, PageCreate, PageDelete, PageSetLayout, PageSetTitle,
 };
 pub use notes_core::{
     ApplyOutcome, AttachmentOwner, BlockStyle, JournalDate, ObjectKind, Op, OpKind, OrderKey,
-    Origin, PageKind, PageLayout, SnapshotAttachment, SnapshotBlock, SnapshotPage,
-    SnapshotPageIdentity, SnapshotTombstone, SyncSnapshot, TaskState, acknowledge_server_op, apply,
-    apply_batch, apply_sequenced, configure_sync, export_sync_snapshot, import_sync_snapshot,
-    pending_outbox, sync_cursor,
+    Origin, PageAlias, PageKind, PageLayout, SnapshotAttachment, SnapshotBlock, SnapshotPage,
+    SnapshotPageAlias, SnapshotPageIdentity, SnapshotTombstone, SyncSnapshot, TaskState,
+    acknowledge_server_op, apply, apply_batch, apply_sequenced, configure_sync,
+    export_sync_snapshot, import_sync_snapshot, pending_outbox, sync_cursor,
 };

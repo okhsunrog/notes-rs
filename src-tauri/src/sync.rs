@@ -308,6 +308,7 @@ async fn initialize_replica(
 fn snapshot_is_empty(snapshot: &SyncSnapshot) -> bool {
     snapshot.page_identities.is_empty()
         && snapshot.pages.is_empty()
+        && snapshot.page_aliases.is_empty()
         && snapshot.blocks.is_empty()
         && snapshot.structures.is_empty()
         && snapshot.tombstones.is_empty()
@@ -447,6 +448,10 @@ async fn emit_operation_changes(
             OpKind::PageCreate(payload) => {
                 changed_pages.insert(payload.uuid);
                 // Creating a canonical page may adopt an existing wikilink stub.
+                graph.insert(payload.uuid);
+            }
+            OpKind::PageAliasSet(payload) => {
+                changed_pages.insert(payload.uuid);
                 graph.insert(payload.uuid);
             }
             OpKind::PageSetTitle(payload) => {
@@ -699,6 +704,7 @@ mod tests {
             seq: 0,
             page_identities: Vec::new(),
             pages: Vec::new(),
+            page_aliases: Vec::new(),
             blocks: Vec::new(),
             structures: Vec::new(),
             tombstones: Vec::new(),

@@ -1,7 +1,7 @@
 use super::*;
 use crate::operation::{
     AttachmentAdd, AttachmentRemove, BlockCreate, BlockDelete, BlockMove, BlockSetMarkdown,
-    BlockSetStyle, PageCreate, PageDelete, PageSetLayout, PageSetTitle,
+    BlockSetStyle, PageAliasSet, PageCreate, PageDelete, PageSetLayout, PageSetTitle,
 };
 use rusqlite::OptionalExtension;
 
@@ -34,6 +34,22 @@ fn capture_inverse(
     match kind {
         OpKind::PageCreate(payload) => {
             inverse.push(OpKind::PageDelete(PageDelete { uuid: payload.uuid }))
+        }
+        OpKind::PageAliasSet(payload) => {
+            let previous = database
+                .query_row(
+                    "SELECT present FROM page_alias_lww
+                      WHERE page_uuid = ?1 AND alias = ?2",
+                    rusqlite::params![payload.uuid, payload.alias],
+                    |row| row.get::<_, bool>(0),
+                )
+                .optional()?
+                .unwrap_or(false);
+            inverse.push(OpKind::PageAliasSet(PageAliasSet {
+                uuid: payload.uuid,
+                alias: payload.alias.clone(),
+                present: previous,
+            }));
         }
         OpKind::PageSetTitle(payload) => {
             if let Some(title) = database

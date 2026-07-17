@@ -1,15 +1,16 @@
 //! Versioned, UUID-addressed page/block operations and the single apply boundary.
 
 use crate::model::{
-    AttachmentOwner, BlockStyle, ObjectKind, OrderKey, PageKind, PageLayout, journal_page_uuid,
+    AttachmentOwner, BlockStyle, ObjectKind, OrderKey, PageAlias, PageKind, PageLayout,
+    journal_page_uuid,
 };
 use crate::{Connection, CoreError, CoreResult, Hlc};
 use anyhow::{Context, Result};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-pub const FORMAT_VERSION: u32 = 5;
+pub const FORMAT_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
@@ -32,6 +33,7 @@ pub struct Op {
 #[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
 pub enum OpKind {
     PageCreate(PageCreate),
+    PageAliasSet(PageAliasSet),
     PageSetTitle(PageSetTitle),
     PageSetLayout(PageSetLayout),
     PageDelete(PageDelete),
@@ -51,6 +53,15 @@ pub struct PageCreate {
     pub title: Option<String>,
     pub layout: PageLayout,
     pub created_at: i64,
+}
+
+/// Sets the presence of one explicit page alias using operation HLC as its
+/// LWW clock. A title is an implicit alias and does not use this operation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PageAliasSet {
+    pub uuid: uuid::Uuid,
+    pub alias: PageAlias,
+    pub present: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -135,10 +146,19 @@ pub struct SyncSnapshot {
     pub seq: u64,
     pub page_identities: Vec<SnapshotPageIdentity>,
     pub pages: Vec<SnapshotPage>,
+    pub page_aliases: Vec<SnapshotPageAlias>,
     pub blocks: Vec<SnapshotBlock>,
     pub structures: Vec<SnapshotBlockStructure>,
     pub tombstones: Vec<SnapshotTombstone>,
     pub attachments: Vec<SnapshotAttachment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SnapshotPageAlias {
+    pub page_uuid: uuid::Uuid,
+    pub alias: PageAlias,
+    pub hlc: Hlc,
+    pub present: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -222,6 +242,33 @@ pub(crate) fn apply_local_kinds_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     kinds: Vec<OpKind>,
 ) -> CoreResult<()> {
+    apply_local_kinds_with_policy(transaction, kinds, false)?;
+    Ok(())
+}
+
+pub(crate) struct LocalBatchApply {
+    pub operations: Vec<Op>,
+    pub stats: DeferredApplyStats,
+}
+
+pub(crate) fn apply_local_kinds_deferred_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    kinds: Vec<OpKind>,
+) -> CoreResult<LocalBatchApply> {
+    apply_local_kinds_with_policy(transaction, kinds, true)
+}
+
+fn apply_local_kinds_with_policy(
+    transaction: &rusqlite::Transaction<'_>,
+    kinds: Vec<OpKind>,
+    deferred: bool,
+) -> CoreResult<LocalBatchApply> {
+    // Validate the complete input before even creating the local device row.
+    // This keeps the external-import boundary observably mutation-free when
+    // any late element in a large batch is malformed.
+    for kind in &kinds {
+        validate_kind(kind)?;
+    }
     let device_id = meta_or_insert_device_id(transaction)?;
     let workspace_uuid = crate::db::transaction_workspace_uuid(transaction)?;
     let previous = transaction
@@ -250,8 +297,13 @@ pub(crate) fn apply_local_kinds_in_transaction(
         clock = Some(hlc);
     }
     let configured = sync_is_configured(transaction)?;
+    let mut effects = if deferred {
+        ApplyEffects::deferred()
+    } else {
+        ApplyEffects::immediate()
+    };
     for operation in &operations {
-        apply_one(transaction, operation)?;
+        apply_one_with_effects(transaction, operation, &mut effects)?;
         transaction.execute(
             "INSERT INTO applied_ops(op_id, seq) VALUES (?1, NULL)",
             [operation.op_id],
@@ -269,6 +321,7 @@ pub(crate) fn apply_local_kinds_in_transaction(
             )?;
         }
     }
+    let stats = effects.finish(transaction)?;
     if let Some(last) = operations.last() {
         transaction.execute(
             "INSERT INTO sync_meta(key, value) VALUES ('last_hlc', ?1)
@@ -276,7 +329,7 @@ pub(crate) fn apply_local_kinds_in_transaction(
             [last.hlc.to_string()],
         )?;
     }
-    Ok(())
+    Ok(LocalBatchApply { operations, stats })
 }
 
 pub async fn apply(conn: &Connection, op: &Op, origin: Origin) -> Result<ApplyOutcome> {
@@ -369,6 +422,7 @@ pub async fn apply_sequenced_batch(
             .transpose()?
             .unwrap_or_default();
         let mut outcomes = Vec::with_capacity(operations.len());
+        let mut effects = ApplyEffects::deferred();
         for (seq, operation) in operations {
             if seq <= cursor {
                 let operation_at_seq = transaction
@@ -410,7 +464,8 @@ pub async fn apply_sequenced_batch(
             let outcome = if existing.is_some() {
                 ApplyOutcome::default()
             } else {
-                let affected_uuids = apply_one(&transaction, &operation)?;
+                let affected_uuids =
+                    apply_one_with_effects(&transaction, &operation, &mut effects)?;
                 observe_hlc(&transaction, &operation.hlc)?;
                 ApplyOutcome {
                     applied: true,
@@ -429,6 +484,7 @@ pub async fn apply_sequenced_batch(
             cursor = cursor.max(seq);
             outcomes.push(outcome);
         }
+        effects.finish(&transaction)?;
         transaction.execute(
             "INSERT INTO sync_meta(key, value) VALUES ('last_server_seq', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -504,6 +560,20 @@ pub async fn export_sync_snapshot(conn: &Connection, seq: u64) -> Result<SyncSna
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let page_aliases = database
+            .prepare(
+                "SELECT page_uuid, alias, hlc, present
+                   FROM page_alias_lww ORDER BY page_uuid, alias",
+            )?
+            .query_map([], |row| {
+                Ok(SnapshotPageAlias {
+                    page_uuid: row.get(0)?,
+                    alias: row.get(1)?,
+                    hlc: sql_hlc(row.get(2)?, 2)?,
+                    present: row.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         let blocks = database
             .prepare(
                 "SELECT uuid, page_uuid, parent_uuid, order_key, style, markdown,
@@ -571,6 +641,7 @@ pub async fn export_sync_snapshot(conn: &Connection, seq: u64) -> Result<SyncSna
             seq,
             page_identities,
             pages,
+            page_aliases,
             blocks,
             structures,
             tombstones,
@@ -650,6 +721,7 @@ pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> 
              DELETE FROM blocks;
              DELETE FROM pages;
              DELETE FROM page_identities;
+             DELETE FROM page_alias_lww;
              DELETE FROM block_structure_lww;
              DELETE FROM attachment_lww;
              DELETE FROM tombstones;
@@ -658,6 +730,9 @@ pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> 
              DELETE FROM history_undo;
              DELETE FROM history_redo;",
         )?;
+        if current_workspace_uuid != snapshot.workspace_uuid {
+            transaction.execute("DELETE FROM external_import_receipts", [])?;
+        }
         transaction.execute(
             "UPDATE workspace SET uuid = ?1 WHERE singleton = 1",
             [snapshot.workspace_uuid],
@@ -684,6 +759,18 @@ pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> 
                 ],
             )?;
             materialize_page_kind(&transaction, page.uuid, &page.kind)?;
+        }
+        for alias in snapshot.page_aliases {
+            transaction.execute(
+                "INSERT INTO page_alias_lww(page_uuid, alias, hlc, present)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    alias.page_uuid,
+                    alias.alias,
+                    alias.hlc.to_string(),
+                    alias.present,
+                ],
+            )?;
         }
         for block in &snapshot.blocks {
             transaction.execute(
@@ -810,6 +897,21 @@ fn validate_snapshot(snapshot: &SyncSnapshot) -> CoreResult<()> {
             return Err(CoreError::invalid(format!(
                 "snapshot contains duplicate page UUID {}",
                 page.uuid
+            )));
+        }
+    }
+    let mut aliases = HashSet::new();
+    for alias in &snapshot.page_aliases {
+        if !identities.contains_key(&alias.page_uuid) {
+            return Err(CoreError::invalid(format!(
+                "snapshot alias {} references unknown page identity {}",
+                alias.alias, alias.page_uuid
+            )));
+        }
+        if !aliases.insert((alias.page_uuid, alias.alias.as_str())) {
+            return Err(CoreError::invalid(format!(
+                "snapshot contains duplicate alias {} for page {}",
+                alias.alias, alias.page_uuid
             )));
         }
     }
@@ -993,6 +1095,7 @@ pub async fn apply_batch(
         let transaction = database.transaction()?;
         let configured = sync_is_configured(&transaction)?;
         let mut outcomes = Vec::with_capacity(operations.len());
+        let mut effects = ApplyEffects::deferred();
         for operation in operations {
             let exists = transaction
                 .query_row(
@@ -1006,7 +1109,7 @@ pub async fn apply_batch(
                 outcomes.push(ApplyOutcome::default());
                 continue;
             }
-            let affected_uuids = apply_one(&transaction, &operation)?;
+            let affected_uuids = apply_one_with_effects(&transaction, &operation, &mut effects)?;
             transaction.execute(
                 "INSERT INTO applied_ops(op_id, seq) VALUES (?1, NULL)",
                 [&operation.op_id],
@@ -1031,6 +1134,7 @@ pub async fn apply_batch(
                 affected_uuids,
             });
         }
+        effects.finish(&transaction)?;
         transaction.commit()?;
         Ok(outcomes)
     })
@@ -1047,7 +1151,11 @@ fn validate(operation: &Op) -> CoreResult<()> {
             operation.format_version
         )));
     }
-    match &operation.kind {
+    validate_kind(&operation.kind)
+}
+
+pub(crate) fn validate_kind(kind: &OpKind) -> CoreResult<()> {
+    match kind {
         OpKind::PageCreate(payload) => {
             validate_title(payload.title.as_deref())?;
             if payload.kind.is_journal() && payload.title.is_some() {
@@ -1057,6 +1165,7 @@ fn validate(operation: &Op) -> CoreResult<()> {
             }
             Ok(())
         }
+        OpKind::PageAliasSet(_) => Ok(()),
         OpKind::PageSetTitle(payload) => validate_title(payload.title.as_deref()),
         OpKind::PageSetLayout(_) | OpKind::PageDelete(_) => Ok(()),
         OpKind::BlockCreate(payload) => {
@@ -1120,9 +1229,114 @@ pub fn validate_attachment_filename(filename: &str) -> CoreResult<()> {
     Ok(())
 }
 
-fn apply_one(
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DeferredApplyStats {
+    pub structure_reconciliations: u32,
+    pub reference_projections: u32,
+}
+
+struct ApplyEffects {
+    deferred: bool,
+    structure_dirty: bool,
+    pending_block_refs: BTreeMap<uuid::Uuid, (String, i64)>,
+    pending_page_links: BTreeSet<String>,
+    stats: DeferredApplyStats,
+}
+
+impl ApplyEffects {
+    fn immediate() -> Self {
+        Self {
+            deferred: false,
+            structure_dirty: false,
+            pending_block_refs: BTreeMap::new(),
+            pending_page_links: BTreeSet::new(),
+            stats: DeferredApplyStats::default(),
+        }
+    }
+
+    fn deferred() -> Self {
+        Self {
+            deferred: true,
+            ..Self::immediate()
+        }
+    }
+
+    fn request_structure(
+        &mut self,
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> rusqlite::Result<()> {
+        if self.deferred {
+            self.structure_dirty = true;
+        } else {
+            reconcile_structure(transaction)?;
+            self.stats.structure_reconciliations += 1;
+        }
+        Ok(())
+    }
+
+    fn request_block_refs(
+        &mut self,
+        transaction: &rusqlite::Transaction<'_>,
+        block_uuid: uuid::Uuid,
+        markdown: &str,
+        timestamp: i64,
+    ) -> rusqlite::Result<()> {
+        if self.deferred {
+            self.pending_block_refs
+                .insert(block_uuid, (markdown.to_owned(), timestamp));
+        } else {
+            replace_block_refs(transaction, block_uuid, markdown, timestamp)?;
+            self.stats.reference_projections += 1;
+        }
+        Ok(())
+    }
+
+    fn request_page_links(
+        &mut self,
+        transaction: &rusqlite::Transaction<'_>,
+        alias: impl Into<String>,
+    ) -> rusqlite::Result<()> {
+        let alias = alias.into();
+        if self.deferred {
+            self.pending_page_links.insert(alias);
+        } else {
+            reconcile_page_links_for_alias(transaction, &alias)?;
+            self.stats.reference_projections += 1;
+        }
+        Ok(())
+    }
+
+    fn discard_block_refs(&mut self, block_uuid: uuid::Uuid) {
+        self.pending_block_refs.remove(&block_uuid);
+    }
+
+    fn finish(
+        mut self,
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> rusqlite::Result<DeferredApplyStats> {
+        if self.structure_dirty {
+            reconcile_structure(transaction)?;
+            self.stats.structure_reconciliations += 1;
+        }
+        // First update already-materialized references for changed aliases.
+        // Pending Markdown is projected afterwards against the final alias
+        // state, avoiding an alias-by-reference second pass during imports.
+        for alias in self.pending_page_links {
+            reconcile_page_links_for_alias(transaction, &alias)?;
+            self.stats.reference_projections += 1;
+        }
+        for (block_uuid, (markdown, timestamp)) in self.pending_block_refs {
+            replace_block_refs(transaction, block_uuid, &markdown, timestamp)?;
+            self.stats.reference_projections += 1;
+        }
+        Ok(self.stats)
+    }
+}
+
+fn apply_one_with_effects(
     transaction: &rusqlite::Transaction<'_>,
     operation: &Op,
+    effects: &mut ApplyEffects,
 ) -> CoreResult<Vec<uuid::Uuid>> {
     let workspace_uuid = crate::db::transaction_workspace_uuid(transaction)?;
     if operation.workspace_uuid != workspace_uuid {
@@ -1192,6 +1406,7 @@ fn apply_one(
                         .collect::<rusqlite::Result<Vec<_>>>()?
                 };
                 for block_uuid in &stale_blocks {
+                    effects.discard_block_refs(*block_uuid);
                     write_tombstone(
                         transaction,
                         *block_uuid,
@@ -1246,7 +1461,11 @@ fn apply_one(
                 payload.title.as_deref(),
                 operation,
                 timestamp,
+                effects,
             )?;
+            for alias in explicit_page_aliases(transaction, payload.uuid)? {
+                effects.request_page_links(transaction, alias)?;
+            }
             apply_page_layout(
                 transaction,
                 payload.uuid,
@@ -1254,9 +1473,36 @@ fn apply_one(
                 operation,
                 timestamp,
             )?;
-            reconcile_structure(transaction)?;
+            effects.request_structure(transaction)?;
             reconcile_attachments_for_owner(transaction, AttachmentOwner::Page(payload.uuid))?;
             Ok(affected)
+        }
+        OpKind::PageAliasSet(payload) => {
+            ensure_object_kind(transaction, payload.uuid, ObjectKind::Page)?;
+            if page_identity(transaction, payload.uuid)?.is_none() {
+                return Err(CoreError::not_found(format!(
+                    "page {} for alias {} was not found",
+                    payload.uuid, payload.alias
+                )));
+            }
+            let changed = transaction.execute(
+                "INSERT INTO page_alias_lww(page_uuid, alias, hlc, present)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(page_uuid, alias) DO UPDATE SET
+                   hlc = excluded.hlc,
+                   present = excluded.present
+                 WHERE page_alias_lww.hlc < excluded.hlc",
+                rusqlite::params![
+                    payload.uuid,
+                    payload.alias,
+                    operation.hlc.to_string(),
+                    payload.present,
+                ],
+            )? > 0;
+            if changed {
+                effects.request_page_links(transaction, payload.alias.as_str())?;
+            }
+            Ok(vec![payload.uuid])
         }
         OpKind::PageSetTitle(payload) => {
             ensure_object_kind(transaction, payload.uuid, ObjectKind::Page)?;
@@ -1272,6 +1518,7 @@ fn apply_one(
                     payload.title.as_deref(),
                     operation,
                     timestamp,
+                    effects,
                 )?;
             }
             Ok(vec![payload.uuid])
@@ -1301,6 +1548,7 @@ fn apply_one(
             if existence_hlc.is_some_and(|hlc| hlc > operation.hlc.to_string()) {
                 return Ok(vec![payload.uuid]);
             }
+            let reference_aliases = page_reference_aliases(transaction, payload.uuid)?;
             let blocks = {
                 let mut statement =
                     transaction.prepare("SELECT uuid FROM blocks WHERE page_uuid = ?1")?;
@@ -1329,7 +1577,13 @@ fn apply_one(
                 )?;
             }
             if tombstone_equals(transaction, payload.uuid, &operation.hlc)? {
+                for block_uuid in &blocks {
+                    effects.discard_block_refs(*block_uuid);
+                }
                 transaction.execute("DELETE FROM pages WHERE uuid = ?1", [payload.uuid])?;
+                for alias in reference_aliases {
+                    effects.request_page_links(transaction, alias)?;
+                }
             }
             let mut affected = vec![payload.uuid];
             affected.extend(blocks);
@@ -1428,6 +1682,7 @@ fn apply_one(
                 &payload.markdown,
                 operation,
                 timestamp,
+                effects,
             )?;
             apply_block_style(
                 transaction,
@@ -1436,7 +1691,7 @@ fn apply_one(
                 operation,
                 timestamp,
             )?;
-            reconcile_structure(transaction)?;
+            effects.request_structure(transaction)?;
             reconcile_attachments_for_owner(transaction, AttachmentOwner::Block(payload.uuid))?;
             Ok(vec![payload.uuid, payload.page_uuid])
         }
@@ -1449,6 +1704,7 @@ fn apply_one(
                     &payload.markdown,
                     operation,
                     timestamp,
+                    effects,
                 )?;
             }
             Ok(vec![payload.uuid])
@@ -1481,7 +1737,7 @@ fn apply_one(
                     &payload.order_key,
                     &operation.hlc,
                 )?;
-                reconcile_structure(transaction)?;
+                effects.request_structure(transaction)?;
                 transaction.execute(
                     "UPDATE blocks SET updated_at = MAX(updated_at, ?2) WHERE uuid = ?1",
                     rusqlite::params![payload.uuid, timestamp],
@@ -1519,6 +1775,7 @@ fn apply_one(
                 &operation.hlc,
             )?;
             if tombstone_equals(transaction, payload.uuid, &operation.hlc)? {
+                effects.discard_block_refs(payload.uuid);
                 transaction.execute(
                     "DELETE FROM block_structure_lww WHERE block_uuid = ?1",
                     [payload.uuid],
@@ -1526,7 +1783,7 @@ fn apply_one(
                 if state.is_some() {
                     transaction.execute("DELETE FROM blocks WHERE uuid = ?1", [payload.uuid])?;
                 }
-                reconcile_structure(transaction)?;
+                effects.request_structure(transaction)?;
                 return Ok(vec![payload.uuid, payload.page_uuid]);
             }
             Ok(vec![payload.uuid])
@@ -1572,22 +1829,28 @@ fn apply_page_title(
     title: Option<&str>,
     operation: &Op,
     timestamp: i64,
+    effects: &mut ApplyEffects,
 ) -> rusqlite::Result<()> {
     let current = transaction
         .query_row(
-            "SELECT title_hlc FROM pages WHERE uuid = ?1",
+            "SELECT title_hlc, normalized_title FROM pages WHERE uuid = ?1",
             [uuid],
-            |row| row.get::<_, Option<String>>(0),
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
         )
-        .optional()?
-        .flatten();
-    if hlc_wins(current.as_deref(), &operation.hlc) {
-        transaction.execute(
-            "UPDATE page_links SET target_page_uuid = NULL WHERE target_page_uuid = ?1",
-            [uuid],
-        )?;
+        .optional()?;
+    let Some((current_hlc, previous_title)) = current else {
+        return Ok(());
+    };
+    if hlc_wins(current_hlc.as_deref(), &operation.hlc) {
+        let mut dirty_aliases = previous_title.into_iter().collect::<BTreeSet<_>>();
         if let Some(title) = title {
             let normalized_title = crate::model::normalize_title(title);
+            dirty_aliases.insert(normalized_title.clone());
             let conflict = transaction
                 .query_row(
                     "SELECT uuid, title_hlc FROM pages
@@ -1613,13 +1876,11 @@ fn apply_page_title(
                           WHERE uuid = ?1",
                         rusqlite::params![uuid, operation.hlc.to_string(), timestamp],
                     )?;
+                    for alias in dirty_aliases {
+                        effects.request_page_links(transaction, alias)?;
+                    }
                     return Ok(());
                 }
-                transaction.execute(
-                    "UPDATE page_links SET target_page_uuid = NULL
-                      WHERE target_page_uuid = ?1",
-                    [conflict_uuid],
-                )?;
                 transaction.execute(
                     "UPDATE pages SET title = NULL, normalized_title = NULL,
                                       updated_at = MAX(updated_at, ?2)
@@ -1640,13 +1901,8 @@ fn apply_page_title(
                 timestamp,
             ],
         )?;
-        if let Some(title) = title {
-            let normalized_title = crate::model::normalize_title(title);
-            transaction.execute(
-                "UPDATE page_links SET target_page_uuid = ?1
-                  WHERE target_title = ?2",
-                rusqlite::params![uuid, normalized_title],
-            )?;
+        for alias in dirty_aliases {
+            effects.request_page_links(transaction, alias)?;
         }
     }
     Ok(())
@@ -1684,6 +1940,7 @@ fn apply_block_markdown(
     markdown: &str,
     operation: &Op,
     timestamp: i64,
+    effects: &mut ApplyEffects,
 ) -> rusqlite::Result<()> {
     let current = transaction
         .query_row(
@@ -1707,7 +1964,7 @@ fn apply_block_markdown(
                 timestamp,
             ],
         )?;
-        replace_block_refs(transaction, uuid, markdown, timestamp)?;
+        effects.request_block_refs(transaction, uuid, markdown, timestamp)?;
     }
     Ok(())
 }
@@ -1853,39 +2110,108 @@ fn reconcile_structure(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Res
 }
 
 fn break_structure_cycles(intents: &mut HashMap<uuid::Uuid, StructureIntent>) {
-    loop {
-        let mut cycle = None;
-        for start in intents.keys().copied() {
-            let mut path = Vec::new();
-            let mut positions = HashMap::new();
-            let mut cursor = Some(start);
-            while let Some(uuid) = cursor {
-                if let Some(index) = positions.get(&uuid).copied() {
-                    cycle = Some(path[index..].to_vec());
-                    break;
-                }
-                positions.insert(uuid, path.len());
-                path.push(uuid);
-                cursor = intents.get(&uuid).and_then(|intent| intent.parent_uuid);
-            }
-            if cycle.is_some() {
+    let starts = intents.keys().copied().collect::<Vec<_>>();
+    let mut proven_acyclic = HashSet::new();
+    for start in starts {
+        if proven_acyclic.contains(&start) {
+            continue;
+        }
+        let mut path = Vec::new();
+        let mut positions = HashMap::new();
+        let mut cursor = Some(start);
+        let mut cycle_start = None;
+        while let Some(uuid) = cursor {
+            if proven_acyclic.contains(&uuid) {
                 break;
             }
+            if let Some(index) = positions.get(&uuid).copied() {
+                cycle_start = Some(index);
+                break;
+            }
+            positions.insert(uuid, path.len());
+            path.push(uuid);
+            cursor = intents.get(&uuid).and_then(|intent| intent.parent_uuid);
         }
-        let Some(cycle) = cycle else { break };
-        let detach = cycle
-            .into_iter()
-            .max_by_key(|uuid| {
-                intents
-                    .get(uuid)
-                    .map(|intent| (intent.hlc.clone(), *uuid))
-                    .expect("cycle member has an intent")
-            })
-            .expect("cycle is non-empty");
-        if let Some(intent) = intents.get_mut(&detach) {
-            intent.parent_uuid = None;
+        if let Some(index) = cycle_start {
+            let detach = path[index..]
+                .iter()
+                .copied()
+                .max_by_key(|uuid| {
+                    intents
+                        .get(uuid)
+                        .map(|intent| (intent.hlc.clone(), *uuid))
+                        .expect("cycle member has an intent")
+                })
+                .expect("cycle is non-empty");
+            if let Some(intent) = intents.get_mut(&detach) {
+                intent.parent_uuid = None;
+            }
         }
+        proven_acyclic.extend(path);
     }
+}
+
+fn page_reference_aliases(
+    transaction: &rusqlite::Transaction<'_>,
+    page_uuid: uuid::Uuid,
+) -> rusqlite::Result<BTreeSet<String>> {
+    let mut aliases = explicit_page_aliases(transaction, page_uuid)?;
+    if let Some(title) = transaction
+        .query_row(
+            "SELECT normalized_title FROM pages WHERE uuid = ?1",
+            [page_uuid],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten()
+    {
+        aliases.insert(title);
+    }
+    Ok(aliases)
+}
+
+fn explicit_page_aliases(
+    transaction: &rusqlite::Transaction<'_>,
+    page_uuid: uuid::Uuid,
+) -> rusqlite::Result<BTreeSet<String>> {
+    transaction
+        .prepare(
+            "SELECT alias FROM page_alias_lww
+              WHERE page_uuid = ?1 AND present = 1",
+        )?
+        .query_map([page_uuid], |row| row.get::<_, String>(0))?
+        .collect()
+}
+
+pub(crate) fn resolve_page_alias(
+    transaction: &rusqlite::Connection,
+    alias: &str,
+) -> rusqlite::Result<Option<uuid::Uuid>> {
+    let candidates = transaction
+        .prepare(
+            "SELECT uuid FROM pages WHERE normalized_title = ?1
+             UNION
+             SELECT aliases.page_uuid
+               FROM page_alias_lww aliases
+               JOIN pages ON pages.uuid = aliases.page_uuid
+              WHERE aliases.alias = ?1 AND aliases.present = 1
+             ORDER BY 1 LIMIT 2",
+        )?
+        .query_map([alias], |row| row.get::<_, uuid::Uuid>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok((candidates.len() == 1).then(|| candidates[0]))
+}
+
+fn reconcile_page_links_for_alias(
+    transaction: &rusqlite::Transaction<'_>,
+    alias: &str,
+) -> rusqlite::Result<()> {
+    let target = resolve_page_alias(transaction, alias)?;
+    transaction.execute(
+        "UPDATE page_links SET target_page_uuid = ?2 WHERE target_title = ?1",
+        rusqlite::params![alias, target],
+    )?;
+    Ok(())
 }
 
 fn replace_block_refs(
@@ -1905,13 +2231,7 @@ fn replace_block_refs(
     let (page_titles, block_uuids) = parse_refs(markdown);
     for title in page_titles {
         let normalized_title = crate::model::normalize_title(&title);
-        let target_page_uuid = transaction
-            .query_row(
-                "SELECT uuid FROM pages WHERE normalized_title = ?1",
-                [&normalized_title],
-                |row| row.get::<_, uuid::Uuid>(0),
-            )
-            .optional()?;
+        let target_page_uuid = resolve_page_alias(transaction, &normalized_title)?;
         transaction.execute(
             "INSERT OR IGNORE INTO page_links
                (source_block_uuid, target_title, target_page_uuid, created_at)
@@ -2345,7 +2665,7 @@ fn snapshot_attachment_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sna
     })
 }
 
-fn sql_hlc(value: String, index: usize) -> rusqlite::Result<Hlc> {
+pub(crate) fn sql_hlc(value: String, index: usize) -> rusqlite::Result<Hlc> {
     value.parse::<Hlc>().map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
             index,
@@ -2425,6 +2745,7 @@ fn observe_max_persisted_hlc(transaction: &rusqlite::Transaction<'_>) -> rusqlit
            UNION ALL SELECT structure_hlc FROM blocks
            UNION ALL SELECT existence_hlc FROM blocks
            UNION ALL SELECT deleted_hlc FROM tombstones
+           UNION ALL SELECT hlc FROM page_alias_lww
            UNION ALL SELECT hlc FROM block_structure_lww
            UNION ALL SELECT hlc FROM attachment_lww
          ) WHERE value IS NOT NULL",

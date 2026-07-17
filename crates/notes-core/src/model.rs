@@ -7,6 +7,70 @@ pub fn normalize_title(title: &str) -> String {
     title.trim().nfkc().flat_map(char::to_lowercase).collect()
 }
 
+/// A canonical, durable page alias used by references independently of the
+/// page's current display title. Construction always applies the same Unicode
+/// normalization as page titles, so aliases have one wire and storage form.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, specta::Type)]
+#[serde(transparent)]
+pub struct PageAlias(String);
+
+impl PageAlias {
+    pub fn new(value: &str) -> Result<Self, ParseEnumError> {
+        let value = normalize_title(value);
+        if value.is_empty() {
+            return Err(ParseEnumError {
+                type_name: "PageAlias",
+                value,
+            });
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for PageAlias {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl FromStr for PageAlias {
+    type Err = ParseEnumError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for PageAlias {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl rusqlite::types::ToSql for PageAlias {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(self.0.as_str().into())
+    }
+}
+
+impl rusqlite::types::FromSql for PageAlias {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        value
+            .as_str()?
+            .parse()
+            .map_err(|error| rusqlite::types::FromSqlError::Other(Box::new(error)))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseEnumError {
     type_name: &'static str,

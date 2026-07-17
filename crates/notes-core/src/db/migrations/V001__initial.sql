@@ -35,6 +35,19 @@ CREATE UNIQUE INDEX idx_page_identities_journal_date
 CREATE UNIQUE INDEX idx_page_identities_uuid_date
   ON page_identities(page_uuid, journal_date);
 
+-- Explicit aliases are synced LWW intents. They deliberately reference the
+-- immutable UUID without a foreign key so deletion can retain the intent and
+-- a later valid page recreation can materialize it again.
+CREATE TABLE page_alias_lww (
+  page_uuid BLOB NOT NULL CHECK (length(page_uuid) = 16),
+  alias TEXT NOT NULL CHECK (length(alias) > 0),
+  hlc TEXT NOT NULL,
+  present INTEGER NOT NULL CHECK (present IN (0, 1)),
+  PRIMARY KEY(page_uuid, alias)
+) WITHOUT ROWID;
+CREATE INDEX idx_page_alias_lww_lookup
+  ON page_alias_lww(alias, present, page_uuid);
+
 CREATE TABLE journal_pages (
   page_uuid BLOB PRIMARY KEY REFERENCES pages(uuid) ON DELETE CASCADE,
   journal_date TEXT NOT NULL UNIQUE,
@@ -90,6 +103,7 @@ CREATE TABLE page_links (
   PRIMARY KEY(source_block_uuid, target_title)
 ) WITHOUT ROWID;
 CREATE INDEX idx_page_links_target ON page_links(target_page_uuid, source_block_uuid);
+CREATE INDEX idx_page_links_title ON page_links(target_title, source_block_uuid);
 
 CREATE TABLE block_refs (
   source_block_uuid BLOB NOT NULL REFERENCES blocks(uuid) ON DELETE CASCADE,
@@ -179,6 +193,20 @@ CREATE TABLE local_device (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
   device_id BLOB UNIQUE NOT NULL CHECK (length(device_id) = 16)
 );
+
+-- External import receipts are local provenance, not user content. Imported
+-- pages, blocks, and aliases still travel through ordinary synced operations.
+CREATE TABLE external_import_receipts (
+  receipt_uuid BLOB PRIMARY KEY CHECK (length(receipt_uuid) = 16),
+  import_format TEXT NOT NULL UNIQUE CHECK (import_format IN ('logseq')),
+  manifest_digest BLOB NOT NULL CHECK (length(manifest_digest) = 32),
+  plan_digest BLOB NOT NULL CHECK (length(plan_digest) = 32),
+  planner_version INTEGER NOT NULL CHECK (planner_version > 0),
+  identity_workspace_uuid BLOB NOT NULL CHECK (length(identity_workspace_uuid) = 16),
+  import_namespace_uuid BLOB NOT NULL CHECK (length(import_namespace_uuid) = 16),
+  provenance_json TEXT NOT NULL,
+  imported_at INTEGER NOT NULL
+) WITHOUT ROWID;
 
 CREATE VIRTUAL TABLE pages_fts USING fts5(
   title,

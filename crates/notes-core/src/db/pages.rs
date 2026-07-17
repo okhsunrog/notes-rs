@@ -20,9 +20,12 @@ pub async fn get_page_by_title(conn: &Connection, title: String) -> Result<Optio
     }
     let normalized_title = crate::model::normalize_title(&title);
     conn.call(move |database| {
-        let sql = format!("SELECT {PAGE_COLUMNS} FROM pages WHERE normalized_title = ?1 LIMIT 1");
+        let Some(page_uuid) = operation::resolve_page_alias(database, &normalized_title)? else {
+            return Ok(None);
+        };
+        let sql = format!("SELECT {PAGE_COLUMNS} FROM pages WHERE uuid = ?1");
         database
-            .query_row(&sql, [normalized_title], row_to_page)
+            .query_row(&sql, [page_uuid], row_to_page)
             .optional()
     })
     .await
