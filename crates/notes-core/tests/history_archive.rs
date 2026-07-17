@@ -1,5 +1,7 @@
 use notes_core::db::{self, DataArchive};
-use notes_core::{AttachmentOwner, BlobHash, BlockStyle, Connection, PageLayout, TaskState};
+use notes_core::{
+    AttachmentOwner, BlobHash, BlockStyle, Connection, OrderKey, PageLayout, TaskState,
+};
 
 struct TestDatabase {
     _directory: tempfile::TempDir,
@@ -473,4 +475,94 @@ async fn invalid_archive_never_runs_the_precommit_callback() {
     .expect_err("invalid archive must fail before publication");
 
     assert!(!callback_ran.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn large_archive_restore_reconciles_deleted_and_created_trees_once() {
+    const INCOMING_BLOCKS: usize = 2_048;
+    const EXISTING_BLOCKS: usize = 8;
+
+    let source = database().await;
+    let page = db::create_page(&source.connection, "Incoming tree".into())
+        .await
+        .expect("create source page");
+    let mut archive = db::export_archive(&source.connection)
+        .await
+        .expect("export source archive");
+    let mut parent_uuid = None;
+    for ordinal in 0..INCOMING_BLOCKS {
+        let uuid = uuid::Uuid::now_v7();
+        archive.blocks.push(db::Block {
+            uuid,
+            page_uuid: page.uuid,
+            parent_uuid,
+            order_key: OrderKey::from_ordinal(1),
+            style: BlockStyle::Paragraph,
+            markdown: format!("Nested block {ordinal}"),
+            created_at: ordinal as i64,
+            updated_at: ordinal as i64,
+        });
+        parent_uuid = Some(uuid);
+    }
+
+    let destination = database().await;
+    let workspace_uuid = archive.workspace_uuid;
+    destination
+        .connection
+        .call(move |database| {
+            database.execute(
+                "UPDATE workspace SET uuid = ?1 WHERE singleton = 1",
+                [workspace_uuid],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("align destination workspace");
+    let existing = db::create_note(&destination.connection)
+        .await
+        .expect("create existing destination tree");
+    let mut existing_parent = existing.initial_block.uuid;
+    for _ in 1..EXISTING_BLOCKS {
+        existing_parent = db::create_block(
+            &destination.connection,
+            existing.page.uuid,
+            Some(existing_parent),
+            None,
+            BlockStyle::Paragraph,
+            String::new(),
+        )
+        .await
+        .expect("grow existing destination tree")
+        .uuid;
+    }
+
+    let stats = db::import_archive_with_precommit(&destination.connection, archive, || Ok(()))
+        .await
+        .expect("restore large archive");
+
+    assert_eq!(stats.structure_reconciliations, 1);
+    assert_eq!(
+        stats.applied_operations,
+        1 + INCOMING_BLOCKS + 1 + EXISTING_BLOCKS,
+        "one deferred batch must contain both the old-tree deletion and new-tree creation ops"
+    );
+    let restored_page_uuid = page.uuid;
+    let restored_block_count: i64 = destination
+        .connection
+        .call(move |database| {
+            database.query_row(
+                "SELECT COUNT(*) FROM blocks WHERE page_uuid = ?1",
+                [restored_page_uuid],
+                |row| row.get(0),
+            )
+        })
+        .await
+        .expect("count restored tree");
+    assert_eq!(restored_block_count, INCOMING_BLOCKS as i64);
+    assert!(
+        db::get_page(&destination.connection, existing.page.uuid)
+            .await
+            .expect("read deleted page")
+            .is_none()
+    );
 }

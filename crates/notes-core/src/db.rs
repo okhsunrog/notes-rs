@@ -20,7 +20,10 @@ mod pages;
 mod search;
 mod workspace;
 
-pub use archive::{ARCHIVE_VERSION, export_archive, import_archive, import_archive_with_precommit};
+pub use archive::{
+    ARCHIVE_VERSION, ArchiveImportStats, export_archive, import_archive,
+    import_archive_with_precommit,
+};
 pub use attachments::{
     attachment_path_ref_count, create_attachment, delete_attachment, get_attachment,
     list_attachments,

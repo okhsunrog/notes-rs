@@ -12,6 +12,13 @@ use std::collections::{HashMap, HashSet};
 pub const ARCHIVE_FORMAT: &str = "notes-rs";
 pub const ARCHIVE_VERSION: u32 = 7;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArchiveImportStats {
+    pub applied_operations: usize,
+    pub structure_reconciliations: u32,
+    pub reference_projections: u32,
+}
+
 pub async fn export_archive(conn: &Connection) -> Result<DataArchive> {
     conn.call(|database| {
         let workspace_uuid = database.query_row(
@@ -153,7 +160,9 @@ pub async fn export_archive(conn: &Connection) -> Result<DataArchive> {
 }
 
 pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<()> {
-    import_archive_with_precommit(conn, archive, || Ok(())).await
+    import_archive_with_precommit(conn, archive, || Ok(()))
+        .await
+        .map(|_| ())
 }
 
 /// Restores an archive while running a host-owned publication step inside the
@@ -166,7 +175,7 @@ pub async fn import_archive_with_precommit<F>(
     conn: &Connection,
     archive: DataArchive,
     precommit: F,
-) -> Result<()>
+) -> Result<ArchiveImportStats>
 where
     F: FnOnce() -> Result<()> + Send + 'static,
 {
@@ -245,7 +254,7 @@ where
             .into());
         }
     }
-    conn.call_domain(move |database| -> Result<()> {
+    conn.call_domain(move |database| -> Result<ArchiveImportStats> {
         let transaction = database.transaction()?;
         let current_workspace_uuid = transaction_workspace_uuid(&transaction)?;
         if current_workspace_uuid != archive.workspace_uuid {
@@ -301,13 +310,13 @@ where
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<rusqlite::Result<Vec<(uuid::Uuid, PageAlias)>>>()?;
 
-        let mut deletion_kinds = current_attachments
+        let mut restore_kinds = current_attachments
             .into_iter()
             .map(|(owner, blob_hash)| {
                 OpKind::AttachmentRemove(AttachmentRemove { owner, blob_hash })
             })
             .collect::<Vec<_>>();
-        deletion_kinds.extend(
+        restore_kinds.extend(
             current_aliases.into_iter().map(|(uuid, alias)| {
                 OpKind::PageAliasSet(PageAliasSet {
                     uuid,
@@ -316,18 +325,18 @@ where
                 })
             }),
         );
-        deletion_kinds.extend(
+        restore_kinds.extend(
             current_blocks
                 .into_iter()
                 .map(|(uuid, page_uuid)| OpKind::BlockDelete(BlockDelete { uuid, page_uuid })),
         );
-        deletion_kinds.extend(
+        restore_kinds.extend(
             current_pages
                 .into_iter()
                 .map(|uuid| OpKind::PageDelete(PageDelete { uuid })),
         );
-        operation::apply_local_kinds_in_transaction(&transaction, deletion_kinds)?;
         if current_workspace_uuid != archive.workspace_uuid {
+            debug_assert!(restore_kinds.is_empty());
             transaction.execute(
                 "UPDATE workspace SET uuid = ?1 WHERE singleton = 1",
                 [archive.workspace_uuid],
@@ -337,7 +346,7 @@ where
             operation::ensure_page_identity(&transaction, identity.uuid, &identity.kind)?;
         }
 
-        let mut creation_kinds = archive.pages.into_iter().map(|page| {
+        restore_kinds.extend(archive.pages.into_iter().map(|page| {
             OpKind::PageCreate(PageCreate {
                 uuid: page.uuid,
                 kind: page.kind,
@@ -345,15 +354,15 @@ where
                 layout: page.layout,
                 created_at: page.created_at,
             })
-        }).collect::<Vec<_>>();
-        creation_kinds.extend(archive.page_aliases.into_iter().map(|alias| {
+        }));
+        restore_kinds.extend(archive.page_aliases.into_iter().map(|alias| {
             OpKind::PageAliasSet(PageAliasSet {
                 uuid: alias.page_uuid,
                 alias: alias.alias,
                 present: alias.present,
             })
         }));
-        creation_kinds.extend(archive.blocks.into_iter().map(|block| {
+        restore_kinds.extend(archive.blocks.into_iter().map(|block| {
             OpKind::BlockCreate(BlockCreate {
                 uuid: block.uuid,
                 page_uuid: block.page_uuid,
@@ -364,7 +373,7 @@ where
                 created_at: block.created_at,
             })
         }));
-        creation_kinds.extend(archive.attachments.into_iter().map(|attachment| {
+        restore_kinds.extend(archive.attachments.into_iter().map(|attachment| {
             OpKind::AttachmentAdd(AttachmentAdd {
                 owner: attachment.owner,
                 blob_hash: attachment.blob_hash,
@@ -373,7 +382,16 @@ where
                 size: attachment.size,
             })
         }));
-        operation::apply_local_kinds_in_transaction(&transaction, creation_kinds)?;
+        let applied = operation::apply_local_kinds_deferred_in_transaction(
+            &transaction,
+            restore_kinds,
+        )?;
+        let stats = ArchiveImportStats {
+            applied_operations: applied.operations.len(),
+            structure_reconciliations: applied.stats.structure_reconciliations,
+            reference_projections: applied.stats.reference_projections,
+        };
+        drop(applied);
         transaction.execute("DELETE FROM external_import_receipts", [])?;
         for receipt in archive.external_import_receipts {
             transaction.execute(
@@ -401,7 +419,7 @@ where
         transaction.execute("DELETE FROM history_redo", [])?;
         precommit()?;
         transaction.commit()?;
-        Ok(())
+        Ok(stats)
     })
     .await
 }
