@@ -8,17 +8,16 @@ import {
   deleteAttachment,
   listAttachments,
   openAttachment,
-  type Node,
+  type Attachment,
+  type AttachmentOwner,
 } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
 
 export function AttachmentsCard({
-  parentId,
-  parentUuid,
+  location,
   onStatus,
 }: {
-  parentId: number;
-  parentUuid: string;
+  location: AttachmentOwner;
   onStatus: (message: string) => void;
 }) {
   const confirm = useConfirmation();
@@ -26,9 +25,9 @@ export function AttachmentsCard({
   const [busy, setBusy] = useState(false);
   const [expanded, setExpanded] = useState(false);
 
-  const attachmentsQuery = useQuery<Node[]>({
-    queryKey: queryKeys.attachments(parentUuid),
-    queryFn: () => listAttachments(parentId),
+  const attachmentsQuery = useQuery<Attachment[]>({
+    queryKey: queryKeys.attachments(location.uuid),
+    queryFn: () => listAttachments(location),
   });
   const attachments = attachmentsQuery.data ?? [];
 
@@ -45,11 +44,11 @@ export function AttachmentsCard({
   async function add() {
     setBusy(true);
     try {
-      const attachment = await attachFile(parentId);
+      const attachment = await attachFile(location);
       if (attachment) {
-        await queryClient.invalidateQueries({ queryKey: queryKeys.attachments(parentUuid) });
+        await queryClient.invalidateQueries({ queryKey: queryKeys.attachments(location.uuid) });
         setExpanded(true);
-        onStatus(`Attached ${attachment.title ?? "file"}`);
+        onStatus(`Attached ${attachment.filename}`);
       }
     } catch (error) {
       onStatus(`attachment error: ${String(error)}`);
@@ -58,19 +57,19 @@ export function AttachmentsCard({
     }
   }
 
-  async function remove(attachment: Node) {
+  async function remove(attachment: Attachment) {
     if (
       !(await confirm({
         title: "Remove attachment?",
-        description: `“${attachment.title ?? "File"}” will be detached from this note. A recovery backup is created first.`,
+        description: `“${attachment.filename}” will be detached from this note. A recovery backup is created first.`,
         confirmLabel: "Remove attachment",
         destructive: true,
       }))
     )
       return;
     try {
-      if (await deleteAttachment(attachment.id)) {
-        await queryClient.invalidateQueries({ queryKey: queryKeys.attachments(parentUuid) });
+      if (await deleteAttachment(attachment.uuid)) {
+        await queryClient.invalidateQueries({ queryKey: queryKeys.attachments(location.uuid) });
         onStatus("Attachment removed; a recovery backup was created.");
       }
     } catch (error) {
@@ -128,19 +127,17 @@ export function AttachmentsCard({
             <ul className="space-y-1.5">
               {attachments.map((attachment) => (
                 <li
-                  key={attachment.id}
+                  key={attachment.uuid}
                   className="flex items-center gap-2 rounded-xl border border-border/60 bg-card/60 px-2.5 py-2 text-xs"
                 >
                   <File className="size-3.5 shrink-0 text-muted-foreground" />
-                  <span className="min-w-0 flex-1 truncate">
-                    {attachment.title ?? "attachment"}
-                  </span>
+                  <span className="min-w-0 flex-1 truncate">{attachment.filename}</span>
                   <Button
                     variant="ghost"
                     size="sm"
-                    aria-label={`Open ${attachment.title ?? "attachment"}`}
+                    aria-label={`Open ${attachment.filename}`}
                     onClick={() =>
-                      void openAttachment(attachment.id).catch((error) =>
+                      void openAttachment(attachment.uuid).catch((error) =>
                         onStatus(`open error: ${String(error)}`),
                       )
                     }
@@ -150,7 +147,7 @@ export function AttachmentsCard({
                   <Button
                     variant="ghost"
                     size="sm"
-                    aria-label={`Remove ${attachment.title ?? "attachment"}`}
+                    aria-label={`Remove ${attachment.filename}`}
                     className="text-muted-foreground hover:text-destructive"
                     onClick={() => void remove(attachment)}
                   >

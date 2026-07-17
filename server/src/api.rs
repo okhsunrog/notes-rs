@@ -14,8 +14,8 @@ use futures::{SinkExt, StreamExt};
 use notes_core::db::SearchHit;
 use notes_protocol::{
     AcceptedOps, AiIndexStatus, AiProviderProbeResult, AiProviderSettingsUpdate, AiRuntimeSettings,
-    BootstrapRequest, ChatEvent, ChatTurn, ClientMessage, OpsBatch, PushOps, ServerInfo,
-    ServerMessage,
+    ApiErrorCode, ApiErrorDetail, ApiErrorResponse, BootstrapRequest, ChatEvent, ChatTurn,
+    ClientMessage, OpsBatch, PushOps, ServerErrorCode, ServerInfo, ServerMessage,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -45,18 +45,7 @@ struct AuthenticatedUser(Arc<UserState>);
 #[derive(Debug)]
 pub struct ApiError {
     status: StatusCode,
-    code: &'static str,
-    message: String,
-}
-
-#[derive(Serialize)]
-struct ErrorBody {
-    error: ErrorDetail,
-}
-
-#[derive(Serialize)]
-struct ErrorDetail {
-    code: &'static str,
+    code: ApiErrorCode,
     message: String,
 }
 
@@ -96,14 +85,14 @@ struct ChatRequest {
     message: String,
     #[serde(default)]
     allow_writes: bool,
-    active_node_uuid: Option<uuid::Uuid>,
+    active_content_uuid: Option<uuid::Uuid>,
 }
 
 impl ApiError {
     fn bad_request(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
-            code: "invalid_request",
+            code: ApiErrorCode::InvalidRequest,
             message: message.into(),
         }
     }
@@ -111,7 +100,7 @@ impl ApiError {
     fn unauthorized() -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
-            code: "unauthorized",
+            code: ApiErrorCode::Unauthorized,
             message: "a valid bearer token is required".into(),
         }
     }
@@ -119,7 +108,7 @@ impl ApiError {
     fn not_found(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
-            code: "not_found",
+            code: ApiErrorCode::NotFound,
             message: message.into(),
         }
     }
@@ -127,7 +116,7 @@ impl ApiError {
     fn conflict(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::CONFLICT,
-            code: "conflict",
+            code: ApiErrorCode::Conflict,
             message: message.into(),
         }
     }
@@ -135,7 +124,7 @@ impl ApiError {
     fn too_large(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::PAYLOAD_TOO_LARGE,
-            code: "payload_too_large",
+            code: ApiErrorCode::PayloadTooLarge,
             message: message.into(),
         }
     }
@@ -143,7 +132,7 @@ impl ApiError {
     fn unavailable(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
-            code: "unavailable",
+            code: ApiErrorCode::Unavailable,
             message: message.into(),
         }
     }
@@ -152,9 +141,25 @@ impl ApiError {
         tracing::error!(error = ?error, "request failed");
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "internal",
+            code: ApiErrorCode::Internal,
             message: "the server could not complete the request".into(),
         }
+    }
+
+    fn from_domain(error: anyhow::Error) -> Self {
+        for cause in error.chain() {
+            let Some(core) = cause.downcast_ref::<notes_core::CoreError>() else {
+                continue;
+            };
+            return match core {
+                notes_core::CoreError::InvalidInput(message) => Self::bad_request(message.clone()),
+                notes_core::CoreError::NotFound(message) => Self::not_found(message.clone()),
+                notes_core::CoreError::Conflict(message)
+                | notes_core::CoreError::SyncConflict(message) => Self::conflict(message.clone()),
+                notes_core::CoreError::Database(_) => Self::internal(error),
+            };
+        }
+        Self::internal(error)
     }
 }
 
@@ -162,8 +167,8 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let mut response = (
             self.status,
-            Json(ErrorBody {
-                error: ErrorDetail {
+            Json(ApiErrorResponse {
+                error: ApiErrorDetail {
                     code: self.code,
                     message: self.message,
                 },
@@ -351,7 +356,7 @@ async fn chat(
                 request.history,
                 request.message,
                 request.allow_writes,
-                request.active_node_uuid,
+                request.active_content_uuid,
                 cancelled,
                 emit,
             )
@@ -431,7 +436,7 @@ async fn push_ops(
         .0
         .ingest(request.ops)
         .await
-        .map_err(ApiError::internal)?;
+        .map_err(ApiError::from_domain)?;
     Ok(Json(AcceptedOps { ops }))
 }
 
@@ -453,17 +458,7 @@ async fn bootstrap(
         .bootstrap(request.snapshot)
         .await
         .map(Json)
-        .map_err(
-            |error| match error.downcast_ref::<notes_core::CoreError>() {
-                Some(notes_core::CoreError::Conflict(_)) => {
-                    ApiError::conflict("server workspace has already been initialized")
-                }
-                Some(notes_core::CoreError::InvalidInput(message)) => {
-                    ApiError::bad_request(message.clone())
-                }
-                _ => ApiError::internal(error),
-            },
-        )
+        .map_err(ApiError::from_domain)
 }
 
 async fn sync_socket(
@@ -491,8 +486,12 @@ async fn websocket_session(user: Arc<UserState>, since: u64, socket: WebSocket) 
         Ok(_) => {}
         Err(error) => {
             tracing::warn!(user = %user.id, error = ?error, "websocket catch-up failed");
-            let _ = send_server_error(&mut sender, "catch_up_failed", "could not load operations")
-                .await;
+            let _ = send_server_error(
+                &mut sender,
+                ServerErrorCode::CatchUpFailed,
+                "could not load operations",
+            )
+            .await;
             return;
         }
     }
@@ -509,7 +508,7 @@ async fn websocket_session(user: Arc<UserState>, since: u64, socket: WebSocket) 
                         continue;
                     }
                     Ok(_) => {
-                        if send_server_error(&mut sender, "unsupported_message", "send JSON text messages").await.is_err() { return; }
+                        if send_server_error(&mut sender, ServerErrorCode::UnsupportedMessage, "send JSON text messages").await.is_err() { return; }
                         continue;
                     }
                     Err(error) => {
@@ -524,17 +523,30 @@ async fn websocket_session(user: Arc<UserState>, since: u64, socket: WebSocket) 
                         }
                         Err(error) => {
                             tracing::warn!(user = %user.id, error = ?error, "websocket ingest failed");
-                            if send_server_error(&mut sender, "ingest_failed", "operation batch was rejected").await.is_err() { return; }
+                            let code = if error.chain().any(|cause| {
+                                matches!(
+                                    cause.downcast_ref::<notes_core::CoreError>(),
+                                    Some(
+                                        notes_core::CoreError::Conflict(_)
+                                            | notes_core::CoreError::SyncConflict(_)
+                                    )
+                                )
+                            }) {
+                                ServerErrorCode::Conflict
+                            } else {
+                                ServerErrorCode::IngestFailed
+                            };
+                            if send_server_error(&mut sender, code, "operation batch was rejected").await.is_err() { return; }
                         }
                     },
                     Ok(ClientMessage::Push { .. }) => {
-                        if send_server_error(&mut sender, "batch_too_large", "a batch cannot exceed 256 operations").await.is_err() { return; }
+                        if send_server_error(&mut sender, ServerErrorCode::BatchTooLarge, "a batch cannot exceed 256 operations").await.is_err() { return; }
                     }
                     Ok(ClientMessage::Ping) => {
                         if send_server_message(&mut sender, &ServerMessage::Pong).await.is_err() { return; }
                     }
                     Err(_) => {
-                        if send_server_error(&mut sender, "invalid_message", "message does not match the sync protocol").await.is_err() { return; }
+                        if send_server_error(&mut sender, ServerErrorCode::InvalidMessage, "message does not match the sync protocol").await.is_err() { return; }
                     }
                 }
             }
@@ -543,7 +555,7 @@ async fn websocket_session(user: Arc<UserState>, since: u64, socket: WebSocket) 
                     if send_server_message(&mut sender, &ServerMessage::Ops { ops: vec![operation] }).await.is_err() { return; }
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
-                    let _ = send_server_error(&mut sender, "resync_required", "the client fell behind; reconnect to catch up").await;
+                    let _ = send_server_error(&mut sender, ServerErrorCode::ResyncRequired, "the client fell behind; reconnect to catch up").await;
                     return;
                 }
                 Err(broadcast::error::RecvError::Closed) => return,
@@ -562,13 +574,13 @@ async fn send_server_message(
 
 async fn send_server_error(
     sender: &mut futures::stream::SplitSink<WebSocket, Message>,
-    code: impl Into<String>,
+    code: ServerErrorCode,
     message: impl Into<String>,
 ) -> Result<(), axum::Error> {
     send_server_message(
         sender,
         &ServerMessage::Error {
-            code: code.into(),
+            code,
             message: message.into(),
         },
     )
@@ -734,8 +746,8 @@ mod tests {
     use crate::config::{ServerConfig, UserConfig};
     use axum::http::Request;
     use http_body_util::BodyExt;
-    use notes_core::{Hlc, NodeKind, Op, OpKind};
-    use notes_sync::{AttachmentAdd, NodeCreate};
+    use notes_core::{AttachmentOwner, Hlc, Op, OpKind, PageView};
+    use notes_sync::{AttachmentAdd, PageCreate};
     use tower::ServiceExt;
 
     const TOKEN: &str = "test-token-with-at-least-thirty-two-characters";
@@ -772,14 +784,10 @@ mod tests {
     fn page_operation(page_uuid: uuid::Uuid) -> Op {
         operation(
             1,
-            OpKind::NodeCreate(NodeCreate {
+            OpKind::PageCreate(PageCreate {
                 uuid: page_uuid,
-                node_kind: NodeKind::Page,
                 title: Some("Synced page".into()),
-                content: String::new(),
-                content_json: None,
-                parent_uuid: None,
-                position: None,
+                default_view: PageView::Outline,
                 created_at: 1,
             }),
         )
@@ -856,6 +864,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn emits_typed_http_errors_and_rejects_conflicting_operation_id_reuse() {
+        let (_directory, app) = test_app().await;
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .header(AUTHORIZATION, "Bearer wrong-token")
+                    .uri("/v1/info")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            unauthorized.headers().get(WWW_AUTHENTICATE),
+            Some(&HeaderValue::from_static("Bearer realm=\"notes-rs\""))
+        );
+        let body = unauthorized
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let error: ApiErrorResponse = serde_json::from_slice(&body).expect("typed error");
+        assert_eq!(error.error.code, ApiErrorCode::Unauthorized);
+
+        let original = page_operation(uuid::Uuid::from_u128(100));
+        let accepted = app
+            .clone()
+            .oneshot(
+                authorized(Request::builder())
+                    .method("POST")
+                    .uri("/v1/ops")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&PushOps {
+                            ops: vec![original.clone()],
+                        })
+                        .expect("request JSON"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(accepted.status(), StatusCode::OK);
+
+        let mut conflicting = original;
+        let OpKind::PageCreate(page) = &mut conflicting.kind else {
+            panic!("test operation must create a page");
+        };
+        page.title = Some("Conflicting title".into());
+        let conflict = app
+            .oneshot(
+                authorized(Request::builder())
+                    .method("POST")
+                    .uri("/v1/ops")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&PushOps {
+                            ops: vec![conflicting],
+                        })
+                        .expect("request JSON"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let body = conflict
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let error: ApiErrorResponse = serde_json::from_slice(&body).expect("typed error");
+        assert_eq!(error.error.code, ApiErrorCode::Conflict);
+        assert!(
+            error
+                .error
+                .message
+                .contains("reused with a different payload")
+        );
+    }
+
+    #[tokio::test]
     async fn reports_server_owned_embedding_contract() {
         let (_directory, app) = test_app().await;
         let response = app
@@ -889,7 +983,7 @@ mod tests {
             operation(
                 2,
                 OpKind::AttachmentAdd(AttachmentAdd {
-                    node_uuid: page_uuid,
+                    owner: AttachmentOwner::Page(page_uuid),
                     blob_hash: hash.clone(),
                     filename: "attachment.txt".into(),
                     mime: "text/plain".into(),
@@ -964,7 +1058,8 @@ mod tests {
             .to_bytes();
         let snapshot: notes_sync::SyncSnapshot = serde_json::from_slice(&body).expect("snapshot");
         assert_eq!(snapshot.seq, 2);
-        assert_eq!(snapshot.nodes.len(), 1);
+        assert_eq!(snapshot.pages.len(), 1);
+        assert!(snapshot.blocks.is_empty());
         assert_eq!(snapshot.attachments.len(), 1);
     }
 }

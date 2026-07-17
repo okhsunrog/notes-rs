@@ -6,17 +6,18 @@ const root = ["backend"] as const;
 export const queryKeys = {
   root,
   pages: [...root, "pages"] as const,
-  entities: [...root, "entities"] as const,
-  nodes: [...root, "node"] as const,
-  node: (uuid: string) => [...root, "node", uuid] as const,
+  pageRoot: [...root, "page"] as const,
+  page: (uuid: string) => [...root, "page", uuid] as const,
+  blockRoot: [...root, "block"] as const,
+  block: (uuid: string) => [...root, "block", uuid] as const,
   childrenRoot: [...root, "children"] as const,
-  children: (parentUuid: string) => [...root, "children", parentUuid] as const,
+  children: (containerUuid: string) => [...root, "children", containerUuid] as const,
   graphRoot: [...root, "graph"] as const,
   graph: (focusUuid?: string | null) => [...root, "graph", focusUuid ?? "all"] as const,
   backlinksRoot: [...root, "backlinks"] as const,
   backlinks: (uuid: string) => [...root, "backlinks", uuid] as const,
   attachmentsRoot: [...root, "attachments"] as const,
-  attachments: (parentUuid: string) => [...root, "attachments", parentUuid] as const,
+  attachments: (ownerUuid: string) => [...root, "attachments", ownerUuid] as const,
   history: [...root, "history"] as const,
   settings: [...root, "settings"] as const,
   syncStatus: [...root, "sync-status"] as const,
@@ -39,25 +40,40 @@ export async function applyDomainEvent(queryClient: QueryClient, event: DomainEv
   const invalidate = (queryKey: readonly unknown[]) => queryClient.invalidateQueries({ queryKey });
 
   switch (event.kind) {
-    case "node_changed": {
-      const derived = [] as Promise<unknown>[];
-      if (event.node_kinds.includes("page")) derived.push(invalidate(queryKeys.pages));
-      if (event.node_kinds.includes("entity")) derived.push(invalidate(queryKeys.entities));
+    case "pages_changed":
       await Promise.all([
-        ...event.node_uuids.map((uuid) => invalidate(queryKeys.node(uuid))),
-        ...event.parent_uuids.map((uuid) => invalidate(queryKeys.children(uuid))),
-        ...derived,
+        invalidate(queryKeys.pages),
+        invalidate(queryKeys.graphRoot),
+        invalidate(queryKeys.backlinksRoot),
+        ...event.page_uuids.map((uuid) => invalidate(queryKeys.page(uuid))),
+      ]);
+      return;
+    case "blocks_changed":
+      await Promise.all([
+        ...event.block_uuids.map((uuid) => invalidate(queryKeys.block(uuid))),
+        ...event.container_uuids.map((uuid) => invalidate(queryKeys.children(uuid))),
+      ]);
+      return;
+    case "pages_deleted": {
+      for (const uuid of event.page_uuids) {
+        queryClient.removeQueries({ queryKey: queryKeys.page(uuid), exact: true });
+        queryClient.removeQueries({ queryKey: queryKeys.children(uuid), exact: true });
+      }
+      await Promise.all([
+        invalidate(queryKeys.pages),
+        invalidate(queryKeys.attachmentsRoot),
+        invalidate(queryKeys.graphRoot),
+        invalidate(queryKeys.backlinksRoot),
       ]);
       return;
     }
-    case "node_deleted": {
-      for (const uuid of event.node_uuids) {
-        queryClient.removeQueries({ queryKey: queryKeys.node(uuid), exact: true });
+    case "blocks_deleted": {
+      for (const uuid of event.block_uuids) {
+        queryClient.removeQueries({ queryKey: queryKeys.block(uuid), exact: true });
+        queryClient.removeQueries({ queryKey: queryKeys.children(uuid), exact: true });
       }
       await Promise.all([
-        ...event.parent_uuids.map((uuid) => invalidate(queryKeys.children(uuid))),
-        invalidate(queryKeys.pages),
-        invalidate(queryKeys.entities),
+        ...event.container_uuids.map((uuid) => invalidate(queryKeys.children(uuid))),
         invalidate(queryKeys.attachmentsRoot),
         invalidate(queryKeys.graphRoot),
         invalidate(queryKeys.backlinksRoot),
@@ -65,20 +81,16 @@ export async function applyDomainEvent(queryClient: QueryClient, event: DomainEv
       return;
     }
     case "graph_changed":
-      await Promise.all([
-        invalidate(queryKeys.graphRoot),
-        invalidate(queryKeys.backlinksRoot),
-        invalidate(queryKeys.entities),
-      ]);
+      await Promise.all([invalidate(queryKeys.graphRoot), invalidate(queryKeys.backlinksRoot)]);
       return;
     case "structure_changed":
       await Promise.all([
-        ...event.node_uuids.map((uuid) => invalidate(queryKeys.node(uuid))),
+        ...event.block_uuids.map((uuid) => invalidate(queryKeys.block(uuid))),
         invalidate(queryKeys.childrenRoot),
       ]);
       return;
     case "attachments_changed":
-      await Promise.all(event.parent_uuids.map((uuid) => invalidate(queryKeys.attachments(uuid))));
+      await Promise.all(event.owner_uuids.map((uuid) => invalidate(queryKeys.attachments(uuid))));
       return;
     case "history_changed":
       await invalidate(queryKeys.history);

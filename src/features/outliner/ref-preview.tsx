@@ -1,13 +1,13 @@
 import { useState } from "react";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
-import { getNodeByUuid, getPageByTitle, type Node } from "@/lib/api";
+import { getBlock, getPageByTitle, type Content, type ObjectKind } from "@/lib/api";
 
 const PREVIEW_CHARS = 240;
 
 type FetchState =
   | { kind: "idle" }
   | { kind: "loading" }
-  | { kind: "found"; node: Node }
+  | { kind: "found"; content: Content }
   | { kind: "missing" }
   | { kind: "error"; message: string };
 
@@ -19,7 +19,11 @@ export function WikiLink({ title }: { title: string }) {
     if (!open || state.kind !== "idle") return;
     setState({ kind: "loading" });
     getPageByTitle(title)
-      .then((node) => setState(node ? { kind: "found", node } : { kind: "missing" }))
+      .then((page) =>
+        setState(
+          page ? { kind: "found", content: { kind: "page", record: page } } : { kind: "missing" },
+        ),
+      )
       .catch((e) => setState({ kind: "error", message: String(e) }));
   };
 
@@ -44,8 +48,14 @@ export function BlockRef({ uuid }: { uuid: string }) {
   const onOpenChange = (open: boolean) => {
     if (!open || state.kind !== "idle") return;
     setState({ kind: "loading" });
-    getNodeByUuid(uuid)
-      .then((node) => setState(node ? { kind: "found", node } : { kind: "missing" }))
+    getBlock(uuid)
+      .then((block) =>
+        setState(
+          block
+            ? { kind: "found", content: { kind: "block", record: block } }
+            : { kind: "missing" },
+        ),
+      )
       .catch((e) => setState({ kind: "error", message: String(e) }));
   };
 
@@ -78,7 +88,7 @@ function PreviewBody({
 }: {
   state: FetchState;
   label: string;
-  kind: "page" | "block";
+  kind: ObjectKind;
 }) {
   if (state.kind === "loading" || state.kind === "idle") {
     return <span className="text-muted-foreground">loading…</span>;
@@ -100,12 +110,15 @@ function PreviewBody({
       </span>
     );
   }
-  const { node } = state;
-  const preview = node.content.slice(0, PREVIEW_CHARS);
-  const truncated = node.content.length > PREVIEW_CHARS;
+  const { content } = state;
+  const text = content.kind === "page" ? (content.record.title ?? "") : content.record.markdown;
+  const preview = text.slice(0, PREVIEW_CHARS);
+  const truncated = text.length > PREVIEW_CHARS;
   return (
     <div className="space-y-1">
-      {node.title && <div className="font-medium">{node.title}</div>}
+      {content.kind === "page" && content.record.title && (
+        <div className="font-medium">{content.record.title}</div>
+      )}
       <div className="whitespace-pre-wrap break-words text-muted-foreground">
         {preview || <span className="italic">empty</span>}
         {truncated && "…"}

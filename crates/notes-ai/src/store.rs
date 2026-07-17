@@ -4,6 +4,7 @@ use notes_core::Connection;
 use rusqlite::OptionalExtension;
 use rusqlite::ffi::sqlite3_auto_extension;
 use rusqlite_migration::{M, Migrations};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -36,7 +37,7 @@ fn migrations() -> Migrations<'static> {
 
 #[derive(Debug, Clone)]
 pub struct IndexJob {
-    pub node_uuid: uuid::Uuid,
+    pub content_uuid: uuid::Uuid,
     pub input_hash: String,
     pub input_text: String,
 }
@@ -48,9 +49,27 @@ pub struct ExtractedEdge {
     pub kind: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractedEntityRecord {
+    pub uuid: uuid::Uuid,
+    pub name: String,
+    pub normalized_name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AiEntity {
+    pub uuid: uuid::Uuid,
+    pub name: String,
+    pub description: String,
+    pub mention_count: u64,
+    pub updated_at: i64,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct VectorMatch {
-    pub node_uuid: uuid::Uuid,
+    pub content_uuid: uuid::Uuid,
     pub distance: f64,
 }
 
@@ -64,7 +83,7 @@ pub struct IndexStatus {
     pub pending: u64,
     pub failed: u64,
     pub indexed: u64,
-    pub source_nodes: u64,
+    pub source_documents: u64,
     pub extraction_pending: u64,
     pub extraction_failed: u64,
 }
@@ -240,6 +259,38 @@ impl AiStore {
             .await
     }
 
+    pub async fn list_entities(&self, limit: u32) -> Result<Vec<AiEntity>> {
+        if !(1..=200).contains(&limit) {
+            bail!("entity limit must be between 1 and 200");
+        }
+        self.connection
+            .call(move |database| {
+                let mut statement = database.prepare(
+                    "SELECT entity.uuid, entity.name, entity.description, entity.updated_at,
+                            COUNT(DISTINCT edge.source_uuid) AS mention_count
+                       FROM entities entity
+                       LEFT JOIN extraction_edges edge
+                         ON edge.dst_uuid = entity.uuid AND edge.kind = 'mentions'
+                      GROUP BY entity.uuid, entity.name, entity.description, entity.updated_at
+                      ORDER BY mention_count DESC, entity.updated_at DESC,
+                               entity.normalized_name
+                      LIMIT ?1",
+                )?;
+                statement
+                    .query_map([limit], |row| {
+                        Ok(AiEntity {
+                            uuid: row.get(0)?,
+                            name: row.get(1)?,
+                            description: row.get(2)?,
+                            updated_at: row.get(3)?,
+                            mention_count: row.get::<_, i64>(4)? as u64,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .await
+    }
+
     pub async fn reset_index(&self) -> Result<()> {
         let generation_id = self.generation_id;
         let table_name = self.table_name.clone();
@@ -267,7 +318,7 @@ impl AiStore {
 
     pub async fn reconcile(&self, notes: &Connection, source_seq: u64) -> Result<u64> {
         let documents = index_documents(notes).await?;
-        let source_nodes = documents.len() as u64;
+        let source_documents = documents.len() as u64;
         let generation_id = self.generation_id;
         let table_name = self.table_name.clone();
         self.connection
@@ -275,7 +326,7 @@ impl AiStore {
                 let transaction = database.transaction()?;
                 let current = {
                     let mut statement = transaction.prepare(
-                        "SELECT node_uuid, input_hash FROM generation_vectors
+                        "SELECT content_uuid, input_hash FROM generation_vectors
                          WHERE generation_id = ?1",
                     )?;
                     statement
@@ -285,21 +336,21 @@ impl AiStore {
                         .collect::<Result<HashMap<_, _>, _>>()?
                 };
                 let present = documents.keys().copied().collect::<HashSet<_>>();
-                for (node_uuid, document) in documents {
-                    if current.get(&node_uuid) == Some(&document.input_hash) {
+                for (content_uuid, document) in documents {
+                    if current.get(&content_uuid) == Some(&document.input_hash) {
                         transaction.execute(
                             "DELETE FROM embedding_jobs
-                             WHERE generation_id = ?1 AND node_uuid = ?2",
-                            rusqlite::params![generation_id, node_uuid],
+                             WHERE generation_id = ?1 AND content_uuid = ?2",
+                            rusqlite::params![generation_id, content_uuid],
                         )?;
                         continue;
                     }
                     transaction.execute(
                         "INSERT INTO embedding_jobs
-                           (generation_id, node_uuid, input_hash, input_text, source_seq,
+                           (generation_id, content_uuid, input_hash, input_text, source_seq,
                             enqueued_at, retry_count, last_attempt, last_error, terminal)
                          VALUES (?1, ?2, ?3, ?4, ?5, unixepoch(), 0, NULL, NULL, 0)
-                         ON CONFLICT(generation_id, node_uuid) DO UPDATE SET
+                         ON CONFLICT(generation_id, content_uuid) DO UPDATE SET
                            input_hash = excluded.input_hash,
                            input_text = excluded.input_text,
                            source_seq = excluded.source_seq,
@@ -318,7 +369,7 @@ impl AiStore {
                              THEN embedding_jobs.terminal ELSE 0 END",
                         rusqlite::params![
                             generation_id,
-                            node_uuid,
+                            content_uuid,
                             document.input_hash,
                             document.text,
                             source_seq as i64
@@ -327,7 +378,7 @@ impl AiStore {
                 }
                 let stale = {
                     let mut statement = transaction.prepare(
-                        "SELECT node_uuid, vector_rowid FROM generation_vectors
+                        "SELECT content_uuid, vector_rowid FROM generation_vectors
                          WHERE generation_id = ?1",
                     )?;
                     statement
@@ -343,20 +394,21 @@ impl AiStore {
                         })
                         .collect::<Result<Vec<_>, _>>()?
                 };
-                for (node_uuid, vector_rowid) in stale {
+                for (content_uuid, vector_rowid) in stale {
                     transaction.execute(
                         &format!("DELETE FROM {table_name} WHERE rowid = ?1"),
                         [vector_rowid],
                     )?;
                     transaction.execute(
                         "DELETE FROM generation_vectors
-                         WHERE generation_id = ?1 AND node_uuid = ?2",
-                        rusqlite::params![generation_id, node_uuid],
+                         WHERE generation_id = ?1 AND content_uuid = ?2",
+                        rusqlite::params![generation_id, content_uuid],
                     )?;
                 }
                 let stale_jobs = {
-                    let mut statement = transaction
-                        .prepare("SELECT node_uuid FROM embedding_jobs WHERE generation_id = ?1")?;
+                    let mut statement = transaction.prepare(
+                        "SELECT content_uuid FROM embedding_jobs WHERE generation_id = ?1",
+                    )?;
                     statement
                         .query_map([generation_id], |row| row.get::<_, uuid::Uuid>(0))?
                         .filter_map(|row| match row {
@@ -366,22 +418,22 @@ impl AiStore {
                         })
                         .collect::<Result<Vec<_>, _>>()?
                 };
-                for node_uuid in stale_jobs {
+                for content_uuid in stale_jobs {
                     transaction.execute(
                         "DELETE FROM embedding_jobs
-                         WHERE generation_id = ?1 AND node_uuid = ?2",
-                        rusqlite::params![generation_id, node_uuid],
+                         WHERE generation_id = ?1 AND content_uuid = ?2",
+                        rusqlite::params![generation_id, content_uuid],
                     )?;
                 }
-                activate_generation_if_complete(&transaction, generation_id, source_nodes)?;
+                activate_generation_if_complete(&transaction, generation_id, source_documents)?;
                 transaction.commit()?;
                 Ok(())
             })
             .await?;
-        Ok(source_nodes)
+        Ok(source_documents)
     }
 
-    pub async fn source_node_count(&self, notes: &Connection) -> Result<u64> {
+    pub async fn source_document_count(&self, notes: &Connection) -> Result<u64> {
         Ok(index_documents(notes).await?.len() as u64)
     }
 
@@ -390,11 +442,11 @@ impl AiStore {
         self.connection
             .call(move |database| {
                 let mut statement = database.prepare(
-                    "SELECT node_uuid, input_hash, input_text FROM embedding_jobs
+                    "SELECT content_uuid, input_hash, input_text FROM embedding_jobs
                      WHERE generation_id = ?1 AND terminal = 0 AND retry_count < ?3
                        AND (last_attempt IS NULL
                             OR unixepoch() - last_attempt >= ?4 * (1 << retry_count))
-                     ORDER BY enqueued_at, node_uuid LIMIT ?2",
+                     ORDER BY enqueued_at, content_uuid LIMIT ?2",
                 )?;
                 statement
                     .query_map(
@@ -406,7 +458,7 @@ impl AiStore {
                         ],
                         |row| {
                             Ok(IndexJob {
-                                node_uuid: row.get(0)?,
+                                content_uuid: row.get(0)?,
                                 input_hash: row.get(1)?,
                                 input_text: row.get(2)?,
                             })
@@ -428,26 +480,26 @@ impl AiStore {
                 let transaction = database.transaction()?;
                 let completed = {
                     let mut statement = transaction
-                        .prepare("SELECT node_uuid, input_hash FROM extraction_state")?;
+                        .prepare("SELECT content_uuid, input_hash FROM extraction_state")?;
                     statement
                         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
                         .collect::<Result<HashMap<uuid::Uuid, String>, _>>()?
                 };
                 let present = documents.keys().copied().collect::<HashSet<_>>();
-                for (node_uuid, document) in documents {
-                    if completed.get(&node_uuid) == Some(&document.input_hash) {
+                for (content_uuid, document) in documents {
+                    if completed.get(&content_uuid) == Some(&document.input_hash) {
                         transaction.execute(
-                            "DELETE FROM extraction_jobs WHERE node_uuid = ?1",
-                            [node_uuid],
+                            "DELETE FROM extraction_jobs WHERE content_uuid = ?1",
+                            [content_uuid],
                         )?;
                         continue;
                     }
                     transaction.execute(
                         "INSERT INTO extraction_jobs
-                           (node_uuid, input_hash, input_text, source_seq, enqueued_at,
+                           (content_uuid, input_hash, input_text, source_seq, enqueued_at,
                             retry_count, last_attempt, last_error, terminal)
                          VALUES (?1, ?2, ?3, ?4, unixepoch(), 0, NULL, NULL, 0)
-                         ON CONFLICT(node_uuid) DO UPDATE SET
+                         ON CONFLICT(content_uuid) DO UPDATE SET
                            input_hash = excluded.input_hash,
                            input_text = excluded.input_text,
                            source_seq = excluded.source_seq,
@@ -461,7 +513,7 @@ impl AiStore {
                            terminal = CASE WHEN extraction_jobs.input_hash = excluded.input_hash
                              THEN extraction_jobs.terminal ELSE 0 END",
                         rusqlite::params![
-                            node_uuid,
+                            content_uuid,
                             document.input_hash,
                             document.text,
                             source_seq as i64
@@ -470,7 +522,7 @@ impl AiStore {
                 }
                 let stale_sources = {
                     let mut statement = transaction.prepare(
-                        "SELECT node_uuid FROM extraction_state
+                        "SELECT content_uuid FROM extraction_state
                          UNION SELECT source_uuid FROM extraction_edges",
                     )?;
                     statement
@@ -484,7 +536,7 @@ impl AiStore {
                 };
                 let stale_jobs = {
                     let mut statement =
-                        transaction.prepare("SELECT node_uuid FROM extraction_jobs")?;
+                        transaction.prepare("SELECT content_uuid FROM extraction_jobs")?;
                     statement
                         .query_map([], |row| row.get::<_, uuid::Uuid>(0))?
                         .filter_map(|row| match row {
@@ -494,10 +546,10 @@ impl AiStore {
                         })
                         .collect::<Result<Vec<_>, _>>()?
                 };
-                for node_uuid in stale_jobs {
+                for content_uuid in stale_jobs {
                     transaction.execute(
-                        "DELETE FROM extraction_jobs WHERE node_uuid = ?1",
-                        [node_uuid],
+                        "DELETE FROM extraction_jobs WHERE content_uuid = ?1",
+                        [content_uuid],
                     )?;
                 }
                 transaction.commit()?;
@@ -515,13 +567,14 @@ impl AiStore {
                     [source_uuid],
                 )?;
                 transaction.execute(
-                    "DELETE FROM extraction_state WHERE node_uuid = ?1",
+                    "DELETE FROM extraction_state WHERE content_uuid = ?1",
                     [source_uuid],
                 )?;
                 transaction.execute(
-                    "DELETE FROM extraction_jobs WHERE node_uuid = ?1",
+                    "DELETE FROM extraction_jobs WHERE content_uuid = ?1",
                     [source_uuid],
                 )?;
+                delete_orphan_entities(&transaction)?;
                 transaction.commit()
             })
             .await
@@ -531,16 +584,16 @@ impl AiStore {
         self.connection
             .call(move |database| {
                 let mut statement = database.prepare(
-                    "SELECT node_uuid, input_hash, input_text FROM extraction_jobs
+                    "SELECT content_uuid, input_hash, input_text FROM extraction_jobs
                      WHERE terminal = 0 AND retry_count < 5
                        AND (last_attempt IS NULL
                             OR unixepoch() - last_attempt >= 30 * (1 << retry_count))
-                     ORDER BY enqueued_at, node_uuid LIMIT ?1",
+                     ORDER BY enqueued_at, content_uuid LIMIT ?1",
                 )?;
                 statement
                     .query_map([limit], |row| {
                         Ok(IndexJob {
-                            node_uuid: row.get(0)?,
+                            content_uuid: row.get(0)?,
                             input_hash: row.get(1)?,
                             input_text: row.get(2)?,
                         })
@@ -556,7 +609,7 @@ impl AiStore {
         error: &str,
         terminal: bool,
     ) -> Result<()> {
-        let node_uuid = job.node_uuid;
+        let content_uuid = job.content_uuid;
         let input_hash = job.input_hash.clone();
         let error = error.chars().take(2_000).collect::<String>();
         self.connection
@@ -567,8 +620,8 @@ impl AiStore {
                          last_error = ?3,
                          terminal = CASE WHEN ?4 THEN 1
                            WHEN retry_count + 1 >= 5 THEN 1 ELSE 0 END
-                     WHERE node_uuid = ?1 AND input_hash = ?2",
-                    rusqlite::params![node_uuid, input_hash, error, terminal],
+                     WHERE content_uuid = ?1 AND input_hash = ?2",
+                    rusqlite::params![content_uuid, input_hash, error, terminal],
                 )?;
                 Ok(())
             })
@@ -580,54 +633,19 @@ impl AiStore {
         notes: &Connection,
         job: &IndexJob,
     ) -> Result<bool> {
-        let node = notes_core::db::get_node_by_uuid(notes, job.node_uuid).await?;
-        Ok(node.is_some_and(|node| {
-            extraction_input(node.title.as_deref(), &node.content).input_hash == job.input_hash
+        let content = notes_core::db::get_content(notes, job.content_uuid).await?;
+        Ok(content.is_some_and(|content| {
+            extraction_input_for_content(&content).input_hash == job.input_hash
         }))
     }
 
-    pub async fn extraction_removals(
+    pub async fn finish_extraction(
         &self,
-        source_uuid: uuid::Uuid,
-        desired: &[ExtractedEdge],
-    ) -> Result<Vec<ExtractedEdge>> {
-        let desired = desired.iter().cloned().collect::<HashSet<_>>();
-        self.connection
-            .call(move |database| {
-                let previous = {
-                    let mut statement = database.prepare(
-                        "SELECT src_uuid, dst_uuid, kind FROM extraction_edges
-                         WHERE source_uuid = ?1",
-                    )?;
-                    statement
-                        .query_map([source_uuid], |row| {
-                            Ok(ExtractedEdge {
-                                src_uuid: row.get(0)?,
-                                dst_uuid: row.get(1)?,
-                                kind: row.get(2)?,
-                            })
-                        })?
-                        .collect::<Result<HashSet<_>, _>>()?
-                };
-                let mut removable = Vec::new();
-                for edge in previous.difference(&desired) {
-                    let other_sources = database.query_row(
-                        "SELECT COUNT(*) FROM extraction_edges
-                         WHERE source_uuid != ?1 AND src_uuid = ?2 AND dst_uuid = ?3 AND kind = ?4",
-                        rusqlite::params![source_uuid, edge.src_uuid, edge.dst_uuid, edge.kind],
-                        |row| row.get::<_, i64>(0),
-                    )?;
-                    if other_sources == 0 {
-                        removable.push(edge.clone());
-                    }
-                }
-                Ok(removable)
-            })
-            .await
-    }
-
-    pub async fn finish_extraction(&self, job: &IndexJob, edges: Vec<ExtractedEdge>) -> Result<()> {
-        let source_uuid = job.node_uuid;
+        job: &IndexJob,
+        entities: Vec<ExtractedEntityRecord>,
+        edges: Vec<ExtractedEdge>,
+    ) -> Result<()> {
+        let source_uuid = job.content_uuid;
         let input_hash = job.input_hash.clone();
         self.connection
             .call(move |database| {
@@ -635,7 +653,7 @@ impl AiStore {
                 let current = transaction
                     .query_row(
                         "SELECT source_seq FROM extraction_jobs
-                         WHERE node_uuid = ?1 AND input_hash = ?2",
+                         WHERE content_uuid = ?1 AND input_hash = ?2",
                         rusqlite::params![source_uuid, input_hash],
                         |row| row.get::<_, i64>(0),
                     )
@@ -647,6 +665,24 @@ impl AiStore {
                     "DELETE FROM extraction_edges WHERE source_uuid = ?1",
                     [source_uuid],
                 )?;
+                for entity in &entities {
+                    transaction.execute(
+                        "INSERT INTO entities(uuid, name, normalized_name, description, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, unixepoch())
+                         ON CONFLICT(uuid) DO UPDATE SET
+                           name = excluded.name,
+                           normalized_name = excluded.normalized_name,
+                           description = CASE WHEN excluded.description = ''
+                             THEN entities.description ELSE excluded.description END,
+                           updated_at = excluded.updated_at",
+                        rusqlite::params![
+                            entity.uuid,
+                            entity.name,
+                            entity.normalized_name,
+                            entity.description,
+                        ],
+                    )?;
+                }
                 for edge in &edges {
                     transaction.execute(
                         "INSERT INTO extraction_edges(source_uuid, src_uuid, dst_uuid, kind)
@@ -654,15 +690,16 @@ impl AiStore {
                         rusqlite::params![source_uuid, edge.src_uuid, edge.dst_uuid, edge.kind],
                     )?;
                 }
+                delete_orphan_entities(&transaction)?;
                 transaction.execute(
-                    "INSERT INTO extraction_state(node_uuid, input_hash, source_seq)
+                    "INSERT INTO extraction_state(content_uuid, input_hash, source_seq)
                      VALUES (?1, ?2, ?3)
-                     ON CONFLICT(node_uuid) DO UPDATE SET
+                     ON CONFLICT(content_uuid) DO UPDATE SET
                        input_hash = excluded.input_hash, source_seq = excluded.source_seq",
                     rusqlite::params![source_uuid, input_hash, source_seq],
                 )?;
                 transaction.execute(
-                    "DELETE FROM extraction_jobs WHERE node_uuid = ?1 AND input_hash = ?2",
+                    "DELETE FROM extraction_jobs WHERE content_uuid = ?1 AND input_hash = ?2",
                     rusqlite::params![source_uuid, input_hash],
                 )?;
                 transaction.commit()?;
@@ -682,13 +719,13 @@ impl AiStore {
         self.connection
             .call(move |database| {
                 let transaction = database.transaction()?;
-                for (node_uuid, input_hash) in jobs {
+                for (content_uuid, input_hash) in jobs {
                     transaction.execute(
                         "UPDATE embedding_jobs
                          SET retry_count = retry_count + 1, last_attempt = unixepoch(),
                              last_error = ?4, terminal = ?5
-                         WHERE generation_id = ?1 AND node_uuid = ?2 AND input_hash = ?3",
-                        rusqlite::params![generation_id, node_uuid, input_hash, error, terminal],
+                         WHERE generation_id = ?1 AND content_uuid = ?2 AND input_hash = ?3",
+                        rusqlite::params![generation_id, content_uuid, input_hash, error, terminal],
                     )?;
                 }
                 transaction.commit()
@@ -698,7 +735,7 @@ impl AiStore {
 
     pub async fn write_embeddings(
         &self,
-        source_nodes: u64,
+        source_documents: u64,
         items: Vec<(uuid::Uuid, String, Vec<f32>)>,
     ) -> Result<()> {
         let generation_id = self.generation_id;
@@ -707,18 +744,18 @@ impl AiStore {
         self.connection
             .call(move |database| {
                 let transaction = database.transaction()?;
-                for (node_uuid, input_hash, embedding) in items {
+                for (content_uuid, input_hash, embedding) in items {
                     if embedding.len() != dimensions {
                         return Err(rusqlite::Error::InvalidParameterName(format!(
-                            "embedding for {node_uuid} has dimension {}, expected {dimensions}",
+                            "embedding for {content_uuid} has dimension {}, expected {dimensions}",
                             embedding.len()
                         )));
                     }
                     let still_current = transaction
                         .query_row(
                             "SELECT source_seq FROM embedding_jobs
-                             WHERE generation_id = ?1 AND node_uuid = ?2 AND input_hash = ?3",
-                            rusqlite::params![generation_id, node_uuid, input_hash],
+                             WHERE generation_id = ?1 AND content_uuid = ?2 AND input_hash = ?3",
+                            rusqlite::params![generation_id, content_uuid, input_hash],
                             |row| row.get::<_, i64>(0),
                         )
                         .optional()?;
@@ -728,8 +765,8 @@ impl AiStore {
                     let rowid = match transaction
                         .query_row(
                             "SELECT vector_rowid FROM generation_vectors
-                             WHERE generation_id = ?1 AND node_uuid = ?2",
-                            rusqlite::params![generation_id, node_uuid],
+                             WHERE generation_id = ?1 AND content_uuid = ?2",
+                            rusqlite::params![generation_id, content_uuid],
                             |row| row.get::<_, i64>(0),
                         )
                         .optional()?
@@ -751,27 +788,33 @@ impl AiStore {
                     )?;
                     transaction.execute(
                         "INSERT INTO generation_vectors
-                           (generation_id, node_uuid, vector_rowid, input_hash, source_seq)
+                           (generation_id, content_uuid, vector_rowid, input_hash, source_seq)
                          VALUES (?1, ?2, ?3, ?4, ?5)
-                         ON CONFLICT(generation_id, node_uuid) DO UPDATE SET
+                         ON CONFLICT(generation_id, content_uuid) DO UPDATE SET
                            vector_rowid = excluded.vector_rowid,
                            input_hash = excluded.input_hash,
                            source_seq = excluded.source_seq",
-                        rusqlite::params![generation_id, node_uuid, rowid, input_hash, source_seq],
+                        rusqlite::params![
+                            generation_id,
+                            content_uuid,
+                            rowid,
+                            input_hash,
+                            source_seq
+                        ],
                     )?;
                     transaction.execute(
                         "DELETE FROM embedding_jobs
-                         WHERE generation_id = ?1 AND node_uuid = ?2 AND input_hash = ?3",
-                        rusqlite::params![generation_id, node_uuid, input_hash],
+                         WHERE generation_id = ?1 AND content_uuid = ?2 AND input_hash = ?3",
+                        rusqlite::params![generation_id, content_uuid, input_hash],
                     )?;
                 }
-                activate_generation_if_complete(&transaction, generation_id, source_nodes)?;
+                activate_generation_if_complete(&transaction, generation_id, source_documents)?;
                 transaction.commit()
             })
             .await
     }
 
-    pub async fn status(&self, source_nodes: u64) -> Result<IndexStatus> {
+    pub async fn status(&self, source_documents: u64) -> Result<IndexStatus> {
         let generation_id = self.generation_id;
         let identity = self.identity.clone();
         let dimensions = self.dimensions;
@@ -828,7 +871,7 @@ impl AiStore {
                     pending,
                     failed,
                     indexed,
-                    source_nodes,
+                    source_documents,
                     extraction_pending,
                     extraction_failed,
                 })
@@ -837,10 +880,22 @@ impl AiStore {
     }
 }
 
+fn delete_orphan_entities(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+    transaction.execute(
+        "DELETE FROM entities
+          WHERE NOT EXISTS (
+            SELECT 1 FROM extraction_edges
+             WHERE src_uuid = entities.uuid OR dst_uuid = entities.uuid
+          )",
+        [],
+    )?;
+    Ok(())
+}
+
 fn activate_generation_if_complete(
     transaction: &rusqlite::Transaction<'_>,
     generation_id: uuid::Uuid,
-    source_nodes: u64,
+    source_documents: u64,
 ) -> rusqlite::Result<()> {
     let pending = transaction.query_row(
         "SELECT COUNT(*) FROM embedding_jobs WHERE generation_id = ?1",
@@ -852,7 +907,7 @@ fn activate_generation_if_complete(
         [generation_id],
         |row| row.get::<_, i64>(0).map(|value| value as u64),
     )?;
-    if pending != 0 || indexed != source_nodes {
+    if pending != 0 || indexed != source_documents {
         return Ok(());
     }
     transaction.execute(
@@ -895,7 +950,7 @@ impl VectorStore for AiStore {
                     return Ok(Vec::new());
                 }
                 let mut statement = database.prepare(&format!(
-                    "SELECT mapping.node_uuid, vectors.distance
+                    "SELECT mapping.content_uuid, vectors.distance
                      FROM {table_name} vectors
                      JOIN generation_vectors mapping
                        ON mapping.generation_id = ?3
@@ -908,7 +963,7 @@ impl VectorStore for AiStore {
                         rusqlite::params![blob, limit as i64, generation_id],
                         |row| {
                             Ok(VectorMatch {
-                                node_uuid: row.get(0)?,
+                                content_uuid: row.get(0)?,
                                 distance: row.get(1)?,
                             })
                         },
@@ -930,13 +985,14 @@ async fn index_documents(notes: &Connection) -> Result<BTreeMap<uuid::Uuid, Inde
     let rows = notes
         .call(|database| {
             let mut statement = database.prepare(
-                "WITH RECURSIVE chain(qid, uuid, parent_id, title, content, depth) AS (
-                   SELECT n.id, n.uuid, n.parent_id, n.title, n.content, 0
-                   FROM nodes n WHERE n.kind IN ('page', 'block')
+                "WITH RECURSIVE chain(qid, uuid, parent_uuid, title, content, depth) AS (
+                   SELECT block.uuid, block.uuid, block.parent_uuid, page.title,
+                          block.markdown, 0
+                     FROM blocks block JOIN pages page ON page.uuid = block.page_uuid
                    UNION ALL
-                   SELECT chain.qid, chain.uuid, parent.parent_id, parent.title,
-                          parent.content, chain.depth + 1
-                   FROM chain JOIN nodes parent ON parent.id = chain.parent_id
+                   SELECT chain.qid, chain.uuid, parent.parent_uuid, NULL,
+                          parent.markdown, chain.depth + 1
+                     FROM chain JOIN blocks parent ON parent.uuid = chain.parent_uuid
                  )
                  SELECT uuid, depth, title, content FROM chain ORDER BY uuid, depth",
             )?;
@@ -978,24 +1034,45 @@ async fn index_documents(notes: &Connection) -> Result<BTreeMap<uuid::Uuid, Inde
 async fn extraction_documents(notes: &Connection) -> Result<BTreeMap<uuid::Uuid, IndexDocument>> {
     let rows = notes
         .call(|database| {
-            let mut statement = database.prepare(
-                "SELECT uuid, title, content FROM nodes WHERE kind IN ('page', 'block')",
-            )?;
-            statement
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, uuid::Uuid>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                })?
-                .collect::<Result<Vec<_>, _>>()
+            let mut rows = Vec::new();
+            {
+                let mut statement = database.prepare("SELECT uuid, title FROM pages")?;
+                rows.extend(
+                    statement
+                        .query_map([], |row| {
+                            Ok((
+                                row.get::<_, uuid::Uuid>(0)?,
+                                row.get::<_, Option<String>>(1)?,
+                                String::new(),
+                            ))
+                        })?
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
+            }
+            {
+                let mut statement = database.prepare("SELECT uuid, markdown FROM blocks")?;
+                rows.extend(
+                    statement
+                        .query_map([], |row| {
+                            Ok((row.get::<_, uuid::Uuid>(0)?, None, row.get::<_, String>(1)?))
+                        })?
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
+            }
+            Ok(rows)
         })
         .await?;
     Ok(rows
         .into_iter()
         .map(|(uuid, title, content)| (uuid, extraction_input(title.as_deref(), &content)))
         .collect())
+}
+
+fn extraction_input_for_content(content: &notes_core::db::Content) -> IndexDocument {
+    match content {
+        notes_core::db::Content::Page(page) => extraction_input(page.title.as_deref(), ""),
+        notes_core::db::Content::Block(block) => extraction_input(None, &block.markdown),
+    }
 }
 
 fn extraction_input(title: Option<&str>, content: &str) -> IndexDocument {
@@ -1105,7 +1182,7 @@ pub fn embedding_identity_fingerprint(endpoint: &str, model: &str, dimensions: u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notes_core::NodeKind;
+    use notes_core::BlockStyle;
 
     #[test]
     fn ai_schema_migration_is_valid() {
@@ -1135,41 +1212,45 @@ mod tests {
         let notes = notes_core::db::open(directory.path().join("notes.db"))
             .await
             .expect("notes database");
-        let node = notes_core::db::create_node(
+        let page = notes_core::db::create_page(&notes, "Indexed".into())
+            .await
+            .expect("create page");
+        let block = notes_core::db::create_block(
             &notes,
-            NodeKind::Page,
-            Some("Indexed".into()),
-            "document".into(),
+            page.uuid,
             None,
+            None,
+            BlockStyle::Paragraph,
+            "document".into(),
         )
         .await
         .expect("create note");
         let store = AiStore::open(directory.path().join("ai.db"), "identity".into(), 2)
             .await
             .expect("AI store");
-        let source_nodes = store.reconcile(&notes, 1).await.expect("reconcile");
+        let source_documents = store.reconcile(&notes, 1).await.expect("reconcile");
         let jobs = store.take_jobs(16).await.expect("jobs");
         assert_eq!(jobs.len(), 1);
         store
             .write_embeddings(
-                source_nodes,
+                source_documents,
                 vec![(
-                    jobs[0].node_uuid,
+                    jobs[0].content_uuid,
                     jobs[0].input_hash.clone(),
                     vec![0.25, 0.75],
                 )],
             )
             .await
             .expect("write embedding");
-        let status = store.status(source_nodes).await.expect("status");
+        let status = store.status(source_documents).await.expect("status");
         assert_eq!(status.generation_status, GenerationStatus::Active);
         assert_eq!(status.indexed, 1);
         let matches = store.search(vec![0.25, 0.75], 4).await.expect("search");
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].node_uuid, node.uuid);
+        assert_eq!(matches[0].content_uuid, block.uuid);
 
         store.reset_index().await.expect("reset index");
-        let status = store.status(source_nodes).await.expect("reset status");
+        let status = store.status(source_documents).await.expect("reset status");
         assert_eq!(status.generation_status, GenerationStatus::Building);
         assert_eq!(status.indexed, 0);
     }
@@ -1184,10 +1265,10 @@ mod tests {
             .await
             .expect("AI store");
 
-        let source_nodes = store.reconcile(&notes, 0).await.expect("reconcile");
-        let status = store.status(source_nodes).await.expect("status");
+        let source_documents = store.reconcile(&notes, 0).await.expect("reconcile");
+        let status = store.status(source_documents).await.expect("status");
 
-        assert_eq!(source_nodes, 0);
+        assert_eq!(source_documents, 0);
         assert_eq!(status.generation_status, GenerationStatus::Active);
     }
 
@@ -1197,27 +1278,31 @@ mod tests {
         let notes = notes_core::db::open(directory.path().join("notes.db"))
             .await
             .expect("notes database");
-        let node = notes_core::db::create_node(
+        let page = notes_core::db::create_page(&notes, "Before".into())
+            .await
+            .expect("create page");
+        let block = notes_core::db::create_block(
             &notes,
-            NodeKind::Page,
-            Some("Before".into()),
-            "old content".into(),
+            page.uuid,
             None,
+            None,
+            BlockStyle::Paragraph,
+            "old content".into(),
         )
         .await
         .expect("create note");
         let store = AiStore::open(directory.path().join("ai.db"), "identity".into(), 2)
             .await
             .expect("AI store");
-        let source_nodes = store.reconcile(&notes, 1).await.expect("first reconcile");
+        let source_documents = store.reconcile(&notes, 1).await.expect("first reconcile");
         let stale_job = store.take_jobs(1).await.expect("old job").remove(0);
 
-        notes_core::db::update_node(
+        notes_core::db::set_block_content(
             &notes,
-            node.id,
-            node.title.clone(),
-            "new content".into(),
-            None,
+            block.uuid,
+            notes_core::db::BlockContent {
+                markdown: "new content".into(),
+            },
         )
         .await
         .expect("change note");
@@ -1227,14 +1312,137 @@ mod tests {
 
         store
             .write_embeddings(
-                source_nodes,
-                vec![(stale_job.node_uuid, stale_job.input_hash, vec![1.0, 0.0])],
+                source_documents,
+                vec![(stale_job.content_uuid, stale_job.input_hash, vec![1.0, 0.0])],
             )
             .await
             .expect("ignore stale result");
-        let status = store.status(source_nodes).await.expect("status");
+        let status = store.status(source_documents).await.expect("status");
         assert_eq!(status.indexed, 0);
         assert_eq!(status.pending, 1);
         assert_eq!(status.generation_status, GenerationStatus::Building);
+    }
+
+    #[tokio::test]
+    async fn extracted_entities_stay_in_ai_storage_and_orphans_are_collected() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let notes = notes_core::db::open(directory.path().join("notes.db"))
+            .await
+            .expect("notes database");
+        let page = notes_core::db::create_page(&notes, "Project".into())
+            .await
+            .expect("create page");
+        let block = notes_core::db::create_block(
+            &notes,
+            page.uuid,
+            None,
+            None,
+            BlockStyle::Paragraph,
+            "Rust powers the project".into(),
+        )
+        .await
+        .expect("create block");
+        let store = AiStore::open(directory.path().join("ai.db"), "identity".into(), 2)
+            .await
+            .expect("AI store");
+
+        store
+            .reconcile_extractions(&notes, 1)
+            .await
+            .expect("reconcile extraction jobs");
+        let job = store
+            .take_extraction_jobs(16)
+            .await
+            .expect("extraction jobs")
+            .into_iter()
+            .find(|job| job.content_uuid == block.uuid)
+            .expect("block extraction job");
+        let entity_uuid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, b"notes-rs:entity:rust");
+        store
+            .finish_extraction(
+                &job,
+                vec![ExtractedEntityRecord {
+                    uuid: entity_uuid,
+                    name: "Rust".into(),
+                    normalized_name: "rust".into(),
+                    description: "A programming language".into(),
+                }],
+                vec![ExtractedEdge {
+                    src_uuid: block.uuid,
+                    dst_uuid: entity_uuid,
+                    kind: "mentions".into(),
+                }],
+            )
+            .await
+            .expect("finish extraction");
+
+        assert!(
+            notes_core::db::get_content(&notes, entity_uuid)
+                .await
+                .expect("query notes database")
+                .is_none(),
+            "derived entities must never be written to notes-core"
+        );
+        let (entities, edges) = store
+            .connection
+            .call(|database| {
+                Ok((
+                    database.query_row("SELECT COUNT(*) FROM entities", [], |row| row.get(0))?,
+                    database.query_row("SELECT COUNT(*) FROM extraction_edges", [], |row| {
+                        row.get(0)
+                    })?,
+                ))
+            })
+            .await
+            .expect("inspect AI database");
+        assert_eq!((entities, edges), (1_i64, 1_i64));
+        let listed = store.list_entities(50).await.expect("list entities");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].uuid, entity_uuid);
+        assert_eq!(listed[0].name, "Rust");
+        assert_eq!(listed[0].description, "A programming language");
+        assert_eq!(listed[0].mention_count, 1);
+
+        notes_core::db::set_block_content(
+            &notes,
+            block.uuid,
+            notes_core::db::BlockContent {
+                markdown: "Nothing to extract".into(),
+            },
+        )
+        .await
+        .expect("update block");
+        store
+            .reconcile_extractions(&notes, 2)
+            .await
+            .expect("reconcile changed extraction input");
+        let changed_job = store
+            .take_extraction_jobs(16)
+            .await
+            .expect("changed extraction jobs")
+            .into_iter()
+            .find(|job| job.content_uuid == block.uuid)
+            .expect("changed block extraction job");
+        store
+            .finish_extraction(&changed_job, Vec::new(), Vec::new())
+            .await
+            .expect("replace extraction with an empty result");
+        let entities = store
+            .connection
+            .call(|database| {
+                database.query_row("SELECT COUNT(*) FROM entities", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+            })
+            .await
+            .expect("count orphan entities");
+        assert_eq!(entities, 0);
+        assert!(
+            store
+                .list_entities(50)
+                .await
+                .expect("list entities")
+                .is_empty()
+        );
     }
 }

@@ -14,12 +14,12 @@ pub use transport::{
 pub use notes_core::Hlc;
 pub use notes_core::operation::FORMAT_VERSION;
 pub use notes_core::operation::{
-    AttachmentAdd, AttachmentRemove, EdgeAdd, EdgeRemove, NodeCreate, NodeDelete, NodeMove,
-    NodeSetContent, NodeSetTitle,
+    AttachmentAdd, AttachmentRemove, BlockCreate, BlockDelete, BlockMove, BlockSetMarkdown,
+    BlockSetStyle, PageCreate, PageDelete, PageSetTitle, PageSetView,
 };
 pub use notes_core::{
-    ApplyOutcome, Op, OpKind, Origin, SnapshotAttachment, SnapshotEdge, SnapshotNode,
-    SnapshotTombstone, SyncSnapshot, acknowledge_server_op, apply, apply_batch, apply_sequenced,
-    configure_sync, export_sync_snapshot, import_sync_snapshot, local_ops, pending_outbox,
-    sync_cursor,
+    ApplyOutcome, AttachmentOwner, BlockStyle, ObjectKind, Op, OpKind, OrderKey, Origin, PageView,
+    SnapshotAttachment, SnapshotBlock, SnapshotPage, SnapshotTombstone, SyncSnapshot,
+    acknowledge_server_op, apply, apply_batch, apply_sequenced, configure_sync,
+    export_sync_snapshot, import_sync_snapshot, pending_outbox, sync_cursor,
 };

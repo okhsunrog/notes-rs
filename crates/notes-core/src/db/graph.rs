@@ -1,363 +1,283 @@
 use super::*;
 
-pub async fn link_nodes(
-    conn: &Connection,
-    src: i64,
-    dst: i64,
-    kind: String,
-    weight: f64,
-) -> Result<()> {
-    let (src_uuid, dst_uuid) = require_node_uuids(conn, src, dst).await?;
-    apply_local(
-        conn,
-        vec![OpKind::EdgeAdd(EdgeAdd {
-            src_uuid,
-            dst_uuid,
-            edge_kind: kind,
-            weight,
-        })],
-    )
-    .await?;
-    Ok(())
-}
-
-/// Replace all outgoing reference edges for `block_id` in one transaction.
-///
-/// Strategy: delete every edge `(src=block_id, kind='refs')`, then re-insert
-/// one edge per wikilink target (eagerly materializing missing pages) and one
-/// per block-ref target (silently skipping broken `((uuid))` refs).
-///
-/// This is the "re-emit and cleanup on every save" approach from the plan —
-/// inefficient but correct. Returns the number of broken block-ref UUIDs so
-/// the frontend can surface them later if desired.
-pub(crate) fn replace_block_refs_tx_at(
-    tx: &rusqlite::Transaction<'_>,
-    block_id: i64,
-    wikilink_titles: &[String],
-    block_uuids: &[String],
-    now: i64,
-) -> rusqlite::Result<u32> {
-    tx.execute(
-        "DELETE FROM edges WHERE src = ?1 AND kind = 'refs'",
-        [block_id],
-    )?;
-    for raw_title in wikilink_titles {
-        let title = raw_title.trim();
-        if title.is_empty() {
-            continue;
-        }
-        let existing = tx
-            .query_row(
-                "SELECT id FROM nodes
-                 WHERE kind = 'page' AND lower(title) = lower(?1)
-                 LIMIT 1",
-                [title],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?;
-        let page_id = match existing {
-            Some(id) => id,
-            None => {
-                let uuid = page_uuid(title);
-                let id = stable_node_id(tx, &uuid)?;
-                tx.execute(
-                    "INSERT INTO nodes (id, uuid, kind, title, content, content_json,
-                                        body_stemmed, parent_id, position,
-                                        created_at, updated_at)
-                     VALUES (?1, ?2, 'page', ?3, '', NULL, '', NULL, NULL, ?4, ?4)",
-                    rusqlite::params![id, uuid, title, now],
-                )?;
-                id
-            }
-        };
-        if page_id != block_id {
-            tx.execute(
-                "INSERT OR IGNORE INTO edges (src, dst, kind, weight, created_at)
-                 VALUES (?1, ?2, 'refs', 1.0, ?3)",
-                rusqlite::params![block_id, page_id, now],
-            )?;
-        }
-    }
-
-    let mut broken = 0;
-    for raw_uuid in block_uuids {
-        let uuid = raw_uuid.trim();
-        if uuid.is_empty() {
-            continue;
-        }
-        let Ok(uuid) = uuid::Uuid::parse_str(uuid) else {
-            broken += 1;
-            continue;
-        };
-        let target = tx
-            .query_row("SELECT id FROM nodes WHERE uuid = ?1", [uuid], |row| {
-                row.get::<_, i64>(0)
-            })
-            .optional()?;
-        match target {
-            Some(target_id) if target_id != block_id => {
-                tx.execute(
-                    "INSERT OR IGNORE INTO edges (src, dst, kind, weight, created_at)
-                     VALUES (?1, ?2, 'refs', 1.0, ?3)",
-                    rusqlite::params![block_id, target_id, now],
-                )?;
-            }
-            Some(_) => {}
-            None => broken += 1,
-        }
-    }
-    Ok(broken)
-}
-
-pub(crate) fn page_uuid(title: &str) -> uuid::Uuid {
-    uuid::Uuid::new_v5(
-        &uuid::Uuid::NAMESPACE_OID,
-        format!("notes-rs:page:{}", title.trim().to_lowercase()).as_bytes(),
-    )
-}
-
-pub(crate) fn stable_node_id(
-    transaction: &rusqlite::Transaction<'_>,
-    uuid: &uuid::Uuid,
-) -> rusqlite::Result<i64> {
-    let mut high = [0_u8; 8];
-    let mut low = [0_u8; 8];
-    high.copy_from_slice(&uuid.as_bytes()[..8]);
-    low.copy_from_slice(&uuid.as_bytes()[8..]);
-    // Tauri sends IDs through JavaScript, so keep them inside Number's exact
-    // integer range while retaining 53 bits of UUID-derived entropy.
-    let value = (u64::from_be_bytes(high) ^ u64::from_be_bytes(low)) & ((1_u64 << 53) - 1);
-    let id = value.max(1) as i64;
-    let occupied = transaction
-        .query_row("SELECT uuid FROM nodes WHERE id = ?1", [id], |row| {
-            row.get::<_, uuid::Uuid>(0)
-        })
-        .optional()?;
-    if occupied.is_some_and(|occupied| occupied != *uuid) {
-        return Err(rusqlite::Error::InvalidParameterName(format!(
-            "UUID-derived node ID collision for {uuid} at local ID {id}"
-        )));
-    }
-    Ok(id)
-}
-
-pub async fn neighbors(conn: &Connection, node_id: i64, depth: u32) -> Result<Vec<Node>> {
-    let nodes = conn
-        .call(move |c| -> rusqlite::Result<Vec<Node>> {
-            let mut stmt = c.prepare(
-                "WITH RECURSIVE reachable(id, d) AS (
+pub async fn neighbors(conn: &Connection, uuid: uuid::Uuid, depth: u32) -> Result<Vec<Content>> {
+    let uuids = conn
+        .call(move |database| {
+            let mut statement = database.prepare(
+                "WITH RECURSIVE adjacent(source, target) AS (
+                   SELECT source_block_uuid, target_page_uuid FROM page_links
+                    WHERE target_page_uuid IS NOT NULL
+                   UNION SELECT target_page_uuid, source_block_uuid FROM page_links
+                    WHERE target_page_uuid IS NOT NULL
+                   UNION SELECT source_block_uuid, target_block_uuid FROM block_refs
+                   UNION SELECT target_block_uuid, source_block_uuid FROM block_refs
+                   UNION SELECT uuid, page_uuid FROM blocks WHERE parent_uuid IS NULL
+                   UNION SELECT page_uuid, uuid FROM blocks WHERE parent_uuid IS NULL
+                   UNION SELECT uuid, parent_uuid FROM blocks WHERE parent_uuid IS NOT NULL
+                   UNION SELECT parent_uuid, uuid FROM blocks WHERE parent_uuid IS NOT NULL
+                 ), reachable(uuid, depth) AS (
                    SELECT ?1, 0
                    UNION
-                   SELECT e.dst, r.d + 1 FROM edges e
-                     JOIN reachable r ON e.src = r.id
-                     WHERE r.d < ?2
-                   UNION
-                   SELECT e.src, r.d + 1 FROM edges e
-                     JOIN reachable r ON e.dst = r.id
-                     WHERE r.d < ?2
+                   SELECT adjacent.target, reachable.depth + 1
+                     FROM reachable JOIN adjacent ON adjacent.source = reachable.uuid
+                    WHERE reachable.depth < ?2
                  )
-                 SELECT n.id, n.uuid, n.kind, n.title, n.content, n.content_json, n.parent_id, n.position, n.created_at, n.updated_at
-                 FROM nodes n JOIN reachable r ON n.id = r.id
-                 WHERE n.id != ?1",
+                 SELECT DISTINCT uuid FROM reachable WHERE uuid != ?1 ORDER BY depth, uuid",
             )?;
-            let rows = stmt
-                .query_map(rusqlite::params![node_id, depth as i64], row_to_node)?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
-        .await?;
-    Ok(nodes)
-}
-
-/// Nodes that link *to* `node_id` via an outgoing edge. Unlike `neighbors`
-/// (which is undirected), this is one-directional: it answers "who points
-/// at me?". Optional `kind` filter narrows to e.g. only `refs` for explicit
-/// wikilinks/block-refs, or `mentions` for entity links.
-pub async fn find_backlinks(
-    conn: &Connection,
-    node_id: i64,
-    kind: Option<String>,
-) -> Result<Vec<Node>> {
-    let rows = conn
-        .call(move |c| -> rusqlite::Result<Vec<Node>> {
-            let sql = if kind.is_some() {
-                format!(
-                    "SELECT {NODE_COLUMNS_N} FROM nodes n
-                     JOIN edges e ON e.src = n.id
-                     WHERE e.dst = ?1 AND e.kind = ?2
-                     ORDER BY n.updated_at DESC"
-                )
-            } else {
-                format!(
-                    "SELECT {NODE_COLUMNS_N} FROM nodes n
-                     JOIN edges e ON e.src = n.id
-                     WHERE e.dst = ?1
-                     ORDER BY n.updated_at DESC"
-                )
-            };
-            let mut stmt = c.prepare(&sql)?;
-            let rows = match kind {
-                Some(k) => stmt
-                    .query_map(rusqlite::params![node_id, k], row_to_node)?
-                    .collect::<Result<Vec<_>, _>>()?,
-                None => stmt
-                    .query_map([node_id], row_to_node)?
-                    .collect::<Result<Vec<_>, _>>()?,
-            };
-            Ok(rows)
-        })
-        .await?;
-    Ok(rows)
-}
-
-/// Walk the parent chain from `node_id` up to the root. Returns root-first so
-/// the LLM reads it like a breadcrumb. The starting node itself is included
-/// as the last element.
-pub async fn read_ancestors(conn: &Connection, node_id: i64) -> Result<Vec<Node>> {
-    let rows = conn
-        .call(move |c| -> rusqlite::Result<Vec<Node>> {
-            let sql = format!(
-                "WITH RECURSIVE up(id, parent_id, depth) AS (
-                   SELECT id, parent_id, 0 FROM nodes WHERE id = ?1
-                   UNION ALL
-                   SELECT n.id, n.parent_id, u.depth + 1
-                     FROM up u JOIN nodes n ON n.id = u.parent_id
-                 )
-                 SELECT {NODE_COLUMNS_N} FROM up u
-                 JOIN nodes n ON n.id = u.id
-                 ORDER BY u.depth DESC"
-            );
-            let mut stmt = c.prepare(&sql)?;
-            let rows = stmt
-                .query_map([node_id], row_to_node)?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
-        .await?;
-    Ok(rows)
-}
-
-/// All descendants of `node_id` up to `depth` levels. Returned in pre-order
-/// DFS via a lexicographic sort path so the result reads like an outline:
-/// each block immediately followed by its own children. Excludes `node_id`
-/// itself.
-pub async fn read_subtree(conn: &Connection, node_id: i64, depth: u32) -> Result<Vec<Node>> {
-    let rows = conn
-        .call(move |c| -> rusqlite::Result<Vec<Node>> {
-            // sort_path is zero-padded floats joined by '/', so lexicographic
-            // sort matches the outline order. We assume non-negative
-            // positions, which holds for blocks created via create_block /
-            // move_block.
-            let sql = format!(
-                "WITH RECURSIVE down(id, sort_path, depth) AS (
-                   SELECT id, '', 0 FROM nodes WHERE id = ?1
-                   UNION ALL
-                   SELECT n.id,
-                          d.sort_path || '/' ||
-                            printf('%015.6f', COALESCE(n.position, 0.0)),
-                          d.depth + 1
-                     FROM down d JOIN nodes n ON n.parent_id = d.id
-                     WHERE d.depth < ?2
-                 )
-                 SELECT {NODE_COLUMNS_N} FROM down d
-                 JOIN nodes n ON n.id = d.id
-                 WHERE n.id != ?1
-                 ORDER BY d.sort_path"
-            );
-            let mut stmt = c.prepare(&sql)?;
-            let rows = stmt
-                .query_map(rusqlite::params![node_id, depth as i64], row_to_node)?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
-        .await?;
-    Ok(rows)
-}
-
-/// Nodes that reference the given tag/entity by its (case-insensitive) title.
-/// Matches both `kind='tag'` and `kind='entity'` since the extractor emits
-/// entities, while user-typed `#tags` would become tag rows when that path
-/// is added.
-pub async fn find_tagged(conn: &Connection, title: String) -> Result<Vec<Node>> {
-    let rows = conn
-        .call(move |c| -> rusqlite::Result<Vec<Node>> {
-            let sql = format!(
-                "SELECT {NODE_COLUMNS_N} FROM nodes n
-                 WHERE EXISTS (
-                   SELECT 1 FROM edges e
-                   JOIN nodes t ON t.id = e.dst
-                   WHERE e.src = n.id
-                     AND e.kind IN ('mentions', 'refs')
-                     AND t.kind IN ('tag', 'entity')
-                     AND lower(t.title) = lower(?1)
-                 )
-                 ORDER BY n.updated_at DESC"
-            );
-            let mut stmt = c.prepare(&sql)?;
-            let rows = stmt
-                .query_map([title], row_to_node)?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
-        .await?;
-    Ok(rows)
-}
-
-pub async fn graph_snapshot(conn: &Connection, focus_id: Option<i64>) -> Result<GraphSnapshot> {
-    conn.call(move |database| -> rusqlite::Result<GraphSnapshot> {
-        let nodes = if let Some(focus_id) = focus_id {
-            let sql = format!(
-                "SELECT DISTINCT {NODE_COLUMNS} FROM nodes n
-                 WHERE n.id = ?1
-                    OR n.id IN (SELECT src FROM edges WHERE dst = ?1)
-                    OR n.id IN (SELECT dst FROM edges WHERE src = ?1)
-                    OR n.parent_id = ?1
-                    OR n.id = (SELECT parent_id FROM nodes WHERE id = ?1)
-                 ORDER BY n.kind, n.title, n.id
-                 LIMIT 100"
-            );
-            let mut statement = database.prepare(&sql)?;
             statement
-                .query_map([focus_id], row_to_node)?
-                .collect::<Result<Vec<_>, _>>()?
-        } else {
-            let sql = format!(
-                "SELECT {NODE_COLUMNS} FROM nodes
-                 WHERE kind IN ('page', 'entity')
-                 ORDER BY updated_at DESC LIMIT 100"
-            );
-            let mut statement = database.prepare(&sql)?;
-            statement
-                .query_map([], row_to_node)?
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        let ids = nodes.iter().map(|node| node.id).collect::<Vec<_>>();
-        let edges = if ids.is_empty() {
-            Vec::new()
-        } else {
-            let placeholders = std::iter::repeat_n("?", ids.len())
-                .collect::<Vec<_>>()
-                .join(",");
-            let sql = format!(
-                "SELECT src, dst, kind, weight, created_at FROM edges
-                 WHERE src IN ({placeholders}) AND dst IN ({placeholders})
-                 ORDER BY created_at DESC LIMIT 250"
-            );
-            let parameters = ids.iter().chain(ids.iter());
-            let mut statement = database.prepare(&sql)?;
-            statement
-                .query_map(rusqlite::params_from_iter(parameters), |row| {
-                    Ok(Edge {
-                        src: row.get(0)?,
-                        dst: row.get(1)?,
-                        kind: row.get(2)?,
-                        weight: row.get(3)?,
-                        created_at: row.get(4)?,
-                    })
+                .query_map(rusqlite::params![uuid, depth], |row| {
+                    row.get::<_, uuid::Uuid>(0)
                 })?
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        Ok(GraphSnapshot { nodes, edges })
-    })
-    .await
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .await?;
+    get_contents(conn, uuids).await
+}
+
+pub async fn find_backlinks(conn: &Connection, uuid: uuid::Uuid) -> Result<Vec<Content>> {
+    let source_uuids = conn
+        .call(move |database| {
+            let mut statement = database.prepare(
+                "SELECT source_block_uuid FROM page_links WHERE target_page_uuid = ?1
+                 UNION
+                 SELECT source_block_uuid FROM block_refs WHERE target_block_uuid = ?1
+                 ORDER BY 1",
+            )?;
+            statement
+                .query_map([uuid], |row| row.get::<_, uuid::Uuid>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .await?;
+    get_contents(conn, source_uuids).await
+}
+
+pub async fn read_ancestors(conn: &Connection, uuid: uuid::Uuid) -> Result<Vec<Content>> {
+    let block = get_block(conn, uuid).await?;
+    let Some(block) = block else {
+        return Ok(get_page(conn, uuid)
+            .await?
+            .map(Content::Page)
+            .into_iter()
+            .collect());
+    };
+    let ancestor_uuids = conn
+        .call(move |database| {
+            let mut statement = database.prepare(
+                "WITH RECURSIVE ancestors(uuid, parent_uuid, depth) AS (
+                   SELECT uuid, parent_uuid, 0 FROM blocks WHERE uuid = ?1
+                   UNION ALL
+                   SELECT parent.uuid, parent.parent_uuid, ancestors.depth + 1
+                     FROM ancestors JOIN blocks parent ON parent.uuid = ancestors.parent_uuid
+                 )
+                 SELECT uuid FROM ancestors ORDER BY depth DESC",
+            )?;
+            statement
+                .query_map([uuid], |row| row.get::<_, uuid::Uuid>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .await?;
+    let mut records = Vec::with_capacity(ancestor_uuids.len() + 1);
+    if let Some(page) = get_page(conn, block.page_uuid).await? {
+        records.push(Content::Page(page));
+    }
+    for ancestor in ancestor_uuids {
+        if let Some(block) = get_block(conn, ancestor).await? {
+            records.push(Content::Block(block));
+        }
+    }
+    Ok(records)
+}
+
+pub async fn read_subtree(conn: &Connection, uuid: uuid::Uuid, depth: u32) -> Result<Vec<Content>> {
+    let (page_uuid, parent_uuid) = if get_page(conn, uuid).await?.is_some() {
+        (uuid, None)
+    } else if let Some(block) = get_block(conn, uuid).await? {
+        (block.page_uuid, Some(uuid))
+    } else {
+        return Ok(Vec::new());
+    };
+    let blocks = conn
+        .call(move |database| {
+            let sql = format!(
+                "WITH RECURSIVE subtree(uuid, path, depth) AS (
+                   SELECT block.uuid, block.order_key, 1
+                     FROM blocks block
+                    WHERE block.page_uuid = ?1 AND block.parent_uuid IS ?2
+                   UNION ALL
+                   SELECT child.uuid, subtree.path || '/' || child.order_key, subtree.depth + 1
+                     FROM subtree JOIN blocks child ON child.parent_uuid = subtree.uuid
+                    WHERE subtree.depth < ?3
+                 )
+                 SELECT {QUALIFIED_BLOCK_COLUMNS} FROM subtree
+                   JOIN blocks ON blocks.uuid = subtree.uuid
+                  ORDER BY subtree.path"
+            );
+            database
+                .prepare(&sql)?
+                .query_map(
+                    rusqlite::params![page_uuid, parent_uuid, depth],
+                    row_to_block,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .await?;
+    Ok(blocks.into_iter().map(Content::Block).collect())
+}
+
+pub async fn graph_snapshot(
+    conn: &Connection,
+    focus_uuid: Option<uuid::Uuid>,
+) -> Result<GraphSnapshot> {
+    let page_level = focus_uuid.is_none();
+    let content = match focus_uuid {
+        Some(uuid) => {
+            let mut records = vec![];
+            if let Some(record) = get_content(conn, uuid).await? {
+                records.push(record);
+            }
+            records.extend(neighbors(conn, uuid, 1).await?);
+            records
+        }
+        None => list_pages(conn, u32::MAX)
+            .await?
+            .into_iter()
+            .map(Content::Page)
+            .collect(),
+    };
+    let selected = content
+        .iter()
+        .map(Content::uuid)
+        .collect::<std::collections::HashSet<_>>();
+    let items = content
+        .into_iter()
+        .map(|content| match content {
+            Content::Page(page) => GraphItem {
+                uuid: page.uuid,
+                kind: ObjectKind::Page,
+                label: page.title.unwrap_or_else(|| "Untitled".into()),
+            },
+            Content::Block(block) => GraphItem {
+                uuid: block.uuid,
+                kind: ObjectKind::Block,
+                label: block.markdown.chars().take(80).collect(),
+            },
+        })
+        .collect();
+    let edges = conn
+        .call(move |database| {
+            if page_level {
+                return page_level_edges(database, &selected);
+            }
+
+            let mut edges = Vec::new();
+            {
+                let mut statement = database.prepare(
+                    "SELECT source_block_uuid, target_page_uuid FROM page_links
+                      WHERE target_page_uuid IS NOT NULL",
+                )?;
+                for row in statement.query_map([], |row| {
+                    Ok((row.get::<_, uuid::Uuid>(0)?, row.get::<_, uuid::Uuid>(1)?))
+                })? {
+                    let (source_uuid, target_uuid) = row?;
+                    if selected.contains(&source_uuid) && selected.contains(&target_uuid) {
+                        edges.push(GraphEdge {
+                            source_uuid,
+                            target_uuid,
+                            relation: GraphRelation::PageLink,
+                        });
+                    }
+                }
+            }
+            {
+                let mut statement = database
+                    .prepare("SELECT source_block_uuid, target_block_uuid FROM block_refs")?;
+                for row in statement.query_map([], |row| {
+                    Ok((row.get::<_, uuid::Uuid>(0)?, row.get::<_, uuid::Uuid>(1)?))
+                })? {
+                    let (source_uuid, target_uuid) = row?;
+                    if selected.contains(&source_uuid) && selected.contains(&target_uuid) {
+                        edges.push(GraphEdge {
+                            source_uuid,
+                            target_uuid,
+                            relation: GraphRelation::BlockReference,
+                        });
+                    }
+                }
+            }
+            {
+                let mut statement = database
+                    .prepare("SELECT uuid, COALESCE(parent_uuid, page_uuid) FROM blocks")?;
+                for row in statement.query_map([], |row| {
+                    Ok((row.get::<_, uuid::Uuid>(0)?, row.get::<_, uuid::Uuid>(1)?))
+                })? {
+                    let (source_uuid, target_uuid) = row?;
+                    if selected.contains(&source_uuid) && selected.contains(&target_uuid) {
+                        edges.push(GraphEdge {
+                            source_uuid: target_uuid,
+                            target_uuid: source_uuid,
+                            relation: GraphRelation::Contains,
+                        });
+                    }
+                }
+            }
+            Ok(edges)
+        })
+        .await?;
+    Ok(GraphSnapshot { items, edges })
+}
+
+/// Project content-level references onto their owning pages for the workspace graph.
+///
+/// Page links always have a concrete page target here. Block references are included
+/// only once the target block exists and its owning page can be determined. `DISTINCT`
+/// intentionally collapses any number of block-level references between the same two
+/// pages into one edge of each relation kind.
+fn page_level_edges(
+    database: &rusqlite::Connection,
+    selected: &std::collections::HashSet<uuid::Uuid>,
+) -> rusqlite::Result<Vec<GraphEdge>> {
+    let mut edges = Vec::new();
+    {
+        let mut statement = database.prepare(
+            "SELECT DISTINCT source.page_uuid, link.target_page_uuid
+               FROM page_links link
+               JOIN blocks source ON source.uuid = link.source_block_uuid
+              WHERE link.target_page_uuid IS NOT NULL
+              ORDER BY source.page_uuid, link.target_page_uuid",
+        )?;
+        for row in statement.query_map([], |row| {
+            Ok((row.get::<_, uuid::Uuid>(0)?, row.get::<_, uuid::Uuid>(1)?))
+        })? {
+            let (source_uuid, target_uuid) = row?;
+            if selected.contains(&source_uuid) && selected.contains(&target_uuid) {
+                edges.push(GraphEdge {
+                    source_uuid,
+                    target_uuid,
+                    relation: GraphRelation::PageLink,
+                });
+            }
+        }
+    }
+    {
+        let mut statement = database.prepare(
+            "SELECT DISTINCT source.page_uuid, target.page_uuid
+               FROM block_refs reference
+               JOIN blocks source ON source.uuid = reference.source_block_uuid
+               JOIN blocks target ON target.uuid = reference.target_block_uuid
+              ORDER BY source.page_uuid, target.page_uuid",
+        )?;
+        for row in statement.query_map([], |row| {
+            Ok((row.get::<_, uuid::Uuid>(0)?, row.get::<_, uuid::Uuid>(1)?))
+        })? {
+            let (source_uuid, target_uuid) = row?;
+            if selected.contains(&source_uuid) && selected.contains(&target_uuid) {
+                edges.push(GraphEdge {
+                    source_uuid,
+                    target_uuid,
+                    relation: GraphRelation::BlockReference,
+                });
+            }
+        }
+    }
+    Ok(edges)
 }

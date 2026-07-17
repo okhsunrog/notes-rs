@@ -1,18 +1,18 @@
 import { ArrowRight, FilePlus2, Link2, Search, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SearchCard } from "@/features/search/search-card";
-import type { Node, SearchHit } from "@/lib/api";
+import type { Content, SearchHit } from "@/lib/api";
 
 type Props = {
   creating: boolean;
   hits: SearchHit[];
   setHits: React.Dispatch<React.SetStateAction<SearchHit[]>>;
   onCreate: () => void | Promise<void>;
-  onOpenNode: (node: Node) => void | Promise<void>;
+  onOpenContent: (content: Content) => void | Promise<void>;
   onStatus: (status: string) => void;
 };
 
-export function HomeView({ creating, hits, setHits, onCreate, onOpenNode, onStatus }: Props) {
+export function HomeView({ creating, hits, setHits, onCreate, onOpenContent, onStatus }: Props) {
   return (
     <div className="mx-auto flex min-h-full max-w-4xl flex-col justify-center px-8 py-16 sm:px-12">
       <div className="max-w-2xl">
@@ -61,7 +61,7 @@ export function HomeView({ creating, hits, setHits, onCreate, onOpenNode, onStat
           variant="inline"
           hits={hits}
           setHits={setHits}
-          onOpenNode={onOpenNode}
+          onOpenContent={onOpenContent}
           onStatus={onStatus}
         />
       </div>

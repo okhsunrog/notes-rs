@@ -1,8 +1,8 @@
 use anyhow::Context;
 use base64::Engine;
 use notes_core::Connection;
-use notes_core::db::{self, Node, SearchHit};
-use notes_core::{NodeKind, ReorderDirection};
+use notes_core::db::{self, Block, Page, SearchHit};
+use notes_core::{BlockStyle, PageView, ReorderDirection};
 use notes_protocol::{
     AiIndexStatus, AiProviderProbeResult, AiProviderSettingsUpdate, AiRuntimeSettings, ChatEvent,
     ChatTurn,
@@ -27,8 +27,8 @@ mod data;
 pub use data::*;
 mod lifecycle;
 pub use lifecycle::*;
-mod nodes;
-pub use nodes::*;
+mod pages;
+pub use pages::*;
 mod outliner;
 pub use outliner::*;
 mod system;
@@ -105,23 +105,28 @@ pub struct AppState {
 #[derive(Debug, Clone, Serialize, specta::Type)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DomainEvent {
-    NodeChanged {
-        node_uuids: Vec<uuid::Uuid>,
-        parent_uuids: Vec<uuid::Uuid>,
-        node_kinds: Vec<NodeKind>,
+    PagesChanged {
+        page_uuids: Vec<uuid::Uuid>,
     },
-    NodeDeleted {
-        node_uuids: Vec<uuid::Uuid>,
-        parent_uuids: Vec<uuid::Uuid>,
+    BlocksChanged {
+        block_uuids: Vec<uuid::Uuid>,
+        container_uuids: Vec<uuid::Uuid>,
+    },
+    PagesDeleted {
+        page_uuids: Vec<uuid::Uuid>,
+    },
+    BlocksDeleted {
+        block_uuids: Vec<uuid::Uuid>,
+        container_uuids: Vec<uuid::Uuid>,
     },
     GraphChanged {
-        node_uuids: Vec<uuid::Uuid>,
+        content_uuids: Vec<uuid::Uuid>,
     },
     StructureChanged {
-        node_uuids: Vec<uuid::Uuid>,
+        block_uuids: Vec<uuid::Uuid>,
     },
     AttachmentsChanged {
-        parent_uuids: Vec<uuid::Uuid>,
+        owner_uuids: Vec<uuid::Uuid>,
     },
     HistoryChanged,
     SettingsChanged,
@@ -134,46 +139,49 @@ pub enum DomainEvent {
 #[tauri_specta(event_name = "domain:event")]
 pub struct DomainEventMessage(pub DomainEvent);
 
+#[derive(Debug, Clone, Serialize, specta::Type, tauri_specta::Event)]
+#[tauri_specta(event_name = "app:ready")]
+pub struct StartupReadyEvent;
+
+#[derive(Debug, Clone, Serialize, specta::Type, tauri_specta::Event)]
+#[serde(rename_all = "camelCase")]
+#[tauri_specta(event_name = "app:startup-error")]
+pub struct StartupErrorEvent {
+    pub message: String,
+}
+
 pub(crate) fn emit_domain(app: &AppHandle, event: DomainEvent) {
     if let Err(error) = DomainEventMessage(event).emit(app) {
         tracing::warn!(%error, "failed to emit domain event");
     }
 }
 
-async fn node_uuids_for_ids(
-    connection: &Connection,
-    ids: impl IntoIterator<Item = i64>,
-) -> Vec<uuid::Uuid> {
-    match db::node_uuids_for_ids(connection, ids).await {
-        Ok(uuids) => uuids,
-        Err(error) => {
-            tracing::warn!(%error, "failed to resolve node UUIDs for domain event");
-            Vec::new()
-        }
-    }
-}
-
-pub(crate) async fn emit_nodes_changed(
-    app: &AppHandle,
-    connection: &Connection,
-    nodes: &[Node],
-    additional_parent_ids: impl IntoIterator<Item = i64>,
-) {
-    let parent_ids = nodes
-        .iter()
-        .filter_map(|node| node.parent_id)
-        .chain(additional_parent_ids);
+pub(crate) fn emit_pages_changed(app: &AppHandle, pages: &[Page]) {
     emit_domain(
         app,
-        DomainEvent::NodeChanged {
-            node_uuids: nodes.iter().map(|node| node.uuid).collect(),
-            parent_uuids: node_uuids_for_ids(connection, parent_ids).await,
-            node_kinds: nodes
-                .iter()
-                .map(|node| node.kind)
-                .collect::<std::collections::BTreeSet<_>>()
-                .into_iter()
-                .collect(),
+        DomainEvent::PagesChanged {
+            page_uuids: pages.iter().map(|page| page.uuid).collect(),
+        },
+    );
+}
+
+pub(crate) fn emit_blocks_changed(
+    app: &AppHandle,
+    blocks: &[Block],
+    additional_container_uuids: impl IntoIterator<Item = uuid::Uuid>,
+) {
+    let container_uuids = blocks
+        .iter()
+        .map(|block| block.parent_uuid.unwrap_or(block.page_uuid))
+        .chain(additional_container_uuids)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    emit_domain(
+        app,
+        DomainEvent::BlocksChanged {
+            block_uuids: blocks.iter().map(|block| block.uuid).collect(),
+            container_uuids,
         },
     );
 }
@@ -213,6 +221,22 @@ fn err<E: std::fmt::Display + 'static>(error: E) -> CommandError {
             let code = match error {
                 notes_sync::TransportError::Unauthorized => CommandErrorCode::Unavailable,
                 notes_sync::TransportError::Conflict(_) => CommandErrorCode::Conflict,
+                notes_sync::TransportError::Http {
+                    code:
+                        Some(
+                            notes_protocol::ApiErrorCode::InvalidRequest
+                            | notes_protocol::ApiErrorCode::PayloadTooLarge,
+                        ),
+                    ..
+                } => CommandErrorCode::InvalidInput,
+                notes_sync::TransportError::Http {
+                    code: Some(notes_protocol::ApiErrorCode::NotFound),
+                    ..
+                } => CommandErrorCode::NotFound,
+                notes_sync::TransportError::Http {
+                    code: Some(notes_protocol::ApiErrorCode::Unavailable),
+                    ..
+                } => CommandErrorCode::Unavailable,
                 notes_sync::TransportError::Http { status: 400, .. } => {
                     CommandErrorCode::InvalidInput
                 }
@@ -281,6 +305,7 @@ mod tests {
         assert!(matches!(
             err(anyhow::Error::from(notes_sync::TransportError::Http {
                 status: 400,
+                code: Some(notes_protocol::ApiErrorCode::InvalidRequest),
                 message: "invalid provider configuration".into(),
             }))
             .code,

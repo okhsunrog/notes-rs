@@ -9,6 +9,7 @@ pub struct Oplog {
     connection: Connection,
 }
 
+#[derive(Debug)]
 pub struct AppendOutcome {
     pub operation: SequencedOp,
     pub inserted: bool,
@@ -38,7 +39,7 @@ impl Oplog {
     pub async fn append(&self, operation: notes_core::Op) -> Result<AppendOutcome> {
         let envelope = serde_json::to_string(&operation)?;
         self.connection
-            .call(move |database| {
+            .call_domain(move |database| -> Result<AppendOutcome> {
                 if let Some((seq, existing)) = database
                     .query_row(
                         "SELECT seq, envelope FROM oplog WHERE op_id = ?1",
@@ -48,6 +49,13 @@ impl Oplog {
                     .optional()?
                 {
                     let existing = serde_json::from_str(&existing).map_err(json_error)?;
+                    if existing != operation {
+                        return Err(notes_core::CoreError::sync_conflict(format!(
+                            "operation id {} was reused with a different payload",
+                            operation.op_id
+                        ))
+                        .into());
+                    }
                     return Ok(AppendOutcome {
                         operation: SequencedOp {
                             seq: seq as u64,
@@ -162,8 +170,8 @@ fn json_error(error: serde_json::Error) -> rusqlite::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notes_core::{Hlc, NodeKind, Op, OpKind, operation::FORMAT_VERSION};
-    use notes_sync::NodeCreate;
+    use notes_core::{Hlc, Op, OpKind, PageView, operation::FORMAT_VERSION};
+    use notes_sync::PageCreate;
 
     fn operation(index: u128) -> Op {
         let device_id = uuid::Uuid::from_u128(1);
@@ -172,14 +180,10 @@ mod tests {
             device_id,
             hlc: Hlc::new(index as u64, 0, device_id),
             format_version: FORMAT_VERSION,
-            kind: OpKind::NodeCreate(NodeCreate {
+            kind: OpKind::PageCreate(PageCreate {
                 uuid: uuid::Uuid::from_u128(index + 100),
-                node_kind: NodeKind::Page,
                 title: Some(format!("Page {index}")),
-                content: String::new(),
-                content_json: None,
-                parent_uuid: None,
-                position: None,
+                default_view: PageView::Outline,
                 created_at: index as i64,
             }),
         }
@@ -202,5 +206,31 @@ mod tests {
         let second = reopened.append(operation(2)).await.expect("append second");
         assert_eq!(second.operation.seq, 2);
         reopened.assert_gapless().await.expect("gapless oplog");
+    }
+
+    #[tokio::test]
+    async fn rejects_reused_operation_ids_with_different_payloads() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let log = Oplog::open(&directory.path().join("oplog.db"))
+            .await
+            .expect("open oplog");
+        let original = operation(1);
+        log.append(original.clone()).await.expect("append original");
+
+        let mut conflicting = original;
+        let OpKind::PageCreate(page) = &mut conflicting.kind else {
+            panic!("test operation must create a page");
+        };
+        page.title = Some("Different payload".into());
+        let error = log
+            .append(conflicting)
+            .await
+            .expect_err("reused operation identity must be rejected");
+        assert!(matches!(
+            error.downcast_ref::<notes_core::CoreError>(),
+            Some(notes_core::CoreError::SyncConflict(_))
+        ));
+        assert_eq!(log.latest_seq().await.expect("latest sequence"), 1);
+        log.assert_gapless().await.expect("gapless oplog");
     }
 }

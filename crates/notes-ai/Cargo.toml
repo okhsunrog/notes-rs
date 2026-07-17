@@ -22,7 +22,7 @@ notes-core.workspace = true
 notes-protocol.workspace = true
 reqwest.workspace = true
 rig.workspace = true
-rusqlite.workspace = true
+rusqlite = { workspace = true, features = ["load_extension"] }
 rusqlite_migration.workspace = true
 schemars.workspace = true
 serde.workspace = true

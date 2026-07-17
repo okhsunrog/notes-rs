@@ -2,10 +2,10 @@ import { Fragment, type ReactNode } from "react";
 import { BlockRef, WikiLink } from "./ref-preview";
 
 /**
- * Lightweight markdown-ish renderer for block view mode. Recognizes inline
- * code, `[[wikilinks]]`, `((block-refs))`, `**bold**`, and `*italic*`. Not a
- * full Markdown parser — we never render headings, lists, or block-level
- * constructs, because the outliner already provides block structure.
+ * Lightweight inline Markdown renderer shared by page views. Block-level
+ * structure (heading, list, quote, code, divider) comes from `BlockStyle` in
+ * the caller; this function handles inline code, links, references and basic
+ * emphasis inside that durable block shape.
  *
  * Precedence (highest first):
  *   1. inline code  `…`        — content inside is literal

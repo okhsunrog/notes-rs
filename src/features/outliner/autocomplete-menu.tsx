@@ -1,21 +1,22 @@
 import { Loader2 } from "lucide-react";
-import { type Node } from "@/lib/api";
+import type { Block, Page } from "@/lib/api";
 
 export type AutocompleteItem = {
-  /** Stable id (page id for [[, block id for ((). */
-  id: number;
+  /** Stable UUID used as the React key. */
+  uuid: string;
   /** Primary text shown in the row. */
   label: string;
   /** Optional secondary text (e.g. block content preview). */
   hint?: string;
 };
 
-export function nodeToItem(node: Node, kind: "[[" | "(("): AutocompleteItem {
-  if (kind === "[[") {
-    return { id: node.id, label: node.title ?? `(untitled #${node.id})` };
-  }
-  const preview = node.content.replace(/\s+/g, " ").slice(0, 60);
-  return { id: node.id, label: node.uuid, hint: preview };
+export function pageToItem(page: Page): AutocompleteItem {
+  return { uuid: page.uuid, label: page.title ?? "Untitled" };
+}
+
+export function blockToItem(block: Block): AutocompleteItem {
+  const preview = block.markdown.replace(/\s+/g, " ").slice(0, 60);
+  return { uuid: block.uuid, label: block.uuid, hint: preview };
 }
 
 type Props = {
@@ -56,7 +57,7 @@ export function AutocompleteMenu({
         <ul className="max-h-64 overflow-y-auto py-1">
           {items.map((it, idx) => (
             <li
-              key={it.id}
+              key={it.uuid}
               onClick={() => onPick(idx)}
               className={`flex cursor-pointer flex-col gap-0.5 px-3 py-1.5 ${
                 idx === selectedIdx ? "bg-accent text-accent-foreground" : "hover:bg-accent/50"

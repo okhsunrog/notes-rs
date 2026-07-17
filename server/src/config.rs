@@ -3,6 +3,7 @@ use notes_protocol::{AiProviderSettings, AiProviderSettingsUpdate, CompletionPro
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use url::Url;
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -24,13 +25,13 @@ pub struct ServerConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct AiConfig {
     pub retrieval_api_key: String,
-    pub retrieval_base_url: String,
+    pub retrieval_base_url: Url,
     pub embedding_model: String,
     pub embedding_dimensions: usize,
     pub rerank_model: String,
     pub completion_protocol: CompletionProtocol,
     pub completion_api_key: String,
-    pub completion_base_url: String,
+    pub completion_base_url: Url,
     pub chat_model: String,
     pub extraction_model: String,
     pub automatic_embeddings: bool,
@@ -42,13 +43,15 @@ impl Default for AiConfig {
     fn default() -> Self {
         Self {
             retrieval_api_key: String::new(),
-            retrieval_base_url: notes_ai::config::DEFAULT_OPENROUTER_BASE_URL.into(),
+            retrieval_base_url: Url::parse(notes_ai::config::DEFAULT_OPENROUTER_BASE_URL)
+                .expect("valid default retrieval URL"),
             embedding_model: "qwen/qwen3-embedding-8b".into(),
             embedding_dimensions: 4096,
             rerank_model: "cohere/rerank-v3.5".into(),
             completion_protocol: CompletionProtocol::Openai,
             completion_api_key: String::new(),
-            completion_base_url: notes_ai::config::DEFAULT_OPENROUTER_BASE_URL.into(),
+            completion_base_url: Url::parse(notes_ai::config::DEFAULT_OPENROUTER_BASE_URL)
+                .expect("valid default completion URL"),
             chat_model: "google/gemini-3.1-flash-lite".into(),
             extraction_model: "google/gemini-3.1-flash-lite".into(),
             automatic_embeddings: true,
@@ -125,8 +128,8 @@ impl AiConfig {
         if self.completion_api_key.trim().is_empty() {
             bail!("AI completion API key cannot be empty");
         }
-        notes_ai::config::validate_http_base_url(&self.retrieval_base_url)?;
-        notes_ai::config::validate_http_base_url(&self.completion_base_url)?;
+        validate_provider_url(&self.retrieval_base_url)?;
+        validate_provider_url(&self.completion_base_url)?;
         if self.embedding_dimensions == 0 {
             bail!("AI embedding dimensions must be positive");
         }
@@ -181,6 +184,14 @@ impl AiConfig {
             query_rewriting_enabled: self.query_rewriting_enabled,
         }
     }
+}
+
+fn validate_provider_url(url: &Url) -> Result<()> {
+    notes_ai::config::validate_http_base_url(url.as_str())?;
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!("AI provider base URL cannot include credentials");
+    }
+    Ok(())
 }
 
 fn default_listen() -> SocketAddr {
@@ -243,6 +254,34 @@ mod tests {
             }],
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_malformed_provider_urls_during_deserialization() {
+        for field in ["retrieval_base_url", "completion_base_url"] {
+            let contents = format!(r#"{field} = "not a URL""#);
+            assert!(
+                toml::from_str::<AiConfig>(&contents).is_err(),
+                "{field} must be parsed as a URL, not retained as an unchecked string"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_non_http_or_credentialed_provider_urls() {
+        for invalid in [
+            "ftp://provider.example.test/v1",
+            "https://user:password@provider.example.test/v1",
+            "https://provider.example.test/v1?secret=value",
+        ] {
+            let ai = AiConfig {
+                retrieval_api_key: "retrieval-key".into(),
+                completion_api_key: "completion-key".into(),
+                retrieval_base_url: Url::parse(invalid).expect("syntactically valid URL"),
+                ..AiConfig::default()
+            };
+            assert!(ai.validate().is_err(), "{invalid:?} must be rejected");
+        }
     }
 
     #[test]

@@ -1,8 +1,10 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import type { PageView } from "@/lib/api";
 
 type Store = {
-  editingId: number | null;
-  setEditing: (id: number | null) => void;
+  editingUuid: string | null;
+  setEditing: (uuid: string | null) => void;
+  view: PageView;
 };
 
 const OutlinerCtx = createContext<Store | null>(null);
@@ -13,22 +15,34 @@ export function useOutliner() {
   return ctx;
 }
 
-/** Only ephemeral editor state lives here. Persisted nodes and child lists are
+/** Only ephemeral editor state lives here. Persisted blocks and child lists are
  * owned by Rust/SQLite and cached by TanStack Query. */
 export function OutlinerProvider({
   children,
-  initialEditingId = null,
+  initialEditingUuid = null,
+  initialEditingRequest = 0,
+  view,
 }: {
   children: React.ReactNode;
-  initialEditingId?: number | null;
+  initialEditingUuid?: string | null;
+  initialEditingRequest?: number;
+  view: PageView;
 }) {
-  const [editingId, setEditing] = useState<number | null>(initialEditingId);
+  const [editingUuid, setEditing] = useState<string | null>(
+    initialEditingRequest > 0 ? initialEditingUuid : null,
+  );
 
   useEffect(() => {
-    setEditing(initialEditingId);
-  }, [initialEditingId]);
+    if (initialEditingRequest > 0 && initialEditingUuid !== null) {
+      setEditing(initialEditingUuid);
+    }
+  }, [initialEditingRequest, initialEditingUuid]);
 
-  const store = useMemo(() => ({ editingId, setEditing }), [editingId]);
+  useEffect(() => {
+    if (view === "reading") setEditing(null);
+  }, [view]);
+
+  const store = useMemo(() => ({ editingUuid, setEditing, view }), [editingUuid, view]);
 
   return <OutlinerCtx.Provider value={store}>{children}</OutlinerCtx.Provider>;
 }

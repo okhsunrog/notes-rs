@@ -1,7 +1,6 @@
-use crate::store::{AiStore, ExtractedEdge, IndexJob};
+use crate::store::{AiStore, ExtractedEdge, ExtractedEntityRecord, IndexJob};
 use anyhow::Result;
-use notes_core::operation::{EdgeAdd, EdgeRemove, NodeCreate, NodeSetContent};
-use notes_core::{Connection, NodeKind, OpKind, Origin};
+use notes_core::Connection;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -130,29 +129,16 @@ async fn tick(
         .reconcile_extractions(notes, notes_core::sync_cursor(notes).await?)
         .await?;
     for source_uuid in stale_sources {
-        let removals = store.extraction_removals(source_uuid, &[]).await?;
-        let kinds = removals
-            .into_iter()
-            .map(|edge| {
-                OpKind::EdgeRemove(EdgeRemove {
-                    src_uuid: edge.src_uuid,
-                    dst_uuid: edge.dst_uuid,
-                    edge_kind: edge.kind,
-                })
-            })
-            .collect::<Vec<_>>();
-        if !kinds.is_empty() {
-            let operations = notes_core::local_ops(notes, kinds).await?;
-            notes_core::apply_batch(notes, &operations, Origin::Local).await?;
-            on_entities_changed();
-        }
         store.forget_extraction_source(source_uuid).await?;
+        on_entities_changed();
     }
     let jobs = store.take_extraction_jobs(1).await?;
     let changed = !jobs.is_empty();
     for job in jobs {
         if job.input_text.trim().chars().count() < 3 {
-            store.finish_extraction(&job, Vec::new()).await?;
+            store
+                .finish_extraction(&job, Vec::new(), Vec::new())
+                .await?;
             continue;
         }
         match extractor.extract(job.input_text.clone()).await {
@@ -160,8 +146,8 @@ async fn tick(
                 if !store.extraction_job_is_current(notes, &job).await? {
                     continue;
                 }
-                if let Err(error) = apply_extraction(notes, store, &job, result).await {
-                    tracing::warn!(node_uuid = %job.node_uuid, ?error, "applying extraction failed");
+                if let Err(error) = apply_extraction(store, &job, result).await {
+                    tracing::warn!(content_uuid = %job.content_uuid, ?error, "applying extraction failed");
                     store
                         .record_extraction_failure(&job, &error.to_string(), true)
                         .await?;
@@ -170,7 +156,7 @@ async fn tick(
                 }
             }
             Err(error) => {
-                tracing::warn!(node_uuid = %job.node_uuid, ?error, "extraction failed");
+                tracing::warn!(content_uuid = %job.content_uuid, ?error, "extraction failed");
                 store
                     .record_extraction_failure(
                         &job,
@@ -184,15 +170,9 @@ async fn tick(
     Ok(changed)
 }
 
-async fn apply_extraction(
-    notes: &Connection,
-    store: &AiStore,
-    job: &IndexJob,
-    result: ExtractionResult,
-) -> Result<()> {
-    let now = chrono::Utc::now().timestamp();
-    let mut kinds = Vec::new();
+async fn apply_extraction(store: &AiStore, job: &IndexJob, result: ExtractionResult) -> Result<()> {
     let mut entities = HashMap::<String, uuid::Uuid>::new();
+    let mut entity_records = Vec::new();
     let mut desired_edges = Vec::new();
     for entity in result.entities {
         let name = entity.name.trim();
@@ -208,29 +188,15 @@ async fn apply_extraction(
             .filter(|description| !description.is_empty())
             .unwrap_or_default()
             .to_owned();
-        match notes_core::db::get_node_by_uuid(notes, uuid).await? {
-            None => kinds.push(OpKind::NodeCreate(NodeCreate {
-                uuid,
-                node_kind: NodeKind::Entity,
-                title: Some(name.to_owned()),
-                content: description,
-                content_json: None,
-                parent_uuid: None,
-                position: None,
-                created_at: now,
-            })),
-            Some(existing) if !description.is_empty() && existing.content != description => {
-                kinds.push(OpKind::NodeSetContent(NodeSetContent {
-                    uuid,
-                    content: description,
-                    content_json: None,
-                }));
-            }
-            Some(_) => {}
-        }
+        entity_records.push(ExtractedEntityRecord {
+            uuid,
+            name: name.to_owned(),
+            normalized_name: key.clone(),
+            description,
+        });
         entities.insert(key, uuid);
         desired_edges.push(ExtractedEdge {
-            src_uuid: job.node_uuid,
+            src_uuid: job.content_uuid,
             dst_uuid: uuid,
             kind: "mentions".into(),
         });
@@ -260,27 +226,9 @@ async fn apply_extraction(
         ))
     });
     desired_edges.dedup();
-    for edge in store
-        .extraction_removals(job.node_uuid, &desired_edges)
-        .await?
-    {
-        kinds.push(OpKind::EdgeRemove(EdgeRemove {
-            src_uuid: edge.src_uuid,
-            dst_uuid: edge.dst_uuid,
-            edge_kind: edge.kind,
-        }));
-    }
-    for edge in &desired_edges {
-        kinds.push(OpKind::EdgeAdd(EdgeAdd {
-            src_uuid: edge.src_uuid,
-            dst_uuid: edge.dst_uuid,
-            edge_kind: edge.kind.clone(),
-            weight: 1.0,
-        }));
-    }
-    let operations = notes_core::local_ops(notes, kinds).await?;
-    notes_core::apply_batch(notes, &operations, Origin::Local).await?;
-    store.finish_extraction(job, desired_edges).await
+    store
+        .finish_extraction(job, entity_records, desired_edges)
+        .await
 }
 
 fn entity_uuid(normalized_name: &str) -> uuid::Uuid {

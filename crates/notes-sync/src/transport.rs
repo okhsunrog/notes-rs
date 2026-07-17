@@ -5,7 +5,8 @@ use futures::StreamExt;
 use notes_core::db::SearchHit;
 use notes_protocol::{
     AcceptedOps, AiIndexStatus, AiProviderProbeResult, AiProviderSettingsUpdate, AiRuntimeSettings,
-    BootstrapRequest, ChatEvent, ChatTurn, OpsBatch, PushOps, SequencedOp, ServerInfo,
+    ApiErrorCode, ApiErrorResponse, BootstrapRequest, ChatEvent, ChatTurn, OpsBatch, PushOps,
+    SequencedOp, ServerInfo,
 };
 use reqwest::StatusCode;
 use serde::Serialize;
@@ -28,8 +29,12 @@ pub enum TransportError {
     Unauthorized,
     #[error("sync conflict: {0}")]
     Conflict(String),
-    #[error("sync server returned HTTP {status}: {message}")]
-    Http { status: u16, message: String },
+    #[error("sync server returned HTTP {status} ({code:?}): {message}")]
+    Http {
+        status: u16,
+        code: Option<ApiErrorCode>,
+        message: String,
+    },
 }
 
 impl TransportError {
@@ -160,7 +165,7 @@ impl HttpTransport {
         history: Vec<ChatTurn>,
         message: String,
         allow_writes: bool,
-        active_node_uuid: Option<uuid::Uuid>,
+        active_content_uuid: Option<uuid::Uuid>,
         cancelled: CancellationToken,
         mut on_event: impl FnMut(ChatEvent),
     ) -> Result<String> {
@@ -170,7 +175,7 @@ impl HttpTransport {
             history: Vec<ChatTurn>,
             message: String,
             allow_writes: bool,
-            active_node_uuid: Option<uuid::Uuid>,
+            active_content_uuid: Option<uuid::Uuid>,
         }
 
         let response = self
@@ -182,7 +187,7 @@ impl HttpTransport {
                 history,
                 message,
                 allow_writes,
-                active_node_uuid,
+                active_content_uuid,
             })
             .send()
             .await?;
@@ -419,15 +424,23 @@ async fn require_success(response: reqwest::Response) -> Result<reqwest::Respons
         .text()
         .await
         .unwrap_or_else(|_| "response body unavailable".into());
-    let message = body.chars().take(500).collect::<String>();
+    Err(transport_error_from_response(status, &body).into())
+}
+
+fn transport_error_from_response(status: StatusCode, body: &str) -> TransportError {
+    let structured = serde_json::from_str::<ApiErrorResponse>(body).ok();
+    let code = structured.as_ref().map(|body| body.error.code);
+    let message = structured
+        .map(|body| body.error.message)
+        .unwrap_or_else(|| body.chars().take(500).collect::<String>());
     match status {
-        StatusCode::UNAUTHORIZED => Err(TransportError::Unauthorized.into()),
-        StatusCode::CONFLICT => Err(TransportError::Conflict(message).into()),
-        _ => Err(TransportError::Http {
+        StatusCode::UNAUTHORIZED => TransportError::Unauthorized,
+        StatusCode::CONFLICT => TransportError::Conflict(message),
+        _ => TransportError::Http {
             status: status.as_u16(),
+            code,
             message,
-        }
-        .into()),
+        },
     }
 }
 
@@ -453,5 +466,57 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn preserves_structured_http_error_details_and_retry_policy() {
+        let invalid = transport_error_from_response(
+            StatusCode::BAD_REQUEST,
+            &serde_json::to_string(&ApiErrorResponse {
+                error: notes_protocol::ApiErrorDetail {
+                    code: ApiErrorCode::InvalidRequest,
+                    message: "embedding dimensions must be positive".into(),
+                },
+            })
+            .expect("error body"),
+        );
+        assert!(matches!(
+            invalid,
+            TransportError::Http {
+                status: 400,
+                code: Some(ApiErrorCode::InvalidRequest),
+                ref message,
+            } if message == "embedding dimensions must be positive"
+        ));
+        assert!(invalid.is_permanent());
+
+        let conflict = transport_error_from_response(
+            StatusCode::CONFLICT,
+            r#"{"error":{"code":"conflict","message":"op_id was reused"}}"#,
+        );
+        assert!(matches!(
+            conflict,
+            TransportError::Conflict(ref message) if message == "op_id was reused"
+        ));
+        assert!(conflict.is_permanent());
+
+        for status in [
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            assert!(!transport_error_from_response(status, "temporary failure").is_permanent());
+        }
+    }
+
+    #[test]
+    fn bounds_unstructured_server_error_messages() {
+        let error = transport_error_from_response(StatusCode::BAD_GATEWAY, &"x".repeat(700));
+        let TransportError::Http { code, message, .. } = error else {
+            panic!("expected a generic HTTP transport error");
+        };
+        assert_eq!(code, None);
+        assert_eq!(message.chars().count(), 500);
     }
 }

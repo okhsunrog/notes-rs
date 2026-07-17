@@ -4,7 +4,7 @@ use futures::{SinkExt, StreamExt};
 use notes_core::{
     Connection, OpKind, acknowledge_server_ops, apply_sequenced_batch, export_sync_snapshot,
 };
-use notes_protocol::{ClientMessage, SequencedOp, ServerMessage};
+use notes_protocol::{ClientMessage, SequencedOp, ServerErrorCode, ServerMessage};
 use notes_sync::{
     AppliedRemoteOperation, HttpTransport, SyncClient, SyncSnapshot, SyncTransport, TransportError,
 };
@@ -298,9 +298,10 @@ async fn initialize_replica(
 }
 
 fn snapshot_is_empty(snapshot: &SyncSnapshot) -> bool {
-    snapshot.nodes.is_empty()
+    snapshot.pages.is_empty()
+        && snapshot.blocks.is_empty()
+        && snapshot.structures.is_empty()
         && snapshot.tombstones.is_empty()
-        && snapshot.edges.is_empty()
         && snapshot.attachments.is_empty()
 }
 
@@ -344,9 +345,10 @@ async fn handle_server_message(
             Ok(())
         }
         ServerMessage::Pong => Ok(()),
-        ServerMessage::Error { code, message } if code == "conflict" => {
-            Err(SyncSessionError::ServerConflict(message).into())
-        }
+        ServerMessage::Error {
+            code: ServerErrorCode::Conflict,
+            message,
+        } => Err(SyncSessionError::ServerConflict(message).into()),
         ServerMessage::Error { code, message } => bail!("sync server error {code}: {message}"),
     }
 }
@@ -390,21 +392,21 @@ async fn previous_operation_contents(
     let content_ops = operations
         .iter()
         .filter_map(|operation| match &operation.envelope.kind {
-            OpKind::NodeSetContent(payload) => Some((operation.envelope.op_id, payload.uuid)),
+            OpKind::BlockSetMarkdown(payload) => Some((operation.envelope.op_id, payload.uuid)),
             _ => None,
         })
         .collect::<Vec<_>>();
     if content_ops.is_empty() {
         return Ok(std::collections::HashMap::new());
     }
-    let nodes = notes_core::db::get_nodes_by_uuids(
+    let blocks = notes_core::db::get_blocks(
         connection,
         content_ops.iter().map(|(_, uuid)| *uuid).collect(),
     )
     .await?;
-    let contents = nodes
+    let contents = blocks
         .into_iter()
-        .map(|node| (node.uuid, node.content))
+        .map(|block| (block.uuid, block.markdown))
         .collect::<std::collections::HashMap<_, _>>();
     Ok(content_ops
         .into_iter()
@@ -422,74 +424,110 @@ async fn emit_operation_changes(
     if operations.is_empty() {
         return;
     }
-    let mut changed = BTreeSet::new();
-    let mut deleted = BTreeSet::new();
+    let mut changed_pages = BTreeSet::new();
+    let mut deleted_pages = BTreeSet::new();
+    let mut changed_blocks = BTreeSet::new();
+    let mut deleted_blocks = BTreeSet::new();
+    let mut containers = BTreeSet::new();
     let mut structure = BTreeSet::new();
     let mut graph = BTreeSet::new();
-    let mut attachment_parents = BTreeSet::new();
+    let mut attachment_owners = BTreeSet::new();
 
     for applied in operations {
         match &applied.operation.kind {
-            OpKind::NodeCreate(payload) => {
-                changed.insert(payload.uuid);
-                if payload.node_kind == notes_core::NodeKind::Block
-                    && notes_core::content_references_changed("", &payload.content)
-                {
+            OpKind::PageCreate(payload) => {
+                changed_pages.insert(payload.uuid);
+                // Creating a canonical page may adopt an existing wikilink stub.
+                graph.insert(payload.uuid);
+            }
+            OpKind::PageSetTitle(payload) => {
+                changed_pages.insert(payload.uuid);
+                graph.insert(payload.uuid);
+            }
+            OpKind::PageSetView(payload) => {
+                changed_pages.insert(payload.uuid);
+            }
+            OpKind::PageDelete(payload) => {
+                deleted_pages.insert(payload.uuid);
+                graph.insert(payload.uuid);
+            }
+            OpKind::BlockCreate(payload) => {
+                changed_blocks.insert(payload.uuid);
+                containers.insert(payload.parent_uuid.unwrap_or(payload.page_uuid));
+                if notes_core::content_references_changed("", &payload.markdown) {
                     graph.insert(payload.uuid);
                 }
-                if payload.parent_uuid.is_some() {
-                    structure.insert(payload.uuid);
-                }
             }
-            OpKind::NodeSetContent(payload) => {
-                changed.insert(payload.uuid);
+            OpKind::BlockSetMarkdown(payload) => {
+                changed_blocks.insert(payload.uuid);
                 if applied.previous_content.as_deref().is_none_or(|previous| {
-                    notes_core::content_references_changed(previous, &payload.content)
+                    notes_core::content_references_changed(previous, &payload.markdown)
                 }) {
                     graph.insert(payload.uuid);
                 }
             }
-            OpKind::NodeSetTitle(payload) => {
-                changed.insert(payload.uuid);
+            OpKind::BlockSetStyle(payload) => {
+                changed_blocks.insert(payload.uuid);
             }
-            OpKind::NodeMove(payload) => {
-                changed.insert(payload.uuid);
+            OpKind::BlockMove(payload) => {
+                changed_blocks.insert(payload.uuid);
+                containers.insert(payload.parent_uuid.unwrap_or(payload.page_uuid));
+                // The old parent is not part of the operation envelope. A structure
+                // event deliberately invalidates the whole children-query family.
                 structure.insert(payload.uuid);
             }
-            OpKind::NodeDelete(payload) => {
-                deleted.insert(payload.uuid);
+            OpKind::BlockDelete(payload) => {
+                deleted_blocks.insert(payload.uuid);
+                containers.insert(payload.page_uuid);
                 structure.insert(payload.uuid);
                 graph.insert(payload.uuid);
             }
-            OpKind::EdgeAdd(payload) => {
-                graph.extend([payload.src_uuid, payload.dst_uuid]);
-            }
-            OpKind::EdgeRemove(payload) => {
-                graph.extend([payload.src_uuid, payload.dst_uuid]);
-            }
             OpKind::AttachmentAdd(payload) => {
-                attachment_parents.insert(payload.node_uuid);
-                graph.insert(payload.node_uuid);
+                attachment_owners.insert(payload.owner.uuid());
             }
             OpKind::AttachmentRemove(payload) => {
-                attachment_parents.insert(payload.node_uuid);
-                graph.insert(payload.node_uuid);
+                attachment_owners.insert(payload.owner.uuid());
             }
         }
     }
 
-    if !changed.is_empty() {
-        match notes_core::db::get_nodes_by_uuids(connection, changed.into_iter().collect()).await {
-            Ok(nodes) => crate::commands::emit_nodes_changed(app, connection, &nodes, []).await,
-            Err(error) => tracing::warn!(%error, "resolving remotely changed nodes failed"),
+    if !changed_pages.is_empty() {
+        match notes_core::db::get_contents(connection, changed_pages.into_iter().collect()).await {
+            Ok(contents) => {
+                let pages = contents
+                    .into_iter()
+                    .filter_map(|content| match content {
+                        notes_core::db::Content::Page(page) => Some(page),
+                        notes_core::db::Content::Block(_) => None,
+                    })
+                    .collect::<Vec<_>>();
+                crate::commands::emit_pages_changed(app, &pages);
+            }
+            Err(error) => tracing::warn!(%error, "resolving remotely changed pages failed"),
         }
     }
-    if !deleted.is_empty() {
+    if !changed_blocks.is_empty() {
+        match notes_core::db::get_blocks(connection, changed_blocks.into_iter().collect()).await {
+            Ok(blocks) => {
+                crate::commands::emit_blocks_changed(app, &blocks, containers.iter().copied())
+            }
+            Err(error) => tracing::warn!(%error, "resolving remotely changed blocks failed"),
+        }
+    }
+    if !deleted_pages.is_empty() {
         crate::commands::emit_domain(
             app,
-            crate::commands::DomainEvent::NodeDeleted {
-                node_uuids: deleted.into_iter().collect(),
-                parent_uuids: Vec::new(),
+            crate::commands::DomainEvent::PagesDeleted {
+                page_uuids: deleted_pages.into_iter().collect(),
+            },
+        );
+    }
+    if !deleted_blocks.is_empty() {
+        crate::commands::emit_domain(
+            app,
+            crate::commands::DomainEvent::BlocksDeleted {
+                block_uuids: deleted_blocks.into_iter().collect(),
+                container_uuids: containers.into_iter().collect(),
             },
         );
     }
@@ -497,7 +535,7 @@ async fn emit_operation_changes(
         crate::commands::emit_domain(
             app,
             crate::commands::DomainEvent::StructureChanged {
-                node_uuids: structure.into_iter().collect(),
+                block_uuids: structure.into_iter().collect(),
             },
         );
     }
@@ -505,15 +543,15 @@ async fn emit_operation_changes(
         crate::commands::emit_domain(
             app,
             crate::commands::DomainEvent::GraphChanged {
-                node_uuids: graph.into_iter().collect(),
+                content_uuids: graph.into_iter().collect(),
             },
         );
     }
-    if !attachment_parents.is_empty() {
+    if !attachment_owners.is_empty() {
         crate::commands::emit_domain(
             app,
             crate::commands::DomainEvent::AttachmentsChanged {
-                parent_uuids: attachment_parents.into_iter().collect(),
+                owner_uuids: attachment_owners.into_iter().collect(),
             },
         );
     }
@@ -649,9 +687,10 @@ mod tests {
         assert!(snapshot_is_empty(&SyncSnapshot {
             format_version: notes_sync::FORMAT_VERSION,
             seq: 0,
-            nodes: Vec::new(),
+            pages: Vec::new(),
+            blocks: Vec::new(),
+            structures: Vec::new(),
             tombstones: Vec::new(),
-            edges: Vec::new(),
             attachments: Vec::new(),
         }));
     }

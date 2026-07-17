@@ -229,7 +229,7 @@ async fn previous_contents(
     let content_ops = operations
         .iter()
         .filter_map(|operation| match &operation.envelope.kind {
-            notes_core::OpKind::NodeSetContent(payload) => {
+            notes_core::OpKind::BlockSetMarkdown(payload) => {
                 Some((operation.envelope.op_id, payload.uuid))
             }
             _ => None,
@@ -238,14 +238,14 @@ async fn previous_contents(
     if content_ops.is_empty() {
         return Ok(HashMap::new());
     }
-    let nodes = notes_core::db::get_nodes_by_uuids(
+    let blocks = notes_core::db::get_blocks(
         connection,
         content_ops.iter().map(|(_, uuid)| *uuid).collect(),
     )
     .await?;
-    let contents = nodes
+    let contents = blocks
         .into_iter()
-        .map(|node| (node.uuid, node.content))
+        .map(|block| (block.uuid, block.markdown))
         .collect::<HashMap<_, _>>();
     Ok(content_ops
         .into_iter()
@@ -256,7 +256,7 @@ async fn previous_contents(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notes_core::{NodeKind, db, export_sync_snapshot, import_sync_snapshot};
+    use notes_core::{BlockStyle, db, export_sync_snapshot, import_sync_snapshot};
 
     async fn client(name: &str) -> (tempfile::TempDir, Connection, SyncClient) {
         let directory = tempfile::tempdir().expect("temporary directory");
@@ -275,24 +275,12 @@ mod tests {
         let (_right_dir, right, right_sync) = client("test").await;
         let mut server = LoopbackServer::new();
 
-        db::create_node(
-            &left,
-            NodeKind::Page,
-            Some("Left".into()),
-            "offline left".into(),
-            None,
-        )
-        .await
-        .expect("left edit");
-        db::create_node(
-            &right,
-            NodeKind::Page,
-            Some("Right".into()),
-            "offline right".into(),
-            None,
-        )
-        .await
-        .expect("right edit");
+        db::create_page(&left, "Left".into())
+            .await
+            .expect("left edit");
+        db::create_page(&right, "Right".into())
+            .await
+            .expect("right edit");
 
         let left_stats = left_sync
             .sync_until_idle(&mut server)
@@ -314,7 +302,7 @@ mod tests {
                 .await
                 .expect("list pages")
                 .into_iter()
-                .map(|node| node.title.expect("page title"))
+                .map(|page| page.title.expect("page title"))
                 .collect::<Vec<_>>();
             titles.sort();
             assert_eq!(titles, vec!["Left", "Right"]);
@@ -332,30 +320,18 @@ mod tests {
     async fn restarted_server_keeps_gapless_sequence_and_dedupes_retries() {
         let (_directory, connection, client) = client("restart").await;
         let mut server = LoopbackServer::new();
-        db::create_node(
-            &connection,
-            NodeKind::Page,
-            Some("Before restart".into()),
-            String::new(),
-            None,
-        )
-        .await
-        .expect("first edit");
+        db::create_page(&connection, "Before restart".into())
+            .await
+            .expect("first edit");
         client.sync_once(&mut server).await.expect("first sync");
         let first = server.log()[0].envelope.clone();
 
         let mut server = LoopbackServer::from_log(server.log().to_vec()).expect("restart server");
         let duplicate = server.ingest([first]);
         assert_eq!(duplicate[0].seq, 1);
-        db::create_node(
-            &connection,
-            NodeKind::Page,
-            Some("After restart".into()),
-            String::new(),
-            None,
-        )
-        .await
-        .expect("second edit");
+        db::create_page(&connection, "After restart".into())
+            .await
+            .expect("second edit");
         client.sync_once(&mut server).await.expect("second sync");
         assert_eq!(
             server.log().iter().map(|item| item.seq).collect::<Vec<_>>(),
@@ -367,15 +343,9 @@ mod tests {
     async fn snapshot_bootstrap_plus_tail_replay_matches_full_log() {
         let (_source_dir, source, source_sync) = client("snapshot").await;
         let mut server = LoopbackServer::new();
-        let page = db::create_node(
-            &source,
-            NodeKind::Page,
-            Some("Snapshot".into()),
-            String::new(),
-            None,
-        )
-        .await
-        .expect("create page");
+        let page = db::create_page(&source, "Snapshot".into())
+            .await
+            .expect("create page");
         source_sync
             .sync_until_idle(&mut server)
             .await
@@ -384,9 +354,16 @@ mod tests {
             .await
             .expect("export sync snapshot");
 
-        db::create_block(&source, Some(page.id), None, "tail edit".into(), None)
-            .await
-            .expect("create tail block");
+        db::create_block(
+            &source,
+            page.uuid,
+            None,
+            None,
+            BlockStyle::Paragraph,
+            "tail edit".into(),
+        )
+        .await
+        .expect("create tail block");
         source_sync
             .sync_until_idle(&mut server)
             .await

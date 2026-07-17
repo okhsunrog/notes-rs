@@ -1,9 +1,24 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, ChevronRight, Info } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  CodeXml,
+  Heading1,
+  Heading2,
+  Heading3,
+  Info,
+  List,
+  ListOrdered,
+  ListTodo,
+  Loader2,
+  Minus,
+  Pilcrow,
+  Quote,
+  type LucideIcon,
+} from "lucide-react";
 import { toast } from "sonner";
 import {
-  createBlock,
   deleteBlock,
   indentBlock,
   moveBlockDown,
@@ -13,24 +28,40 @@ import {
   searchPagesByTitle,
   splitBlock,
   setBlockContent,
+  setBlockStyle,
+  type Block,
   type BlockContent,
-  type Node,
+  type BlockStyle,
+  type PageView,
 } from "@/lib/api";
+import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { BlockChildren } from "./block-tree";
 import { BlockEdit, type BlockEditHandle } from "./block-edit";
 import { useOutliner } from "./outliner-store";
-import { nextSibling, positionAfter, prevSibling } from "./keyboard";
-import { parseRefs } from "./parse-refs";
+import { nextSibling, prevSibling } from "./keyboard";
 import { renderMarkdown } from "./render-markdown";
 import { detectTrigger, type Trigger } from "./autocomplete";
-import { AutocompleteMenu, nodeToItem, type AutocompleteItem } from "./autocomplete-menu";
+import {
+  AutocompleteMenu,
+  blockToItem,
+  pageToItem,
+  type AutocompleteItem,
+} from "./autocomplete-menu";
 import { queryKeys } from "@/lib/query";
+import { cn } from "@/lib/utils";
 import { reconcileRemoteDraft } from "./editor-sync";
+import {
+  BLOCK_STYLE_OPTIONS,
+  getBlockStyleOption,
+  isBlockStyle,
+  replaceCachedBlock,
+  type BlockStyleIcon,
+} from "./block-style";
 
 type Props = {
-  block: Node;
-  parent: Node;
+  block: Block;
   depth: number;
+  ordinal: number;
 };
 
 type SaveState = "idle" | "dirty" | "saving" | "error";
@@ -39,27 +70,38 @@ const AUTOSAVE_MS = 400;
 const AC_DEBOUNCE_MS = 120;
 const LONG_BLOCK_CHARS = 600;
 
-function blockContent(content: string): BlockContent {
-  const { blockRefs } = parseRefs(content);
-  return { content, blockUuids: blockRefs };
+function blockContent(markdown: string): BlockContent {
+  return { markdown };
 }
 
-export function BlockNode({ block, parent, depth }: Props) {
+function lastOrderedBlock(blocks: Block[]) {
+  return blocks.reduce<Block | null>(
+    (last, candidate) => (!last || candidate.orderKey > last.orderKey ? candidate : last),
+    null,
+  );
+}
+
+export function BlockNode({ block, depth, ordinal }: Props) {
   const store = useOutliner();
   const queryClient = useQueryClient();
-  const editing = store.editingId === block.id;
+  const editing = store.view !== "reading" && store.editingUuid === block.uuid;
+  const outline = store.view === "outline";
+  const readOnly = store.view === "reading";
+  const containerUuid = block.parentUuid ?? block.pageUuid;
   const collapseKey = `outliner.collapsed.${block.uuid}`;
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(collapseKey) === "1");
   const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [styleBusy, setStyleBusy] = useState(false);
 
-  const draftRef = useRef(block.content);
+  const draftRef = useRef(block.markdown);
   const blockRef = useRef(block);
-  const remoteConflictRef = useRef<Node | null>(null);
-  const [remoteConflict, setRemoteConflict] = useState<Node | null>(null);
+  const remoteConflictRef = useRef<Block | null>(null);
+  const [remoteConflict, setRemoteConflict] = useState<Block | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveInFlight = useRef<Promise<boolean> | null>(null);
   const editRef = useRef<BlockEditHandle>(null);
-  const [draftLen, setDraftLen] = useState(block.content.length);
-  const longBlock = (editing ? draftLen : block.content.length) >= LONG_BLOCK_CHARS;
+  const [draftLen, setDraftLen] = useState(block.markdown.length);
+  const longBlock = (editing ? draftLen : block.markdown.length) >= LONG_BLOCK_CHARS;
 
   // Autocomplete state — only relevant in edit mode.
   const [trigger, setTrigger] = useState<Trigger | null>(null);
@@ -80,13 +122,13 @@ export function BlockNode({ block, parent, depth }: Props) {
     const previous = blockRef.current;
     if (block.uuid !== previous.uuid) {
       blockRef.current = block;
-      draftRef.current = block.content;
-      setDraftLen(block.content.length);
+      draftRef.current = block.markdown;
+      setDraftLen(block.markdown.length);
       remoteConflictRef.current = null;
       setRemoteConflict(null);
       return;
     }
-    const decision = reconcileRemoteDraft(previous.content, draftRef.current, block.content);
+    const decision = reconcileRemoteDraft(previous.markdown, draftRef.current, block.markdown);
     if (decision === "unchanged") {
       blockRef.current = block;
       return;
@@ -100,12 +142,12 @@ export function BlockNode({ block, parent, depth }: Props) {
     }
 
     blockRef.current = block;
-    draftRef.current = block.content;
-    setDraftLen(block.content.length);
+    draftRef.current = block.markdown;
+    setDraftLen(block.markdown.length);
     if (editing) store.setEditing(null);
   }, [block, editing, store]);
 
-  const siblings = () => queryClient.getQueryData<Node[]>(queryKeys.children(parent.uuid)) ?? [];
+  const siblings = () => queryClient.getQueryData<Block[]>(queryKeys.children(containerUuid)) ?? [];
 
   const invalidateChildren = (parentUuid?: string) =>
     queryClient.invalidateQueries({
@@ -123,32 +165,76 @@ export function BlockNode({ block, parent, depth }: Props) {
     }
   };
 
-  const flush = useCallback(async () => {
-    clearTimer();
-    if (remoteConflictRef.current) {
-      setSaveState("error");
-      return;
-    }
-    const current = blockRef.current;
-    const next = draftRef.current;
-    if (next === current.content) {
-      setSaveState("idle");
-      return;
-    }
-    setSaveState("saving");
-    try {
-      const [updated] = await setBlockContent(current.uuid, blockContent(next));
+  const applyBlockSnapshot = useCallback(
+    (updated: Block) => {
       blockRef.current = updated;
-      queryClient.setQueryData<Node[]>(queryKeys.children(parent.uuid), (rows = []) =>
-        rows.map((row) => (row.uuid === updated.uuid ? updated : row)),
+      queryClient.setQueryData<Block[]>(queryKeys.children(containerUuid), (rows = []) =>
+        replaceCachedBlock(rows, updated),
       );
-      queryClient.setQueryData(queryKeys.node(updated.uuid), updated);
-      setSaveState("idle");
-    } catch (err) {
-      console.error("block save failed", err);
-      setSaveState("error");
+      queryClient.setQueryData(queryKeys.block(updated.uuid), updated);
+    },
+    [containerUuid, queryClient],
+  );
+
+  const flush = useCallback(async (): Promise<boolean> => {
+    clearTimer();
+    if (saveInFlight.current) return saveInFlight.current;
+
+    const pending = (async () => {
+      while (true) {
+        if (remoteConflictRef.current) {
+          setSaveState("error");
+          return false;
+        }
+        const current = blockRef.current;
+        const next = draftRef.current;
+        if (next === current.markdown) {
+          setSaveState("idle");
+          return true;
+        }
+        setSaveState("saving");
+        try {
+          const updated = await setBlockContent(current.uuid, blockContent(next));
+          applyBlockSnapshot(updated);
+          // The user may have typed while this save was in flight. Persist that
+          // newer draft in the same serialized save loop before reporting clean.
+          if (draftRef.current !== updated.markdown) continue;
+          setSaveState("idle");
+          return true;
+        } catch (err) {
+          console.error("block save failed", err);
+          setSaveState("error");
+          return false;
+        }
+      }
+    })();
+    saveInFlight.current = pending;
+    try {
+      return await pending;
+    } finally {
+      if (saveInFlight.current === pending) saveInFlight.current = null;
     }
-  }, [parent.uuid, queryClient]);
+  }, [applyBlockSnapshot]);
+
+  const changeBlockStyle = async (value: string) => {
+    if (!isBlockStyle(value) || styleBusy || readOnly) return;
+    if (value === blockRef.current.style) return;
+
+    setStyleBusy(true);
+    try {
+      if (!(await flush())) return;
+      const current = blockRef.current;
+      const updated = await setBlockStyle(current.uuid, value);
+      applyBlockSnapshot(updated);
+      setSaveState("idle");
+    } catch (error) {
+      console.error("block style update failed", error);
+      setSaveState("error");
+      toast.error("Could not change the block style.");
+    } finally {
+      setStyleBusy(false);
+    }
+  };
 
   // Re-fetch results whenever the trigger query changes.
   useEffect(() => {
@@ -159,14 +245,14 @@ export function BlockNode({ block, parent, depth }: Props) {
     acDebounce.current = setTimeout(async () => {
       try {
         if (trigger.kind === "[[") {
-          const nodes = await searchPagesByTitle(trigger.query, 8);
+          const pages = await searchPagesByTitle(trigger.query, 8);
           if (reqId !== acReqId.current) return;
-          setAcItems(nodes.map((n) => nodeToItem(n, "[[")));
+          setAcItems(pages.map(pageToItem));
         } else {
           const ftsQuery = buildFtsPrefix(trigger.query);
-          const nodes = ftsQuery ? await searchBlocksFts(ftsQuery, 8) : [];
+          const blocks = ftsQuery ? await searchBlocksFts(ftsQuery, 8) : [];
           if (reqId !== acReqId.current) return;
-          setAcItems(nodes.map((n) => nodeToItem(n, "((")));
+          setAcItems(blocks.map(blockToItem));
         }
         if (reqId === acReqId.current) {
           setAcIdx(0);
@@ -227,8 +313,8 @@ export function BlockNode({ block, parent, depth }: Props) {
     if (!remote) return;
     clearTimer();
     blockRef.current = remote;
-    draftRef.current = remote.content;
-    setDraftLen(remote.content.length);
+    draftRef.current = remote.markdown;
+    setDraftLen(remote.markdown.length);
     remoteConflictRef.current = null;
     setRemoteConflict(null);
     setSaveState("idle");
@@ -264,9 +350,9 @@ export function BlockNode({ block, parent, depth }: Props) {
     clearTimer();
     try {
       const parts = [draftRef.current, ...paragraphs.slice(1)].map(blockContent);
-      const changed = await splitBlock(block.id, parts);
-      await invalidateChildren(parent.uuid);
-      store.setEditing(changed[changed.length - 1]?.id ?? block.id);
+      const changed = await splitBlock(block.uuid, parts);
+      await invalidateChildren(containerUuid);
+      store.setEditing(lastOrderedBlock(changed)?.uuid ?? block.uuid);
     } catch (error) {
       console.error("paste split failed", error);
       setSaveState("error");
@@ -283,7 +369,7 @@ export function BlockNode({ block, parent, depth }: Props) {
    * the long-block info-icon nudge. If the content has no blank-line breaks,
    * we surface guidance instead of silently doing nothing. */
   const onSplitCurrent = async () => {
-    const source = editing ? draftRef.current : block.content;
+    const source = editing ? draftRef.current : block.markdown;
     const paragraphs = source
       .split(/\n[ \t]*(?:\n[ \t]*)+/)
       .map((p) => p.trim())
@@ -294,11 +380,11 @@ export function BlockNode({ block, parent, depth }: Props) {
     }
     clearTimer();
     try {
-      const changed = await splitBlock(block.id, paragraphs.map(blockContent));
+      const changed = await splitBlock(block.uuid, paragraphs.map(blockContent));
       draftRef.current = paragraphs[0];
       setDraftLen(paragraphs[0].length);
-      await invalidateChildren(parent.uuid);
-      store.setEditing(changed[changed.length - 1]?.id ?? block.id);
+      await invalidateChildren(containerUuid);
+      store.setEditing(lastOrderedBlock(changed)?.uuid ?? block.uuid);
     } catch (err) {
       console.error("split failed", err);
       setSaveState("error");
@@ -316,33 +402,38 @@ export function BlockNode({ block, parent, depth }: Props) {
     });
   };
 
-  const onEnter = async () => {
-    await flush();
-    const pos = positionAfter(siblings(), block.id);
+  const onEnter = async (selectionStart: number, selectionEnd: number) => {
+    if (remoteConflictRef.current) {
+      setSaveState("error");
+      return;
+    }
+    clearTimer();
+    const markdown = draftRef.current;
+    const parts = [markdown.slice(0, selectionStart), markdown.slice(selectionEnd)].map(
+      blockContent,
+    );
     try {
-      const created = await createBlock({
-        parentId: parent.id,
-        position: pos,
-        content: "",
-        contentJson: null,
-      });
-      await invalidateChildren(parent.uuid);
-      store.setEditing(created.id);
+      const changed = await splitBlock(block.uuid, parts);
+      await invalidateChildren(containerUuid);
+      store.setEditing(
+        changed.find((candidate) => candidate.uuid !== block.uuid)?.uuid ?? block.uuid,
+      );
     } catch (e) {
-      console.error("enter (new sibling) failed", e);
+      console.error("enter (split block) failed", e);
+      setSaveState("error");
     }
   };
 
   const onBackspaceEmpty = async () => {
     if (draftRef.current.length > 0) return false;
-    const prev = prevSibling(siblings(), block.id);
+    const prev = prevSibling(siblings(), block.uuid);
     try {
-      const ok = await deleteBlock(block.id);
+      const ok = await deleteBlock(block.uuid);
       if (!ok) return false;
-      queryClient.setQueryData<Node[]>(queryKeys.children(parent.uuid), (rows = []) =>
+      queryClient.setQueryData<Block[]>(queryKeys.children(containerUuid), (rows = []) =>
         rows.filter((row) => row.uuid !== block.uuid),
       );
-      if (prev) store.setEditing(prev.id);
+      if (prev) store.setEditing(prev.uuid);
       else store.setEditing(null);
       return true;
     } catch (e) {
@@ -356,19 +447,19 @@ export function BlockNode({ block, parent, depth }: Props) {
     try {
       const moved = await indentBlock(block.uuid);
       await invalidateChildren();
-      store.setEditing(moved.id);
+      store.setEditing(moved.uuid);
     } catch (e) {
       console.error("tab indent failed", e);
     }
   };
 
   const onShiftTab = async () => {
-    if (parent.kind === "page") return;
+    if (block.parentUuid === null) return;
     await flush();
     try {
       const moved = await outdentBlock(block.uuid);
       await invalidateChildren();
-      store.setEditing(moved.id);
+      store.setEditing(moved.uuid);
     } catch (e) {
       console.error("shift-tab outdent failed", e);
     }
@@ -376,8 +467,8 @@ export function BlockNode({ block, parent, depth }: Props) {
 
   const onUpDown = (dir: "up" | "down") => {
     const rows = siblings();
-    const target = dir === "up" ? prevSibling(rows, block.id) : nextSibling(rows, block.id);
-    if (target) store.setEditing(target.id);
+    const target = dir === "up" ? prevSibling(rows, block.uuid) : nextSibling(rows, block.uuid);
+    if (target) store.setEditing(target.uuid);
   };
 
   const toggleCollapsed = () => {
@@ -392,14 +483,16 @@ export function BlockNode({ block, parent, depth }: Props) {
     await flush();
     try {
       await (direction === "up" ? moveBlockUp(block.uuid) : moveBlockDown(block.uuid));
-      await invalidateChildren(parent.uuid);
-      store.setEditing(block.id);
+      await invalidateChildren(containerUuid);
+      store.setEditing(block.uuid);
     } catch (error) {
       console.error("block reorder failed", error);
     }
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.nativeEvent.isComposing) return;
+
     // While the autocomplete menu is open, it captures navigation keys.
     if (trigger) {
       if (e.key === "ArrowDown") {
@@ -445,7 +538,7 @@ export function BlockNode({ block, parent, depth }: Props) {
     }
     if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
       e.preventDefault();
-      void onEnter();
+      void onEnter(e.currentTarget.selectionStart, e.currentTarget.selectionEnd);
       return;
     }
     if (e.key === "Backspace" && draftRef.current.length === 0) {
@@ -477,22 +570,32 @@ export function BlockNode({ block, parent, depth }: Props) {
   };
 
   return (
-    <li className="flex flex-col">
-      <div className="group -mx-2 flex items-start gap-1 rounded-xl px-2 py-1 transition-colors hover:bg-primary/[0.035] focus-within:bg-primary/[0.04]">
-        <button
-          type="button"
-          className="mt-1.5 flex size-4 shrink-0 items-center justify-center rounded text-muted-foreground/35 transition hover:bg-primary/10 hover:text-primary"
-          onClick={toggleCollapsed}
-          title={collapsed ? "expand" : "collapse"}
-        >
-          {collapsed ? (
-            <ChevronRight className="size-3" />
-          ) : (
-            <ChevronDown className="size-3 opacity-0 group-hover:opacity-100" />
-          )}
-        </button>
-        <BlockBullet state={saveState} />
-        {longBlock && (
+    <li className="flex flex-col" data-block-style={block.style}>
+      <div
+        className={`group flex items-start transition-colors ${
+          outline
+            ? "-mx-2 gap-1 rounded-xl px-2 py-1 hover:bg-primary/[0.035] focus-within:bg-primary/[0.04]"
+            : "py-1.5"
+        }`}
+      >
+        {outline && (
+          <>
+            <button
+              type="button"
+              className="mt-1.5 flex size-4 shrink-0 items-center justify-center rounded text-muted-foreground/35 transition hover:bg-primary/10 hover:text-primary"
+              onClick={toggleCollapsed}
+              title={collapsed ? "expand" : "collapse"}
+            >
+              {collapsed ? (
+                <ChevronRight className="size-3" />
+              ) : (
+                <ChevronDown className="size-3 opacity-0 group-hover:opacity-100" />
+              )}
+            </button>
+            <BlockBullet state={saveState} />
+          </>
+        )}
+        {longBlock && !readOnly && (
           <button
             type="button"
             onClick={(e) => {
@@ -508,9 +611,9 @@ export function BlockNode({ block, parent, depth }: Props) {
         <div
           className="relative min-w-0 flex-1"
           onClick={() => {
-            if (!editing) {
-              draftRef.current = block.content;
-              store.setEditing(block.id);
+            if (!editing && !readOnly) {
+              draftRef.current = block.markdown;
+              store.setEditing(block.uuid);
             }
           }}
         >
@@ -518,7 +621,7 @@ export function BlockNode({ block, parent, depth }: Props) {
             <>
               <BlockEdit
                 ref={editRef}
-                initial={block.content}
+                initial={block.markdown}
                 onChange={onDraftChange}
                 onBlur={onBlur}
                 onKeyDown={onKeyDown}
@@ -567,23 +670,175 @@ export function BlockNode({ block, parent, depth }: Props) {
               )}
             </>
           ) : (
-            <div className="cursor-text whitespace-pre-wrap break-words text-sm leading-relaxed">
-              {block.content ? (
-                renderMarkdown(block.content)
-              ) : (
-                <span className="text-muted-foreground/45">Start writing…</span>
-              )}
+            <div className={readOnly ? "cursor-default" : "cursor-text"}>
+              <RenderedBlock block={block} ordinal={ordinal} view={store.view} />
             </div>
           )}
         </div>
+        {!readOnly && (
+          <BlockStylePicker
+            style={block.style}
+            editing={editing}
+            busy={styleBusy}
+            onChange={(value) => void changeBlockStyle(value)}
+            onRestoreEditorFocus={() => editRef.current?.focus()}
+          />
+        )}
       </div>
-      {!collapsed && (
-        <div className="ml-[1.4rem] border-l border-primary/10 pl-3">
-          <BlockChildren parent={block} depth={depth + 1} />
+      {(!outline || !collapsed) && (
+        <div
+          className={
+            outline
+              ? "ml-[1.4rem] border-l border-primary/10 pl-3"
+              : depth > 0
+                ? "ml-5 border-l border-border/45 pl-4"
+                : ""
+          }
+        >
+          <BlockChildren pageUuid={block.pageUuid} parentUuid={block.uuid} depth={depth + 1} />
         </div>
       )}
     </li>
   );
+}
+
+const BLOCK_STYLE_ICONS: Record<BlockStyleIcon, LucideIcon> = {
+  paragraph: Pilcrow,
+  bullet: List,
+  numbered: ListOrdered,
+  task: ListTodo,
+  "heading-1": Heading1,
+  "heading-2": Heading2,
+  "heading-3": Heading3,
+  quote: Quote,
+  code: CodeXml,
+  divider: Minus,
+};
+
+function BlockStylePicker({
+  style,
+  editing,
+  busy,
+  onChange,
+  onRestoreEditorFocus,
+}: {
+  style: BlockStyle;
+  editing: boolean;
+  busy: boolean;
+  onChange: (value: string) => void;
+  onRestoreEditorFocus: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const current = getBlockStyleOption(style);
+  const CurrentIcon = BLOCK_STYLE_ICONS[current.icon];
+
+  return (
+    <Select
+      value={style}
+      open={open}
+      onOpenChange={setOpen}
+      onValueChange={onChange}
+      disabled={busy}
+    >
+      <SelectTrigger
+        size="sm"
+        aria-label={`Block style: ${current.label}`}
+        title={`Block style: ${current.label}`}
+        className={cn(
+          "mt-0.5 h-7 min-w-0 shrink-0 gap-1 rounded-lg border-transparent bg-transparent px-1.5 shadow-none hover:border-border/70 hover:bg-card/80 focus-visible:border-border focus-visible:ring-2 [&>svg:last-child]:size-3",
+          editing || open
+            ? "opacity-100"
+            : "opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100",
+        )}
+      >
+        {busy ? (
+          <Loader2 className="size-3.5 animate-spin" />
+        ) : (
+          <CurrentIcon className="size-3.5" />
+        )}
+        <span className="sr-only">{current.label}</span>
+      </SelectTrigger>
+      <SelectContent
+        position="popper"
+        align="end"
+        sideOffset={4}
+        className="min-w-48 rounded-xl border-border/70 p-1 shadow-xl"
+        onCloseAutoFocus={(event) => {
+          if (!editing) return;
+          event.preventDefault();
+          onRestoreEditorFocus();
+        }}
+      >
+        {BLOCK_STYLE_OPTIONS.map((option) => {
+          const Icon = BLOCK_STYLE_ICONS[option.icon];
+          return (
+            <SelectItem key={option.value} value={option.value} className="rounded-lg py-2">
+              <Icon className="size-4" />
+              <span>{option.label}</span>
+            </SelectItem>
+          );
+        })}
+      </SelectContent>
+    </Select>
+  );
+}
+
+function RenderedBlock({
+  block,
+  ordinal,
+  view,
+}: {
+  block: Block;
+  ordinal: number;
+  view: PageView;
+}) {
+  if (block.style === "divider") return <hr className="my-4 border-border/70" />;
+  if (!block.markdown) {
+    return <span className="text-sm text-muted-foreground/45">Start writing…</span>;
+  }
+  if (block.style === "code") {
+    return (
+      <pre className="overflow-x-auto rounded-xl border border-border/60 bg-muted/55 p-3 text-xs leading-relaxed">
+        <code>{block.markdown}</code>
+      </pre>
+    );
+  }
+
+  const content = renderMarkdown(block.markdown);
+  if (block.style === "heading_1") {
+    return <h2 className="mt-5 mb-2 text-2xl font-semibold tracking-tight">{content}</h2>;
+  }
+  if (block.style === "heading_2") {
+    return <h3 className="mt-4 mb-1.5 text-xl font-semibold tracking-tight">{content}</h3>;
+  }
+  if (block.style === "heading_3") {
+    return <h4 className="mt-3 mb-1 text-base font-semibold">{content}</h4>;
+  }
+  if (block.style === "quote") {
+    return (
+      <blockquote className="border-l-2 border-primary/35 pl-4 text-sm leading-relaxed text-muted-foreground italic">
+        {content}
+      </blockquote>
+    );
+  }
+  if (view === "outline" && (block.style === "bullet" || block.style === "numbered")) {
+    return <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{content}</p>;
+  }
+  if (block.style === "bullet" || block.style === "numbered" || block.style === "task") {
+    return (
+      <div className="flex gap-2 text-sm leading-relaxed">
+        {block.style === "task" ? (
+          <input type="checkbox" disabled className="mt-1 size-3.5 accent-primary" />
+        ) : (
+          <span className="w-4 shrink-0 text-right text-muted-foreground">
+            {block.style === "numbered" ? `${ordinal}.` : "•"}
+          </span>
+        )}
+        <span className="min-w-0 whitespace-pre-wrap break-words">{content}</span>
+      </div>
+    );
+  }
+  return <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{content}</p>;
 }
 
 /** Convert "auto comp" → "auto* comp*" for FTS5 prefix matching. Strips

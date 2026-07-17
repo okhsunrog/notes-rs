@@ -1,5 +1,5 @@
 use futures::StreamExt;
-use notes_core::{NodeKind, acknowledge_server_op, apply_sequenced, export_sync_snapshot};
+use notes_core::{BlockStyle, acknowledge_server_op, apply_sequenced, export_sync_snapshot};
 use notes_protocol::ServerMessage;
 use notes_server::config::{ServerConfig, UserConfig};
 use notes_sync::HttpTransport;
@@ -45,23 +45,41 @@ async fn bootstraps_and_fanouts_operations_over_the_real_network_protocol() {
     let left = notes_core::db::open(left_directory.path().join("notes.db"))
         .await
         .expect("left database");
-    notes_core::db::create_node(
+    let bootstrap_page = notes_core::db::create_page(&left, "Bootstrap page".into())
+        .await
+        .expect("bootstrap note");
+    let bootstrap_block = notes_core::db::create_block(
         &left,
-        NodeKind::Page,
-        Some("Bootstrap page".into()),
-        String::new(),
+        bootstrap_page.uuid,
         None,
+        None,
+        BlockStyle::Heading1,
+        "Typed block snapshot".into(),
     )
     .await
-    .expect("bootstrap note");
+    .expect("bootstrap block");
     let bootstrap = export_sync_snapshot(&left, 0)
         .await
         .expect("local snapshot");
     let server_snapshot = transport
-        .bootstrap(bootstrap)
+        .bootstrap(bootstrap.clone())
         .await
         .expect("bootstrap server");
-    assert_eq!(server_snapshot.nodes.len(), 1);
+    assert_eq!(server_snapshot.pages.len(), 1);
+    assert_eq!(server_snapshot.blocks.len(), 1);
+    assert_eq!(server_snapshot.blocks[0].style, BlockStyle::Heading1);
+
+    let conflict = transport
+        .bootstrap(bootstrap)
+        .await
+        .expect_err("a second bootstrap must be rejected");
+    let conflict = notes_sync::transport_error(&conflict).expect("typed transport error");
+    assert!(matches!(
+        conflict,
+        notes_sync::TransportError::Conflict(message)
+            if message == "server workspace has already been initialized"
+    ));
+    assert!(conflict.is_permanent());
 
     let right_directory = tempfile::tempdir().expect("right directory");
     let right = notes_core::db::open(right_directory.path().join("notes.db"))
@@ -70,20 +88,21 @@ async fn bootstraps_and_fanouts_operations_over_the_real_network_protocol() {
     notes_core::import_sync_snapshot(&right, transport.snapshot().await.expect("snapshot"))
         .await
         .expect("import right snapshot");
+    let imported_block = notes_core::db::get_block(&right, bootstrap_block.uuid)
+        .await
+        .expect("read imported block")
+        .expect("imported block");
+    assert_eq!(imported_block.page_uuid, bootstrap_page.uuid);
+    assert_eq!(imported_block.style, BlockStyle::Heading1);
+    assert_eq!(imported_block.markdown, "Typed block snapshot");
 
     notes_core::configure_sync(&left, transport.base_url().as_str())
         .await
         .expect("enable left sync");
     let mut socket = transport.connect(0).await.expect("websocket");
-    notes_core::db::create_node(
-        &left,
-        NodeKind::Page,
-        Some("Realtime page".into()),
-        String::new(),
-        None,
-    )
-    .await
-    .expect("realtime note");
+    notes_core::db::create_page(&left, "Realtime page".into())
+        .await
+        .expect("realtime note");
     let pending = notes_core::pending_outbox(&left, 256)
         .await
         .expect("left outbox");
@@ -116,7 +135,7 @@ async fn bootstraps_and_fanouts_operations_over_the_real_network_protocol() {
         .await
         .expect("right pages")
         .into_iter()
-        .filter_map(|node| node.title)
+        .filter_map(|page| page.title)
         .collect::<Vec<_>>();
     titles.sort();
     assert_eq!(titles, vec!["Bootstrap page", "Realtime page"]);

@@ -3,15 +3,26 @@ import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, RefreshCw, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ChatCard } from "@/features/chat/chat-card";
-import { findBacklinks, getGraphSnapshot, type GraphSnapshot, type Node } from "@/lib/api";
+import {
+  contentText,
+  contentUuid,
+  findBacklinks,
+  getBlock,
+  getGraphSnapshot,
+  getPage,
+  type Content,
+  type GraphItem,
+  type GraphSnapshot,
+  type Page,
+} from "@/lib/api";
 import { queryKeys } from "@/lib/query";
 
 type Props = {
-  node: Node | null;
-  onOpenNode: (node: Node) => void | Promise<void>;
+  page: Page | null;
+  onOpenContent: (content: Content) => void | Promise<void>;
 };
 
-export function KnowledgePanel({ node }: Props) {
+export function KnowledgePanel({ page }: Props) {
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
       <div className="flex shrink-0 items-center gap-2 px-1 pt-1">
@@ -24,23 +35,23 @@ export function KnowledgePanel({ node }: Props) {
         </div>
       </div>
       <div className="min-h-0 flex-1 pt-1">
-        <ChatCard node={node} />
+        <ChatCard page={page} />
       </div>
     </div>
   );
 }
 
-export function GraphWorkspace({ node, onOpenNode, onClose }: Props & { onClose: () => void }) {
+export function GraphWorkspace({ page, onOpenContent, onClose }: Props & { onClose: () => void }) {
   const graphQuery = useQuery({
-    queryKey: queryKeys.graph(null),
-    queryFn: () => getGraphSnapshot(null),
+    queryKey: queryKeys.graph(page?.uuid ?? null),
+    queryFn: () => getGraphSnapshot(page?.uuid ?? null),
   });
   const backlinksQuery = useQuery({
-    queryKey: queryKeys.backlinks(node?.uuid ?? "inactive"),
-    queryFn: () => findBacklinks((node as Node).id),
-    enabled: node !== null,
+    queryKey: queryKeys.backlinks(page?.uuid ?? "inactive"),
+    queryFn: () => findBacklinks((page as Page).uuid),
+    enabled: page !== null,
   });
-  const snapshot = graphQuery.data ?? { nodes: [], edges: [] };
+  const snapshot = graphQuery.data ?? { items: [], edges: [] };
   const backlinks = backlinksQuery.data ?? [];
   const error = graphQuery.error ?? backlinksQuery.error;
 
@@ -53,7 +64,7 @@ export function GraphWorkspace({ node, onOpenNode, onClose }: Props & { onClose:
         <div>
           <h2 className="text-sm font-semibold">Knowledge graph</h2>
           <p className="text-xs text-muted-foreground">
-            {node ? `Focused around ${node.title ?? `node #${node.id}`}` : "All pages and entities"}
+            {page ? `Focused around ${page.title ?? "Untitled"}` : "All pages and blocks"}
           </p>
         </div>
         <Button
@@ -73,15 +84,27 @@ export function GraphWorkspace({ node, onOpenNode, onClose }: Props & { onClose:
               {String(error)}
             </p>
           )}
-          <GraphView snapshot={snapshot} focusId={node?.id ?? null} onOpenNode={onOpenNode} />
+          <GraphView
+            snapshot={snapshot}
+            focusUuid={page?.uuid ?? null}
+            onOpenItem={async (item) => {
+              if (item.kind === "page") {
+                const record = await getPage(item.uuid);
+                if (record) await onOpenContent({ kind: "page", record });
+              } else {
+                const record = await getBlock(item.uuid);
+                if (record) await onOpenContent({ kind: "block", record });
+              }
+            }}
+          />
           <div className="pointer-events-none absolute bottom-5 left-5 flex gap-3 rounded-xl border border-border/60 bg-card/80 px-3 py-2 text-[10px] text-muted-foreground shadow-sm backdrop-blur">
             <span>
               <i className="mr-1 inline-block size-2 rounded-full bg-sky-500" /> Page
             </span>
             <span>
-              <i className="mr-1 inline-block size-2 rounded-full bg-amber-500" /> Entity
+              <i className="mr-1 inline-block size-2 rounded-full bg-amber-500" /> Block
             </span>
-            <span>Click a node to open it</span>
+            <span>Click an item to open it</span>
           </div>
         </div>
         <aside className="w-72 shrink-0 overflow-y-auto border-l border-border/60 bg-sidebar/65 p-4">
@@ -89,25 +112,25 @@ export function GraphWorkspace({ node, onOpenNode, onClose }: Props & { onClose:
             Backlinks
           </h3>
           <p className="mt-1 text-xs text-muted-foreground">
-            {node
-              ? `Incoming links to #${node.id}`
+            {page
+              ? `Incoming links to ${page.title ?? "this note"}`
               : "Open a note before entering the graph to inspect its backlinks."}
           </p>
-          {node && backlinks.length === 0 && (
+          {page && backlinks.length === 0 && (
             <p className="mt-4 text-xs text-muted-foreground">No incoming links.</p>
           )}
           <ul className="mt-4 space-y-2">
             {backlinks.map((backlink) => (
-              <li key={backlink.id}>
+              <li key={contentUuid(backlink)}>
                 <button
                   type="button"
-                  onClick={() => void onOpenNode(backlink)}
+                  onClick={() => void onOpenContent(backlink)}
                   className="w-full rounded-xl border border-border/60 bg-card/55 px-3 py-2.5 text-left text-xs transition hover:border-primary/25 hover:bg-primary/5"
                 >
                   <span className="font-medium">
-                    {backlink.title ?? (backlink.content.slice(0, 48) || `#${backlink.id}`)}
+                    {contentText(backlink).slice(0, 48) || "Untitled"}
                   </span>
-                  <span className="ml-1 text-muted-foreground">#{backlink.id}</span>
+                  <span className="ml-1 text-muted-foreground">{backlink.kind}</span>
                 </button>
               </li>
             ))}
@@ -120,27 +143,27 @@ export function GraphWorkspace({ node, onOpenNode, onClose }: Props & { onClose:
 
 function GraphView({
   snapshot,
-  focusId,
-  onOpenNode,
+  focusUuid,
+  onOpenItem,
 }: {
   snapshot: GraphSnapshot;
-  focusId: number | null;
-  onOpenNode: Props["onOpenNode"];
+  focusUuid: string | null;
+  onOpenItem: (item: GraphItem) => void | Promise<void>;
 }) {
   const positioned = useMemo(() => {
-    const count = snapshot.nodes.length;
-    return snapshot.nodes.map((node, index) => {
+    const count = snapshot.items.length;
+    return snapshot.items.map((item, index) => {
       const angle = count <= 1 ? 0 : (index / count) * Math.PI * 2 - Math.PI / 2;
       const radiusX = count <= 1 ? 0 : Math.min(430, 150 + count * 30);
       const radiusY = count <= 1 ? 0 : Math.min(250, 90 + count * 18);
       return {
-        node,
+        item,
         x: 600 + Math.cos(angle) * radiusX,
         y: 350 + Math.sin(angle) * radiusY,
       };
     });
-  }, [snapshot.nodes]);
-  const byId = new Map(positioned.map((item) => [item.node.id, item]));
+  }, [snapshot.items]);
+  const byUuid = new Map(positioned.map((position) => [position.item.uuid, position]));
 
   if (positioned.length === 0) {
     return (
@@ -159,11 +182,11 @@ function GraphView({
       className="h-full w-full bg-card/20"
     >
       {snapshot.edges.map((edge) => {
-        const source = byId.get(edge.src);
-        const target = byId.get(edge.dst);
+        const source = byUuid.get(edge.sourceUuid);
+        const target = byUuid.get(edge.targetUuid);
         return source && target ? (
           <line
-            key={`${edge.src}-${edge.dst}-${edge.kind}`}
+            key={`${edge.sourceUuid}-${edge.targetUuid}-${edge.relation}`}
             x1={source.x}
             y1={source.y}
             x2={target.x}
@@ -171,33 +194,27 @@ function GraphView({
             className="stroke-border"
             strokeWidth="2"
           >
-            <title>{edge.kind}</title>
+            <title>{edge.relation}</title>
           </line>
         ) : null;
       })}
-      {positioned.map(({ node, x, y }) => (
+      {positioned.map(({ item, x, y }) => (
         <g
-          key={node.id}
+          key={item.uuid}
           role="button"
           tabIndex={0}
-          aria-label={node.title ?? `Node ${node.id}`}
-          onClick={() => void onOpenNode(node)}
+          aria-label={item.label}
+          onClick={() => void onOpenItem(item)}
           onKeyDown={(event) => {
-            if (event.key === "Enter" || event.key === " ") void onOpenNode(node);
+            if (event.key === "Enter" || event.key === " ") void onOpenItem(item);
           }}
           className="cursor-pointer outline-none"
         >
           <circle
             cx={x}
             cy={y}
-            r={node.id === focusId ? 18 : 13}
-            className={
-              node.kind === "entity"
-                ? "fill-amber-500"
-                : node.id === focusId
-                  ? "fill-foreground"
-                  : "fill-sky-500"
-            }
+            r={item.uuid === focusUuid ? 18 : 13}
+            className={item.kind === "block" ? "fill-amber-500" : "fill-sky-500"}
           />
           <text
             x={x}
@@ -205,7 +222,7 @@ function GraphView({
             textAnchor="middle"
             className="fill-foreground text-[14px] font-medium"
           >
-            {(node.title ?? `#${node.id}`).slice(0, 28)}
+            {item.label.slice(0, 28)}
           </text>
         </g>
       ))}

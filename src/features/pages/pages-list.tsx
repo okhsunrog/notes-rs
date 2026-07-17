@@ -3,13 +3,13 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { FileText, Plus, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { listPages, type Node } from "@/lib/api";
+import { listPages, type Page } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { queryKeys } from "@/lib/query";
 
 type Props = {
   selectedUuid: string | null;
-  onSelect: (page: Node) => void;
+  onSelect: (page: Page) => void;
   onCreate: () => void | Promise<void>;
   onStatus: (s: string) => void;
 };
@@ -92,7 +92,7 @@ export function PagesList({ selectedUuid, onSelect, onCreate, onStatus }: Props)
           <li className="px-3 py-5 text-center text-xs text-muted-foreground">No matching notes</li>
         )}
         {visiblePages.map((p) => (
-          <li key={p.id}>
+          <li key={p.uuid}>
             <button
               type="button"
               onClick={() => onSelect(p)}
@@ -115,7 +115,7 @@ export function PagesList({ selectedUuid, onSelect, onCreate, onStatus }: Props)
                   {p.title ?? "Untitled"}
                 </span>
                 <span className="mt-0.5 block text-[10px] text-muted-foreground">
-                  {formatRelativeDate(p.updated_at)}
+                  {formatRelativeDate(p.updatedAt)}
                 </span>
               </span>
             </button>

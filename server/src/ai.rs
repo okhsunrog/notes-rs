@@ -211,17 +211,15 @@ impl AiRuntime {
         history: Vec<ChatTurn>,
         message: String,
         allow_writes: bool,
-        active_node_uuid: Option<uuid::Uuid>,
+        active_content_uuid: Option<uuid::Uuid>,
         cancelled: CancellationToken,
         emit: impl Fn(ChatEvent) + Send + Sync + 'static,
     ) -> Result<String> {
         let active = self.active();
         let user = active.user(user_id)?;
         let query_rewriting = user.store.control().await?.query_rewriting;
-        let active_node_id = match active_node_uuid {
-            Some(uuid) => db::get_node_by_uuid(&user.notes, uuid)
-                .await?
-                .map(|node| node.id),
+        let active_content_uuid = match active_content_uuid {
+            Some(uuid) => db::get_content(&user.notes, uuid).await?.map(|_| uuid),
             None => None,
         };
         if cancelled.is_cancelled() {
@@ -232,7 +230,7 @@ impl AiRuntime {
             history,
             message,
             allow_writes,
-            active_node_id,
+            active_content_uuid,
             cancelled,
             emit,
             active.chat.clone(),
@@ -309,7 +307,7 @@ async fn build_active(
     config.validate()?;
     let clients = build_provider_clients(&config)?;
     let identity = embedding_identity_fingerprint(
-        &config.retrieval_base_url,
+        config.retrieval_base_url.as_str(),
         &config.embedding_model,
         config.embedding_dimensions,
     );
@@ -362,24 +360,24 @@ async fn build_active(
 fn build_provider_clients(config: &AiConfig) -> Result<ProviderClients> {
     let embedder = notes_ai::embed::make_openrouter_embedder(
         config.retrieval_api_key.clone(),
-        &config.retrieval_base_url,
+        config.retrieval_base_url.as_str(),
         config.embedding_model.clone(),
         config.embedding_dimensions,
     )?;
     let reranker = notes_ai::embed::make_openrouter_reranker(
         config.retrieval_api_key.clone(),
-        &config.retrieval_base_url,
+        config.retrieval_base_url.as_str(),
         config.rerank_model.clone(),
     )?;
     let chat = notes_ai::config::completion_config(
         config.completion_protocol,
-        Some(config.completion_base_url.clone()),
+        Some(config.completion_base_url.to_string()),
         Some(config.completion_api_key.clone()),
         config.chat_model.clone(),
     )?;
     let extraction = notes_ai::config::completion_config(
         config.completion_protocol,
-        Some(config.completion_base_url.clone()),
+        Some(config.completion_base_url.to_string()),
         Some(config.completion_api_key.clone()),
         config.extraction_model.clone(),
     )?;
@@ -393,8 +391,8 @@ fn build_provider_clients(config: &AiConfig) -> Result<ProviderClients> {
 
 async fn status_for(active: &ActiveAi, user_id: &str) -> Result<AiIndexStatus> {
     let user = active.user(user_id)?;
-    let source_nodes = user.store.source_node_count(&user.notes).await?;
-    let status = user.store.status(source_nodes).await?;
+    let source_documents = user.store.source_document_count(&user.notes).await?;
+    let status = user.store.status(source_documents).await?;
     Ok(AiIndexStatus {
         provider: active.config.public_settings(),
         generation_id: status.generation_id,
@@ -410,8 +408,8 @@ async fn status_for(active: &ActiveAi, user_id: &str) -> Result<AiIndexStatus> {
         },
         pending_embeddings: status.pending,
         failed_embeddings: status.failed,
-        indexed_nodes: status.indexed,
-        source_nodes: status.source_nodes,
+        indexed_documents: status.indexed,
+        source_documents: status.source_documents,
         pending_extractions: status.extraction_pending,
         failed_extractions: status.extraction_failed,
     })

@@ -3,39 +3,54 @@ import { QueryClient } from "@tanstack/react-query";
 import { applyDomainEvent, queryKeys } from "./query";
 
 describe("domain event query invalidation", () => {
-  it("invalidates the changed node, its parent children and derived views", async () => {
+  it("invalidates a changed page and title-derived views", async () => {
     const client = new QueryClient();
-    client.setQueryData(queryKeys.node("node-a"), { uuid: "node-a" });
-    client.setQueryData(queryKeys.node("node-b"), { uuid: "node-b" });
-    client.setQueryData(queryKeys.children("parent-a"), []);
     client.setQueryData(queryKeys.pages, []);
-    client.setQueryData(queryKeys.graph(null), { nodes: [], edges: [] });
+    client.setQueryData(queryKeys.page("page-a"), { uuid: "page-a" });
+    client.setQueryData(queryKeys.graph(null), { items: [], edges: [] });
 
     await applyDomainEvent(client, {
-      kind: "node_changed",
-      node_uuids: ["node-a"],
-      parent_uuids: ["parent-a"],
-      node_kinds: ["block"],
+      kind: "pages_changed",
+      page_uuids: ["page-a"],
     });
 
-    expect(client.getQueryState(queryKeys.node("node-a"))?.isInvalidated).toBe(true);
-    expect(client.getQueryState(queryKeys.node("node-b"))?.isInvalidated).toBe(false);
+    expect(client.getQueryState(queryKeys.pages)?.isInvalidated).toBe(true);
+    expect(client.getQueryState(queryKeys.page("page-a"))?.isInvalidated).toBe(true);
+    expect(client.getQueryState(queryKeys.graph(null))?.isInvalidated).toBe(true);
+  });
+
+  it("invalidates a changed block and its containing child list", async () => {
+    const client = new QueryClient();
+    client.setQueryData(queryKeys.block("block-a"), { uuid: "block-a" });
+    client.setQueryData(queryKeys.block("block-b"), { uuid: "block-b" });
+    client.setQueryData(queryKeys.children("parent-a"), []);
+    client.setQueryData(queryKeys.pages, []);
+    client.setQueryData(queryKeys.graph(null), { items: [], edges: [] });
+
+    await applyDomainEvent(client, {
+      kind: "blocks_changed",
+      block_uuids: ["block-a"],
+      container_uuids: ["parent-a"],
+    });
+
+    expect(client.getQueryState(queryKeys.block("block-a"))?.isInvalidated).toBe(true);
+    expect(client.getQueryState(queryKeys.block("block-b"))?.isInvalidated).toBe(false);
     expect(client.getQueryState(queryKeys.children("parent-a"))?.isInvalidated).toBe(true);
     expect(client.getQueryState(queryKeys.pages)?.isInvalidated).toBe(false);
     expect(client.getQueryState(queryKeys.graph(null))?.isInvalidated).toBe(false);
   });
 
-  it("removes deleted node snapshots", async () => {
+  it("removes deleted block snapshots", async () => {
     const client = new QueryClient();
-    client.setQueryData(queryKeys.node("deleted"), { uuid: "deleted" });
+    client.setQueryData(queryKeys.block("deleted"), { uuid: "deleted" });
 
     await applyDomainEvent(client, {
-      kind: "node_deleted",
-      node_uuids: ["deleted"],
-      parent_uuids: [],
+      kind: "blocks_deleted",
+      block_uuids: ["deleted"],
+      container_uuids: [],
     });
 
-    expect(client.getQueryData(queryKeys.node("deleted"))).toBeUndefined();
+    expect(client.getQueryData(queryKeys.block("deleted"))).toBeUndefined();
   });
 
   it("invalidates the complete backend cache after a workspace replacement", async () => {
@@ -62,11 +77,11 @@ describe("domain event query invalidation", () => {
     const client = new QueryClient();
     client.setQueryData(queryKeys.children("parent-a"), []);
     client.setQueryData(queryKeys.children("parent-b"), []);
-    client.setQueryData(queryKeys.graph(null), { nodes: [], edges: [] });
+    client.setQueryData(queryKeys.graph(null), { items: [], edges: [] });
 
     await applyDomainEvent(client, {
       kind: "structure_changed",
-      node_uuids: ["moved"],
+      block_uuids: ["moved"],
     });
 
     expect(client.getQueryState(queryKeys.children("parent-a"))?.isInvalidated).toBe(true);
@@ -74,14 +89,14 @@ describe("domain event query invalidation", () => {
     expect(client.getQueryState(queryKeys.graph(null))?.isInvalidated).toBe(false);
   });
 
-  it("invalidates only attachments for affected parents", async () => {
+  it("invalidates only attachments for affected owners", async () => {
     const client = new QueryClient();
     client.setQueryData(queryKeys.attachments("parent-a"), []);
     client.setQueryData(queryKeys.attachments("parent-b"), []);
 
     await applyDomainEvent(client, {
       kind: "attachments_changed",
-      parent_uuids: ["parent-a"],
+      owner_uuids: ["parent-a"],
     });
 
     expect(client.getQueryState(queryKeys.attachments("parent-a"))?.isInvalidated).toBe(true);

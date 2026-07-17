@@ -1,16 +1,26 @@
-import { type Node } from "@/lib/api";
+import { type Page } from "@/lib/api";
 import { BlockChildren } from "./block-tree";
 import { OutlinerProvider } from "./outliner-store";
 
 type Props = {
-  page: Node;
-  initialEditingId?: number | null;
+  page: Page;
+  initialEditingUuid?: string | null;
+  focusRequest?: number;
 };
 
-export function Outliner({ page, initialEditingId }: Props) {
+export function Outliner({ page, initialEditingUuid = null, focusRequest = 0 }: Props) {
   return (
-    <OutlinerProvider initialEditingId={initialEditingId}>
-      <BlockChildren parent={page} depth={0} />
+    <OutlinerProvider
+      initialEditingUuid={initialEditingUuid}
+      initialEditingRequest={focusRequest}
+      view={page.defaultView}
+    >
+      <BlockChildren
+        pageUuid={page.uuid}
+        parentUuid={null}
+        depth={0}
+        focusFirstBlockRequest={initialEditingUuid === null ? focusRequest : 0}
+      />
     </OutlinerProvider>
   );
 }

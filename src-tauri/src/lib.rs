@@ -4,7 +4,8 @@ mod sync;
 
 use notes_core::db;
 use std::sync::{Arc, RwLock};
-use tauri::{Emitter, Manager};
+use tauri::Manager;
+use tauri_specta::Event;
 
 fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
     tauri_specta::Builder::<tauri::Wry>::new()
@@ -26,20 +27,19 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::history_status,
             commands::undo,
             commands::redo,
-            commands::create_node,
-            commands::update_node,
             commands::rename_page,
+            commands::set_page_view,
             commands::create_note,
+            commands::get_page,
+            commands::get_block,
             commands::set_block_content,
+            commands::set_block_style,
             commands::split_block,
-            commands::link_nodes,
-            commands::get_node,
             commands::get_containing_page,
             commands::neighbors,
             commands::search_notes,
             commands::chat_stream,
             commands::cancel_chat,
-            commands::list_entities,
             commands::list_pages,
             commands::delete_page,
             commands::find_backlinks,
@@ -61,11 +61,18 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::delete_block,
             commands::get_or_create_page_by_title,
             commands::get_page_by_title,
-            commands::get_node_by_uuid,
             commands::search_pages_by_title,
             commands::search_blocks_fts,
         ])
-        .events(tauri_specta::collect_events![commands::DomainEventMessage])
+        .events(tauri_specta::collect_events![
+            commands::DomainEventMessage,
+            commands::StartupReadyEvent,
+            commands::StartupErrorEvent
+        ])
+        // The UI contract intentionally uses JavaScript numbers. Every exposed 64-bit value is
+        // bounded below Number.MAX_SAFE_INTEGER: Unix-second timestamps, attachment sizes capped
+        // at 100 MiB, SQLite row counts, and server queue counters. HLCs and server sequences are
+        // synchronization internals and never cross the Tauri command/event boundary.
         .dangerously_cast_bigints_to_number()
 }
 
@@ -185,7 +192,7 @@ pub fn run() {
                         }
                         *startup.write().unwrap_or_else(|e| e.into_inner()) =
                             commands::StartupStatus::Ready;
-                        let _ = handle.emit("app:ready", ());
+                        let _ = commands::StartupReadyEvent.emit(&handle);
                         tracing::info!(?db_path, "notes-rs ready");
                     }
                     Err(error) => {
@@ -195,7 +202,7 @@ pub fn run() {
                             commands::StartupStatus::Error {
                                 message: message.clone(),
                             };
-                        let _ = handle.emit("app:startup-error", message);
+                        let _ = commands::StartupErrorEvent { message }.emit(&handle);
                     }
                 }
             });
@@ -217,7 +224,7 @@ fn report_startup_error(
     *startup.write().unwrap_or_else(|error| error.into_inner()) = commands::StartupStatus::Error {
         message: message.clone(),
     };
-    let _ = handle.emit("app:startup-error", message);
+    let _ = commands::StartupErrorEvent { message }.emit(handle);
 }
 
 #[cfg(not(target_os = "android"))]

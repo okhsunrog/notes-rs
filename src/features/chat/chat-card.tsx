@@ -4,7 +4,7 @@ import { ArrowUp, CheckCircle2, PencilLine, Sparkles, Square, Trash2, Wrench } f
 import { useConfirmation } from "@/app/confirmation";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { cancelChat, chatStream, type ChatEvent, type ChatTurn, type Node } from "@/lib/api";
+import { cancelChat, chatStream, type ChatEvent, type ChatTurn, type Page } from "@/lib/api";
 
 const CHAT_STORAGE_KEY = "notes-rs.chat.v1";
 const MarkdownResponse = lazy(() => import("@/features/chat/markdown-response"));
@@ -30,7 +30,7 @@ function boundedHistory(turns: ChatTurn[]) {
   return result.reverse();
 }
 
-export function ChatCard({ node }: { node: Node | null }) {
+export function ChatCard({ page }: { page: Page | null }) {
   const confirm = useConfirmation();
   const [chatInput, setChatInput] = useState("");
   const [chatLog, setChatLog] = useState<ChatTurn[]>(loadStoredChat);
@@ -111,7 +111,7 @@ export function ChatCard({ node }: { node: Node | null }) {
     };
 
     try {
-      await chatStream(history, message, allowWrites, node?.uuid ?? null, requestId, channel);
+      await chatStream(history, message, allowWrites, page?.uuid ?? null, requestId, channel);
     } catch (err) {
       setChatLog((l) => {
         const next = [...l];
@@ -129,7 +129,7 @@ export function ChatCard({ node }: { node: Node | null }) {
     <div className="flex h-full min-h-0 flex-col">
       <div className="mb-1 flex items-center justify-between gap-2 px-1 text-[10px] text-muted-foreground">
         <span className="truncate">
-          {node ? `Context: ${node.title || `node #${node.id}`}` : "No active note context"}
+          {page ? `Context: ${page.title || "Untitled note"}` : "No active note context"}
         </span>
         {chatLog.length > 0 && (
           <Button
@@ -161,7 +161,7 @@ export function ChatCard({ node }: { node: Node | null }) {
               {[
                 "What have I been thinking about?",
                 "Find related ideas",
-                ...(node ? ["Summarize this note"] : []),
+                ...(page ? ["Summarize this note"] : []),
               ].map((prompt) => (
                 <button
                   key={prompt}

@@ -150,7 +150,10 @@ export function ServerAiProviderForm({ provider, onError, onMessage }: Props) {
             value={draft.completionProtocol}
             disabled={busy}
             onChange={(event) =>
-              set("completionProtocol", event.currentTarget.value as "openai" | "anthropic")
+              set(
+                "completionProtocol",
+                event.currentTarget.value as AiProviderSettingsUpdate["completionProtocol"],
+              )
             }
             className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm dark:bg-input/30"
           >

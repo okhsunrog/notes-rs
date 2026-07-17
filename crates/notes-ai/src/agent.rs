@@ -1,23 +1,23 @@
-use crate::retrieval::{RetrievalPipeline, node_documents, select_reranked_hits};
+use crate::retrieval::{RetrievalPipeline, content_documents, select_reranked_hits};
 use anyhow::Context;
 use futures::StreamExt;
 use llm_relay::RigClient;
-use notes_core::db::{self, Node, SearchHit};
-use notes_core::{Connection, NodeKind};
+use notes_core::db::{self, Content, Page, SearchHit};
+use notes_core::{BlockStyle, Connection};
 use notes_protocol::{ChatEvent, ChatTurn};
 use rig::agent::MultiTurnStreamItem;
 use rig::client::CompletionClient;
 use rig::completion::{CompletionModel, Message, Prompt};
 use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingPrompt};
 use rig::tool::{Tool, ToolError};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 const SYSTEM_PROMPT: &str = r#"
 You are an assistant embedded in a personal knowledge graph (notes-rs).
-The user's notes are stored as nodes (blocks, pages, entities, tags) connected by typed edges.
+The user's notes are stored as UUID-addressed pages containing ordered block trees.
 You answer questions by retrieving from the graph using tools — never invent facts.
 
 Workflow:
@@ -25,18 +25,17 @@ Workflow:
    "list all notes", or requests for a notebook-wide overview. Then use
    `read_subtree` on the returned page ids when their contents are needed.
 2. Use `search_and_expand` for relevance questions: it does hybrid retrieval, then
-   walks the graph one hop from each seed and reranks the merged set. This is
+   walks page links, block references, and containment one hop from each seed and reranks the merged set. This is
    the default because the graph almost always adds useful context.
 3. Use `search_agentic` only when you want plain text-relevance with no graph
    expansion (e.g. you're looking for exact wording).
-4. Drill into specific nodes once you have ids:
+4. Drill into specific content once you have UUIDs:
    - `read_ancestors` for the outline breadcrumb above a block,
    - `read_subtree` to read everything under a page or section,
    - `find_backlinks` for "who points at this?",
-   - `find_tagged` for "what mentions entity/tag X?",
    - `neighbors` for undirected graph walks,
-   - `get_node` for a single row.
-5. Cite node IDs (e.g. "see node #42") in your final answer.
+   - `get_content` for one page or block.
+5. Cite page/block UUIDs in your final answer.
 6. If nothing relevant found, say so plainly. Do not fabricate.
 
 When calling a search tool, always write a fully self-contained query that resolves any references
@@ -245,7 +244,7 @@ impl Tool for SearchAgentic {
     type Output = Vec<SearchHit>;
 
     fn description(&self) -> String {
-        "Hybrid search (BM25 + semantic + BGE rerank) over notes. Returns ranked nodes with scores. Prefer this for most queries.".into()
+        "Hybrid search (BM25 + semantic + BGE rerank) over notes. Returns ranked pages and blocks with scores. Prefer this for most queries.".into()
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -276,7 +275,7 @@ const EXPAND_POOL_MAX: usize = 64;
 
 /// Hybrid search + 1-hop graph expansion + rerank. The default retrieval
 /// tool: starts from the same hybrid candidates as `search_agentic`, then
-/// pulls each seed's immediate neighbors (refs, mentions, relations) into
+/// pulls each seed's immediate neighbors (links, references, containment) into
 /// the candidate set before reranking. This is what makes the typed-edge
 /// graph actually do work for the model instead of being decoration.
 #[derive(Clone)]
@@ -292,7 +291,7 @@ impl Tool for SearchAndExpand {
     type Output = Vec<SearchHit>;
 
     fn description(&self) -> String {
-        "Hybrid search then walk one graph hop from each seed (refs/mentions/relations) and rerank the merged pool. Prefer this over `search_agentic` for most questions — the extra context usually helps.".into()
+        "Hybrid search then walk one graph hop from each seed (links/references/containment) and rerank the merged pool. Prefer this over `search_agentic` for most questions — the extra context usually helps.".into()
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -321,35 +320,39 @@ impl Tool for SearchAndExpand {
         if seeds.is_empty() {
             return Ok(Vec::new());
         }
-        // Walk one hop from each seed; dedup by id, cap the merged pool.
+        // Walk one hop from each seed; dedup by UUID, cap the merged pool.
         use std::collections::HashMap;
-        let mut pool: HashMap<i64, Node> = HashMap::new();
+        let mut pool: HashMap<uuid::Uuid, Content> = HashMap::new();
         for s in &seeds {
-            pool.entry(s.node.id).or_insert_with(|| s.node.clone());
+            pool.entry(s.content.uuid())
+                .or_insert_with(|| s.content.clone());
         }
         for s in &seeds {
             if pool.len() >= EXPAND_POOL_MAX {
                 break;
             }
-            let neigh = db::neighbors(self.retrieval.notes(), s.node.id, 1)
+            let neigh = db::neighbors(self.retrieval.notes(), s.content.uuid(), 1)
                 .await
                 .map_err(into_tool_err)?;
             for n in neigh {
                 if pool.len() >= EXPAND_POOL_MAX {
                     break;
                 }
-                pool.entry(n.id).or_insert(n);
+                pool.entry(n.uuid()).or_insert(n);
             }
         }
         let candidates = pool
             .into_values()
-            .map(|node| SearchHit { node, score: 0.0 })
+            .map(|content| SearchHit {
+                content,
+                score: 0.0,
+            })
             .collect::<Vec<_>>();
-        let nodes = candidates
+        let content = candidates
             .iter()
-            .map(|candidate| candidate.node.clone())
+            .map(|candidate| candidate.content.clone())
             .collect::<Vec<_>>();
-        let docs = node_documents(&nodes);
+        let docs = content_documents(&content);
         let scored = self
             .retrieval
             .reranker()
@@ -385,7 +388,7 @@ impl Tool for ListPages {
     const NAME: &'static str = "list_pages";
     type Error = ToolError;
     type Args = ListPagesArgs;
-    type Output = Vec<Node>;
+    type Output = Vec<Page>;
 
     fn description(&self) -> String {
         "List notebook pages without semantic filtering. Use for inventory questions such as 'what notes do I have?' before reading page subtrees.".into()
@@ -421,7 +424,7 @@ pub struct Neighbors {
 
 #[derive(Deserialize)]
 pub struct NeighborsArgs {
-    pub id: i64,
+    pub uuid: uuid::Uuid,
     #[serde(default = "default_depth")]
     pub depth: u32,
 }
@@ -434,20 +437,20 @@ impl Tool for Neighbors {
     const NAME: &'static str = "neighbors";
     type Error = ToolError;
     type Args = NeighborsArgs;
-    type Output = Vec<Node>;
+    type Output = Vec<Content>;
 
     fn description(&self) -> String {
-        "Return nodes reachable from the given node id within `depth` hops over the graph edges (undirected).".into()
+        "Return pages and blocks reachable from a UUID within `depth` link/containment hops.".into()
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "id": { "type": "integer", "description": "Source node id" },
+                "uuid": { "type": "string", "format": "uuid", "description": "Source page or block UUID" },
                 "depth": { "type": "integer", "minimum": 1, "maximum": MAX_GRAPH_DEPTH, "description": "Hop limit (default 1)", "default": 1 }
             },
-            "required": ["id"]
+            "required": ["uuid"]
         })
     }
 
@@ -457,7 +460,7 @@ impl Tool for Neighbors {
                 format!("depth must be between 1 and {MAX_GRAPH_DEPTH}").into(),
             ));
         }
-        db::neighbors(&self.conn, args.id, args.depth)
+        db::neighbors(&self.conn, args.uuid, args.depth)
             .await
             .map_err(into_tool_err)
     }
@@ -472,35 +475,31 @@ pub struct FindBacklinks {
 
 #[derive(Deserialize)]
 pub struct FindBacklinksArgs {
-    pub id: i64,
-    /// Optional edge-kind filter, e.g. "refs" or "mentions".
-    #[serde(default)]
-    pub kind: Option<String>,
+    pub uuid: uuid::Uuid,
 }
 
 impl Tool for FindBacklinks {
     const NAME: &'static str = "find_backlinks";
     type Error = ToolError;
     type Args = FindBacklinksArgs;
-    type Output = Vec<Node>;
+    type Output = Vec<Content>;
 
     fn description(&self) -> String {
-        "Find nodes that link TO the given node (incoming edges only — different from `neighbors`, which is undirected). Optional `kind` filter: 'refs' for wikilinks/block-refs, 'mentions' for entity mentions.".into()
+        "Find blocks that link to the given page or block UUID through a wikilink or block reference.".into()
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "id": { "type": "integer", "description": "Target node id" },
-                "kind": { "type": ["string", "null"], "description": "Optional edge-kind filter" }
+                "uuid": { "type": "string", "format": "uuid", "description": "Target page or block UUID" }
             },
-            "required": ["id"]
+            "required": ["uuid"]
         })
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        db::find_backlinks(&self.conn, args.id, args.kind)
+        db::find_backlinks(&self.conn, args.uuid)
             .await
             .map_err(into_tool_err)
     }
@@ -515,29 +514,29 @@ pub struct ReadAncestors {
 
 #[derive(Deserialize)]
 pub struct ReadAncestorsArgs {
-    pub id: i64,
+    pub uuid: uuid::Uuid,
 }
 
 impl Tool for ReadAncestors {
     const NAME: &'static str = "read_ancestors";
     type Error = ToolError;
     type Args = ReadAncestorsArgs;
-    type Output = Vec<Node>;
+    type Output = Vec<Content>;
 
     fn description(&self) -> String {
-        "Walk the parent chain from this node up to the page root. Returned root-first; the node itself is the last element. Useful for getting an outline breadcrumb / surrounding context for a block.".into()
+        "Walk the parent chain from this block up to the page root. Returned root-first; the block itself is the last element. Useful for getting an outline breadcrumb / surrounding context.".into()
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
-            "properties": { "id": { "type": "integer" } },
-            "required": ["id"]
+            "properties": { "uuid": { "type": "string", "format": "uuid" } },
+            "required": ["uuid"]
         })
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        db::read_ancestors(&self.conn, args.id)
+        db::read_ancestors(&self.conn, args.uuid)
             .await
             .map_err(into_tool_err)
     }
@@ -552,7 +551,7 @@ pub struct ReadSubtree {
 
 #[derive(Deserialize)]
 pub struct ReadSubtreeArgs {
-    pub id: i64,
+    pub uuid: uuid::Uuid,
     #[serde(default = "default_subtree_depth")]
     pub depth: u32,
 }
@@ -565,20 +564,20 @@ impl Tool for ReadSubtree {
     const NAME: &'static str = "read_subtree";
     type Error = ToolError;
     type Args = ReadSubtreeArgs;
-    type Output = Vec<Node>;
+    type Output = Vec<Content>;
 
     fn description(&self) -> String {
-        "Return all descendants of `id` up to `depth` levels, in outline (DFS pre-order) order. Use this to read the entire subtree below a page or section.".into()
+        "Return descendants of a page or block UUID in outline order.".into()
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "id": { "type": "integer" },
+                "uuid": { "type": "string", "format": "uuid" },
                 "depth": { "type": "integer", "minimum": 1, "maximum": MAX_SUBTREE_DEPTH, "description": "Max levels to descend (default 4)", "default": 4 }
             },
-            "required": ["id"]
+            "required": ["uuid"]
         })
     }
 
@@ -588,214 +587,106 @@ impl Tool for ReadSubtree {
                 format!("depth must be between 1 and {MAX_SUBTREE_DEPTH}").into(),
             ));
         }
-        db::read_subtree(&self.conn, args.id, args.depth)
+        db::read_subtree(&self.conn, args.uuid, args.depth)
             .await
             .map_err(into_tool_err)
     }
 }
 
-// ───────────────────────── find_tagged ─────────────────────────
+// ───────────────────────── get_content ─────────────────────────
 
 #[derive(Clone)]
-pub struct FindTagged {
+pub struct GetContent {
     pub conn: Connection,
 }
 
 #[derive(Deserialize)]
-pub struct FindTaggedArgs {
-    pub title: String,
+pub struct GetContentArgs {
+    pub uuid: uuid::Uuid,
 }
 
-impl Tool for FindTagged {
-    const NAME: &'static str = "find_tagged";
+impl Tool for GetContent {
+    const NAME: &'static str = "get_content";
     type Error = ToolError;
-    type Args = FindTaggedArgs;
-    type Output = Vec<Node>;
+    type Args = GetContentArgs;
+    type Output = Option<Content>;
 
     fn description(&self) -> String {
-        "Find blocks/pages that mention an entity or tag with the given title (case-insensitive). Use this when the user asks about a specific person/project/concept and you want everything connected to it.".into()
+        "Fetch one page or block by UUID.".into()
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
-            "properties": { "title": { "type": "string" } },
+            "properties": { "uuid": { "type": "string", "format": "uuid" } },
+            "required": ["uuid"]
+        })
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        db::get_content(&self.conn, args.uuid)
+            .await
+            .map_err(into_tool_err)
+    }
+}
+
+// ───────────────────────── create_page ─────────────────────────
+
+#[derive(Clone)]
+pub struct CreatePage {
+    pub conn: Connection,
+}
+
+#[derive(Deserialize)]
+pub struct CreatePageArgs {
+    pub title: String,
+    #[serde(default)]
+    pub markdown: String,
+}
+
+impl Tool for CreatePage {
+    const NAME: &'static str = "create_page";
+    type Error = ToolError;
+    type Args = CreatePageArgs;
+    type Output = Page;
+
+    fn description(&self) -> String {
+        "Create a page and optionally its first paragraph. Only call when the user explicitly asks to record something.".into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "title": { "type": "string", "minLength": 1, "maxLength": 500 },
+                "markdown": { "type": "string", "maxLength": 100000, "default": "" }
+            },
             "required": ["title"]
         })
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        db::find_tagged(&self.conn, args.title)
-            .await
-            .map_err(into_tool_err)
-    }
-}
-
-// ───────────────────────── get_node ─────────────────────────
-
-#[derive(Clone)]
-pub struct GetNode {
-    pub conn: Connection,
-}
-
-#[derive(Deserialize)]
-pub struct GetNodeArgs {
-    pub id: i64,
-}
-
-impl Tool for GetNode {
-    const NAME: &'static str = "get_node";
-    type Error = ToolError;
-    type Args = GetNodeArgs;
-    type Output = Option<Node>;
-
-    fn description(&self) -> String {
-        "Fetch a single node by its integer id.".into()
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": { "id": { "type": "integer" } },
-            "required": ["id"]
-        })
-    }
-
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        db::get_node(&self.conn, args.id)
-            .await
-            .map_err(into_tool_err)
-    }
-}
-
-// ───────────────────────── create_node ─────────────────────────
-
-#[derive(Clone)]
-pub struct CreateNode {
-    pub conn: Connection,
-}
-
-#[derive(Deserialize)]
-pub struct CreateNodeArgs {
-    pub kind: NodeKind,
-    pub title: Option<String>,
-    pub content: String,
-}
-
-impl Tool for CreateNode {
-    const NAME: &'static str = "create_node";
-    type Error = ToolError;
-    type Args = CreateNodeArgs;
-    type Output = Node;
-
-    fn description(&self) -> String {
-        "Create a new node. Use kind 'block' for note content, 'page' for named pages, 'tag' for tags. Only call when the user explicitly asks to record something.".into()
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "kind": { "type": "string", "enum": ["block", "page", "tag", "entity"] },
-                "title": { "type": ["string", "null"] },
-                "content": { "type": "string" }
-            },
-            "required": ["kind", "content"]
-        })
-    }
-
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        if args.content.len() > 100_000
-            || args.title.as_ref().is_some_and(|title| title.len() > 500)
-        {
+        if args.markdown.len() > 100_000 || args.title.trim().is_empty() || args.title.len() > 500 {
             return Err(ToolError::ToolCallError(
-                "node title or content exceeds the allowed size".into(),
+                "page title or content exceeds the allowed size".into(),
             ));
         }
-        if args.kind == NodeKind::Block {
-            return Err(ToolError::ToolCallError(
-                "orphan blocks cannot be created; create a page instead".into(),
-            ));
-        }
-        if args.kind == NodeKind::Page
-            && args
-                .title
-                .as_ref()
-                .is_none_or(|title| title.trim().is_empty())
-        {
-            return Err(ToolError::ToolCallError(
-                "pages require a non-empty title".into(),
-            ));
-        }
-        db::create_node(&self.conn, args.kind, args.title, args.content, None)
-            .await
-            .map_err(into_tool_err)
-    }
-}
-
-// ───────────────────────── link_nodes ─────────────────────────
-
-#[derive(Clone)]
-pub struct LinkNodes {
-    pub conn: Connection,
-}
-
-#[derive(Deserialize)]
-pub struct LinkArgs {
-    pub src: i64,
-    pub dst: i64,
-    pub kind: String,
-    #[serde(default = "default_weight")]
-    pub weight: f64,
-}
-fn default_weight() -> f64 {
-    1.0
-}
-
-#[derive(Serialize)]
-pub struct LinkOk {
-    ok: bool,
-}
-
-impl Tool for LinkNodes {
-    const NAME: &'static str = "link_nodes";
-    type Error = ToolError;
-    type Args = LinkArgs;
-    type Output = LinkOk;
-
-    fn description(&self) -> String {
-        "Create a typed edge between two nodes. Common kinds: 'refs', 'mentions', 'relates_to', 'contains'.".into()
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "src": { "type": "integer" },
-                "dst": { "type": "integer" },
-                "kind": { "type": "string" },
-                "weight": { "type": "number", "default": 1.0 }
-            },
-            "required": ["src", "dst", "kind"]
-        })
-    }
-
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        if args.src == args.dst
-            || args.kind.trim().is_empty()
-            || args.kind.len() > 64
-            || !args.weight.is_finite()
-            || !(0.0..=10.0).contains(&args.weight)
-        {
-            return Err(ToolError::ToolCallError(
-                "invalid edge: use distinct nodes, a short kind, and weight between 0 and 10"
-                    .into(),
-            ));
-        }
-        db::link_nodes(&self.conn, args.src, args.dst, args.kind, args.weight)
+        let page = db::create_page(&self.conn, args.title)
             .await
             .map_err(into_tool_err)?;
-        Ok(LinkOk { ok: true })
+        if !args.markdown.trim().is_empty() {
+            db::create_block(
+                &self.conn,
+                page.uuid,
+                None,
+                None,
+                BlockStyle::Paragraph,
+                args.markdown,
+            )
+            .await
+            .map_err(into_tool_err)?;
+        }
+        Ok(page)
     }
 }
 
@@ -806,15 +697,15 @@ fn build_agent<M: CompletionModel + 'static>(
     retrieval: RetrievalPipeline,
     rewriter: QueryRewriter,
     allow_writes: bool,
-    active_node_id: Option<i64>,
+    active_content_uuid: Option<uuid::Uuid>,
 ) -> Result<rig::agent::Agent<M>, AgentError> {
     let conn = retrieval.notes().clone();
-    let preamble = active_node_id.map_or_else(
+    let preamble = active_content_uuid.map_or_else(
         || SYSTEM_PROMPT.to_string(),
-        |id| {
+        |uuid| {
             format!(
-                "{SYSTEM_PROMPT}\nThe note currently open in the UI is node #{id}. When the user says \
-                 'this note', inspect that node and its subtree instead of guessing from search."
+                "{SYSTEM_PROMPT}\nThe page currently open in the UI has UUID {uuid}. When the user says \
+                 'this note', inspect that page and its subtree instead of guessing from search."
             )
         },
     );
@@ -834,12 +725,9 @@ fn build_agent<M: CompletionModel + 'static>(
         .tool(FindBacklinks { conn: conn.clone() })
         .tool(ReadAncestors { conn: conn.clone() })
         .tool(ReadSubtree { conn: conn.clone() })
-        .tool(FindTagged { conn: conn.clone() })
-        .tool(GetNode { conn: conn.clone() });
+        .tool(GetContent { conn: conn.clone() });
     if allow_writes {
-        builder = builder
-            .tool(CreateNode { conn: conn.clone() })
-            .tool(LinkNodes { conn });
+        builder = builder.tool(CreatePage { conn });
     }
     Ok(builder.build())
 }
@@ -857,7 +745,7 @@ pub async fn run_chat_stream_with_config(
     history: Vec<ChatTurn>,
     message: String,
     allow_writes: bool,
-    active_node_id: Option<i64>,
+    active_content_uuid: Option<uuid::Uuid>,
     cancelled: CancellationToken,
     emit: impl Fn(ChatEvent) + Send + Sync + 'static,
     config: llm_relay::ClientConfig,
@@ -892,7 +780,7 @@ pub async fn run_chat_stream_with_config(
                 history,
                 message,
                 allow_writes,
-                active_node_id,
+                active_content_uuid,
                 cancelled,
                 emit,
                 config.clone(),
@@ -907,7 +795,7 @@ pub async fn run_chat_stream_with_config(
                 history,
                 message,
                 allow_writes,
-                active_node_id,
+                active_content_uuid,
                 cancelled,
                 emit,
                 config.clone(),
@@ -925,14 +813,20 @@ async fn run_chat_stream_with_model<M: CompletionModel + 'static>(
     history: Vec<ChatTurn>,
     message: String,
     allow_writes: bool,
-    active_node_id: Option<i64>,
+    active_content_uuid: Option<uuid::Uuid>,
     cancelled: CancellationToken,
     emit: Arc<dyn Fn(ChatEvent) + Send + Sync>,
     query_rewriter_config: llm_relay::ClientConfig,
     query_rewriting_enabled: bool,
 ) -> Result<String, AgentError> {
     let rewriter = QueryRewriter::new(&history, query_rewriting_enabled, query_rewriter_config);
-    let agent = build_agent(model, retrieval, rewriter, allow_writes, active_node_id)?;
+    let agent = build_agent(
+        model,
+        retrieval,
+        rewriter,
+        allow_writes,
+        active_content_uuid,
+    )?;
     let history: Vec<Message> = history.into_iter().map(chat_turn_message).collect();
 
     let mut stream = agent
@@ -1059,38 +953,31 @@ mod tests {
     #[test]
     fn rerank_fallback_keeps_real_candidates_for_low_confidence_queries() {
         let candidates = vec![
-            Node {
-                id: 1,
+            Content::Page(Page {
                 uuid: uuid::Uuid::from_u128(1),
-                kind: NodeKind::Page,
                 title: Some("First note".into()),
-                content: String::new(),
-                content_json: None,
-                parent_id: None,
-                position: None,
+                default_view: notes_core::PageView::Outline,
                 created_at: 0,
                 updated_at: 0,
-            },
-            Node {
-                id: 2,
+            }),
+            Content::Page(Page {
                 uuid: uuid::Uuid::from_u128(2),
-                kind: NodeKind::Page,
                 title: Some("Second note".into()),
-                content: String::new(),
-                content_json: None,
-                parent_id: None,
-                position: None,
+                default_view: notes_core::PageView::Outline,
                 created_at: 0,
                 updated_at: 0,
-            },
+            }),
         ];
         let candidates = candidates
             .into_iter()
-            .map(|node| SearchHit { node, score: 0.0 })
+            .map(|content| SearchHit {
+                content,
+                score: 0.0,
+            })
             .collect::<Vec<_>>();
         let hits = select_reranked_hits(vec![(1, 0.02), (0, 0.01)], &candidates, 8);
         assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0].node.id, 2);
+        assert_eq!(hits[0].content.uuid(), uuid::Uuid::from_u128(2));
         assert!(hits[0].score < crate::retrieval::RELEVANCE_FLOOR);
     }
 }

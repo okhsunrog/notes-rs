@@ -10,17 +10,24 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { search, type Node, type SearchHit, type SearchMode } from "@/lib/api";
+import {
+  contentText,
+  contentUuid,
+  search,
+  type Content,
+  type SearchHit,
+  type SearchMode,
+} from "@/lib/api";
 
 type Props = {
   variant?: "card" | "inline" | "dialog";
   hits: SearchHit[];
   setHits: React.Dispatch<React.SetStateAction<SearchHit[]>>;
-  onOpenNode: (n: Node) => void | Promise<void>;
+  onOpenContent: (content: Content) => void | Promise<void>;
   onStatus: (s: string) => void;
 };
 
-export function SearchCard({ variant = "card", hits, setHits, onOpenNode, onStatus }: Props) {
+export function SearchCard({ variant = "card", hits, setHits, onOpenContent, onStatus }: Props) {
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<SearchMode>("fts");
   const [busy, setBusy] = useState(false);
@@ -76,20 +83,22 @@ export function SearchCard({ variant = "card", hits, setHits, onOpenNode, onStat
           <div className="space-y-2">
             {hits.map((h, index) => (
               <button
-                key={h.node.id}
+                key={contentUuid(h.content)}
                 type="button"
-                onClick={() => void onOpenNode(h.node)}
+                onClick={() => void onOpenContent(h.content)}
                 className="w-full rounded-md border bg-card p-3 text-left text-sm transition hover:bg-accent"
               >
                 <div className="flex items-center gap-2">
-                  <Badge variant="secondary">#{h.node.id}</Badge>
-                  {h.node.title && <span className="font-medium">{h.node.title}</span>}
+                  <Badge variant="secondary">{h.content.kind}</Badge>
+                  {h.content.kind === "page" && h.content.record.title && (
+                    <span className="font-medium">{h.content.record.title}</span>
+                  )}
                   <span className="ml-auto text-xs text-muted-foreground">
                     #{index + 1} · {mode === "semantic" ? "server AI" : "local FTS"}
                   </span>
                 </div>
                 <p className="mt-1 line-clamp-3 text-muted-foreground whitespace-pre-wrap">
-                  {h.node.content}
+                  {contentText(h.content)}
                 </p>
               </button>
             ))}

@@ -25,106 +25,86 @@ export const commands = {
 	saveSettings: (update: SettingsUpdate) => typedError<SettingsSnapshot, CommandError>(__TAURI_INVOKE("save_settings", { update })),
 	resetSettings: () => typedError<SettingsSnapshot, CommandError>(__TAURI_INVOKE("reset_settings")),
 	restartApp: () => __TAURI_INVOKE<void>("restart_app"),
-	historyStatus: () => typedError<[number, number], CommandError>(__TAURI_INVOKE("history_status")),
+	historyStatus: () => typedError<HistoryStatus, CommandError>(__TAURI_INVOKE("history_status")),
 	undo: () => typedError<boolean, CommandError>(__TAURI_INVOKE("undo")),
 	redo: () => typedError<boolean, CommandError>(__TAURI_INVOKE("redo")),
-	createNode: (kind: NodeKind, title: string | null, content: string, contentJson: string | null) => typedError<Node, CommandError>(__TAURI_INVOKE("create_node", { kind, title, content, contentJson })),
-	updateNode: (id: number, title: string | null, content: string, contentJson: string | null) => typedError<null, CommandError>(__TAURI_INVOKE("update_node", { id, title, content, contentJson })),
-	renamePage: (uuid: string, title: string | null) => typedError<Node, CommandError>(__TAURI_INVOKE("rename_page", { uuid, title })),
+	renamePage: (uuid: string, title: string | null) => typedError<Page, CommandError>(__TAURI_INVOKE("rename_page", { uuid, title })),
+	setPageView: (uuid: string, view: PageView) => typedError<Page, CommandError>(__TAURI_INVOKE("set_page_view", { uuid, view })),
 	createNote: () => typedError<CreatedNote, CommandError>(__TAURI_INVOKE("create_note")),
-	setBlockContent: (uuid: string, block: BlockContent) => typedError<[Node, number], CommandError>(__TAURI_INVOKE("set_block_content", { uuid, block })),
-	splitBlock: (id: number, parts: BlockContent[]) => typedError<Node[], CommandError>(__TAURI_INVOKE("split_block", { id, parts })),
-	linkNodes: (src: number, dst: number, kind: string, weight: number | null) => typedError<null, CommandError>(__TAURI_INVOKE("link_nodes", { src, dst, kind, weight })),
-	getNode: (id: number) => typedError<{
-	id: number,
+	getPage: (uuid: string) => typedError<{
 	uuid: string,
-	kind: NodeKind,
 	title: string | null,
-	content: string,
-	content_json: string | null,
-	parent_id: number | null,
-	position: number | null,
-	created_at: number,
-	updated_at: number,
-} | null, CommandError>(__TAURI_INVOKE("get_node", { id })),
-	getContainingPage: (id: number) => typedError<{
-	id: number,
+	defaultView: PageView,
+	createdAt: number,
+	updatedAt: number,
+} | null, CommandError>(__TAURI_INVOKE("get_page", { uuid })),
+	getBlock: (uuid: string) => typedError<{
 	uuid: string,
-	kind: NodeKind,
+	pageUuid: string,
+	parentUuid: string | null,
+	orderKey: OrderKey,
+	style: BlockStyle,
+	markdown: string,
+	createdAt: number,
+	updatedAt: number,
+} | null, CommandError>(__TAURI_INVOKE("get_block", { uuid })),
+	setBlockContent: (uuid: string, content: BlockContent) => typedError<Block, CommandError>(__TAURI_INVOKE("set_block_content", { uuid, content })),
+	setBlockStyle: (uuid: string, style: BlockStyle) => typedError<Block, CommandError>(__TAURI_INVOKE("set_block_style", { uuid, style })),
+	splitBlock: (uuid: string, parts: BlockContent[]) => typedError<Block[], CommandError>(__TAURI_INVOKE("split_block", { uuid, parts })),
+	getContainingPage: (blockUuid: string) => typedError<{
+	uuid: string,
 	title: string | null,
-	content: string,
-	content_json: string | null,
-	parent_id: number | null,
-	position: number | null,
-	created_at: number,
-	updated_at: number,
-} | null, CommandError>(__TAURI_INVOKE("get_containing_page", { id })),
-	neighbors: (id: number, depth: number) => typedError<Node[], CommandError>(__TAURI_INVOKE("neighbors", { id, depth })),
+	defaultView: PageView,
+	createdAt: number,
+	updatedAt: number,
+} | null, CommandError>(__TAURI_INVOKE("get_containing_page", { blockUuid })),
+	neighbors: (uuid: string, depth: number) => typedError<Content[], CommandError>(__TAURI_INVOKE("neighbors", { uuid, depth })),
 	searchNotes: (mode: SearchMode, query: string, limit: number) => typedError<SearchHit[], CommandError>(__TAURI_INVOKE("search_notes", { mode, query, limit })),
-	chatStream: (history: ChatTurn[], message: string, allowWrites: boolean, activeNodeUuid: string | null, requestId: string, onEvent: Channel<ChatEvent>) => typedError<string, CommandError>(__TAURI_INVOKE("chat_stream", { history, message, allowWrites, activeNodeUuid, requestId, onEvent })),
+	chatStream: (history: ChatTurn[], message: string, allowWrites: boolean, activeContentUuid: string | null, requestId: string, onEvent: Channel<ChatEvent>) => typedError<string, CommandError>(__TAURI_INVOKE("chat_stream", { history, message, allowWrites, activeContentUuid, requestId, onEvent })),
 	cancelChat: (requestId: string) => __TAURI_INVOKE<boolean>("cancel_chat", { requestId }),
-	listEntities: (limit: number | null) => typedError<Node[], CommandError>(__TAURI_INVOKE("list_entities", { limit })),
-	listPages: (limit: number | null) => typedError<Node[], CommandError>(__TAURI_INVOKE("list_pages", { limit })),
-	deletePage: (id: number) => typedError<boolean, CommandError>(__TAURI_INVOKE("delete_page", { id })),
-	findBacklinks: (id: number, kind: string | null) => typedError<Node[], CommandError>(__TAURI_INVOKE("find_backlinks", { id, kind })),
-	graphSnapshot: (focusId: number | null) => typedError<GraphSnapshot, CommandError>(__TAURI_INVOKE("graph_snapshot", { focusId })),
+	listPages: (limit: number | null) => typedError<Page[], CommandError>(__TAURI_INVOKE("list_pages", { limit })),
+	deletePage: (uuid: string) => typedError<boolean, CommandError>(__TAURI_INVOKE("delete_page", { uuid })),
+	findBacklinks: (uuid: string) => typedError<Content[], CommandError>(__TAURI_INVOKE("find_backlinks", { uuid })),
+	graphSnapshot: (focusUuid: string | null) => typedError<GraphSnapshot, CommandError>(__TAURI_INVOKE("graph_snapshot", { focusUuid })),
 	exportData: () => typedError<string | null, CommandError>(__TAURI_INVOKE("export_data")),
 	importData: () => typedError<string | null, CommandError>(__TAURI_INVOKE("import_data")),
 	createBackup: () => typedError<string, CommandError>(__TAURI_INVOKE("create_backup")),
-	attachFile: (parentId: number) => typedError<{
-	id: number,
+	attachFile: (location: AttachmentOwner) => typedError<{
 	uuid: string,
-	kind: NodeKind,
-	title: string | null,
-	content: string,
-	content_json: string | null,
-	parent_id: number | null,
-	position: number | null,
-	created_at: number,
-	updated_at: number,
-} | null, CommandError>(__TAURI_INVOKE("attach_file", { parentId })),
-	listAttachments: (parentId: number) => typedError<Node[], CommandError>(__TAURI_INVOKE("list_attachments", { parentId })),
-	openAttachment: (id: number) => typedError<null, CommandError>(__TAURI_INVOKE("open_attachment", { id })),
-	deleteAttachment: (id: number) => typedError<boolean, CommandError>(__TAURI_INVOKE("delete_attachment", { id })),
-	createPage: (title: string) => typedError<Node, CommandError>(__TAURI_INVOKE("create_page", { title })),
-	listBlockChildren: (parentId: number) => typedError<Node[], CommandError>(__TAURI_INVOKE("list_block_children", { parentId })),
-	createBlock: (parentId: number | null, position: number | null, content: string, contentJson: string | null) => typedError<Node, CommandError>(__TAURI_INVOKE("create_block", { parentId, position, content, contentJson })),
-	indentBlock: (uuid: string) => typedError<Node, CommandError>(__TAURI_INVOKE("indent_block", { uuid })),
-	outdentBlock: (uuid: string) => typedError<Node, CommandError>(__TAURI_INVOKE("outdent_block", { uuid })),
-	moveBlockUp: (uuid: string) => typedError<Node, CommandError>(__TAURI_INVOKE("move_block_up", { uuid })),
-	moveBlockDown: (uuid: string) => typedError<Node, CommandError>(__TAURI_INVOKE("move_block_down", { uuid })),
-	deleteBlock: (id: number) => typedError<boolean, CommandError>(__TAURI_INVOKE("delete_block", { id })),
-	getOrCreatePageByTitle: (title: string) => typedError<Node, CommandError>(__TAURI_INVOKE("get_or_create_page_by_title", { title })),
+	owner: AttachmentOwner,
+	blobHash: string,
+	filename: string,
+	mime: string,
+	size: number,
+	createdAt: number,
+} | null, CommandError>(__TAURI_INVOKE("attach_file", { location })),
+	listAttachments: (location: AttachmentOwner) => typedError<Attachment[], CommandError>(__TAURI_INVOKE("list_attachments", { location })),
+	openAttachment: (uuid: string) => typedError<null, CommandError>(__TAURI_INVOKE("open_attachment", { uuid })),
+	deleteAttachment: (uuid: string) => typedError<boolean, CommandError>(__TAURI_INVOKE("delete_attachment", { uuid })),
+	createPage: (title: string) => typedError<Page, CommandError>(__TAURI_INVOKE("create_page", { title })),
+	listBlockChildren: (pageUuid: string, parentUuid: string | null) => typedError<Block[], CommandError>(__TAURI_INVOKE("list_block_children", { pageUuid, parentUuid })),
+	createBlock: (pageUuid: string, parentUuid: string | null, afterUuid: string | null, style: BlockStyle, markdown: string) => typedError<Block, CommandError>(__TAURI_INVOKE("create_block", { pageUuid, parentUuid, afterUuid, style, markdown })),
+	indentBlock: (uuid: string) => typedError<Block, CommandError>(__TAURI_INVOKE("indent_block", { uuid })),
+	outdentBlock: (uuid: string) => typedError<Block, CommandError>(__TAURI_INVOKE("outdent_block", { uuid })),
+	moveBlockUp: (uuid: string) => typedError<Block, CommandError>(__TAURI_INVOKE("move_block_up", { uuid })),
+	moveBlockDown: (uuid: string) => typedError<Block, CommandError>(__TAURI_INVOKE("move_block_down", { uuid })),
+	deleteBlock: (uuid: string) => typedError<boolean, CommandError>(__TAURI_INVOKE("delete_block", { uuid })),
+	getOrCreatePageByTitle: (title: string) => typedError<Page, CommandError>(__TAURI_INVOKE("get_or_create_page_by_title", { title })),
 	getPageByTitle: (title: string) => typedError<{
-	id: number,
 	uuid: string,
-	kind: NodeKind,
 	title: string | null,
-	content: string,
-	content_json: string | null,
-	parent_id: number | null,
-	position: number | null,
-	created_at: number,
-	updated_at: number,
+	defaultView: PageView,
+	createdAt: number,
+	updatedAt: number,
 } | null, CommandError>(__TAURI_INVOKE("get_page_by_title", { title })),
-	getNodeByUuid: (uuid: string) => typedError<{
-	id: number,
-	uuid: string,
-	kind: NodeKind,
-	title: string | null,
-	content: string,
-	content_json: string | null,
-	parent_id: number | null,
-	position: number | null,
-	created_at: number,
-	updated_at: number,
-} | null, CommandError>(__TAURI_INVOKE("get_node_by_uuid", { uuid })),
-	searchPagesByTitle: (query: string, limit: number) => typedError<Node[], CommandError>(__TAURI_INVOKE("search_pages_by_title", { query, limit })),
-	searchBlocksFts: (query: string, limit: number) => typedError<Node[], CommandError>(__TAURI_INVOKE("search_blocks_fts", { query, limit })),
+	searchPagesByTitle: (query: string, limit: number) => typedError<Page[], CommandError>(__TAURI_INVOKE("search_pages_by_title", { query, limit })),
+	searchBlocksFts: (query: string, limit: number) => typedError<Block[], CommandError>(__TAURI_INVOKE("search_blocks_fts", { query, limit })),
 };
 
 /** Events */
 export const events = {
+	appReady: makeEvent<StartupReadyEvent>("app:ready"),
+	appStartupError: makeEvent<StartupErrorEvent>("app:startup-error"),
 	domainEvent: makeEvent<DomainEventMessage>("domain:event"),
 };
 
@@ -138,8 +118,8 @@ export type AiIndexStatus = {
 	settings: AiRuntimeSettings,
 	pendingEmbeddings: number,
 	failedEmbeddings: number,
-	indexedNodes: number,
-	sourceNodes: number,
+	indexedDocuments: number,
+	sourceDocuments: number,
 	pendingExtractions: number,
 	failedExtractions: number,
 };
@@ -192,10 +172,38 @@ export type AiRuntimeSettings = {
 	queryRewriting: boolean,
 };
 
-export type BlockContent = {
-	content: string,
-	blockUuids: string[],
+export type Attachment = {
+	uuid: string,
+	owner: AttachmentOwner,
+	blobHash: string,
+	filename: string,
+	mime: string,
+	size: number,
+	createdAt: number,
 };
+
+export type AttachmentOwner = { kind: "page"; uuid: string } | { kind: "block"; uuid: string };
+
+export type Block = {
+	uuid: string,
+	pageUuid: string,
+	parentUuid: string | null,
+	orderKey: OrderKey,
+	style: BlockStyle,
+	markdown: string,
+	createdAt: number,
+	updatedAt: number,
+};
+
+export type BlockContent = {
+	markdown: string,
+};
+
+/**
+ *  Semantic Markdown shape of a block. Outline bullets are editor chrome
+ *  and deliberately do not change this value.
+ */
+export type BlockStyle = "paragraph" | "bullet" | "numbered" | "task" | "heading_1" | "heading_2" | "heading_3" | "quote" | "code" | "divider";
 
 export type ChatEvent = { kind: "text_delta"; text: string } | { kind: "reasoning"; text: string } | { kind: "tool_start"; id: string; name: string; args: unknown } | { kind: "tool_end"; id: string; result: string } | { kind: "done"; text: string } | { kind: "error"; message: string } | { kind: "usage"; inputTokens: number; outputTokens: number; totalTokens: number } | { kind: "cancelled" };
 
@@ -210,9 +218,11 @@ export type CommandErrorCode = "invalid_input" | "not_found" | "conflict" | "una
 
 export type CompletionProtocol = "openai" | "anthropic";
 
+export type Content = { kind: "page"; record: Page } | { kind: "block"; record: Block };
+
 export type CreatedNote = {
-	page: Node,
-	initialBlock: Node,
+	page: Page,
+	initialBlock: Block,
 };
 
 /**
@@ -220,21 +230,32 @@ export type CreatedNote = {
  *  Payloads carry affected IDs when a command can identify them; whole-workspace
  *  replacements (import/sync) deliberately request a full cache refresh.
  */
-export type DomainEvent = { kind: "node_changed"; node_uuids: string[]; parent_uuids: string[]; node_kinds: NodeKind[] } | { kind: "node_deleted"; node_uuids: string[]; parent_uuids: string[] } | { kind: "graph_changed"; node_uuids: string[] } | { kind: "structure_changed"; node_uuids: string[] } | { kind: "attachments_changed"; parent_uuids: string[] } | { kind: "history_changed" } | { kind: "settings_changed" } | { kind: "sync_status_changed" } | { kind: "server_ai_changed" } | { kind: "workspace_changed" };
+export type DomainEvent = { kind: "pages_changed"; page_uuids: string[] } | { kind: "blocks_changed"; block_uuids: string[]; container_uuids: string[] } | { kind: "pages_deleted"; page_uuids: string[] } | { kind: "blocks_deleted"; block_uuids: string[]; container_uuids: string[] } | { kind: "graph_changed"; content_uuids: string[] } | { kind: "structure_changed"; block_uuids: string[] } | { kind: "attachments_changed"; owner_uuids: string[] } | { kind: "history_changed" } | { kind: "settings_changed" } | { kind: "sync_status_changed" } | { kind: "server_ai_changed" } | { kind: "workspace_changed" };
 
 export type DomainEventMessage = DomainEvent;
 
-export type Edge = {
-	src: number,
-	dst: number,
-	kind: string,
-	weight: number | null,
-	created_at: number,
+export type GraphEdge = {
+	sourceUuid: string,
+	targetUuid: string,
+	relation: GraphRelation,
 };
 
+export type GraphItem = {
+	uuid: string,
+	kind: ObjectKind,
+	label: string,
+};
+
+export type GraphRelation = "contains" | "page_link" | "block_reference";
+
 export type GraphSnapshot = {
-	nodes: Node[],
-	edges: Edge[],
+	items: GraphItem[],
+	edges: GraphEdge[],
+};
+
+export type HistoryStatus = {
+	undoCount: number,
+	redoCount: number,
 };
 
 export type MobileSystemInfo = {
@@ -242,21 +263,27 @@ export type MobileSystemInfo = {
 	safeArea: SafeAreaInsets,
 };
 
-export type Node = {
-	id: number,
+export type ObjectKind = "page" | "block";
+
+/**
+ *  A lexical, sync-safe sibling ordering key. Keys are fixed-width uppercase
+ *  hexadecimal integers, so SQLite TEXT ordering is also numeric ordering.
+ */
+export type OrderKey = string;
+
+export type Page = {
 	uuid: string,
-	kind: NodeKind,
 	title: string | null,
-	content: string,
-	content_json: string | null,
-	parent_id: number | null,
-	position: number | null,
-	created_at: number,
-	updated_at: number,
+	defaultView: PageView,
+	createdAt: number,
+	updatedAt: number,
 };
 
-/**  Closed set of node shapes understood by storage, sync and the UI. */
-export type NodeKind = "page" | "block" | "tag" | "entity" | "attachment";
+/**
+ *  The durable presentation a page opens with. The content model is the
+ *  same in every view; this only changes editing and rendering semantics.
+ */
+export type PageView = "outline" | "document" | "reading";
 
 export type SafeAreaInsets = {
 	top: number | null,
@@ -266,7 +293,7 @@ export type SafeAreaInsets = {
 };
 
 export type SearchHit = {
-	node: Node,
+	content: Content,
 	score: number | null,
 };
 
@@ -287,6 +314,12 @@ export type SettingsUpdate = {
 	apiKeys?: Partial<{ [key in SecretKey]: string }>,
 	clearKeys?: SecretKey[],
 };
+
+export type StartupErrorEvent = {
+	message: string,
+};
+
+export type StartupReadyEvent = null;
 
 export type StartupStatus = { state: "starting"; message: string } | { state: "ready" } | { state: "error"; message: string };
 

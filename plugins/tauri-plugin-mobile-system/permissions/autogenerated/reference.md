@@ -16,6 +16,7 @@ Default permissions for non-sensitive mobile system integration
 <th>Description</th>
 </tr>
 
+
 <tr>
 <td>
 

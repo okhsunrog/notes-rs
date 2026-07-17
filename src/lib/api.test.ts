@@ -20,4 +20,16 @@ describe("typed command results", () => {
       message: "request is already active",
     } satisfies Partial<CommandFailure>);
   });
+
+  it("preserves raw Tauri argument deserialization errors as ordinary errors", async () => {
+    const failure = unwrapCommand(
+      Promise.resolve({
+        status: "error",
+        error: "invalid URL: relative URL without a base",
+      }),
+    );
+
+    await expect(failure).rejects.toEqual(new Error("invalid URL: relative URL without a base"));
+    await expect(failure).rejects.not.toBeInstanceOf(CommandFailure);
+  });
 });

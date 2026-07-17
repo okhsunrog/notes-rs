@@ -1,14 +1,15 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   createNote,
   deletePage,
   getContainingPage,
   getHistoryStatus,
-  getNodeByUuid,
+  getPage,
   redo,
   undo,
-  type Node,
+  type Content,
+  type Page,
   type SearchHit,
 } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
@@ -23,7 +24,9 @@ export function useNotesWorkspace(
   const queryClient = useQueryClient();
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [activePageUuid, setActivePageUuid] = useState<string | null>(null);
-  const [newNote, setNewNote] = useState<{ pageUuid: string; blockId: number | null } | null>(null);
+  const [newNote, setNewNote] = useState<{ pageUuid: string; blockUuid: string | null } | null>(
+    null,
+  );
   const [creatingNote, setCreatingNote] = useState(false);
   const creatingNoteRef = useRef(false);
 
@@ -32,12 +35,19 @@ export function useNotesWorkspace(
     queryFn: getHistoryStatus,
     enabled: ready,
   });
-  const activeNodeQuery = useQuery({
-    queryKey: queryKeys.node(activePageUuid ?? "inactive"),
-    queryFn: () => getNodeByUuid(activePageUuid as string),
+  const activePageQuery = useQuery({
+    queryKey: queryKeys.page(activePageUuid ?? "inactive"),
+    queryFn: () => getPage(activePageUuid as string),
     enabled: activePageUuid !== null,
   });
-  const activeNode = activeNodeQuery.data ?? null;
+  const activePage = activePageQuery.data ?? null;
+
+  useEffect(() => {
+    if (activePageUuid !== null && activePageQuery.isSuccess && activePageQuery.data === null) {
+      setActivePageUuid(null);
+      setNewNote(null);
+    }
+  }, [activePageQuery.data, activePageQuery.isSuccess, activePageUuid]);
 
   const createNewNote = useCallback(async () => {
     if (creatingNoteRef.current) return;
@@ -45,10 +55,10 @@ export function useNotesWorkspace(
     setCreatingNote(true);
     try {
       const note = await createNote();
-      queryClient.setQueryData(queryKeys.node(note.page.uuid), note.page);
+      queryClient.setQueryData(queryKeys.page(note.page.uuid), note.page);
       queryClient.setQueryData(queryKeys.children(note.page.uuid), [note.initialBlock]);
       await queryClient.invalidateQueries({ queryKey: queryKeys.pages });
-      setNewNote({ pageUuid: note.page.uuid, blockId: note.initialBlock.id });
+      setNewNote({ pageUuid: note.page.uuid, blockUuid: note.initialBlock.uuid });
       setActivePageUuid(note.page.uuid);
       setHits([]);
       onStatus("New note ready — name it, then press Enter to write.");
@@ -79,29 +89,34 @@ export function useNotesWorkspace(
   );
 
   const applyUpdated = useCallback(
-    (updated: Node) => {
+    (updated: Page) => {
       setHits((current) =>
-        current.map((hit) => (hit.node.uuid === updated.uuid ? { ...hit, node: updated } : hit)),
+        current.map((hit) =>
+          hit.content.kind === "page" && hit.content.record.uuid === updated.uuid
+            ? { ...hit, content: { kind: "page", record: updated } }
+            : hit,
+        ),
       );
-      queryClient.setQueryData(queryKeys.node(updated.uuid), updated);
+      queryClient.setQueryData(queryKeys.page(updated.uuid), updated);
       void queryClient.invalidateQueries({ queryKey: queryKeys.pages });
     },
     [queryClient],
   );
 
-  const openNode = useCallback(
-    async (node: Node) => {
+  const openContent = useCallback(
+    async (content: Content) => {
       try {
-        const page = node.kind === "page" ? node : await getContainingPage(node.id);
+        const page =
+          content.kind === "page" ? content.record : await getContainingPage(content.record.uuid);
         if (!page) {
-          onStatus(`No containing page found for #${node.id}`);
+          onStatus(`No containing page found for ${content.record.uuid}`);
           return;
         }
-        queryClient.setQueryData(queryKeys.node(page.uuid), page);
+        queryClient.setQueryData(queryKeys.page(page.uuid), page);
         setActivePageUuid(page.uuid);
         showEditor();
-        if (page.uuid !== node.uuid) {
-          onStatus(`Opened ${page.title ?? "page"} containing #${node.id}`);
+        if (content.kind === "block") {
+          onStatus(`Opened ${page.title ?? "page"} containing the selected block.`);
         }
       } catch (error) {
         onStatus(`open error: ${String(error)}`);
@@ -111,21 +126,25 @@ export function useNotesWorkspace(
   );
 
   const removePage = useCallback(
-    async (node: Node) => {
+    async (page: Page) => {
       if (
         !(await confirm({
           title: "Delete note?",
-          description: `“${node.title ?? "Untitled"}” and all of its blocks will be removed. A recovery backup is created first.`,
+          description: `“${page.title ?? "Untitled"}” and all of its blocks will be removed. A recovery backup is created first.`,
           confirmLabel: "Delete note",
           destructive: true,
         }))
       )
         return;
       try {
-        if (await deletePage(node.id)) {
+        if (await deletePage(page.uuid)) {
           setActivePageUuid(null);
-          queryClient.removeQueries({ queryKey: queryKeys.node(node.uuid), exact: true });
-          setHits((current) => current.filter((hit) => hit.node.uuid !== node.uuid));
+          queryClient.removeQueries({ queryKey: queryKeys.page(page.uuid), exact: true });
+          setHits((current) =>
+            current.filter(
+              (hit) => !(hit.content.kind === "page" && hit.content.record.uuid === page.uuid),
+            ),
+          );
           onStatus("Page deleted; a recovery backup was created.");
         }
       } catch (error) {
@@ -136,9 +155,9 @@ export function useNotesWorkspace(
   );
 
   const selectPage = useCallback(
-    (page: Node) => {
+    (page: Page) => {
       setNewNote(null);
-      queryClient.setQueryData(queryKeys.node(page.uuid), page);
+      queryClient.setQueryData(queryKeys.page(page.uuid), page);
       setActivePageUuid(page.uuid);
       showEditor();
     },
@@ -152,17 +171,17 @@ export function useNotesWorkspace(
   }, [queryClient]);
 
   return {
-    activeNode,
+    activePage,
     activePageUuid,
     applyUpdated,
     closePage: () => setActivePageUuid(null),
     createNewNote,
     creatingNote,
-    history: historyQuery.data ?? ([0, 0] as const),
+    history: historyQuery.data ?? { undoCount: 0, redoCount: 0 },
     hits,
     moveHistory,
     newNote,
-    openNode,
+    openContent,
     removePage,
     resetWorkspace,
     selectPage,

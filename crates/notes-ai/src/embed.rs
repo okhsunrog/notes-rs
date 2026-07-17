@@ -694,7 +694,7 @@ pub fn spawn_worker(
 
 async fn tick(notes: &Connection, store: &AiStore, embedder: &dyn EmbedderBackend) -> Result<bool> {
     let source_seq = notes_core::sync_cursor(notes).await?;
-    let source_nodes = store.reconcile(notes, source_seq).await?;
+    store.reconcile(notes, source_seq).await?;
     let jobs = store.take_jobs(16).await?;
     if jobs.is_empty() {
         return Ok(false);
@@ -709,7 +709,7 @@ async fn tick(notes: &Connection, store: &AiStore, embedder: &dyn EmbedderBacken
             store
                 .record_failure(
                     jobs.iter()
-                        .map(|job| (job.node_uuid, job.input_hash.clone()))
+                        .map(|job| (job.content_uuid, job.input_hash.clone()))
                         .collect(),
                     &error.to_string(),
                     crate::failure::provider_failure_is_terminal(&error),
@@ -724,7 +724,7 @@ async fn tick(notes: &Connection, store: &AiStore, embedder: &dyn EmbedderBacken
             .all(|embedding| embedding.len() == embedder.ndims());
     if !valid {
         let error = format!(
-            "embedding provider returned {} vectors for {} nodes or an unexpected dimension (expected {})",
+            "embedding provider returned {} vectors for {} documents or an unexpected dimension (expected {})",
             embs.len(),
             jobs.len(),
             embedder.ndims()
@@ -732,7 +732,7 @@ async fn tick(notes: &Connection, store: &AiStore, embedder: &dyn EmbedderBacken
         store
             .record_failure(
                 jobs.iter()
-                    .map(|job| (job.node_uuid, job.input_hash.clone()))
+                    .map(|job| (job.content_uuid, job.input_hash.clone()))
                     .collect(),
                 &error,
                 true,
@@ -743,15 +743,53 @@ async fn tick(notes: &Connection, store: &AiStore, embedder: &dyn EmbedderBacken
     let items = jobs
         .into_iter()
         .zip(embs)
-        .map(|(job, embedding)| (job.node_uuid, job.input_hash, embedding))
+        .map(|(job, embedding)| (job.content_uuid, job.input_hash, embedding))
         .collect();
-    store.write_embeddings(source_nodes, items).await?;
+    // The provider call above can be slow enough for source content to change while it is in
+    // flight. Reconciliation atomically replaces those jobs with their new input hashes, so
+    // `write_embeddings` will ignore stale results instead of removing the newer work item.
+    let source_documents = store
+        .reconcile(notes, notes_core::sync_cursor(notes).await?)
+        .await?;
+    store.write_embeddings(source_documents, items).await?;
     Ok(true)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct MutatingEmbedder {
+        notes: Connection,
+        block_uuid: uuid::Uuid,
+    }
+
+    #[async_trait]
+    impl EmbedderBackend for MutatingEmbedder {
+        fn ndims(&self) -> usize {
+            2
+        }
+
+        fn id(&self) -> String {
+            "test:mutating".into()
+        }
+
+        async fn embed_passages(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
+            notes_core::db::set_block_content(
+                &self.notes,
+                self.block_uuid,
+                notes_core::db::BlockContent {
+                    markdown: "new content written while embedding".into(),
+                },
+            )
+            .await?;
+            Ok(texts.into_iter().map(|_| vec![1.0, 0.0]).collect())
+        }
+
+        async fn embed_query(&self, _text: String) -> Result<Vec<f32>> {
+            Ok(vec![1.0, 0.0])
+        }
+    }
 
     #[test]
     fn rejects_malformed_rerank_indices_and_scores() {
@@ -810,5 +848,50 @@ mod tests {
         )
         .expect("valid results");
         assert_eq!(results, vec![(1, 0.8), (0, 0.2)]);
+    }
+
+    #[tokio::test]
+    async fn tick_does_not_commit_an_embedding_for_content_changed_in_flight() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let notes = notes_core::db::open(directory.path().join("notes.db"))
+            .await
+            .expect("notes database");
+        let page = notes_core::db::create_page(&notes, "Race".into())
+            .await
+            .expect("create page");
+        let block = notes_core::db::create_block(
+            &notes,
+            page.uuid,
+            None,
+            None,
+            notes_core::BlockStyle::Paragraph,
+            "old content".into(),
+        )
+        .await
+        .expect("create block");
+        let store = AiStore::open(directory.path().join("ai.db"), "identity".into(), 2)
+            .await
+            .expect("AI store");
+        let embedder = MutatingEmbedder {
+            notes: notes.clone(),
+            block_uuid: block.uuid,
+        };
+
+        assert!(
+            tick(&notes, &store, &embedder)
+                .await
+                .expect("embedding tick")
+        );
+
+        let status = store.status(1).await.expect("AI status");
+        assert_eq!(status.indexed, 0);
+        assert_eq!(status.pending, 1);
+        let current = store.take_jobs(1).await.expect("current job").remove(0);
+        assert_eq!(current.content_uuid, block.uuid);
+        assert!(
+            current
+                .input_text
+                .contains("new content written while embedding")
+        );
     }
 }

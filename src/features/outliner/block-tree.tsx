@@ -1,37 +1,53 @@
+import { useEffect, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, Plus } from "lucide-react";
-import { createBlock, type Node } from "@/lib/api";
+import { createBlock } from "@/lib/api";
 import { listBlockChildren } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
 import { BlockNode } from "./block-node";
 import { useOutliner } from "./outliner-store";
 
 type Props = {
-  parent: Node;
+  pageUuid: string;
+  parentUuid: string | null;
   depth: number;
+  focusFirstBlockRequest?: number;
 };
 
-/** Renders the ordered list of children for `parent`. Subscribes to the
- * outliner store and ensures the level is loaded on mount. */
-export function BlockChildren({ parent, depth }: Props) {
+/** Renders one ordered sibling list and loads it from the backend cache. */
+export function BlockChildren({ pageUuid, parentUuid, depth, focusFirstBlockRequest = 0 }: Props) {
   const store = useOutliner();
   const queryClient = useQueryClient();
+  const handledFocusRequest = useRef(0);
+  const containerUuid = parentUuid ?? pageUuid;
   const childrenQuery = useQuery({
-    queryKey: queryKeys.children(parent.uuid),
-    queryFn: () => listBlockChildren(parent.id),
+    queryKey: queryKeys.children(containerUuid),
+    queryFn: () => listBlockChildren(pageUuid, parentUuid),
   });
   const blocks = childrenQuery.data;
 
+  useEffect(() => {
+    if (
+      focusFirstBlockRequest <= handledFocusRequest.current ||
+      store.view === "reading" ||
+      !blocks?.length
+    ) {
+      return;
+    }
+    handledFocusRequest.current = focusFirstBlockRequest;
+    store.setEditing(blocks[0].uuid);
+  }, [blocks, focusFirstBlockRequest, store]);
+
   const addBlock = async () => {
     try {
+      const lastBlock = blocks && blocks.length > 0 ? blocks[blocks.length - 1] : null;
       const created = await createBlock({
-        parentId: parent.id,
-        position: null,
-        content: "",
-        contentJson: null,
+        pageUuid,
+        parentUuid,
+        afterUuid: lastBlock?.uuid ?? null,
       });
-      await queryClient.invalidateQueries({ queryKey: queryKeys.children(parent.uuid) });
-      store.setEditing(created.id);
+      await queryClient.invalidateQueries({ queryKey: queryKeys.children(containerUuid) });
+      store.setEditing(created.uuid);
     } catch (e) {
       console.error("create block failed", e);
     }
@@ -55,14 +71,16 @@ export function BlockChildren({ parent, depth }: Props) {
       return (
         <div className="rounded-md border border-dashed bg-card/30 p-6 text-center text-sm text-muted-foreground">
           <p>No blocks yet on this page.</p>
-          <button
-            type="button"
-            onClick={() => void addBlock()}
-            className="mt-3 inline-flex items-center gap-1 rounded-md border bg-background px-2 py-1 text-xs text-foreground hover:bg-accent"
-          >
-            <Plus className="size-3" />
-            Add first block
-          </button>
+          {store.view !== "reading" && (
+            <button
+              type="button"
+              onClick={() => void addBlock()}
+              className="mt-3 inline-flex items-center gap-1 rounded-md border bg-background px-2 py-1 text-xs text-foreground hover:bg-accent"
+            >
+              <Plus className="size-3" />
+              Add first block
+            </button>
+          )}
         </div>
       );
     }
@@ -72,11 +90,11 @@ export function BlockChildren({ parent, depth }: Props) {
   return (
     <>
       <ul className="flex flex-col gap-0.5">
-        {blocks.map((b) => (
-          <BlockNode key={b.id} block={b} parent={parent} depth={depth} />
+        {blocks.map((block, index) => (
+          <BlockNode key={block.uuid} block={block} depth={depth} ordinal={index + 1} />
         ))}
       </ul>
-      {depth === 0 && (
+      {depth === 0 && store.view !== "reading" && (
         <button
           type="button"
           onClick={() => void addBlock()}

@@ -291,9 +291,9 @@ async fn bootstrap_replica(
         .into());
     }
     let current = export_sync_snapshot(notes, 0).await?;
-    if !current.nodes.is_empty()
+    if !current.pages.is_empty()
+        || !current.blocks.is_empty()
         || !current.tombstones.is_empty()
-        || !current.edges.is_empty()
         || !current.attachments.is_empty()
     {
         return Err(notes_core::CoreError::conflict(

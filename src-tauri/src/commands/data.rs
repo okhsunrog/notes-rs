@@ -125,16 +125,22 @@ pub(super) async fn write_backup(
 }
 
 fn add_archive_files(app: &AppHandle, archive: &mut db::DataArchive) -> anyhow::Result<()> {
-    for node in archive
-        .nodes
-        .iter()
-        .filter(|node| node.kind == NodeKind::Attachment)
-    {
-        let path = safe_app_data_path(app, &node.content)?;
+    for attachment in &archive.attachments {
+        let relative = super::attachments::attachment_relative_path(
+            &attachment.blob_hash,
+            &attachment.filename,
+        );
+        let path = safe_app_data_path(app, &relative)?;
         let bytes = std::fs::read(&path)
             .with_context(|| format!("reading attachment {}", path.display()))?;
+        let actual_hash = format!("{:x}", Sha256::digest(&bytes));
+        anyhow::ensure!(
+            actual_hash == attachment.blob_hash,
+            "attachment {} does not match its stored content hash",
+            attachment.filename
+        );
         archive.files.insert(
-            node.content.clone(),
+            relative.to_string_lossy().into_owned(),
             base64::engine::general_purpose::STANDARD.encode(bytes),
         );
     }
@@ -148,16 +154,42 @@ async fn restore_archive(
 ) -> anyhow::Result<()> {
     let data_dir = app.path().app_data_dir()?;
     let staging = data_dir.join(format!("attachments-import-{}", uuid::Uuid::new_v4()));
+    let expected_files = archive
+        .attachments
+        .iter()
+        .map(|attachment| {
+            super::attachments::attachment_relative_path(
+                &attachment.blob_hash,
+                &attachment.filename,
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let actual_files = archive
+        .files
+        .keys()
+        .map(safe_relative_path)
+        .collect::<anyhow::Result<std::collections::BTreeSet<_>>>()?;
+    anyhow::ensure!(
+        actual_files == expected_files,
+        "archive attachment metadata and file payloads do not match"
+    );
     for (relative, encoded) in &archive.files {
         let relative = safe_relative_path(relative)?;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(encoded)?;
+        let components = relative.components().collect::<Vec<_>>();
+        let expected_hash = components
+            .get(1)
+            .and_then(|component| component.as_os_str().to_str())
+            .context("attachment archive path is missing its content hash")?;
+        anyhow::ensure!(
+            format!("{:x}", Sha256::digest(&bytes)) == expected_hash,
+            "archive attachment payload does not match its content hash"
+        );
         let destination = staging.join(relative.strip_prefix("attachments").unwrap_or(&relative));
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(
-            destination,
-            base64::engine::general_purpose::STANDARD.decode(encoded)?,
-        )?;
+        std::fs::write(destination, bytes)?;
     }
     if let Err(error) = db::import_archive(connection, archive).await {
         let _ = std::fs::remove_dir_all(staging);
@@ -175,7 +207,7 @@ async fn restore_archive(
 
 pub(super) fn safe_app_data_path(
     app: &AppHandle,
-    relative: &str,
+    relative: impl AsRef<std::path::Path>,
 ) -> anyhow::Result<std::path::PathBuf> {
     Ok(app
         .path()
@@ -183,8 +215,8 @@ pub(super) fn safe_app_data_path(
         .join(safe_relative_path(relative)?))
 }
 
-fn safe_relative_path(value: &str) -> anyhow::Result<std::path::PathBuf> {
-    let path = std::path::Path::new(value);
+fn safe_relative_path(value: impl AsRef<std::path::Path>) -> anyhow::Result<std::path::PathBuf> {
+    let path = value.as_ref();
     if path.is_absolute()
         || path.components().any(|component| {
             matches!(

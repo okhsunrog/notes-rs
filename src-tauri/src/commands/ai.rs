@@ -55,7 +55,7 @@ pub async fn chat_stream(
     history: Vec<ChatTurn>,
     message: String,
     allow_writes: bool,
-    active_node_uuid: Option<uuid::Uuid>,
+    active_content_uuid: Option<uuid::Uuid>,
     request_id: uuid::Uuid,
     on_event: Channel<ChatEvent>,
 ) -> CommandResult<String> {
@@ -80,7 +80,7 @@ pub async fn chat_stream(
             history,
             message,
             allow_writes,
-            active_node_uuid,
+            active_content_uuid,
             cancellation,
             move |event| {
                 let _ = on_event.send(event);

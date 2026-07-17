@@ -4,7 +4,6 @@ import { Cloud, CloudOff, GitFork, Loader2, Redo2, Search, Settings, Undo2 } fro
 import { AppLayout } from "@/app/layout";
 import { WindowControls } from "@/app/window-controls";
 import { Toaster } from "@/components/ui/sonner";
-import { EntitiesCard } from "@/features/entities/entities-card";
 import { GraphWorkspace, KnowledgePanel } from "@/features/graph/knowledge-panel";
 import { HomeView } from "@/features/home/home-view";
 import { SearchCard } from "@/features/search/search-card";
@@ -12,7 +11,7 @@ import { PagesList } from "@/features/pages/pages-list";
 import { PageView } from "@/features/pages/page-view";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import { getSyncStatus, loadSettings, type Node } from "@/lib/api";
+import { getSyncStatus, loadSettings, type Content, type WindowDecorationMode } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
 import { useAppShortcuts } from "@/app/use-app-shortcuts";
 import { useStartupState } from "@/app/use-startup-state";
@@ -28,9 +27,7 @@ function App() {
   const { ready, startupError } = useStartupState();
   const [status, setStatus] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [windowDecorationMode, setWindowDecorationMode] = useState<"native" | "borderless">(
-    "native",
-  );
+  const [windowDecorationMode, setWindowDecorationMode] = useState<WindowDecorationMode>("native");
   const [searchOpen, setSearchOpen] = useState(false);
   const [graphOpen, setGraphOpen] = useState(false);
   const [editorRequest, setEditorRequest] = useState(0);
@@ -51,10 +48,10 @@ function App() {
     await workspace.createNewNote();
   }, [workspace]);
 
-  const openNode = useCallback(
-    async (node: Node) => {
+  const openContent = useCallback(
+    async (content: Content) => {
       setGraphOpen(false);
-      await workspace.openNode(node);
+      await workspace.openContent(content);
     },
     [workspace],
   );
@@ -64,6 +61,15 @@ function App() {
       setWindowDecorationMode(settingsQuery.data.windowDecorationMode);
     }
   }, [settingsQuery.data]);
+
+  useEffect(() => {
+    if (!status) return;
+    const timeout = window.setTimeout(
+      () => setStatus(""),
+      status.toLowerCase().includes("error") ? 8_000 : 4_000,
+    );
+    return () => window.clearTimeout(timeout);
+  }, [status]);
 
   useAppShortcuts({
     enabled: ready,
@@ -182,7 +188,7 @@ function App() {
               variant="ghost"
               size="sm"
               aria-label="Undo structural change"
-              disabled={workspace.history[0] === 0}
+              disabled={workspace.history.undoCount === 0}
               onClick={() => void workspace.moveHistory("undo")}
             >
               <Undo2 className="size-4" />
@@ -191,7 +197,7 @@ function App() {
               variant="ghost"
               size="sm"
               aria-label="Redo structural change"
-              disabled={workspace.history[1] === 0}
+              disabled={workspace.history.redoCount === 0}
               onClick={() => void workspace.moveHistory("redo")}
             >
               <Redo2 className="size-4" />
@@ -208,27 +214,24 @@ function App() {
           </>
         }
         sidebar={
-          <div className="flex h-full flex-col gap-4">
-            <PagesList
-              selectedUuid={workspace.activePageUuid}
-              onCreate={createNewNote}
-              onSelect={workspace.selectPage}
-              onStatus={setStatus}
-            />
-            <EntitiesCard variant="compact" />
-          </div>
+          <PagesList
+            selectedUuid={workspace.activePageUuid}
+            onCreate={createNewNote}
+            onSelect={workspace.selectPage}
+            onStatus={setStatus}
+          />
         }
         center={
-          workspace.activeNode ? (
+          workspace.activePage ? (
             <PageView
-              key={workspace.activeNode.uuid}
-              node={workspace.activeNode}
-              initialBlockId={
-                workspace.newNote?.pageUuid === workspace.activeNode.uuid
-                  ? workspace.newNote.blockId
+              key={workspace.activePage.uuid}
+              page={workspace.activePage}
+              initialBlockUuid={
+                workspace.newNote?.pageUuid === workspace.activePage.uuid
+                  ? workspace.newNote.blockUuid
                   : null
               }
-              autoFocusTitle={workspace.newNote?.pageUuid === workspace.activeNode.uuid}
+              autoFocusTitle={workspace.newNote?.pageUuid === workspace.activePage.uuid}
               onSaved={workspace.applyUpdated}
               onStatus={setStatus}
               onClose={workspace.closePage}
@@ -240,17 +243,17 @@ function App() {
               hits={workspace.hits}
               setHits={workspace.setHits}
               onCreate={createNewNote}
-              onOpenNode={openNode}
+              onOpenContent={openContent}
               onStatus={setStatus}
             />
           )
         }
-        right={<KnowledgePanel node={workspace.activeNode} onOpenNode={openNode} />}
+        right={<KnowledgePanel page={workspace.activePage} onOpenContent={openContent} />}
         fullWorkspace={
           graphOpen ? (
             <GraphWorkspace
-              node={workspace.activeNode}
-              onOpenNode={openNode}
+              page={workspace.activePage}
+              onOpenContent={openContent}
               onClose={() => setGraphOpen(false)}
             />
           ) : undefined
@@ -266,8 +269,8 @@ function App() {
             variant="dialog"
             hits={workspace.hits}
             setHits={workspace.setHits}
-            onOpenNode={async (node) => {
-              await openNode(node);
+            onOpenContent={async (content) => {
+              await openContent(content);
               setSearchOpen(false);
             }}
             onStatus={setStatus}

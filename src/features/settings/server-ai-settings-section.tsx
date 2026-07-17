@@ -50,8 +50,8 @@ export function ServerAiSettingsSection({ enabled, onError, onMessage }: Props) 
     onMessage("");
     saveMutation.mutate({ ...status.settings, ...patch });
   };
-  const progress = status?.sourceNodes
-    ? Math.min(100, Math.round((status.indexedNodes / status.sourceNodes) * 100))
+  const progress = status?.sourceDocuments
+    ? Math.min(100, Math.round((status.indexedDocuments / status.sourceDocuments) * 100))
     : status?.generationState === "active"
       ? 100
       : 0;
@@ -100,7 +100,7 @@ export function ServerAiSettingsSection({ enabled, onError, onMessage }: Props) 
             <div className="mt-2 flex justify-between text-xs text-muted-foreground">
               <span>{progress}% indexed</span>
               <span>
-                {status.indexedNodes} / {status.sourceNodes} nodes
+                {status.indexedDocuments} / {status.sourceDocuments} documents
               </span>
             </div>
           </div>

@@ -14,3 +14,4 @@ serde_json.workspace = true
 specta.workspace = true
 specta-typescript.workspace = true
 uuid.workspace = true
+url.workspace = true

@@ -2,7 +2,7 @@ use crate::embed::{EmbedderBackend, RerankBackend};
 use crate::store::VectorStore;
 use anyhow::{Result, bail};
 use notes_core::Connection;
-use notes_core::db::{self, Node, SearchHit};
+use notes_core::db::{self, Content, SearchHit};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -43,24 +43,32 @@ impl RetrievalPipeline {
         )?;
         let vector_uuids = vectors
             .iter()
-            .map(|result| result.node_uuid)
+            .map(|result| result.content_uuid)
             .collect::<Vec<_>>();
-        let vector_nodes = db::get_nodes_by_uuids(&self.notes, vector_uuids).await?;
-        let mut nodes = fts
+        let vector_content = db::get_contents(&self.notes, vector_uuids).await?;
+        let mut content = fts
             .iter()
-            .map(|hit| (hit.node.uuid, hit.node.clone()))
-            .chain(vector_nodes.into_iter().map(|node| (node.uuid, node)))
+            .map(|hit| (hit.content.uuid(), hit.content.clone()))
+            .chain(
+                vector_content
+                    .into_iter()
+                    .map(|content| (content.uuid(), content)),
+            )
             .collect::<HashMap<_, _>>();
         let mut scores = HashMap::<uuid::Uuid, f64>::new();
         for (rank, hit) in fts.into_iter().enumerate() {
-            *scores.entry(hit.node.uuid).or_default() += 1.0 / (RRF_K + rank as f64 + 1.0);
+            *scores.entry(hit.content.uuid()).or_default() += 1.0 / (RRF_K + rank as f64 + 1.0);
         }
         for (rank, hit) in vectors.into_iter().enumerate() {
-            *scores.entry(hit.node_uuid).or_default() += 1.0 / (RRF_K + rank as f64 + 1.0);
+            *scores.entry(hit.content_uuid).or_default() += 1.0 / (RRF_K + rank as f64 + 1.0);
         }
         let mut hits = scores
             .into_iter()
-            .filter_map(|(uuid, score)| nodes.remove(&uuid).map(|node| SearchHit { node, score }))
+            .filter_map(|(uuid, score)| {
+                content
+                    .remove(&uuid)
+                    .map(|content| SearchHit { content, score })
+            })
             .collect::<Vec<_>>();
         hits.sort_by(|left, right| right.score.total_cmp(&left.score));
         hits.truncate(limit as usize);
@@ -88,11 +96,7 @@ impl RetrievalPipeline {
 }
 
 fn hit_text(hit: &SearchHit) -> String {
-    format!(
-        "{}\n{}",
-        hit.node.title.as_deref().unwrap_or_default(),
-        hit.node.content
-    )
+    hit.content.text().to_owned()
 }
 
 pub fn select_reranked_hits(
@@ -106,7 +110,7 @@ pub fn select_reranked_hits(
         .take(limit)
         .filter_map(|(index, score)| {
             candidates.get(*index).map(|candidate| SearchHit {
-                node: candidate.node.clone(),
+                content: candidate.content.clone(),
                 score: f64::from(*score),
             })
         })
@@ -119,7 +123,7 @@ pub fn select_reranked_hits(
         .take(limit.min(LOW_CONFIDENCE_FALLBACK_LIMIT))
         .filter_map(|(index, score)| {
             candidates.get(index).map(|candidate| SearchHit {
-                node: candidate.node.clone(),
+                content: candidate.content.clone(),
                 score: f64::from(score),
             })
         })
@@ -136,15 +140,9 @@ fn validate(query: &str, limit: u32) -> Result<()> {
     Ok(())
 }
 
-pub fn node_documents(nodes: &[Node]) -> Vec<String> {
-    nodes
+pub fn content_documents(content: &[Content]) -> Vec<String> {
+    content
         .iter()
-        .map(|node| {
-            format!(
-                "{}\n{}",
-                node.title.as_deref().unwrap_or_default(),
-                node.content
-            )
-        })
+        .map(|content| content.text().to_owned())
         .collect()
 }

@@ -1,19 +1,28 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, Clock3, Loader2, MoreHorizontal, Trash2 } from "lucide-react";
+import {
+  BookOpen,
+  Check,
+  Clock3,
+  FileText,
+  ListTree,
+  Loader2,
+  MoreHorizontal,
+  Trash2,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Outliner } from "@/features/outliner/outliner";
 import { AttachmentsCard } from "@/features/attachments/attachments-card";
-import { renamePage, type Node } from "@/lib/api";
+import { renamePage, setPageView, type Page, type PageView } from "@/lib/api";
 import { DebouncedAction } from "@/lib/debounced-action";
 
 type Props = {
-  node: Node;
-  onSaved: (updated: Node) => void;
+  page: Page;
+  onSaved: (updated: Page) => void;
   onStatus: (s: string) => void;
   onClose: () => void;
-  onDelete: (node: Node) => void | Promise<void>;
-  initialBlockId?: number | null;
+  onDelete: (page: Page) => void | Promise<void>;
+  initialBlockUuid?: string | null;
   autoFocusTitle?: boolean;
 };
 
@@ -22,21 +31,22 @@ type SaveState = "idle" | "dirty" | "saving" | "saved" | "error";
 const AUTOSAVE_MS = 400;
 
 export function PageView({
-  node,
+  page,
   onSaved,
   onStatus,
   onClose,
   onDelete,
-  initialBlockId = null,
+  initialBlockUuid = null,
   autoFocusTitle = false,
 }: Props) {
-  const [title, setTitle] = useState(node.title ?? "");
+  const [title, setTitle] = useState(page.title ?? "");
   const [saveState, setSaveState] = useState<SaveState>("idle");
-  const [focusBody, setFocusBody] = useState(false);
+  const [viewBusy, setViewBusy] = useState(false);
+  const [bodyFocusRequest, setBodyFocusRequest] = useState(0);
 
   const autosave = useRef(new DebouncedAction()).current;
   const titleInput = useRef<HTMLInputElement>(null);
-  const nodeRef = useRef(node);
+  const pageRef = useRef(page);
   const titleRef = useRef(title);
   const onSavedRef = useRef(onSaved);
   const onStatusRef = useRef(onStatus);
@@ -45,23 +55,25 @@ export function PageView({
   onSavedRef.current = onSaved;
   onStatusRef.current = onStatus;
 
-  const flush = useCallback(async () => {
+  const flush = useCallback(async (): Promise<boolean> => {
     autosave.cancel();
-    const current = nodeRef.current;
+    const current = pageRef.current;
     const nextTitle = titleRef.current.trim() || null;
     if (nextTitle === (current.title ?? null)) {
       setSaveState("idle");
-      return;
+      return true;
     }
     setSaveState("saving");
     try {
       const updated = await renamePage(current.uuid, nextTitle);
-      nodeRef.current = updated;
+      pageRef.current = updated;
       onSavedRef.current(updated);
       setSaveState("saved");
+      return true;
     } catch (err) {
       setSaveState("error");
       onStatusRef.current(`save error: ${String(err)}`);
+      return false;
     }
   }, [autosave]);
 
@@ -72,18 +84,36 @@ export function PageView({
 
   useEffect(() => {
     autosave.cancel();
-    nodeRef.current = node;
-    setTitle(node.title ?? "");
+    pageRef.current = page;
+    setTitle(page.title ?? "");
     setSaveState("idle");
-    setFocusBody(false);
-  }, [autosave, node]);
+  }, [autosave, page]);
+
+  useEffect(() => {
+    setBodyFocusRequest(0);
+  }, [page.uuid]);
 
   useEffect(() => {
     if (!autoFocusTitle) return;
     const input = titleInput.current;
     input?.focus();
     input?.select();
-  }, [autoFocusTitle, node.id]);
+  }, [autoFocusTitle, page.uuid]);
+
+  const changeView = async (view: PageView) => {
+    if (view === pageRef.current.defaultView || viewBusy) return;
+    setViewBusy(true);
+    try {
+      await flush();
+      const updated = await setPageView(pageRef.current.uuid, view);
+      pageRef.current = updated;
+      onSavedRef.current(updated);
+    } catch (error) {
+      onStatusRef.current(`view error: ${String(error)}`);
+    } finally {
+      setViewBusy(false);
+    }
+  };
 
   useEffect(() => {
     return () => {
@@ -103,7 +133,7 @@ export function PageView({
         <span className="truncate">{title || "Untitled"}</span>
         <span className="ml-auto flex items-center gap-1.5">
           <Clock3 className="size-3" />
-          {new Date(node.updated_at * 1000).toLocaleDateString(undefined, {
+          {new Date(page.updatedAt * 1000).toLocaleDateString(undefined, {
             month: "short",
             day: "numeric",
           })}
@@ -114,13 +144,19 @@ export function PageView({
         <Input
           ref={titleInput}
           value={title}
+          readOnly={page.defaultView === "reading"}
           onBlur={() => void flush()}
           onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing) return;
             if (event.key === "Enter") {
               event.preventDefault();
-              void flush();
-              setFocusBody(true);
-              event.currentTarget.blur();
+              if (pageRef.current.defaultView === "reading") return;
+              const input = event.currentTarget;
+              void (async () => {
+                if (!(await flush())) return;
+                setBodyFocusRequest((request) => request + 1);
+                input.blur();
+              })();
             }
           }}
           onChange={(e) => {
@@ -145,28 +181,64 @@ export function PageView({
 
       <div className="mt-4 mb-9 flex items-center gap-2">
         <span className="rounded-full bg-primary/10 px-2.5 py-1 text-[10px] font-semibold tracking-wide text-primary">
-          NOTE
+          {page.defaultView.toUpperCase()}
         </span>
+        <div
+          role="group"
+          aria-label="Page view"
+          className="ml-1 flex items-center rounded-lg border border-border/60 bg-card/55 p-0.5"
+        >
+          {PAGE_VIEWS.map(({ value, label, icon: Icon }) => (
+            <Button
+              key={value}
+              type="button"
+              variant={page.defaultView === value ? "secondary" : "ghost"}
+              size="xs"
+              disabled={viewBusy}
+              aria-pressed={page.defaultView === value}
+              onClick={() => void changeView(value)}
+              className="rounded-md px-2 text-[10px]"
+            >
+              <Icon className="size-3" />
+              <span className="hidden sm:inline">{label}</span>
+            </Button>
+          ))}
+        </div>
         <Button
           variant="ghost"
           size="xs"
           className="ml-auto rounded-lg text-muted-foreground opacity-60 hover:text-destructive hover:opacity-100"
           aria-label="Delete page"
-          onClick={() => void onDelete(node)}
+          onClick={() => void onDelete(page)}
         >
           <Trash2 className="size-4" />
         </Button>
       </div>
 
       <div className="editor-body">
-        <Outliner key={node.id} page={node} initialEditingId={focusBody ? initialBlockId : null} />
+        <Outliner
+          key={page.uuid}
+          page={page}
+          initialEditingUuid={initialBlockUuid}
+          focusRequest={bodyFocusRequest}
+        />
       </div>
       <div className="mt-16">
-        <AttachmentsCard parentId={node.id} parentUuid={node.uuid} onStatus={onStatus} />
+        <AttachmentsCard location={{ kind: "page", uuid: page.uuid }} onStatus={onStatus} />
       </div>
     </article>
   );
 }
+
+const PAGE_VIEWS: Array<{
+  value: PageView;
+  label: string;
+  icon: typeof ListTree;
+}> = [
+  { value: "outline", label: "Outline", icon: ListTree },
+  { value: "document", label: "Document", icon: FileText },
+  { value: "reading", label: "Reading", icon: BookOpen },
+];
 
 function SaveIndicator({ state }: { state: SaveState }) {
   if (state === "idle") return null;

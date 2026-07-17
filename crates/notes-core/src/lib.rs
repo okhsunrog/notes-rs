@@ -10,12 +10,14 @@ pub mod stem;
 
 pub use error::{CoreError, CoreResult};
 pub use hlc::Hlc;
-pub use model::{NodeKind, ReorderDirection};
+pub use model::{AttachmentOwner, BlockStyle, ObjectKind, OrderKey, PageView, ReorderDirection};
 pub use operation::{
-    ApplyOutcome, Op, OpKind, Origin, SnapshotAttachment, SnapshotEdge, SnapshotNode,
+    ApplyOutcome, AttachmentAdd, AttachmentRemove, BlockCreate, BlockDelete, BlockMove,
+    BlockSetMarkdown, BlockSetStyle, Op, OpKind, Origin, PageCreate, PageDelete, PageSetTitle,
+    PageSetView, SnapshotAttachment, SnapshotBlock, SnapshotBlockStructure, SnapshotPage,
     SnapshotTombstone, SyncSnapshot, acknowledge_server_op, acknowledge_server_ops, apply,
     apply_batch, apply_sequenced, apply_sequenced_batch, configure_sync,
-    content_references_changed, export_sync_snapshot, import_sync_snapshot, local_ops,
-    pending_outbox, sync_cursor, validate_blob_hash,
+    content_references_changed, export_sync_snapshot, import_sync_snapshot, pending_outbox,
+    sync_cursor, validate_attachment_filename, validate_blob_hash,
 };
 pub use sqlite::Connection;

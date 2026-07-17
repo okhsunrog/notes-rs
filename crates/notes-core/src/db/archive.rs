@@ -1,174 +1,158 @@
 use super::*;
+use crate::operation::{
+    AttachmentAdd, AttachmentRemove, BlockCreate, BlockDelete, PageCreate, PageDelete,
+};
+
+pub const ARCHIVE_FORMAT: &str = "notes-rs";
+pub const ARCHIVE_VERSION: u32 = 2;
 
 pub async fn export_archive(conn: &Connection) -> Result<DataArchive> {
-    conn.call(|database| -> rusqlite::Result<DataArchive> {
-        let nodes = {
-            let sql = format!("SELECT {NODE_COLUMNS} FROM nodes ORDER BY id");
-            let mut statement = database.prepare(&sql)?;
-            statement
-                .query_map([], row_to_node)?
-                .collect::<Result<Vec<_>, _>>()?
+    conn.call(|database| {
+        let pages = {
+            let sql = format!("SELECT {PAGE_COLUMNS} FROM pages ORDER BY uuid");
+            database
+                .prepare(&sql)?
+                .query_map([], row_to_page)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
         };
-        let edges = {
-            let mut statement = database
-                .prepare("SELECT src, dst, kind, weight, created_at FROM edges ORDER BY id")?;
+        let blocks = {
+            let sql = format!("SELECT {BLOCK_COLUMNS} FROM blocks ORDER BY page_uuid, parent_uuid, order_key, uuid");
+            database
+                .prepare(&sql)?
+                .query_map([], row_to_block)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let attachments = {
+            let mut statement = database.prepare(
+                "SELECT uuid, page_uuid, block_uuid, blob_hash, filename, mime, size, created_at
+                   FROM attachments ORDER BY uuid",
+            )?;
             statement
                 .query_map([], |row| {
-                    Ok(Edge {
-                        src: row.get(0)?,
-                        dst: row.get(1)?,
-                        kind: row.get(2)?,
-                        weight: row.get(3)?,
-                        created_at: row.get(4)?,
+                    let owner = match (
+                        row.get::<_, Option<uuid::Uuid>>(1)?,
+                        row.get::<_, Option<uuid::Uuid>>(2)?,
+                    ) {
+                        (Some(uuid), None) => AttachmentOwner::Page(uuid),
+                        (None, Some(uuid)) => AttachmentOwner::Block(uuid),
+                        _ => return Err(rusqlite::Error::InvalidQuery),
+                    };
+                    let size = u64::try_from(row.get::<_, i64>(6)?).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            6,
+                            rusqlite::types::Type::Integer,
+                            Box::new(error),
+                        )
+                    })?;
+                    Ok(Attachment {
+                        uuid: row.get(0)?,
+                        owner,
+                        blob_hash: row.get(3)?,
+                        filename: row.get(4)?,
+                        mime: row.get(5)?,
+                        size,
+                        created_at: row.get(7)?,
                     })
                 })?
-                .collect::<Result<Vec<_>, _>>()?
+                .collect::<rusqlite::Result<Vec<_>>>()?
         };
         Ok(DataArchive {
-            format: "notes-rs".into(),
-            version: 1,
+            format: ARCHIVE_FORMAT.into(),
+            version: ARCHIVE_VERSION,
             exported_at: chrono::Utc::now().timestamp(),
-            nodes,
-            edges,
-            files: std::collections::BTreeMap::new(),
+            pages,
+            blocks,
+            attachments,
+            files: Default::default(),
         })
     })
     .await
 }
 
 pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<()> {
-    if archive.format != "notes-rs" || archive.version != 1 {
-        return Err(
-            crate::CoreError::invalid("unsupported notes-rs archive format or version").into(),
-        );
+    if archive.format != ARCHIVE_FORMAT || archive.version != ARCHIVE_VERSION {
+        return Err(crate::CoreError::invalid(format!(
+            "unsupported archive format {} version {}",
+            archive.format, archive.version
+        ))
+        .into());
     }
-    let current = export_archive(conn).await?;
-    let kinds = archive_transition_kinds(&current, &archive)?;
-    apply_local(conn, kinds).await?;
+    conn.call_domain(move |database| -> crate::CoreResult<()> {
+        let transaction = database.transaction()?;
+        let current_attachments = transaction
+            .prepare("SELECT page_uuid, block_uuid, blob_hash FROM attachments ORDER BY uuid")?
+            .query_map([], |row| {
+                let owner = match (
+                    row.get::<_, Option<uuid::Uuid>>(0)?,
+                    row.get::<_, Option<uuid::Uuid>>(1)?,
+                ) {
+                    (Some(uuid), None) => AttachmentOwner::Page(uuid),
+                    (None, Some(uuid)) => AttachmentOwner::Block(uuid),
+                    _ => return Err(rusqlite::Error::InvalidQuery),
+                };
+                Ok((owner, row.get::<_, String>(2)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let current_blocks = transaction
+            .prepare("SELECT uuid, page_uuid FROM blocks ORDER BY uuid")?
+            .query_map([], |row| {
+                Ok((row.get::<_, uuid::Uuid>(0)?, row.get::<_, uuid::Uuid>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let current_pages = transaction
+            .prepare("SELECT uuid FROM pages ORDER BY uuid")?
+            .query_map([], |row| row.get::<_, uuid::Uuid>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
 
-    Ok(())
-}
-
-fn archive_transition_kinds(current: &DataArchive, target: &DataArchive) -> Result<Vec<OpKind>> {
-    use std::collections::{BTreeMap, BTreeSet, HashMap};
-
-    let current_by_uuid = current
-        .nodes
-        .iter()
-        .map(|node| (node.uuid, node))
-        .collect::<BTreeMap<_, _>>();
-    let target_by_uuid = target
-        .nodes
-        .iter()
-        .map(|node| (node.uuid, node))
-        .collect::<BTreeMap<_, _>>();
-    let target_id_to_uuid = target
-        .nodes
-        .iter()
-        .map(|node| (node.id, node.uuid))
-        .collect::<HashMap<_, _>>();
-    let current_id_to_uuid = current
-        .nodes
-        .iter()
-        .map(|node| (node.id, node.uuid))
-        .collect::<HashMap<_, _>>();
-    let mut kinds = Vec::new();
-
-    for uuid in current_by_uuid.keys().rev() {
-        if !target_by_uuid.contains_key(uuid) {
-            kinds.push(OpKind::NodeDelete(NodeDelete { uuid: *uuid }));
-        }
-    }
-    for (uuid, target_node) in &target_by_uuid {
-        match current_by_uuid.get(uuid) {
-            None => kinds.push(OpKind::NodeCreate(NodeCreate {
-                uuid: *uuid,
-                node_kind: target_node.kind,
-                title: target_node.title.clone(),
-                content: target_node.content.clone(),
-                content_json: target_node.content_json.clone(),
-                parent_uuid: None,
-                position: target_node.position,
-                created_at: target_node.created_at,
-            })),
-            Some(current_node) => {
-                if current_node.title != target_node.title {
-                    kinds.push(OpKind::NodeSetTitle(NodeSetTitle {
-                        uuid: *uuid,
-                        title: target_node.title.clone(),
-                    }));
-                }
-                if current_node.content != target_node.content
-                    || current_node.content_json != target_node.content_json
-                {
-                    kinds.push(OpKind::NodeSetContent(NodeSetContent {
-                        uuid: *uuid,
-                        content: target_node.content.clone(),
-                        content_json: target_node.content_json.clone(),
-                    }));
-                }
-            }
-        }
-    }
-    for (uuid, target_node) in &target_by_uuid {
-        if target_node.kind != NodeKind::Block {
-            continue;
-        }
-        let parent_uuid = target_node
-            .parent_id
-            .and_then(|parent_id| target_id_to_uuid.get(&parent_id))
-            .copied();
-        let current_structure = current_by_uuid.get(uuid).map(|node| {
-            (
-                node.parent_id
-                    .and_then(|parent_id| current_id_to_uuid.get(&parent_id))
-                    .copied(),
-                node.position,
-            )
-        });
-        if current_structure != Some((parent_uuid, target_node.position)) {
-            kinds.push(OpKind::NodeMove(NodeMove {
-                uuid: *uuid,
-                parent_uuid,
-                position: target_node.position.unwrap_or(1024.0),
-            }));
-        }
-    }
-
-    let edge_map = |archive: &DataArchive, ids: &HashMap<i64, uuid::Uuid>| {
-        archive
-            .edges
-            .iter()
-            .filter_map(|edge| {
-                Some((
-                    (
-                        *ids.get(&edge.src)?,
-                        *ids.get(&edge.dst)?,
-                        edge.kind.clone(),
-                    ),
-                    edge.weight,
-                ))
+        let mut kinds = current_attachments
+            .into_iter()
+            .map(|(owner, blob_hash)| {
+                OpKind::AttachmentRemove(AttachmentRemove { owner, blob_hash })
             })
-            .collect::<BTreeMap<_, _>>()
-    };
-    let current_edges = edge_map(current, &current_id_to_uuid);
-    let target_edges = edge_map(target, &target_id_to_uuid);
-    let current_keys = current_edges.keys().cloned().collect::<BTreeSet<_>>();
-    let target_keys = target_edges.keys().cloned().collect::<BTreeSet<_>>();
-    for (src_uuid, dst_uuid, edge_kind) in current_keys.difference(&target_keys) {
-        kinds.push(OpKind::EdgeRemove(operation::EdgeRemove {
-            src_uuid: *src_uuid,
-            dst_uuid: *dst_uuid,
-            edge_kind: edge_kind.clone(),
+            .collect::<Vec<_>>();
+        kinds.extend(
+            current_blocks
+                .into_iter()
+                .map(|(uuid, page_uuid)| OpKind::BlockDelete(BlockDelete { uuid, page_uuid })),
+        );
+        kinds.extend(
+            current_pages
+                .into_iter()
+                .map(|uuid| OpKind::PageDelete(PageDelete { uuid })),
+        );
+        kinds.extend(archive.pages.into_iter().map(|page| {
+            OpKind::PageCreate(PageCreate {
+                uuid: page.uuid,
+                title: page.title,
+                default_view: page.default_view,
+                created_at: page.created_at,
+            })
         }));
-    }
-    for (src_uuid, dst_uuid, edge_kind) in target_keys.difference(&current_keys) {
-        kinds.push(OpKind::EdgeAdd(EdgeAdd {
-            src_uuid: *src_uuid,
-            dst_uuid: *dst_uuid,
-            edge_kind: edge_kind.clone(),
-            weight: target_edges[&(*src_uuid, *dst_uuid, edge_kind.clone())],
+        kinds.extend(archive.blocks.into_iter().map(|block| {
+            OpKind::BlockCreate(BlockCreate {
+                uuid: block.uuid,
+                page_uuid: block.page_uuid,
+                parent_uuid: block.parent_uuid,
+                order_key: block.order_key,
+                style: block.style,
+                markdown: block.markdown,
+                created_at: block.created_at,
+            })
         }));
-    }
-    Ok(kinds)
+        kinds.extend(archive.attachments.into_iter().map(|attachment| {
+            OpKind::AttachmentAdd(AttachmentAdd {
+                owner: attachment.owner,
+                blob_hash: attachment.blob_hash,
+                filename: attachment.filename,
+                mime: attachment.mime,
+                size: attachment.size,
+            })
+        }));
+        operation::apply_local_kinds_in_transaction(&transaction, kinds)?;
+        transaction.execute("DELETE FROM history_undo", [])?;
+        transaction.execute("DELETE FROM history_redo", [])?;
+        transaction.commit()?;
+        Ok(())
+    })
+    .await
 }

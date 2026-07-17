@@ -33,13 +33,13 @@ pub enum CompletionProtocol {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AiProviderSettings {
-    pub retrieval_base_url: String,
+    pub retrieval_base_url: url::Url,
     pub retrieval_api_key_configured: bool,
     pub embedding_model: String,
     pub embedding_dimensions: usize,
     pub rerank_model: String,
     pub completion_protocol: CompletionProtocol,
-    pub completion_base_url: String,
+    pub completion_base_url: url::Url,
     pub completion_api_key_configured: bool,
     pub chat_model: String,
     pub extraction_model: String,
@@ -50,13 +50,13 @@ pub struct AiProviderSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AiProviderSettingsUpdate {
-    pub retrieval_base_url: String,
+    pub retrieval_base_url: url::Url,
     pub retrieval_api_key: Option<String>,
     pub embedding_model: String,
     pub embedding_dimensions: usize,
     pub rerank_model: String,
     pub completion_protocol: CompletionProtocol,
-    pub completion_base_url: String,
+    pub completion_base_url: url::Url,
     pub completion_api_key: Option<String>,
     pub chat_model: String,
     pub extraction_model: String,
@@ -95,8 +95,8 @@ pub struct AiIndexStatus {
     pub settings: AiRuntimeSettings,
     pub pending_embeddings: u64,
     pub failed_embeddings: u64,
-    pub indexed_nodes: u64,
-    pub source_nodes: u64,
+    pub indexed_documents: u64,
+    pub source_documents: u64,
     pub pending_extractions: u64,
     pub failed_extractions: u64,
 }
@@ -128,13 +128,75 @@ pub enum ClientMessage {
     Ping,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerErrorCode {
+    CatchUpFailed,
+    UnsupportedMessage,
+    IngestFailed,
+    BatchTooLarge,
+    InvalidMessage,
+    ResyncRequired,
+    Conflict,
+}
+
+impl ServerErrorCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CatchUpFailed => "catch_up_failed",
+            Self::UnsupportedMessage => "unsupported_message",
+            Self::IngestFailed => "ingest_failed",
+            Self::BatchTooLarge => "batch_too_large",
+            Self::InvalidMessage => "invalid_message",
+            Self::ResyncRequired => "resync_required",
+            Self::Conflict => "conflict",
+        }
+    }
+}
+
+impl std::fmt::Display for ServerErrorCode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
-    Ops { ops: Vec<SequencedOp> },
-    Ack { ops: Vec<SequencedOp> },
+    Ops {
+        ops: Vec<SequencedOp>,
+    },
+    Ack {
+        ops: Vec<SequencedOp>,
+    },
     Pong,
-    Error { code: String, message: String },
+    Error {
+        code: ServerErrorCode,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiErrorCode {
+    InvalidRequest,
+    Unauthorized,
+    NotFound,
+    Conflict,
+    PayloadTooLarge,
+    Unavailable,
+    Internal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApiErrorResponse {
+    pub error: ApiErrorDetail,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApiErrorDetail {
+    pub code: ApiErrorCode,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, specta::Type)]

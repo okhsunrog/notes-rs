@@ -29,6 +29,7 @@ import {
   saveSettings,
   type SecretKey,
   type SettingsSnapshot,
+  type WindowDecorationMode,
 } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
 import { cn } from "@/lib/utils";
@@ -39,7 +40,7 @@ import { toSettingsUpdate } from "./settings-update";
 
 type Props = {
   onBack: () => void;
-  onDecorationModeChanged: (mode: "native" | "borderless") => void;
+  onDecorationModeChanged: (mode: WindowDecorationMode) => void;
   dataAvailable: boolean;
   onDataChanged: () => void;
 };

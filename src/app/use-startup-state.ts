@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
 import { getStartupStatus } from "@/lib/api";
+import { events } from "@/lib/bindings";
 
 export function useStartupState() {
   const [ready, setReady] = useState(false);
@@ -8,7 +8,14 @@ export function useStartupState() {
 
   useEffect(() => {
     let cancelled = false;
-    getStartupStatus()
+    const readyListener = events.appReady.listen(() => {
+      if (!cancelled) setReady(true);
+    });
+    const errorListener = events.appStartupError.listen(({ payload }) => {
+      if (!cancelled) setStartupError(payload.message);
+    });
+
+    void getStartupStatus()
       .then((result) => {
         if (cancelled) return;
         if (result.state === "ready") setReady(true);
@@ -17,12 +24,6 @@ export function useStartupState() {
       .catch(() => {
         // Startup state may not be registered during the first setup tick.
       });
-    const readyListener = listen("app:ready", () => {
-      if (!cancelled) setReady(true);
-    });
-    const errorListener = listen<string>("app:startup-error", ({ payload }) => {
-      if (!cancelled) setStartupError(payload);
-    });
     return () => {
       cancelled = true;
       void readyListener.then((unlisten) => unlisten());
