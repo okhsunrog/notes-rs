@@ -39,7 +39,7 @@ describe("domain event query invalidation", () => {
 
   it("invalidates the complete backend cache after a workspace replacement", async () => {
     const client = new QueryClient();
-    client.setQueryData(queryKeys.settings, { localOnly: true });
+    client.setQueryData(queryKeys.settings, { windowDecorationMode: "native" });
     client.setQueryData(queryKeys.history, [1, 0]);
 
     await applyDomainEvent(client, { kind: "workspace_changed" });

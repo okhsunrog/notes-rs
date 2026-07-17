@@ -21,7 +21,6 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
-notes-ai.workspace = true
 notes-core.workspace = true
 notes-protocol.workspace = true
 notes-sync.workspace = true
@@ -42,9 +41,7 @@ tracing-subscriber = "0.3.23"
 uuid.workspace = true
 url.workspace = true
 chrono.workspace = true
-llm-relay.workspace = true
 futures.workspace = true
-schemars.workspace = true
 sha2.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
@@ -60,14 +57,6 @@ tauri-plugin-dialog = "2.7.1"
 tauri-plugin-mobile-system = { path = "../plugins/tauri-plugin-mobile-system" }
 tauri-plugin-android-fs = "28.4.0"
 tracing-logcat = "0.1.0"
-
-[features]
-default = []
-# Compile in the fastembed-based local embedder + reranker. Adds ~300 MB of
-# transitive deps (ort, hf-hub, tokenizers). Off by default — cloud providers
-# (OpenRouter, OpenAI, etc.) are the supported path. Enable with
-# `--features local-models` if you want offline-capable embedding/rerank.
-local-models = ["notes-ai/local-models"]
 
 [dev-dependencies]
 tempfile.workspace = true

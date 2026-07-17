@@ -1,13 +1,10 @@
 use anyhow::Context;
 use base64::Engine;
-use futures::StreamExt;
-use notes_ai::agent;
-use notes_ai::embed::{EmbedderBackend, RerankBackend};
 use notes_core::Connection;
 use notes_core::db::{self, Node, SearchHit};
 use notes_core::{NodeKind, ReorderDirection};
 use notes_protocol::{ChatEvent, ChatTurn};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -156,12 +153,7 @@ impl std::error::Error for CommandError {}
 
 pub struct AppState {
     pub conn: Connection,
-    pub embedder: Option<Arc<dyn EmbedderBackend>>,
-    pub reranker: Option<Arc<dyn RerankBackend>>,
     pub remote_ai: Option<notes_sync::HttpTransport>,
-    pub chat_config: Option<llm_relay::ClientConfig>,
-    pub query_rewriting_enabled: bool,
-    pub background_paused: Arc<AtomicBool>,
     pub chat_cancellations: Arc<std::sync::Mutex<HashMap<uuid::Uuid, Arc<AtomicBool>>>>,
 }
 
@@ -183,7 +175,6 @@ pub enum DomainEvent {
         node_uuids: Vec<uuid::Uuid>,
     },
     HistoryChanged,
-    BackgroundStatusChanged,
     SettingsChanged,
     SyncStatusChanged,
     WorkspaceChanged,
@@ -229,78 +220,6 @@ async fn emit_nodes_changed(
             parent_uuids: node_uuids_for_ids(connection, parent_ids).await,
         },
     );
-}
-
-#[derive(Debug, Serialize, specta::Type)]
-#[serde(rename_all = "camelCase")]
-pub struct BackgroundStatus {
-    pub paused: bool,
-    pub embeddings_pending: i64,
-    pub embeddings_failed: i64,
-    pub extractions_pending: i64,
-    pub extractions_failed: i64,
-    pub failures: Vec<db::BackgroundFailure>,
-}
-
-#[derive(Debug, Deserialize, specta::Type)]
-#[serde(rename_all = "camelCase")]
-pub struct ProviderProbeRequest {
-    protocol: crate::settings::CompletionProtocol,
-    base_url: String,
-    model: String,
-    api_key: Option<String>,
-    key_scope: Option<crate::settings::ProviderKeyScope>,
-}
-
-#[derive(Debug, Serialize, specta::Type)]
-#[serde(rename_all = "camelCase")]
-pub struct ProviderProbeResult {
-    capabilities: Vec<CapabilityProbeResult>,
-}
-
-#[derive(Debug, Serialize, specta::Type)]
-#[serde(rename_all = "camelCase")]
-pub struct CapabilityProbeResult {
-    name: ProbeCapability,
-    ok: bool,
-    latency_ms: u64,
-    detail: String,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, specta::Type)]
-#[serde(rename_all = "snake_case")]
-pub enum ProbeCapability {
-    Completion,
-    Streaming,
-    RequiredTool,
-    StructuredOutput,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct StructuredProbe {
-    status: String,
-}
-
-fn probe_result(
-    name: ProbeCapability,
-    started: std::time::Instant,
-    result: Result<String, impl std::fmt::Display>,
-) -> CapabilityProbeResult {
-    match result {
-        Ok(detail) => CapabilityProbeResult {
-            name,
-            ok: true,
-            latency_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-            detail: detail.chars().take(240).collect(),
-        },
-        Err(error) => CapabilityProbeResult {
-            name,
-            ok: false,
-            latency_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-            detail: error.to_string().chars().take(500).collect(),
-        },
-    }
 }
 
 /// Registered immediately in setup so the frontend can ask whether the heavy
@@ -371,168 +290,8 @@ pub fn save_settings(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn test_completion_provider(
-    app: AppHandle,
-    request: ProviderProbeRequest,
-) -> CommandResult<ProviderProbeResult> {
-    let mut config = crate::settings::completion_config_for_probe(
-        &app,
-        request.protocol,
-        request.base_url,
-        request.model,
-        request.api_key,
-        request.key_scope,
-    )
-    .map_err(err)?
-    .timeout(std::time::Duration::from_secs(20))
-    .max_tokens(64);
-    config.retry_policy.max_retries = 0;
-    let client = llm_relay::LlmClient::new(config).map_err(err)?;
-    let mut capabilities = Vec::new();
-
-    let started = std::time::Instant::now();
-    let completion = client
-        .complete("Reply with exactly: OK", llm_relay::ChatOptions::default())
-        .await
-        .and_then(|response| {
-            let text = response.text();
-            if text.trim().is_empty() {
-                Err(llm_relay::LlmError::EmptyResponse)
-            } else {
-                Ok(text)
-            }
-        });
-    capabilities.push(probe_result(
-        ProbeCapability::Completion,
-        started,
-        completion,
-    ));
-
-    let started = std::time::Instant::now();
-    let streaming = async {
-        let mut stream = client
-            .chat_stream(
-                &[llm_relay::Message::user_text("Reply with exactly: OK")],
-                llm_relay::ChatOptions::default(),
-            )
-            .await?;
-        let mut text = String::new();
-        while let Some(event) = stream.next().await {
-            if let llm_relay::StreamEvent::TextDelta { text: delta } = event? {
-                text.push_str(&delta);
-            }
-        }
-        if text.trim().is_empty() {
-            Err(llm_relay::LlmError::EmptyResponse)
-        } else {
-            Ok(text)
-        }
-    }
-    .await;
-    capabilities.push(probe_result(ProbeCapability::Streaming, started, streaming));
-
-    let started = std::time::Instant::now();
-    let tools = [llm_relay::ToolDefinition::new(
-        "provider_probe",
-        "Return the requested provider probe status.",
-        serde_json::json!({
-            "type": "object",
-            "properties": { "status": { "type": "string" } },
-            "required": ["status"],
-            "additionalProperties": false
-        }),
-    )];
-    let tool_call = client
-        .complete(
-            "Call provider_probe with status OK.",
-            llm_relay::ChatOptions {
-                tools: Some(&tools),
-                required_tool: Some("provider_probe"),
-                ..llm_relay::ChatOptions::default()
-            },
-        )
-        .await
-        .and_then(|response| {
-            response
-                .tool_uses()
-                .first()
-                .map(|tool| format!("{tool:?}"))
-                .ok_or_else(|| llm_relay::LlmError::InvalidStructuredOutput {
-                    error: "provider did not return the required tool call".into(),
-                    body: response.text(),
-                })
-        });
-    capabilities.push(probe_result(
-        ProbeCapability::RequiredTool,
-        started,
-        tool_call,
-    ));
-
-    let started = std::time::Instant::now();
-    let structured = client
-        .complete_structured::<StructuredProbe>(
-            "Return a status field containing exactly OK.",
-            "provider_probe",
-            None,
-        )
-        .await
-        .map(|response| response.data.status);
-    capabilities.push(probe_result(
-        ProbeCapability::StructuredOutput,
-        started,
-        structured,
-    ));
-
-    Ok(ProviderProbeResult { capabilities })
-}
-
-#[tauri::command]
-#[specta::specta]
 pub fn restart_app(app: AppHandle) {
     app.restart()
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn background_status(state: State<'_, AppState>) -> CommandResult<BackgroundStatus> {
-    let queues = db::queue_status(&state.conn).await.map_err(err)?;
-    Ok(BackgroundStatus {
-        paused: state.background_paused.load(Ordering::Acquire),
-        embeddings_pending: queues.embeddings_pending,
-        embeddings_failed: queues.embeddings_failed,
-        extractions_pending: queues.extractions_pending,
-        extractions_failed: queues.extractions_failed,
-        failures: queues.failures,
-    })
-}
-
-#[tauri::command]
-#[specta::specta]
-pub fn set_background_paused(app: AppHandle, state: State<'_, AppState>, paused: bool) {
-    state.background_paused.store(paused, Ordering::Release);
-    emit_domain(&app, DomainEvent::BackgroundStatusChanged);
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn retry_background_jobs(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> CommandResult<()> {
-    db::retry_background_jobs(&state.conn).await.map_err(err)?;
-    emit_domain(&app, DomainEvent::BackgroundStatusChanged);
-    Ok(())
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn clear_background_jobs(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> CommandResult<()> {
-    db::clear_background_jobs(&state.conn).await.map_err(err)?;
-    emit_domain(&app, DomainEvent::BackgroundStatusChanged);
-    Ok(())
 }
 
 #[tauri::command]
@@ -1433,23 +1192,7 @@ pub async fn search_vec(
     query: String,
     limit: u32,
 ) -> CommandResult<Vec<SearchHit>> {
-    let limit = validate_search_request(&query, limit)?;
-    if let Some(remote) = &state.remote_ai {
-        return match remote.search(query.clone(), limit).await {
-            Ok(results) => Ok(results),
-            Err(error) => {
-                tracing::warn!(%error, "remote vector search unavailable; falling back to FTS");
-                db::search_fts(&state.conn, query, limit).await.map_err(err)
-            }
-        };
-    }
-    let embedder = state
-        .embedder
-        .as_ref()
-        .context("local embedding provider is unavailable")
-        .map_err(err)?;
-    let emb = embedder.embed_query(query).await.map_err(err)?;
-    db::search_vec(&state.conn, emb, limit).await.map_err(err)
+    remote_search(&state, query, limit).await
 }
 
 #[tauri::command]
@@ -1459,25 +1202,7 @@ pub async fn search_hybrid(
     query: String,
     limit: u32,
 ) -> CommandResult<Vec<SearchHit>> {
-    let limit = validate_search_request(&query, limit)?;
-    if let Some(remote) = &state.remote_ai {
-        return match remote.search(query.clone(), limit).await {
-            Ok(results) => Ok(results),
-            Err(error) => {
-                tracing::warn!(%error, "remote hybrid search unavailable; falling back to FTS");
-                db::search_fts(&state.conn, query, limit).await.map_err(err)
-            }
-        };
-    }
-    let embedder = state
-        .embedder
-        .as_ref()
-        .context("local embedding provider is unavailable")
-        .map_err(err)?;
-    let emb = embedder.embed_query(query.clone()).await.map_err(err)?;
-    db::search_hybrid(&state.conn, query, emb, limit)
-        .await
-        .map_err(err)
+    remote_search(&state, query, limit).await
 }
 
 /// Retrieve via hybrid RRF, then rerank with the configured provider.
@@ -1488,78 +1213,20 @@ pub async fn search_agentic(
     query: String,
     limit: u32,
 ) -> CommandResult<Vec<SearchHit>> {
-    let limit = validate_search_request(&query, limit)?;
-    if let Some(remote) = &state.remote_ai {
-        return match remote.search(query.clone(), limit).await {
-            Ok(results) => Ok(results),
-            Err(error) => {
-                tracing::warn!(%error, "remote agentic search unavailable; falling back to FTS");
-                db::search_fts(&state.conn, query, limit).await.map_err(err)
-            }
-        };
-    }
-    let embedder = state
-        .embedder
-        .as_ref()
-        .context("local embedding provider is unavailable")
-        .map_err(err)?;
-    let emb = embedder.embed_query(query.clone()).await.map_err(err)?;
-    // See SearchAgentic for rationale; widening the rerank pool matters even
-    // more here because the UI can ask for `limit = 3` and starve the
-    // reranker otherwise.
-    let pool = limit.saturating_mul(4).max(32);
-    let candidates = db::search_hybrid(&state.conn, query.clone(), emb, pool)
-        .await
-        .map_err(err)?;
-    if candidates.is_empty() {
-        return Ok(Vec::new());
-    }
-    let docs: Vec<String> = candidates
-        .iter()
-        .map(|h| {
-            let title = h.node.title.as_deref().unwrap_or("");
-            format!("{title}\n{}", h.node.content)
-        })
-        .collect();
-    let reranker = state
-        .reranker
-        .as_ref()
-        .context("local reranking provider is unavailable")
-        .map_err(err)?;
-    let scored = reranker.rerank(query, docs).await.map_err(err)?;
-    let mut out: Vec<SearchHit> = scored
-        .into_iter()
-        .take(limit as usize)
-        .filter_map(|(idx, score)| {
-            candidates.get(idx).map(|candidate| SearchHit {
-                node: candidate.node.clone(),
-                score: score as f64,
-            })
-        })
-        .collect();
-    out.truncate(limit as usize);
-    Ok(out)
+    remote_search(&state, query, limit).await
 }
 
-#[tauri::command]
-#[specta::specta]
-pub async fn rerank(
-    state: State<'_, AppState>,
+async fn remote_search(
+    state: &AppState,
     query: String,
-    documents: Vec<String>,
-) -> CommandResult<Vec<(usize, f32)>> {
-    if query.trim().is_empty() || query.chars().count() > 4_096 {
-        return Err("query must contain 1 to 4096 characters".into());
-    }
-    if documents.len() > 128 || documents.iter().any(|document| document.len() > 100_000) {
-        return Err("reranking accepts at most 128 documents of at most 100000 bytes each".into());
-    }
-    let reranker = state
-        .reranker
-        .as_ref()
-        .context("local reranking provider is unavailable")
-        .map_err(err)?;
-    reranker.rerank(query, documents).await.map_err(err)
+    limit: u32,
+) -> CommandResult<Vec<SearchHit>> {
+    let limit = validate_search_request(&query, limit)?;
+    let remote = state.remote_ai.as_ref().ok_or_else(|| CommandError {
+        code: CommandErrorCode::Unavailable,
+        message: "semantic search requires a configured notes-rs server; local FTS remains available offline".into(),
+    })?;
+    remote.search(query, limit).await.map_err(err)
 }
 
 fn validate_search_request(query: &str, limit: u32) -> CommandResult<u32> {
@@ -1574,44 +1241,8 @@ fn validate_search_request(query: &str, limit: u32) -> CommandResult<u32> {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn chat(state: State<'_, AppState>, message: String) -> CommandResult<String> {
-    if state.remote_ai.is_some() {
-        return Err(CommandError {
-            code: CommandErrorCode::Unavailable,
-            message: "non-streaming chat is unavailable in server mode".into(),
-        });
-    }
-    let embedder = state
-        .embedder
-        .as_ref()
-        .context("local embedding provider is unavailable")
-        .map_err(err)?;
-    let reranker = state
-        .reranker
-        .as_ref()
-        .context("local reranking provider is unavailable")
-        .map_err(err)?;
-    let config = state
-        .chat_config
-        .clone()
-        .context("chat provider is unavailable")
-        .map_err(err)?;
-    agent::run_chat_with_config(
-        state.conn.clone(),
-        embedder.clone(),
-        reranker.clone(),
-        message,
-        config,
-    )
-    .await
-    .map_err(err)
-}
-
-#[tauri::command]
-#[specta::specta]
 #[allow(clippy::too_many_arguments)]
 pub async fn chat_stream(
-    app: AppHandle,
     state: State<'_, AppState>,
     history: Vec<ChatTurn>,
     message: String,
@@ -1630,75 +1261,27 @@ pub async fn chat_stream(
             return Err("a chat request with this ID is already active".into());
         }
     }
-    let on_event = Arc::new(on_event);
-    if let Some(remote) = &state.remote_ai {
-        let channel = on_event.clone();
-        let result = remote
-            .chat_stream(
-                history,
-                message,
-                allow_writes,
-                active_node_uuid,
-                cancellation,
-                move |event| {
-                    let _ = channel.send(event);
-                },
-            )
-            .await;
-        state
-            .chat_cancellations
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(&request_id);
-        return result.map_err(err);
-    }
-    let embedder = state
-        .embedder
-        .as_ref()
-        .context("local embedding provider is unavailable")
-        .map_err(err)?;
-    let reranker = state
-        .reranker
-        .as_ref()
-        .context("local reranking provider is unavailable")
-        .map_err(err)?;
-    let emit = move |ev: ChatEvent| {
-        let _ = on_event.send(ev);
-    };
-    let config = state
-        .chat_config
-        .clone()
-        .context("chat provider is unavailable")
-        .map_err(err)?;
-    let result = agent::run_chat_stream_with_config(
-        state.conn.clone(),
-        embedder.clone(),
-        reranker.clone(),
-        history,
-        message,
-        allow_writes,
-        match active_node_uuid {
-            Some(uuid) => db::get_node_by_uuid(&state.conn, uuid)
-                .await
-                .map_err(err)?
-                .map(|node| node.id),
-            None => None,
-        },
-        cancellation,
-        emit,
-        config,
-        state.query_rewriting_enabled,
-    )
-    .await;
+    let remote = state.remote_ai.as_ref().ok_or_else(|| CommandError {
+        code: CommandErrorCode::Unavailable,
+        message: "AI chat requires a configured notes-rs server".into(),
+    })?;
+    let result = remote
+        .chat_stream(
+            history,
+            message,
+            allow_writes,
+            active_node_uuid,
+            cancellation,
+            move |event| {
+                let _ = on_event.send(event);
+            },
+        )
+        .await;
     state
         .chat_cancellations
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .remove(&request_id);
-    if allow_writes && result.is_ok() {
-        emit_domain(&app, DomainEvent::WorkspaceChanged);
-        emit_domain(&app, DomainEvent::HistoryChanged);
-    }
     result.map_err(err)
 }
 

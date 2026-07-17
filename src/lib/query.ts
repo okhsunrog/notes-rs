@@ -18,7 +18,6 @@ export const queryKeys = {
   attachmentsRoot: [...root, "attachments"] as const,
   attachments: (parentUuid: string) => [...root, "attachments", parentUuid] as const,
   history: [...root, "history"] as const,
-  backgroundStatus: [...root, "background-status"] as const,
   settings: [...root, "settings"] as const,
   syncStatus: [...root, "sync-status"] as const,
 };
@@ -54,7 +53,6 @@ export async function applyDomainEvent(queryClient: QueryClient, event: DomainEv
         invalidate(queryKeys.graphRoot),
         invalidate(queryKeys.backlinksRoot),
         invalidate(queryKeys.attachmentsRoot),
-        invalidate(queryKeys.backgroundStatus),
       ]);
       return;
     }
@@ -63,14 +61,10 @@ export async function applyDomainEvent(queryClient: QueryClient, event: DomainEv
         invalidate(queryKeys.graphRoot),
         invalidate(queryKeys.backlinksRoot),
         invalidate(queryKeys.entities),
-        invalidate(queryKeys.backgroundStatus),
       ]);
       return;
     case "history_changed":
       await invalidate(queryKeys.history);
-      return;
-    case "background_status_changed":
-      await invalidate(queryKeys.backgroundStatus);
       return;
     case "settings_changed":
       await invalidate(queryKeys.settings);

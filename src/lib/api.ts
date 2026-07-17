@@ -1,16 +1,12 @@
 import { commands } from "@/lib/bindings";
 import type {
-  BackgroundFailure,
-  BackgroundStatus,
   BlockContent,
   ChatEvent,
   CommandError,
   Edge,
-  EmbeddingProvider,
   GraphSnapshot,
   Node,
   SearchHit,
-  RerankProvider,
   SecretKey,
   SettingsSnapshot,
   SettingsUpdate,
@@ -19,16 +15,12 @@ import type {
 } from "@/lib/bindings";
 
 export type {
-  BackgroundFailure,
-  BackgroundStatus,
   BlockContent,
   ChatEvent,
   Edge,
-  EmbeddingProvider,
   GraphSnapshot,
   Node,
   SearchHit,
-  RerankProvider,
   SecretKey,
   SettingsSnapshot,
   SettingsUpdate,
@@ -108,30 +100,10 @@ export const setSystemBarsStyle = checkedCommand(commands.setSystemBarsStyle);
 export const loadSettings = checkedCommand(commands.loadSettings);
 export const saveSettings = checkedCommand(commands.saveSettings);
 
-export function testCompletionProvider(request: {
-  protocol: "openai" | "anthropic";
-  baseUrl: string;
-  model: string;
-  apiKey?: string;
-  keyScope?: "chat" | "extraction";
-}) {
-  return unwrapCommand(
-    commands.testCompletionProvider({
-      ...request,
-      apiKey: request.apiKey ?? null,
-      keyScope: request.keyScope ?? null,
-    }),
-  );
-}
-
 export const restartApp = commands.restartApp;
 export const chatStream = checkedCommand(commands.chatStream);
 export const cancelChat = commands.cancelChat;
-export const getBackgroundStatus = checkedCommand(commands.backgroundStatus);
 export const getSyncStatus = commands.syncStatus;
-export const setBackgroundPaused = commands.setBackgroundPaused;
-export const retryBackgroundJobs = checkedCommand(commands.retryBackgroundJobs);
-export const clearBackgroundJobs = checkedCommand(commands.clearBackgroundJobs);
 export const listEntities = (limit = 30) => unwrapCommand(commands.listEntities(limit));
 export const listPages = (limit = 200) => unwrapCommand(commands.listPages(limit));
 export const createPage = checkedCommand(commands.createPage);

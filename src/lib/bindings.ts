@@ -18,12 +18,7 @@ export const commands = {
 	syncStatus: () => __TAURI_INVOKE<SyncStatus>("sync_status"),
 	loadSettings: () => typedError<SettingsSnapshot, CommandError>(__TAURI_INVOKE("load_settings")),
 	saveSettings: (update: SettingsUpdate) => typedError<SettingsSnapshot, CommandError>(__TAURI_INVOKE("save_settings", { update })),
-	testCompletionProvider: (request: ProviderProbeRequest) => typedError<ProviderProbeResult, CommandError>(__TAURI_INVOKE("test_completion_provider", { request })),
 	restartApp: () => __TAURI_INVOKE<void>("restart_app"),
-	backgroundStatus: () => typedError<BackgroundStatus, CommandError>(__TAURI_INVOKE("background_status")),
-	setBackgroundPaused: (paused: boolean) => __TAURI_INVOKE<void>("set_background_paused", { paused }),
-	retryBackgroundJobs: () => typedError<null, CommandError>(__TAURI_INVOKE("retry_background_jobs")),
-	clearBackgroundJobs: () => typedError<null, CommandError>(__TAURI_INVOKE("clear_background_jobs")),
 	historyStatus: () => typedError<[number, number], CommandError>(__TAURI_INVOKE("history_status")),
 	undo: () => typedError<boolean, CommandError>(__TAURI_INVOKE("undo")),
 	redo: () => typedError<boolean, CommandError>(__TAURI_INVOKE("redo")),
@@ -64,8 +59,6 @@ export const commands = {
 	searchHybrid: (query: string, limit: number) => typedError<SearchHit[], CommandError>(__TAURI_INVOKE("search_hybrid", { query, limit })),
 	/**  Retrieve via hybrid RRF, then rerank with the configured provider. */
 	searchAgentic: (query: string, limit: number) => typedError<SearchHit[], CommandError>(__TAURI_INVOKE("search_agentic", { query, limit })),
-	rerank: (query: string, documents: string[]) => typedError<([number, number | null])[], CommandError>(__TAURI_INVOKE("rerank", { query, documents })),
-	chat: (message: string) => typedError<string, CommandError>(__TAURI_INVOKE("chat", { message })),
 	chatStream: (history: ChatTurn[], message: string, allowWrites: boolean, activeNodeUuid: string | null, requestId: string, onEvent: Channel<ChatEvent>) => typedError<string, CommandError>(__TAURI_INVOKE("chat_stream", { history, message, allowWrites, activeNodeUuid, requestId, onEvent })),
 	cancelChat: (requestId: string) => __TAURI_INVOKE<boolean>("cancel_chat", { requestId }),
 	listEntities: (limit: number | null) => typedError<Node[], CommandError>(__TAURI_INVOKE("list_entities", { limit })),
@@ -138,40 +131,10 @@ export const events = {
 };
 
 /* Types */
-/**  A queued background job that has failed at least once. */
-export type BackgroundFailure = {
-	queue: BackgroundQueue,
-	nodeId: number,
-	nodeTitle: string | null,
-	retryCount: number,
-	lastAttempt: number | null,
-	failureKind: FailureKind,
-	lastError: string,
-	terminal: boolean,
-};
-
-export type BackgroundQueue = "embedding" | "extraction";
-
-export type BackgroundStatus = {
-	paused: boolean,
-	embeddingsPending: number,
-	embeddingsFailed: number,
-	extractionsPending: number,
-	extractionsFailed: number,
-	failures: BackgroundFailure[],
-};
-
 export type BlockContent = {
 	content: string,
 	wikilinkTitles: string[],
 	blockUuids: string[],
-};
-
-export type CapabilityProbeResult = {
-	name: ProbeCapability,
-	ok: boolean,
-	latencyMs: number,
-	detail: string,
 };
 
 export type ChatEvent = { kind: "text_delta"; text: string } | { kind: "reasoning"; text: string } | { kind: "tool_start"; id: string; name: string; args: unknown } | { kind: "tool_end"; id: string; result: string } | { kind: "done"; text: string } | { kind: "error"; message: string } | { kind: "usage"; inputTokens: number; outputTokens: number; totalTokens: number } | { kind: "cancelled" };
@@ -185,8 +148,6 @@ export type CommandError = {
 
 export type CommandErrorCode = "invalid_input" | "not_found" | "conflict" | "unavailable" | "internal";
 
-export type CompletionProtocol = "openai" | "anthropic";
-
 export type CreatedNote = {
 	page: Node,
 	initialBlock: Node,
@@ -197,7 +158,7 @@ export type CreatedNote = {
  *  Payloads carry affected IDs when a command can identify them; whole-workspace
  *  replacements (import/sync) deliberately request a full cache refresh.
  */
-export type DomainEvent = { kind: "node_changed"; node_uuids: string[]; parent_uuids: string[] } | { kind: "node_deleted"; node_uuids: string[]; parent_uuids: string[] } | { kind: "graph_changed"; node_uuids: string[] } | { kind: "history_changed" } | { kind: "background_status_changed" } | { kind: "settings_changed" } | { kind: "sync_status_changed" } | { kind: "workspace_changed" };
+export type DomainEvent = { kind: "node_changed"; node_uuids: string[]; parent_uuids: string[] } | { kind: "node_deleted"; node_uuids: string[]; parent_uuids: string[] } | { kind: "graph_changed"; node_uuids: string[] } | { kind: "history_changed" } | { kind: "settings_changed" } | { kind: "sync_status_changed" } | { kind: "workspace_changed" };
 
 export type DomainEventMessage = DomainEvent;
 
@@ -208,12 +169,6 @@ export type Edge = {
 	weight: number | null,
 	created_at: number,
 };
-
-export type EmbeddingProvider = "openrouter" | "openai" | "cohere" | "voyageai" | "gemini" | "local";
-
-export type ExtractionProtocol = "inherit" | "openai" | "anthropic";
-
-export type FailureKind = "unknown" | "transient" | "auth" | "provider_request" | "schema" | "configuration" | "network" | "provider_response" | "apply";
 
 export type GraphSnapshot = {
 	nodes: Node[],
@@ -241,24 +196,6 @@ export type Node = {
 /**  Closed set of node shapes understood by storage, sync and the UI. */
 export type NodeKind = "page" | "block" | "tag" | "entity" | "attachment";
 
-export type ProbeCapability = "completion" | "streaming" | "required_tool" | "structured_output";
-
-export type ProviderKeyScope = "chat" | "extraction";
-
-export type ProviderProbeRequest = {
-	protocol: CompletionProtocol,
-	baseUrl: string,
-	model: string,
-	apiKey: string | null,
-	keyScope: ProviderKeyScope | null,
-};
-
-export type ProviderProbeResult = {
-	capabilities: CapabilityProbeResult[],
-};
-
-export type RerankProvider = "openrouter" | "local";
-
 export type SafeAreaInsets = {
 	top: number | null,
 	right: number | null,
@@ -271,50 +208,17 @@ export type SearchHit = {
 	score: number | null,
 };
 
-export type SecretKey = "CHAT_API_KEY" | "EXTRACT_API_KEY" | "OPENROUTER_API_KEY" | "OPENAI_API_KEY" | "COHERE_API_KEY" | "VOYAGE_API_KEY" | "GEMINI_API_KEY" | "SYNC_TOKEN";
+export type SecretKey = "SYNC_TOKEN";
 
 export type SettingsSnapshot = {
-	localOnly: boolean,
-	entityExtractionEnabled: boolean,
-	queryRewritingEnabled: boolean,
-	chatModel: string,
-	chatProtocol: CompletionProtocol,
-	chatBaseUrl: string,
-	extractionModel: string,
-	extractionProtocol: ExtractionProtocol,
-	extractionBaseUrl: string | null,
-	embeddingProvider: EmbeddingProvider,
-	embeddingModel: string,
-	embeddingNdims: number | null,
-	rerankProvider: RerankProvider,
-	rerankModel: string,
-	openrouterBaseUrl: string,
-	openaiBaseUrl: string,
 	windowDecorationMode: WindowDecorationMode,
 	syncDirectory: string | null,
 	syncServerUrl: string | null,
 	configuredKeys: SecretKey[],
-	localModelsAvailable: boolean,
 	configPath: string,
 };
 
 export type SettingsUpdate = {
-	localOnly: boolean,
-	entityExtractionEnabled: boolean,
-	queryRewritingEnabled: boolean,
-	chatModel: string,
-	chatProtocol: CompletionProtocol,
-	chatBaseUrl: string,
-	extractionModel: string,
-	extractionProtocol: ExtractionProtocol,
-	extractionBaseUrl: string | null,
-	embeddingProvider: EmbeddingProvider,
-	embeddingModel: string,
-	embeddingNdims: number | null,
-	rerankProvider: RerankProvider,
-	rerankModel: string,
-	openrouterBaseUrl: string,
-	openaiBaseUrl: string,
 	windowDecorationMode: WindowDecorationMode,
 	syncDirectory: string | null,
 	syncServerUrl: string | null,

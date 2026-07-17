@@ -2,10 +2,7 @@ mod commands;
 mod settings;
 mod sync;
 
-use anyhow::Context;
-use notes_ai::{embed, extract};
 use notes_core::db;
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 use tauri::{Emitter, Manager};
 
@@ -19,12 +16,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::sync_status,
             commands::load_settings,
             commands::save_settings,
-            commands::test_completion_provider,
             commands::restart_app,
-            commands::background_status,
-            commands::set_background_paused,
-            commands::retry_background_jobs,
-            commands::clear_background_jobs,
             commands::history_status,
             commands::undo,
             commands::redo,
@@ -42,8 +34,6 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::search_vec,
             commands::search_hybrid,
             commands::search_agentic,
-            commands::rerank,
-            commands::chat,
             commands::chat_stream,
             commands::cancel_chat,
             commands::list_entities,
@@ -134,7 +124,6 @@ pub fn run() {
             let db_path = data_dir.join("notes.db");
             let configured_settings = settings::runtime(&handle)?;
             let sync_credentials = configured_settings.sync_credentials()?;
-            let server_mode = sync_credentials.is_some();
             let remote_ai = sync_credentials
                 .as_ref()
                 .map(|(server_url, token)| {
@@ -145,128 +134,19 @@ pub fn run() {
             let sync_status = sync_runtime.status.clone();
             app.manage(sync_runtime);
 
-            // Register the readiness flag immediately so the frontend can
-            // poll/listen instead of invoking commands that would otherwise
-            // fail with an opaque "state not managed" error during the
-            // (slow, first-run) embedder model download.
             let startup = Arc::new(RwLock::new(commands::StartupStatus::Starting {
-                message: "Opening database and loading search providers…".into(),
+                message: "Opening local notes database…".into(),
             }));
             handle.manage(commands::Startup {
                 status: startup.clone(),
             });
 
             tauri::async_runtime::spawn(async move {
-                let initialize = async {
-                    let (embedder, reranker, id, ndims, chat_config, extraction_config) = if server_mode {
-                        let fallback_ndims = configured_settings
-                            .embedding_dimensions()
-                            .context("embedding dimensions are required in server mode")?
-                            as usize;
-                        let fallback_id = configured_settings.embedding_provider_id();
-                        let (id, ndims) = match remote_ai.as_ref() {
-                            Some(transport) => match transport.info().await {
-                                Ok(info) => {
-                                    if !info.ai_enabled {
-                                        anyhow::bail!("the configured sync server has AI disabled");
-                                    }
-                                    (info.embedding_provider_id, info.embedding_dimensions)
-                                }
-                                Err(error) => {
-                                    tracing::warn!(%error, "server info unavailable; opening the offline cache with saved embedding metadata");
-                                    (fallback_id, fallback_ndims)
-                                }
-                            },
-                            None => (fallback_id, fallback_ndims),
-                        };
-                        tracing::info!(embedder = %id, ndims, "using server-owned AI");
-                        (None, None, id, ndims, None, None)
-                    } else {
-                        let embedder = embed::make_embedder(&configured_settings.embedder_config())?;
-                        let id = embedder.id();
-                        let ndims = embedder.ndims();
-                        let reranker = embed::make_reranker(&configured_settings.reranker_config())?;
-                        let chat_config = configured_settings
-                            .cloud_ai_enabled()
-                            .then(|| configured_settings.chat_config())
-                            .transpose()?;
-                        let extraction_config = configured_settings
-                            .entity_extraction_enabled()
-                            .then(|| configured_settings.extraction_config())
-                            .transpose()?;
-                        tracing::info!(embedder = %id, ndims, "local AI providers loaded");
-                        (
-                            Some(embedder),
-                            Some(reranker),
-                            id,
-                            ndims,
-                            chat_config,
-                            extraction_config,
-                        )
-                    };
-                    let conn = db::open(&db_path, &id, ndims).await?;
-                    anyhow::Ok((
-                        conn,
-                        embedder,
-                        reranker,
-                        chat_config,
-                        extraction_config,
-                    ))
-                };
-
-                match initialize.await {
-                    Ok((conn, embedder, reranker, chat_config, extraction_config)) => {
-                        let background_paused = Arc::new(AtomicBool::new(false));
-                        if let Some(embedder) = &embedder {
-                            let embedding_event_handle = handle.clone();
-                            embed::spawn_worker(
-                                conn.clone(),
-                                embedder.clone(),
-                                Arc::new(move || {
-                                    commands::emit_domain(
-                                        &embedding_event_handle,
-                                        commands::DomainEvent::BackgroundStatusChanged,
-                                    );
-                                }),
-                                background_paused.clone(),
-                            );
-                        }
-                        if let Some(extraction_config) = extraction_config {
-                            let extractor =
-                                Arc::new(extract::EntityExtractor::new(extraction_config));
-                            let event_handle = handle.clone();
-                            let status_event_handle = handle.clone();
-                            extract::spawn_worker(
-                                conn.clone(),
-                                extractor,
-                                Arc::new(move || {
-                                    commands::emit_domain(
-                                        &event_handle,
-                                        commands::DomainEvent::GraphChanged {
-                                            node_uuids: Vec::new(),
-                                        },
-                                    );
-                                }),
-                                Arc::new(move || {
-                                    commands::emit_domain(
-                                        &status_event_handle,
-                                        commands::DomainEvent::BackgroundStatusChanged,
-                                    );
-                                }),
-                                background_paused.clone(),
-                            );
-                        } else {
-                            tracing::info!("automatic entity extraction is disabled");
-                        }
+                match db::open(&db_path, "client:no-ai", 1).await {
+                    Ok(conn) => {
                         handle.manage(commands::AppState {
                             conn: conn.clone(),
-                            embedder,
-                            reranker,
                             remote_ai,
-                            chat_config,
-                            query_rewriting_enabled: configured_settings
-                                .query_rewriting_enabled(),
-                            background_paused,
                             chat_cancellations: Arc::new(std::sync::Mutex::new(
                                 std::collections::HashMap::new(),
                             )),
