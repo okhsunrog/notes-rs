@@ -23,6 +23,7 @@ use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::broadcast;
 use tokio_util::io::ReaderStream;
+use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
 const JSON_BODY_LIMIT: usize = 2 * 1024 * 1024;
@@ -34,6 +35,7 @@ pub struct AppState {
     pub data_dir: PathBuf,
     pub max_blob_bytes: u64,
     pub ai: Option<Arc<crate::ai::AiRuntime>>,
+    pub shutdown: CancellationToken,
 }
 
 #[derive(Clone)]
@@ -292,7 +294,7 @@ async fn chat(
         .clone()
         .ok_or_else(|| ApiError::unavailable("server AI is not configured"))?;
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<ChatEvent>();
-    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancelled = CancellationToken::new();
     let cancellation_for_emit = cancelled.clone();
     let error_emitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let error_for_emit = error_emitted.clone();
@@ -304,7 +306,7 @@ async fn chat(
                 error_for_emit.store(true, std::sync::atomic::Ordering::Release);
             }
             if event_sender.send(event).is_err() {
-                cancellation_for_emit.store(true, std::sync::atomic::Ordering::Release);
+                cancellation_for_emit.cancel();
             }
         };
         if let Err(error) = ai

@@ -7,7 +7,6 @@ use notes_protocol::{AiIndexStatus, AiRuntimeSettings, ChatEvent, ChatTurn};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
@@ -15,6 +14,7 @@ use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tauri_specta::Event;
+use tokio_util::sync::CancellationToken;
 
 #[cfg(target_os = "android")]
 use tauri_plugin_mobile_system::MobileSystemExt;
@@ -136,7 +136,7 @@ impl std::error::Error for CommandError {}
 pub struct AppState {
     pub conn: Connection,
     pub remote_ai: Option<notes_sync::HttpTransport>,
-    pub chat_cancellations: Arc<std::sync::Mutex<HashMap<uuid::Uuid, Arc<AtomicBool>>>>,
+    pub chat_cancellations: Arc<std::sync::Mutex<HashMap<uuid::Uuid, CancellationToken>>>,
 }
 
 /// The single frontend invalidation stream for persisted Rust state.
@@ -1321,7 +1321,7 @@ pub async fn chat_stream(
     request_id: uuid::Uuid,
     on_event: Channel<ChatEvent>,
 ) -> CommandResult<String> {
-    let cancellation = Arc::new(AtomicBool::new(false));
+    let cancellation = CancellationToken::new();
     {
         let mut active = state
             .chat_cancellations
@@ -1365,7 +1365,7 @@ pub fn cancel_chat(state: State<'_, AppState>, request_id: uuid::Uuid) -> bool {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     if let Some(cancellation) = active.get(&request_id) {
-        cancellation.store(true, Ordering::Release);
+        cancellation.cancel();
         true
     } else {
         false

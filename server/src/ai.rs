@@ -11,13 +11,17 @@ use notes_protocol::{AiGenerationState, AiIndexStatus, AiRuntimeSettings, ChatEv
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 struct UserAi {
+    source: Arc<crate::state::UserState>,
     notes: Connection,
     store: Arc<AiStore>,
     retrieval: RetrievalPipeline,
+    embed_wake: Arc<Notify>,
+    extract_wake: Arc<Notify>,
 }
 
 #[derive(Clone)]
@@ -34,7 +38,12 @@ pub struct AiRuntime {
 }
 
 impl AiRuntime {
-    pub async fn open(config: &AiConfig, registry: &UserRegistry, data_dir: &Path) -> Result<Self> {
+    pub async fn open(
+        config: &AiConfig,
+        registry: &UserRegistry,
+        data_dir: &Path,
+        shutdown: CancellationToken,
+    ) -> Result<Self> {
         let embedder = notes_ai::embed::make_openrouter_embedder(
             config.openrouter_api_key.clone(),
             &config.openrouter_base_url,
@@ -65,6 +74,8 @@ impl AiRuntime {
         );
         let mut users = HashMap::new();
         for user in registry.users() {
+            let embed_wake = Arc::new(Notify::new());
+            let extract_wake = Arc::new(Notify::new());
             let store = Arc::new(
                 AiStore::open_with_control(
                     data_dir.join("users").join(&user.id).join("ai.db"),
@@ -88,11 +99,30 @@ impl AiRuntime {
             users.insert(
                 user.id.clone(),
                 UserAi {
+                    source: user.clone(),
                     notes: user.notes.clone(),
                     store,
                     retrieval,
+                    embed_wake: embed_wake.clone(),
+                    extract_wake: extract_wake.clone(),
                 },
             );
+            let mut changes = user.subscribe();
+            let change_shutdown = shutdown.child_token();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        () = change_shutdown.cancelled() => return,
+                        result = changes.recv() => match result {
+                            Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                embed_wake.notify_one();
+                                extract_wake.notify_one();
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                        },
+                    }
+                }
+            });
         }
         let runtime = Self {
             users: Arc::new(users),
@@ -105,26 +135,37 @@ impl AiRuntime {
             chat_model: config.chat_model.clone(),
             extraction_model: config.extraction_model.clone(),
         };
-        runtime.spawn_workers(embedder);
+        runtime.spawn_workers(embedder, shutdown);
         Ok(runtime)
     }
 
-    fn spawn_workers(&self, embedder: Arc<dyn EmbedderBackend>) {
+    fn spawn_workers(&self, embedder: Arc<dyn EmbedderBackend>, shutdown: CancellationToken) {
         for user in self.users.values() {
             notes_ai::embed::spawn_worker(
                 user.notes.clone(),
                 user.store.clone(),
                 embedder.clone(),
                 Arc::new(|| {}),
+                user.embed_wake.clone(),
+                shutdown.child_token(),
             );
+            let entity_source = user.source.clone();
+            let entity_embed_wake = user.embed_wake.clone();
+            let entity_extract_wake = user.extract_wake.clone();
             notes_ai::extract::spawn_worker(
                 user.notes.clone(),
                 user.store.clone(),
                 Arc::new(notes_ai::extract::EntityExtractor::new(
                     self.extraction.clone(),
                 )),
+                Arc::new(move || {
+                    entity_source.notify_outbox();
+                    entity_embed_wake.notify_one();
+                    entity_extract_wake.notify_one();
+                }),
                 Arc::new(|| {}),
-                Arc::new(|| {}),
+                user.extract_wake.clone(),
+                shutdown.child_token(),
             );
         }
     }
@@ -189,11 +230,16 @@ impl AiRuntime {
                 query_rewriting: settings.query_rewriting,
             })
             .await?;
+        user.embed_wake.notify_one();
+        user.extract_wake.notify_one();
         self.status(user_id).await
     }
 
     pub async fn reindex(&self, user_id: &str) -> Result<AiIndexStatus> {
-        self.user(user_id)?.store.reset_index().await?;
+        let user = self.user(user_id)?;
+        user.store.reset_index().await?;
+        user.embed_wake.notify_one();
+        user.extract_wake.notify_one();
         self.status(user_id).await
     }
 
@@ -205,7 +251,7 @@ impl AiRuntime {
         message: String,
         allow_writes: bool,
         active_node_uuid: Option<uuid::Uuid>,
-        cancelled: Arc<AtomicBool>,
+        cancelled: CancellationToken,
         emit: impl Fn(ChatEvent) + Send + Sync + 'static,
     ) -> Result<String> {
         let user = self.user(user_id)?;
@@ -216,7 +262,7 @@ impl AiRuntime {
                 .map(|node| node.id),
             None => None,
         };
-        if cancelled.load(Ordering::Acquire) {
+        if cancelled.is_cancelled() {
             bail!("chat request was cancelled");
         }
         agent::run_chat_stream_with_config(

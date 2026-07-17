@@ -9,7 +9,9 @@ use notes_sync::{Op, SyncSnapshot};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::sync::Notify;
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 const REPLAY_BATCH_SIZE: usize = 1_000;
 
@@ -26,6 +28,7 @@ pub struct UserState {
     pub snapshot_dir: PathBuf,
     command_tx: mpsc::Sender<UserCommand>,
     operations_tx: broadcast::Sender<SequencedOp>,
+    outbox_wake: Arc<Notify>,
 }
 
 enum UserCommand {
@@ -43,20 +46,27 @@ enum UserCommand {
 }
 
 impl UserRegistry {
-    pub async fn open(config: &ServerConfig) -> Result<Self> {
+    pub async fn open(config: &ServerConfig, shutdown: CancellationToken) -> Result<Self> {
         tokio::fs::create_dir_all(&config.data_dir)
             .await
             .with_context(|| format!("creating data directory {}", config.data_dir.display()))?;
         let mut states = HashMap::new();
         let mut tokens = HashMap::new();
         for user in &config.users {
-            let state =
-                Arc::new(UserState::open(user, &config.data_dir, config.snapshot_every_ops).await?);
+            let state = Arc::new(
+                UserState::open(
+                    user,
+                    &config.data_dir,
+                    config.snapshot_every_ops,
+                    shutdown.child_token(),
+                )
+                .await?,
+            );
             states.insert(user.id.clone(), state.clone());
             for token in &user.tokens {
                 tokens.insert(token.clone(), state.clone());
             }
-            spawn_local_outbox_publisher(state.clone());
+            spawn_local_outbox_publisher(state.clone(), shutdown.child_token());
         }
         tracing::info!(users = states.len(), "opened server user replicas");
         Ok(Self {
@@ -74,27 +84,52 @@ impl UserRegistry {
     }
 }
 
-fn spawn_local_outbox_publisher(user: Arc<UserState>) {
+fn spawn_local_outbox_publisher(user: Arc<UserState>, shutdown: CancellationToken) {
     tokio::spawn(async move {
         loop {
-            match notes_core::pending_outbox(&user.notes, 256).await {
-                Ok(operations) if operations.is_empty() => {}
-                Ok(operations) => {
-                    if let Err(error) = user.ingest(operations).await {
-                        tracing::warn!(user = %user.id, ?error, "publishing server-authored operations failed");
-                    }
+            loop {
+                let operations = tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    result = notes_core::pending_outbox(&user.notes, 256) => match result {
+                        Ok(operations) => operations,
+                        Err(error) => {
+                            tracing::warn!(user = %user.id, ?error, "reading server outbox failed");
+                            break;
+                        }
+                    },
+                };
+                if operations.is_empty() {
+                    break;
                 }
-                Err(error) => {
-                    tracing::warn!(user = %user.id, ?error, "reading server outbox failed");
+                let batch_is_full = operations.len() == 256;
+                let result = tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    result = user.ingest(operations) => result,
+                };
+                if let Err(error) = result {
+                    tracing::warn!(user = %user.id, ?error, "publishing server-authored operations failed");
+                    break;
+                }
+                if !batch_is_full {
+                    break;
                 }
             }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                () = user.outbox_wake.notified() => {},
+                () = tokio::time::sleep(std::time::Duration::from_secs(30)) => {},
+            }
         }
     });
 }
 
 impl UserState {
-    async fn open(user: &UserConfig, data_dir: &Path, snapshot_every_ops: u64) -> Result<Self> {
+    async fn open(
+        user: &UserConfig,
+        data_dir: &Path,
+        snapshot_every_ops: u64,
+        shutdown: CancellationToken,
+    ) -> Result<Self> {
         let user_dir = data_dir.join("users").join(&user.id);
         let snapshot_dir = user_dir.join("snapshots");
         tokio::fs::create_dir_all(&snapshot_dir)
@@ -111,6 +146,7 @@ impl UserState {
 
         let (command_tx, command_rx) = mpsc::channel(64);
         let (operations_tx, _) = broadcast::channel(1_024);
+        let outbox_wake = Arc::new(Notify::new());
         tokio::spawn(run_user_actor(
             notes.clone(),
             oplog.clone(),
@@ -118,6 +154,7 @@ impl UserState {
             snapshot_every_ops,
             operations_tx.clone(),
             command_rx,
+            shutdown,
         ));
         Ok(Self {
             id: user.id.clone(),
@@ -126,6 +163,7 @@ impl UserState {
             snapshot_dir,
             command_tx,
             operations_tx,
+            outbox_wake,
         })
     }
 
@@ -168,6 +206,10 @@ impl UserState {
     pub fn subscribe(&self) -> broadcast::Receiver<SequencedOp> {
         self.operations_tx.subscribe()
     }
+
+    pub fn notify_outbox(&self) {
+        self.outbox_wake.notify_one();
+    }
 }
 
 async fn replay_oplog(notes: &Connection, oplog: &Oplog) -> Result<()> {
@@ -197,8 +239,14 @@ async fn run_user_actor(
     snapshot_every_ops: u64,
     operations_tx: broadcast::Sender<SequencedOp>,
     mut commands: mpsc::Receiver<UserCommand>,
+    shutdown: CancellationToken,
 ) {
-    while let Some(command) = commands.recv().await {
+    loop {
+        let command = tokio::select! {
+            () = shutdown.cancelled() => return,
+            command = commands.recv() => command,
+        };
+        let Some(command) = command else { return };
         match command {
             UserCommand::Ingest {
                 operations,

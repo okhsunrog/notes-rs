@@ -12,13 +12,12 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use tokio_util::io::ReaderStream;
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 pub type SyncSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -142,7 +141,7 @@ impl HttpTransport {
         message: String,
         allow_writes: bool,
         active_node_uuid: Option<uuid::Uuid>,
-        cancelled: Arc<AtomicBool>,
+        cancelled: CancellationToken,
         mut on_event: impl FnMut(ChatEvent),
     ) -> Result<String> {
         #[derive(Serialize)]
@@ -175,12 +174,9 @@ impl HttpTransport {
         loop {
             let chunk = tokio::select! {
                 chunk = body.next() => chunk,
-                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                    if cancelled.load(Ordering::Acquire) {
-                        on_event(ChatEvent::Cancelled);
-                        bail!("chat request was cancelled");
-                    }
-                    continue;
+                () = cancelled.cancelled() => {
+                    on_event(ChatEvent::Cancelled);
+                    bail!("chat request was cancelled");
                 }
             };
             let Some(chunk) = chunk else { break };

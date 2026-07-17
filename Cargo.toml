@@ -55,7 +55,7 @@ tokio-tungstenite = { version = "0.30.0", default-features = false, features = [
   "connect",
   "rustls-tls-webpki-roots",
 ] }
-tokio-util = { version = "0.7.18", features = ["io"] }
+tokio-util = { version = "0.7.18", features = ["io", "rt"] }
 toml = "1.1.3"
 tower = "0.5.3"
 tower-http = { version = "0.7.0", features = ["limit", "trace"] }

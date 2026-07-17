@@ -6,7 +6,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::Notify;
 use tokio::time::{Duration, sleep};
+use tokio_util::sync::CancellationToken;
 
 const PREAMBLE: &str = r#"
 Extract named entities and their relations from the user's note.
@@ -76,24 +78,44 @@ pub fn spawn_worker(
     extractor: Arc<EntityExtractor>,
     on_entities_changed: Arc<dyn Fn() + Send + Sync>,
     on_status_changed: Arc<dyn Fn() + Send + Sync>,
+    wake: Arc<Notify>,
+    shutdown: CancellationToken,
 ) {
     tokio::spawn(async move {
         loop {
-            match store.control().await {
+            let did_work = match store.control().await {
                 Ok(control) if control.entity_extraction => {
-                    match tick(&notes, &store, &extractor, on_entities_changed.as_ref()).await {
-                        Ok(true) => on_status_changed(),
-                        Ok(false) => {}
+                    let result = tokio::select! {
+                        () = shutdown.cancelled() => return,
+                        result = tick(&notes, &store, &extractor, on_entities_changed.as_ref()) => result,
+                    };
+                    match result {
+                        Ok(true) => {
+                            on_status_changed();
+                            true
+                        }
+                        Ok(false) => false,
                         Err(error) => {
                             on_status_changed();
                             tracing::warn!(?error, "extract worker tick failed");
+                            false
                         }
                     }
                 }
-                Ok(_) => {}
-                Err(error) => tracing::warn!(?error, "reading AI worker settings failed"),
+                Ok(_) => false,
+                Err(error) => {
+                    tracing::warn!(?error, "reading AI worker settings failed");
+                    false
+                }
+            };
+            if did_work {
+                continue;
             }
-            sleep(Duration::from_secs(2)).await;
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                () = wake.notified() => {},
+                () = sleep(Duration::from_secs(30)) => {},
+            }
         }
     });
 }

@@ -13,7 +13,7 @@ use rig::tool::{Tool, ToolError};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use tokio_util::sync::CancellationToken;
 
 const SYSTEM_PROMPT: &str = r#"
 You are an assistant embedded in a personal knowledge graph (notes-rs).
@@ -858,7 +858,7 @@ pub async fn run_chat_stream_with_config(
     message: String,
     allow_writes: bool,
     active_node_id: Option<i64>,
-    cancelled: Arc<AtomicBool>,
+    cancelled: CancellationToken,
     emit: impl Fn(ChatEvent) + Send + Sync + 'static,
     config: llm_relay::ClientConfig,
     query_rewriting_enabled: bool,
@@ -926,7 +926,7 @@ async fn run_chat_stream_with_model<M: CompletionModel + 'static>(
     message: String,
     allow_writes: bool,
     active_node_id: Option<i64>,
-    cancelled: Arc<AtomicBool>,
+    cancelled: CancellationToken,
     emit: Arc<dyn Fn(ChatEvent) + Send + Sync>,
     query_rewriter_config: llm_relay::ClientConfig,
     query_rewriting_enabled: bool,
@@ -946,12 +946,9 @@ async fn run_chat_stream_with_model<M: CompletionModel + 'static>(
     loop {
         let item = tokio::select! {
             item = stream.next() => item,
-            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                if cancelled.load(Ordering::Acquire) {
-                    emit(ChatEvent::Cancelled);
-                    return Ok(full);
-                }
-                continue;
+            () = cancelled.cancelled() => {
+                emit(ChatEvent::Cancelled);
+                return Ok(full);
             }
         };
         let Some(item) = item else {

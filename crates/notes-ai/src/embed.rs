@@ -13,7 +13,9 @@ use serde::Deserialize;
 use std::sync::Arc;
 #[cfg(feature = "local-models")]
 use tokio::sync::Mutex;
+use tokio::sync::Notify;
 use tokio::time::{Duration, sleep};
+use tokio_util::sync::CancellationToken;
 
 // ───────────────────────── embedder: trait + factory ─────────────────────────
 
@@ -648,24 +650,44 @@ pub fn spawn_worker(
     store: Arc<AiStore>,
     embedder: Arc<dyn EmbedderBackend>,
     on_status_changed: Arc<dyn Fn() + Send + Sync>,
+    wake: Arc<Notify>,
+    shutdown: CancellationToken,
 ) {
     tokio::spawn(async move {
         loop {
-            match store.control().await {
+            let did_work = match store.control().await {
                 Ok(control) if control.automatic_embeddings => {
-                    match tick(&notes, &store, embedder.as_ref()).await {
-                        Ok(true) => on_status_changed(),
-                        Ok(false) => {}
+                    let result = tokio::select! {
+                        () = shutdown.cancelled() => return,
+                        result = tick(&notes, &store, embedder.as_ref()) => result,
+                    };
+                    match result {
+                        Ok(true) => {
+                            on_status_changed();
+                            true
+                        }
+                        Ok(false) => false,
                         Err(e) => {
                             on_status_changed();
                             tracing::warn!(error = ?e, "embed worker tick failed");
+                            false
                         }
                     }
                 }
-                Ok(_) => {}
-                Err(error) => tracing::warn!(?error, "reading AI worker settings failed"),
+                Ok(_) => false,
+                Err(error) => {
+                    tracing::warn!(?error, "reading AI worker settings failed");
+                    false
+                }
+            };
+            if did_work {
+                continue;
             }
-            sleep(Duration::from_millis(500)).await;
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                () = wake.notified() => {},
+                () = sleep(Duration::from_secs(30)) => {},
+            }
         }
     });
 }

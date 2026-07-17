@@ -22,8 +22,12 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("binding notes-server to {}", config.listen))?;
     tracing::info!(listen = %config.listen, "notes-server ready");
+    let shutdown = state.shutdown.clone();
     axum::serve(listener, notes_server::router(state))
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            shutdown.cancel();
+        })
         .await
         .context("serving notes API")?;
     Ok(())
