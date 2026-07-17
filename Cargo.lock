@@ -3420,6 +3420,7 @@ dependencies = [
  "async-channel",
  "chrono",
  "notes-blob",
+ "notes-markdown",
  "proptest",
  "rusqlite",
  "rusqlite_migration",
@@ -3442,6 +3443,7 @@ version = "0.1.0"
 dependencies = [
  "data-url",
  "image",
+ "notes-markdown",
  "percent-encoding",
  "pulldown-cmark",
  "serde",
@@ -3451,6 +3453,13 @@ dependencies = [
  "thiserror 2.0.18",
  "unicode-normalization",
  "uuid",
+]
+
+[[package]]
+name = "notes-markdown"
+version = "0.1.0"
+dependencies = [
+ "pulldown-cmark",
 ]
 
 [[package]]

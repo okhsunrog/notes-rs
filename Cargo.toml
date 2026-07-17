@@ -5,6 +5,7 @@ members = [
   "crates/notes-core",
   "crates/notes-ai",
   "crates/notes-import",
+  "crates/notes-markdown",
   "crates/notes-protocol",
   "crates/notes-sync",
   "plugins/tauri-plugin-mobile-system",
@@ -36,9 +37,11 @@ llm-relay = { git = "https://github.com/okhsunrog/llm-relay", rev = "57b0cabe41a
 notes-ai = { path = "crates/notes-ai" }
 notes-blob = { path = "crates/notes-blob" }
 notes-core = { path = "crates/notes-core" }
+notes-markdown = { path = "crates/notes-markdown" }
 notes-protocol = { path = "crates/notes-protocol" }
 notes-sync = { path = "crates/notes-sync" }
 proptest = "1.8.0"
+pulldown-cmark = { version = "=0.13.4", default-features = false }
 reqwest = { version = "0.13.4", default-features = false }
 rig = { package = "rig-core", version = "0.40.0" }
 rusqlite = { version = "0.40.1", default-features = false, features = ["bundled", "uuid"] }

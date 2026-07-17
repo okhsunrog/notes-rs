@@ -1,0 +1,11 @@
+[package]
+name = "notes-markdown"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Canonical Markdown reference scanning for notes-rs"
+
+[dependencies]
+pulldown-cmark.workspace = true

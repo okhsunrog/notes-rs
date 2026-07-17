@@ -6,6 +6,11 @@ use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
+use notes_markdown::{
+    MalformedReference, MalformedReferenceReason, ReferenceKind as MarkdownReferenceKind,
+    ReferenceOccurrence, scan_references,
+};
+
 use crate::media::{MediaCollectionError, MediaLimits, MediaOwnerInput, collect_media};
 use crate::prepared::{
     IMPORT_PLANNER_VERSION, IdentityContext, ImportBlock, ImportBlockIdentity, ImportBlockMapping,
@@ -1392,194 +1397,268 @@ fn scan_reference_fragment(
             relative_path: relative_path.to_owned(),
         }
     })?;
-    let bytes = source.as_bytes();
-    let mut position = start;
-    let mut skipped_index =
-        skipped_ranges.partition_point(|(_, skip_end)| *skip_end <= start as u64);
-    let mut unclosed_wikilink = false;
-    let mut unclosed_block_reference = false;
-    while position + 1 < end {
-        while let Some((_, skip_end)) = skipped_ranges.get(skipped_index)
-            && *skip_end <= position as u64
-        {
-            skipped_index += 1;
-        }
-        if let Some((skip_start, skip_end)) = skipped_ranges.get(skipped_index)
-            && *skip_start <= position as u64
-            && (position as u64) < *skip_end
-        {
-            position = usize::try_from(*skip_end).unwrap_or(end).min(end);
-            skipped_index += 1;
+    let fragment = &source[start..end];
+    let scan = scan_references(fragment);
+    let mut scanned = scan
+        .occurrences
+        .into_iter()
+        .map(ScannedReference::Occurrence)
+        .chain(scan.malformed.into_iter().map(ScannedReference::Malformed))
+        .collect::<Vec<_>>();
+    scanned.sort_by_key(ScannedReference::start);
+
+    for reference in scanned {
+        let local_range = reference.source_range();
+        let source_start = start + local_range.start;
+        let source_end = start + local_range.end;
+        if overlaps_skipped_range(source_start, source_end, skipped_ranges) {
             continue;
         }
-        if bytes[position] == b'`' {
-            position = skip_inline_code(bytes, position, end);
-            continue;
-        }
-        if matches!(bytes[position], b'[' | b'(') && is_escaped(bytes, position) {
-            position += 1;
-            continue;
-        }
-        let kind = match bytes[position..end].get(..2) {
-            Some(b"[[") => ImportReferenceKind::WikiLink,
-            Some(b"((") => ImportReferenceKind::BlockReference,
-            _ => {
-                position += source[position..end]
-                    .chars()
-                    .next()
-                    .expect("valid UTF-8 boundary")
-                    .len_utf8();
-                continue;
+        match reference {
+            ScannedReference::Occurrence(reference) => {
+                let kind = import_reference_kind(reference.kind);
+                let target_start = start + reference.target_range.start;
+                let target_end = start + reference.target_range.end;
+                let target_text = &source[target_start..target_end];
+                let resolution = resolve_reference(kind, target_text, identities);
+                push_import_reference(
+                    source,
+                    source_start,
+                    source_end,
+                    target_start,
+                    target_end,
+                    owner,
+                    kind,
+                    resolution,
+                    source_index,
+                    relative_path,
+                    document_reference_count,
+                    limits,
+                    diagnostics,
+                    output,
+                )?;
             }
-        };
-        let target_start = position + 2;
-        if (kind == ImportReferenceKind::WikiLink && unclosed_wikilink)
-            || (kind == ImportReferenceKind::BlockReference && unclosed_block_reference)
-        {
-            position += 2;
-            continue;
-        }
-        let Some((close, reference_end, nested)) = reference_bounds(bytes, position, end, kind)
-        else {
-            match kind {
-                ImportReferenceKind::WikiLink => unclosed_wikilink = true,
-                ImportReferenceKind::BlockReference => unclosed_block_reference = true,
+            ScannedReference::Malformed(reference) => {
+                handle_malformed_reference(
+                    source,
+                    start,
+                    reference,
+                    owner,
+                    source_index,
+                    relative_path,
+                    document_reference_count,
+                    limits,
+                    diagnostics,
+                    output,
+                )?;
             }
-            position += 2;
-            continue;
-        };
-        if (reference_end - position) as u64 > limits.max_reference_bytes {
-            return Err(PrepareImportError::ReferenceTooLong {
-                relative_path: relative_path.to_owned(),
-                limit_bytes: limits.max_reference_bytes,
-            });
         }
-        if *document_reference_count >= limits.max_references_per_document {
-            return Err(PrepareImportError::ReferenceLimitExceeded {
-                relative_path: relative_path.to_owned(),
-                limit: limits.max_references_per_document,
-            });
-        }
-        if output.len() as u64 >= limits.max_references {
-            return Err(PrepareImportError::TotalReferenceLimitExceeded {
-                limit: limits.max_references,
-            });
-        }
-        let inner = &source[target_start..close];
-        let trimmed_start = inner.len() - inner.trim_start().len();
-        let trimmed_end = inner.trim_end().len();
-        let semantic_start = target_start + trimmed_start;
-        let semantic_end = target_start + trimmed_end;
-        let target_text = source[semantic_start..semantic_end].to_owned();
-        let resolution = if nested {
-            ImportReferenceResolution::Unresolved {
-                reason: ImportReferenceUnresolvedReason::UnsupportedNested,
-            }
-        } else {
-            resolve_reference(kind, &target_text, identities)
-        };
-        let source_start_position = source_index.position(position)?;
-        let target_start_position = source_index.position(semantic_start)?;
-        let target_end_position = source_index.position(semantic_end)?;
-        let source_end_position = source_index.position(reference_end)?;
-        let source_range = SourceRange {
-            start: source_start_position,
-            end: source_end_position,
-        };
-        let target_range = SourceRange {
-            start: target_start_position,
-            end: target_end_position,
-        };
-        if let ImportReferenceResolution::Unresolved { reason } = resolution {
-            let (code, message) = match (kind, reason) {
-                (
-                    ImportReferenceKind::WikiLink,
-                    ImportReferenceUnresolvedReason::UnsupportedNested,
-                ) => (
-                    DiagnosticCode::UnsupportedNestedWikilink,
-                    "nested page reference syntax is unsupported and was left unchanged",
-                ),
-                (ImportReferenceKind::WikiLink, ImportReferenceUnresolvedReason::Ambiguous) => (
-                    DiagnosticCode::AmbiguousPageReference,
-                    "page reference is ambiguous and was left unchanged",
-                ),
-                (ImportReferenceKind::WikiLink, _) => (
-                    DiagnosticCode::UnresolvedPageReference,
-                    "page reference could not be resolved and was left unchanged",
-                ),
-                (ImportReferenceKind::BlockReference, ImportReferenceUnresolvedReason::Invalid) => {
-                    (
-                        DiagnosticCode::InvalidBlockReference,
-                        "block reference is not a valid non-nil UUID and was left unchanged",
-                    )
-                }
-                (ImportReferenceKind::BlockReference, _) => (
-                    DiagnosticCode::UnresolvedBlockReference,
-                    "block reference could not be resolved and was left unchanged",
-                ),
-            };
-            diagnostics.push(ImportDiagnostic::warning_at(
-                code,
-                relative_path,
-                target_range,
-                message,
-                None,
-            ));
-        }
-        output.push(ImportReference {
-            relative_path: relative_path.to_owned(),
-            owner,
-            kind,
-            raw_spelling: source[position..reference_end].to_owned(),
-            target_text,
-            source_range,
-            target_range,
-            resolution,
-        });
-        *document_reference_count += 1;
-        position = reference_end;
     }
     Ok(())
 }
 
-fn reference_bounds(
-    bytes: &[u8],
-    start: usize,
-    end: usize,
-    kind: ImportReferenceKind,
-) -> Option<(usize, usize, bool)> {
+enum ScannedReference {
+    Occurrence(ReferenceOccurrence),
+    Malformed(MalformedReference),
+}
+
+impl ScannedReference {
+    fn start(&self) -> usize {
+        self.source_range().start
+    }
+
+    fn source_range(&self) -> std::ops::Range<usize> {
+        match self {
+            Self::Occurrence(reference) => reference.source_range.clone(),
+            Self::Malformed(reference) => reference.source_range.clone(),
+        }
+    }
+}
+
+fn overlaps_skipped_range(start: usize, end: usize, skipped_ranges: &[(u64, u64)]) -> bool {
+    let Ok(start) = u64::try_from(start) else {
+        return true;
+    };
+    let Ok(end) = u64::try_from(end) else {
+        return true;
+    };
+    let index = skipped_ranges.partition_point(|(_, skip_end)| *skip_end <= start);
+    skipped_ranges
+        .get(index)
+        .is_some_and(|(skip_start, _)| *skip_start < end)
+}
+
+fn import_reference_kind(kind: MarkdownReferenceKind) -> ImportReferenceKind {
     match kind {
-        ImportReferenceKind::BlockReference => {
-            let target_start = start + 2;
-            let close = bytes[target_start..end]
-                .windows(2)
-                .position(|window| window == b"))")?
-                + target_start;
-            Some((close, close + 2, false))
-        }
-        ImportReferenceKind::WikiLink => {
-            let mut depth = 1_u64;
-            let mut cursor = start + 2;
-            let mut nested = false;
-            while cursor + 1 < end {
-                match &bytes[cursor..cursor + 2] {
-                    b"[[" => {
-                        depth = depth.checked_add(1)?;
-                        nested = true;
-                        cursor += 2;
-                    }
-                    b"]]" => {
-                        depth -= 1;
-                        if depth == 0 {
-                            return Some((cursor, cursor + 2, nested));
-                        }
-                        cursor += 2;
-                    }
-                    _ => cursor += 1,
-                }
-            }
-            None
-        }
+        MarkdownReferenceKind::WikiLink => ImportReferenceKind::WikiLink,
+        MarkdownReferenceKind::BlockReference => ImportReferenceKind::BlockReference,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_malformed_reference(
+    source: &str,
+    fragment_start: usize,
+    reference: MalformedReference,
+    owner: ImportReferenceOwner,
+    source_index: &mut SourceCursor<'_>,
+    relative_path: &str,
+    document_reference_count: &mut u64,
+    limits: &PrepareLimits,
+    diagnostics: &mut Vec<ImportDiagnostic>,
+    output: &mut Vec<ImportReference>,
+) -> Result<(), PrepareImportError> {
+    if reference.reason == MalformedReferenceReason::Unclosed {
+        return Ok(());
+    }
+    let kind = import_reference_kind(reference.kind);
+    let source_start = fragment_start + reference.source_range.start;
+    let source_end = fragment_start + reference.source_range.end;
+    if reference.reason == MalformedReferenceReason::NestedDelimiter {
+        let inner_start = source_start + 2;
+        let inner_end = source_end.saturating_sub(2).max(inner_start);
+        let inner = &source[inner_start..inner_end];
+        let target_start = inner_start + (inner.len() - inner.trim_start().len());
+        let target_end = target_start + inner.trim().len();
+        let reason = match kind {
+            ImportReferenceKind::WikiLink => ImportReferenceUnresolvedReason::UnsupportedNested,
+            ImportReferenceKind::BlockReference => ImportReferenceUnresolvedReason::Invalid,
+        };
+        return push_import_reference(
+            source,
+            source_start,
+            source_end,
+            target_start,
+            target_end,
+            owner,
+            kind,
+            ImportReferenceResolution::Unresolved { reason },
+            source_index,
+            relative_path,
+            document_reference_count,
+            limits,
+            diagnostics,
+            output,
+        );
+    }
+
+    let range = SourceRange {
+        start: source_index.position(source_start)?,
+        end: source_index.position(source_end)?,
+    };
+    let (code, message) = match kind {
+        ImportReferenceKind::WikiLink => (
+            DiagnosticCode::UnresolvedPageReference,
+            "malformed page reference was left unchanged",
+        ),
+        ImportReferenceKind::BlockReference => (
+            DiagnosticCode::InvalidBlockReference,
+            "malformed block reference was left unchanged",
+        ),
+    };
+    diagnostics.push(ImportDiagnostic::warning_at(
+        code,
+        relative_path,
+        range,
+        message,
+        None,
+    ));
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_import_reference(
+    source: &str,
+    source_start: usize,
+    source_end: usize,
+    target_start: usize,
+    target_end: usize,
+    owner: ImportReferenceOwner,
+    kind: ImportReferenceKind,
+    resolution: ImportReferenceResolution,
+    source_index: &mut SourceCursor<'_>,
+    relative_path: &str,
+    document_reference_count: &mut u64,
+    limits: &PrepareLimits,
+    diagnostics: &mut Vec<ImportDiagnostic>,
+    output: &mut Vec<ImportReference>,
+) -> Result<(), PrepareImportError> {
+    if (source_end - source_start) as u64 > limits.max_reference_bytes {
+        return Err(PrepareImportError::ReferenceTooLong {
+            relative_path: relative_path.to_owned(),
+            limit_bytes: limits.max_reference_bytes,
+        });
+    }
+    if *document_reference_count >= limits.max_references_per_document {
+        return Err(PrepareImportError::ReferenceLimitExceeded {
+            relative_path: relative_path.to_owned(),
+            limit: limits.max_references_per_document,
+        });
+    }
+    if output.len() as u64 >= limits.max_references {
+        return Err(PrepareImportError::TotalReferenceLimitExceeded {
+            limit: limits.max_references,
+        });
+    }
+    let source_start_position = source_index.position(source_start)?;
+    let target_range = SourceRange {
+        start: source_index.position(target_start)?,
+        end: source_index.position(target_end)?,
+    };
+    let source_range = SourceRange {
+        start: source_start_position,
+        end: source_index.position(source_end)?,
+    };
+    let target_text = source[target_start..target_end].to_owned();
+    if let ImportReferenceResolution::Unresolved { reason } = resolution {
+        let (code, message) = unresolved_reference_diagnostic(kind, reason);
+        diagnostics.push(ImportDiagnostic::warning_at(
+            code,
+            relative_path,
+            target_range,
+            message,
+            None,
+        ));
+    }
+    output.push(ImportReference {
+        relative_path: relative_path.to_owned(),
+        owner,
+        kind,
+        raw_spelling: source[source_start..source_end].to_owned(),
+        target_text,
+        source_range,
+        target_range,
+        resolution,
+    });
+    *document_reference_count += 1;
+    Ok(())
+}
+
+fn unresolved_reference_diagnostic(
+    kind: ImportReferenceKind,
+    reason: ImportReferenceUnresolvedReason,
+) -> (DiagnosticCode, &'static str) {
+    match (kind, reason) {
+        (ImportReferenceKind::WikiLink, ImportReferenceUnresolvedReason::UnsupportedNested) => (
+            DiagnosticCode::UnsupportedNestedWikilink,
+            "nested page reference syntax is unsupported and was left unchanged",
+        ),
+        (ImportReferenceKind::WikiLink, ImportReferenceUnresolvedReason::Ambiguous) => (
+            DiagnosticCode::AmbiguousPageReference,
+            "page reference is ambiguous and was left unchanged",
+        ),
+        (ImportReferenceKind::WikiLink, _) => (
+            DiagnosticCode::UnresolvedPageReference,
+            "page reference could not be resolved and was left unchanged",
+        ),
+        (ImportReferenceKind::BlockReference, ImportReferenceUnresolvedReason::Invalid) => (
+            DiagnosticCode::InvalidBlockReference,
+            "block reference is not a valid non-nil UUID and was left unchanged",
+        ),
+        (ImportReferenceKind::BlockReference, _) => (
+            DiagnosticCode::UnresolvedBlockReference,
+            "block reference could not be resolved and was left unchanged",
+        ),
     }
 }
 
@@ -1649,34 +1728,6 @@ fn fenced_ranges(document: &ParsedLogseqDocument) -> Vec<(u64, u64)> {
         ranges.push((start, document.raw_markdown.len() as u64));
     }
     ranges
-}
-
-fn skip_inline_code(bytes: &[u8], start: usize, end: usize) -> usize {
-    let run = bytes[start..end]
-        .iter()
-        .take_while(|byte| **byte == b'`')
-        .count();
-    let mut position = start + run;
-    while position + run <= end {
-        if bytes[position..position + run]
-            .iter()
-            .all(|byte| *byte == b'`')
-        {
-            return position + run;
-        }
-        position += 1;
-    }
-    start + run
-}
-
-fn is_escaped(bytes: &[u8], position: usize) -> bool {
-    let mut preceding = 0;
-    let mut cursor = position;
-    while cursor > 0 && bytes[cursor - 1] == b'\\' {
-        preceding += 1;
-        cursor -= 1;
-    }
-    preceding % 2 == 1
 }
 
 struct SourceCursor<'source> {

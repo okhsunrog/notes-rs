@@ -2244,13 +2244,23 @@ fn replace_block_refs(
 }
 
 pub fn parse_refs(markdown: &str) -> (Vec<String>, Vec<uuid::Uuid>) {
-    let pages = delimited(markdown, "[[", "]]");
-    let blocks = delimited(markdown, "((", "))")
-        .into_iter()
-        .filter_map(|value| uuid::Uuid::parse_str(&value).ok())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
+    let mut pages = BTreeSet::new();
+    let mut blocks = BTreeSet::new();
+    for reference in notes_markdown::scan_references(markdown).occurrences {
+        let target = reference.target_text(markdown);
+        match reference.kind {
+            notes_markdown::ReferenceKind::WikiLink => {
+                pages.insert(target.to_owned());
+            }
+            notes_markdown::ReferenceKind::BlockReference => {
+                if let Ok(uuid) = uuid::Uuid::parse_str(target) {
+                    blocks.insert(uuid);
+                }
+            }
+        }
+    }
+    let pages = pages.into_iter().collect();
+    let blocks = blocks.into_iter().collect();
     (pages, blocks)
 }
 
@@ -2396,21 +2406,6 @@ fn ensure_object_kind(
         )));
     }
     Ok(())
-}
-
-fn delimited(content: &str, open: &str, close: &str) -> Vec<String> {
-    let mut values = BTreeSet::new();
-    let mut remaining = content;
-    while let Some(start) = remaining.find(open) {
-        let value = &remaining[start + open.len()..];
-        let Some(end) = value.find(close) else { break };
-        let value = value[..end].trim();
-        if !value.is_empty() {
-            values.insert(value.to_owned());
-        }
-        remaining = &remaining[start + open.len() + end + close.len()..];
-    }
-    values.into_iter().collect()
 }
 
 fn write_tombstone(
@@ -2792,6 +2787,21 @@ mod tests {
             "Before [[Roadmap]]",
             "After [[Release]]"
         ));
+    }
+
+    #[test]
+    fn reference_parser_uses_markdown_syntax_boundaries() {
+        let block = uuid::Uuid::now_v7();
+        let markdown = format!(
+            "[[Visible]] `[[Inline]]` [label](<https://example.invalid/[[destination]]>)\n\
+             ```md\n[[Fenced]] (({block}))\n```\n\
+             ![[Embedded]]"
+        );
+
+        assert_eq!(
+            parse_refs(&markdown),
+            (vec!["Embedded".into(), "Visible".into()], vec![])
+        );
     }
 
     #[test]

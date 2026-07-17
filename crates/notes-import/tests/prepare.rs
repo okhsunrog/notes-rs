@@ -79,7 +79,7 @@ fn preserves_valid_block_uuid_removes_only_identity_and_resolves_raw_references(
         (
             "pages/Home.md",
             &format!(
-                "title:: Home Display\n- TODO Link [[Other]] and (({FIRST_BLOCK_UUID}))\n  id:: {SECOND_BLOCK_UUID}\n  color:: blue\n- `[[Other]]` and \\[[Other]]\n- ```md\n  [[Other]]\n  ```\n"
+                "title:: Home Display\n- TODO Link [[Other]] and (({FIRST_BLOCK_UUID}))\n  id:: {SECOND_BLOCK_UUID}\n  color:: blue\n- `[[Other]]` and \\[[Other]]\n- [label](<https://example.invalid/[[Other]]>)\n- ```md\n  [[Other]]\n  ```\n"
             ),
         ),
         (
@@ -159,6 +159,23 @@ fn preserves_valid_block_uuid_removes_only_identity_and_resolves_raw_references(
         }
     )));
     assert_eq!(plan.report.preserved_block_uuid_count, 2);
+}
+
+#[test]
+fn malformed_opener_does_not_hide_a_later_valid_reference() {
+    let graph = graph(&[
+        ("pages/Home.md", "- [[broken and [[Other]]\n"),
+        ("pages/Other.md", "- Target\n"),
+    ]);
+    let (manifest, documents) = scan_and_parse(&graph);
+    let plan = prepare_import(&documents, identity(), &manifest).expect("prepare references");
+
+    assert_eq!(plan.references.len(), 1);
+    assert_eq!(plan.references[0].raw_spelling, "[[Other]]");
+    assert!(matches!(
+        plan.references[0].resolution,
+        ImportReferenceResolution::Resolved { .. }
+    ));
 }
 
 #[test]
