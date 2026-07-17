@@ -10,6 +10,7 @@ type Props = {
   focusRequest?: number;
   onOpenMarkdownLink: MarkdownOpenHandler;
   presentation?: PagePresentation;
+  readOnly?: boolean;
 };
 
 export function Outliner({
@@ -18,6 +19,7 @@ export function Outliner({
   focusRequest = 0,
   onOpenMarkdownLink,
   presentation = PagePresentation.Editing,
+  readOnly = presentation === PagePresentation.Reading,
 }: Props) {
   return (
     <OutlinerProvider
@@ -25,7 +27,7 @@ export function Outliner({
       initialEditingRequest={focusRequest}
       layout={page.layout}
       onOpenMarkdownLink={onOpenMarkdownLink}
-      readOnly={presentation === PagePresentation.Reading}
+      readOnly={readOnly}
     >
       <BlockChildren
         pageUuid={page.uuid}

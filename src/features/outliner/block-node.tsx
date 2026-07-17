@@ -19,7 +19,9 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import {
+  CommandFailure,
   deleteBlock,
+  getBlock,
   indentBlock,
   moveBlockDown,
   moveBlockUp,
@@ -57,6 +59,7 @@ import {
 import { queryKeys } from "@/lib/query";
 import { cn } from "@/lib/utils";
 import { reconcileRemoteDraft } from "./editor-sync";
+import { useBlockDraftOverlay, usePageSessionRegistry } from "@/features/pages/page-session";
 import {
   BLOCK_STYLE_OPTIONS,
   TASK_STATE_OPTIONS,
@@ -96,6 +99,9 @@ function lastOrderedBlock(blocks: Block[]) {
 export function BlockNode({ block, depth, ordinal }: Props) {
   const store = useOutliner();
   const queryClient = useQueryClient();
+  const sessions = usePageSessionRegistry();
+  const overlay = useBlockDraftOverlay(block.pageUuid, block.uuid);
+  const effectiveMarkdown = overlay?.draft ?? block.markdown;
   const editing = !store.readOnly && store.editingUuid === block.uuid;
   const outline = store.layout === "outline";
   const readOnly = store.readOnly;
@@ -106,15 +112,13 @@ export function BlockNode({ block, depth, ordinal }: Props) {
   const [styleBusy, setStyleBusy] = useState(false);
   const styleBusyRef = useRef(false);
 
-  const draftRef = useRef(block.markdown);
+  const draftRef = useRef(effectiveMarkdown);
   const blockRef = useRef(block);
-  const remoteConflictRef = useRef<Block | null>(null);
-  const [remoteConflict, setRemoteConflict] = useState<Block | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveInFlight = useRef<Promise<boolean> | null>(null);
   const editRef = useRef<BlockEditHandle>(null);
-  const [draftLen, setDraftLen] = useState(block.markdown.length);
-  const longBlock = (editing ? draftLen : block.markdown.length) >= LONG_BLOCK_CHARS;
+  const [draftLen, setDraftLen] = useState(effectiveMarkdown.length);
+  const longBlock = (editing ? draftLen : effectiveMarkdown.length) >= LONG_BLOCK_CHARS;
 
   // Autocomplete state — only relevant in edit mode.
   const [trigger, setTrigger] = useState<Trigger | null>(null);
@@ -135,30 +139,50 @@ export function BlockNode({ block, depth, ordinal }: Props) {
     const previous = blockRef.current;
     if (block.uuid !== previous.uuid) {
       blockRef.current = block;
-      draftRef.current = block.markdown;
-      setDraftLen(block.markdown.length);
-      remoteConflictRef.current = null;
-      setRemoteConflict(null);
+      sessions.acceptBlockSnapshot(block.pageUuid, block.uuid, {
+        text: block.markdown,
+        revision: block.markdownRevision,
+      });
+      const draft =
+        sessions.getSnapshot(block.pageUuid).blocks[block.uuid]?.draft ?? block.markdown;
+      draftRef.current = draft;
+      setDraftLen(draft.length);
       return;
     }
     const decision = reconcileRemoteDraft(previous.markdown, draftRef.current, block.markdown);
-    if (decision === "unchanged") {
-      blockRef.current = block;
-      return;
-    }
-
-    if (decision === "conflict") {
-      clearTimer();
-      remoteConflictRef.current = block;
-      setRemoteConflict(block);
-      return;
-    }
-
     blockRef.current = block;
+    sessions.acceptBlockSnapshot(block.pageUuid, block.uuid, {
+      text: block.markdown,
+      revision: block.markdownRevision,
+    });
+    const currentOverlay = sessions.getSnapshot(block.pageUuid).blocks[block.uuid];
+    if (currentOverlay) {
+      draftRef.current = currentOverlay.draft;
+      setDraftLen(currentOverlay.draft.length);
+      if (currentOverlay.conflict) clearTimer();
+      return;
+    }
     draftRef.current = block.markdown;
     setDraftLen(block.markdown.length);
-    if (editing) store.setEditing(null);
-  }, [block, editing, store]);
+    if (decision === "accept_remote" && editing) store.setEditing(null);
+  }, [block, editing, sessions, store]);
+
+  useEffect(() => {
+    if (!overlay) {
+      if (saveState !== "error") setSaveState("idle");
+      return;
+    }
+    draftRef.current = overlay.draft;
+    setDraftLen(overlay.draft.length);
+    if (overlay.conflict) {
+      clearTimer();
+      setSaveState("error");
+    } else if (overlay.inFlight) {
+      setSaveState("saving");
+    } else if (saveState !== "error") {
+      setSaveState("dirty");
+    }
+  }, [overlay, saveState]);
 
   const siblings = () => queryClient.getQueryData<Block[]>(queryKeys.children(containerUuid)) ?? [];
 
@@ -195,13 +219,14 @@ export function BlockNode({ block, depth, ordinal }: Props) {
 
     const pending = (async () => {
       while (true) {
-        if (remoteConflictRef.current) {
-          setSaveState("error");
-          return false;
-        }
         const current = blockRef.current;
-        const next = draftRef.current;
-        if (next === current.markdown) {
+        const attempt = sessions.beginBlockSave(current.pageUuid, current.uuid);
+        if (!attempt) {
+          const currentOverlay = sessions.getSnapshot(current.pageUuid).blocks[current.uuid];
+          if (currentOverlay?.conflict || currentOverlay?.inFlight) {
+            setSaveState(currentOverlay.conflict ? "error" : "saving");
+            return false;
+          }
           setSaveState("idle");
           return true;
         }
@@ -209,16 +234,33 @@ export function BlockNode({ block, depth, ordinal }: Props) {
         try {
           const updated = await setBlockContent(
             current.uuid,
-            blockContent(next),
-            current.markdownRevision,
+            blockContent(attempt.draft),
+            attempt.expectedRevision,
           );
           applyBlockSnapshot(updated);
-          // The user may have typed while this save was in flight. Persist that
-          // newer draft in the same serialized save loop before reporting clean.
-          if (draftRef.current !== updated.markdown) continue;
+          sessions.acknowledgeBlockSave(current.pageUuid, current.uuid, attempt, {
+            text: updated.markdown,
+            revision: updated.markdownRevision,
+          });
+          if (sessions.getSnapshot(current.pageUuid).blocks[current.uuid]) continue;
           setSaveState("idle");
           return true;
         } catch (err) {
+          sessions.failBlockSave(current.pageUuid, current.uuid, attempt);
+          if (err instanceof CommandFailure && err.code === "conflict") {
+            try {
+              const latest = await getBlock(current.uuid);
+              if (latest) {
+                applyBlockSnapshot(latest);
+                sessions.acceptBlockSnapshot(current.pageUuid, current.uuid, {
+                  text: latest.markdown,
+                  revision: latest.markdownRevision,
+                });
+              }
+            } catch (refreshError) {
+              console.error("block conflict refresh failed", refreshError);
+            }
+          }
           console.error("block save failed", err);
           setSaveState("error");
           return false;
@@ -231,7 +273,7 @@ export function BlockNode({ block, depth, ordinal }: Props) {
     } finally {
       if (saveInFlight.current === pending) saveInFlight.current = null;
     }
-  }, [applyBlockSnapshot]);
+  }, [applyBlockSnapshot, sessions]);
 
   const changeBlockStyle = async (value: string) => {
     if (!isBlockStyleKind(value) || styleBusyRef.current || readOnly) return;
@@ -316,6 +358,11 @@ export function BlockNode({ block, depth, ordinal }: Props) {
     const changed = draftRef.current !== value;
     draftRef.current = value;
     if (changed) {
+      const current = blockRef.current;
+      sessions.editBlock(current.pageUuid, current.uuid, value, {
+        text: current.markdown,
+        revision: current.markdownRevision,
+      });
       setDraftLen(value.length);
       setSaveState("dirty");
       clearTimer();
@@ -354,24 +401,22 @@ export function BlockNode({ block, depth, ordinal }: Props) {
   };
 
   const useRemoteVersion = () => {
-    const remote = remoteConflictRef.current;
-    if (!remote) return;
+    if (!overlay?.conflict) return;
     clearTimer();
-    blockRef.current = remote;
-    draftRef.current = remote.markdown;
-    setDraftLen(remote.markdown.length);
-    remoteConflictRef.current = null;
-    setRemoteConflict(null);
+    sessions.useRemoteBlock(block.pageUuid, block.uuid);
+    draftRef.current = blockRef.current.markdown;
+    setDraftLen(blockRef.current.markdown.length);
     setSaveState("idle");
     store.setEditing(null);
   };
 
+  const splitExpectedRevision = () =>
+    sessions.getSnapshot(block.pageUuid).blocks[block.uuid]?.baseRevision ??
+    blockRef.current.markdownRevision;
+
   const keepLocalVersion = () => {
-    const remote = remoteConflictRef.current;
-    if (!remote) return;
-    blockRef.current = remote;
-    remoteConflictRef.current = null;
-    setRemoteConflict(null);
+    if (!overlay?.conflict) return;
+    sessions.keepLocalBlock(block.pageUuid, block.uuid);
     void flush();
   };
 
@@ -391,7 +436,8 @@ export function BlockNode({ block, depth, ordinal }: Props) {
     void (async () => {
       try {
         const parts = [draftRef.current, ...paragraphs.slice(1)].map(blockContent);
-        const changed = await splitBlock(block.uuid, parts);
+        const changed = await splitBlock(block.uuid, parts, splitExpectedRevision());
+        sessions.discardBlock(block.pageUuid, block.uuid);
         await invalidateChildren(containerUuid);
         store.setEditing(lastOrderedBlock(changed)?.uuid ?? block.uuid);
       } catch (error) {
@@ -412,7 +458,7 @@ export function BlockNode({ block, depth, ordinal }: Props) {
    * the long-block info-icon nudge. If the content has no blank-line breaks,
    * we surface guidance instead of silently doing nothing. */
   const onSplitCurrent = async () => {
-    const source = editing ? draftRef.current : block.markdown;
+    const source = editing ? draftRef.current : effectiveMarkdown;
     const paragraphs = source
       .split(/\n[ \t]*(?:\n[ \t]*)+/)
       .map((p) => p.trim())
@@ -423,7 +469,12 @@ export function BlockNode({ block, depth, ordinal }: Props) {
     }
     clearTimer();
     try {
-      const changed = await splitBlock(block.uuid, paragraphs.map(blockContent));
+      const changed = await splitBlock(
+        block.uuid,
+        paragraphs.map(blockContent),
+        splitExpectedRevision(),
+      );
+      sessions.discardBlock(block.pageUuid, block.uuid);
       draftRef.current = paragraphs[0];
       setDraftLen(paragraphs[0].length);
       await invalidateChildren(containerUuid);
@@ -446,7 +497,7 @@ export function BlockNode({ block, depth, ordinal }: Props) {
   };
 
   const onEnter = async (selectionStart: number, selectionEnd: number) => {
-    if (remoteConflictRef.current) {
+    if (sessions.getSnapshot(block.pageUuid).blocks[block.uuid]?.conflict) {
       setSaveState("error");
       return;
     }
@@ -454,7 +505,8 @@ export function BlockNode({ block, depth, ordinal }: Props) {
     const markdown = draftRef.current;
     const parts = splitEditorContent(markdown, selectionStart, selectionEnd).map(blockContent);
     try {
-      const changed = await splitBlock(block.uuid, parts);
+      const changed = await splitBlock(block.uuid, parts, splitExpectedRevision());
+      sessions.discardBlock(block.pageUuid, block.uuid);
       await invalidateChildren(containerUuid);
       store.setEditing(
         changed.find((candidate) => candidate.uuid !== block.uuid)?.uuid ?? block.uuid,
@@ -471,6 +523,7 @@ export function BlockNode({ block, depth, ordinal }: Props) {
     try {
       const ok = await deleteBlock(block.uuid);
       if (!ok) return false;
+      sessions.discardBlock(block.pageUuid, block.uuid);
       queryClient.setQueryData<Block[]>(queryKeys.children(containerUuid), (rows = []) =>
         rows.filter((row) => row.uuid !== block.uuid),
       );
@@ -635,7 +688,7 @@ export function BlockNode({ block, depth, ordinal }: Props) {
           className="relative min-w-0 flex-1"
           onClick={() => {
             if (!editing && !readOnly) {
-              draftRef.current = block.markdown;
+              draftRef.current = effectiveMarkdown;
               store.setEditing(block.uuid);
             }
           }}
@@ -644,14 +697,14 @@ export function BlockNode({ block, depth, ordinal }: Props) {
             <>
               <BlockEdit
                 ref={editRef}
-                initial={block.markdown}
+                initial={effectiveMarkdown}
                 onChange={onDraftChange}
                 onBlur={onBlur}
                 onKeyDown={onKeyDown}
                 onPaste={onPaste}
                 autoFocus
               />
-              {remoteConflict && (
+              {overlay?.conflict && (
                 <div
                   role="alert"
                   className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs"
@@ -695,7 +748,11 @@ export function BlockNode({ block, depth, ordinal }: Props) {
           ) : (
             <div className={readOnly ? "cursor-default" : "cursor-text"}>
               <RenderedBlock
-                block={block}
+                block={
+                  effectiveMarkdown === block.markdown
+                    ? block
+                    : { ...block, markdown: effectiveMarkdown }
+                }
                 ordinal={ordinal}
                 layout={store.layout}
                 readOnly={readOnly}

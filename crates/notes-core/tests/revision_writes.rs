@@ -222,3 +222,83 @@ async fn block_markdown_write_checks_revision_atomically_and_accepts_stale_idemp
     .expect_err("missing block must stay not-found");
     assert_not_found(&missing);
 }
+
+#[tokio::test]
+async fn block_split_checks_revision_before_any_structural_mutation() {
+    let database = database().await;
+    let connection = &database.connection;
+    let page = db::create_page(connection, "Page".into())
+        .await
+        .expect("create page");
+    let initial = db::create_block(
+        connection,
+        page.uuid,
+        None,
+        None,
+        BlockStyle::Paragraph,
+        "Initial".into(),
+    )
+    .await
+    .expect("create block");
+    notes_core::configure_sync(connection, "https://sync.example")
+        .await
+        .expect("configure sync");
+
+    let (updated, changed, _) = db::set_block_content_if_revision(
+        connection,
+        initial.uuid,
+        BlockContent {
+            markdown: "Remote edit".into(),
+        },
+        initial.markdown_revision.clone(),
+    )
+    .await
+    .expect("advance source revision");
+    assert!(changed);
+    let counts_before_stale_split = mutation_counts(connection).await;
+
+    let rejected = db::split_block(
+        connection,
+        initial.uuid,
+        vec![
+            BlockContent {
+                markdown: updated.markdown.clone(),
+            },
+            BlockContent {
+                markdown: "Must not be created".into(),
+            },
+        ],
+        initial.markdown_revision,
+    )
+    .await
+    .expect_err("a stale split is non-idempotent and must conflict");
+    assert_conflict(&rejected);
+    assert_eq!(mutation_counts(connection).await, counts_before_stale_split);
+    assert_eq!(
+        db::list_block_children(connection, page.uuid, None)
+            .await
+            .expect("list unchanged blocks"),
+        vec![updated.clone()]
+    );
+
+    let split = db::split_block(
+        connection,
+        initial.uuid,
+        vec![
+            BlockContent {
+                markdown: "First".into(),
+            },
+            BlockContent {
+                markdown: "Second".into(),
+            },
+        ],
+        updated.markdown_revision,
+    )
+    .await
+    .expect("current revision splits atomically");
+    assert_eq!(split.len(), 2);
+    assert_eq!(split[0].uuid, initial.uuid);
+    assert_eq!(split[0].markdown, "First");
+    assert_eq!(split[1].markdown, "Second");
+    assert_ne!(mutation_counts(connection).await, counts_before_stale_split);
+}

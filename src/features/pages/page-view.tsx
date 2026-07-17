@@ -16,15 +16,26 @@ import { Outliner } from "@/features/outliner/outliner";
 import type { MarkdownOpenHandler } from "@/features/markdown";
 import { AttachmentsCard } from "@/features/attachments/attachments-card";
 import { pageDisplayTitle, shiftJournalDate } from "@/features/journal/journal-date";
-import { renamePage, setPageLayout, type JournalDate, type Page, type PageLayout } from "@/lib/api";
+import {
+  CommandFailure,
+  getPage,
+  renamePage,
+  setPageLayout,
+  type JournalDate,
+  type Page,
+  type PageLayout,
+} from "@/lib/api";
 import { DebouncedAction } from "@/lib/debounced-action";
 import { PagePresentation } from "./page-presentation";
+import { usePageSessionRegistry, usePageWriterLease, useTitleDraftOverlay } from "./page-session";
 import {
   dispositionFromShiftKey,
   type OpenDisposition,
+  type PaneId,
 } from "@/features/workspace/workspace-model";
 
 type Props = {
+  paneId: PaneId;
   page: Page;
   onSaved: (updated: Page) => void;
   onStatus: (s: string) => void;
@@ -44,6 +55,7 @@ type SaveState = "idle" | "dirty" | "saving" | "saved" | "error";
 const AUTOSAVE_MS = 400;
 
 export function PageView({
+  paneId,
   page,
   onSaved,
   onStatus,
@@ -57,7 +69,15 @@ export function PageView({
   presentation,
   onPresentationChange,
 }: Props) {
-  const [title, setTitle] = useState(page.title ?? "");
+  const sessions = usePageSessionRegistry();
+  const titleOverlay = useTitleDraftOverlay(page.uuid);
+  const ownsWriter = usePageWriterLease(
+    page.uuid,
+    paneId,
+    presentation === PagePresentation.Editing,
+  );
+  const title = titleOverlay?.draft ?? page.title ?? "";
+  const canEdit = presentation === PagePresentation.Editing && ownsWriter;
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [layoutBusy, setLayoutBusy] = useState(false);
   const [bodyFocusRequest, setBodyFocusRequest] = useState(0);
@@ -66,6 +86,7 @@ export function PageView({
   const titleInput = useRef<HTMLInputElement>(null);
   const pageRef = useRef(page);
   const titleRef = useRef(title);
+  const titleSaveInFlight = useRef<Promise<boolean> | null>(null);
   const onSavedRef = useRef(onSaved);
   const onStatusRef = useRef(onStatus);
 
@@ -75,60 +96,112 @@ export function PageView({
 
   const flush = useCallback(async (): Promise<boolean> => {
     autosave.cancel();
-    const current = pageRef.current;
-    if (current.kind.kind === "journal") {
-      setSaveState("idle");
-      return true;
-    }
-    const nextTitle = titleRef.current.trim() || null;
-    if (nextTitle === (current.title ?? null)) {
-      setSaveState("idle");
-      return true;
-    }
-    setSaveState("saving");
+    if (titleSaveInFlight.current) return titleSaveInFlight.current;
+
+    const pending = (async () => {
+      while (true) {
+        const current = pageRef.current;
+        if (current.kind.kind === "journal") {
+          setSaveState("idle");
+          return true;
+        }
+        const attempt = sessions.beginTitleSave(current.uuid);
+        if (!attempt) {
+          const overlay = sessions.getSnapshot(current.uuid).title;
+          if (overlay?.conflict || overlay?.inFlight) {
+            setSaveState(overlay.conflict ? "error" : "saving");
+            return false;
+          }
+          setSaveState("idle");
+          return true;
+        }
+        const nextTitle = attempt.draft.trim() || null;
+        setSaveState("saving");
+        try {
+          if (nextTitle === (current.title ?? null)) {
+            sessions.acknowledgeTitleSave(current.uuid, attempt, {
+              text: current.title ?? "",
+              revision: current.titleRevision,
+            });
+          } else {
+            const updated = await renamePage(current.uuid, nextTitle, attempt.expectedRevision);
+            pageRef.current = updated;
+            sessions.acknowledgeTitleSave(current.uuid, attempt, {
+              text: updated.title ?? "",
+              revision: updated.titleRevision,
+            });
+            onSavedRef.current(updated);
+          }
+          if (sessions.getSnapshot(current.uuid).title) continue;
+          setSaveState("saved");
+          return true;
+        } catch (err) {
+          sessions.failTitleSave(current.uuid, attempt);
+          if (err instanceof CommandFailure && err.code === "conflict") {
+            try {
+              const latest = await getPage(current.uuid);
+              if (latest) {
+                pageRef.current = latest;
+                onSavedRef.current(latest);
+                sessions.acceptTitleSnapshot(current.uuid, {
+                  text: latest.title ?? "",
+                  revision: latest.titleRevision,
+                });
+              }
+            } catch (refreshError) {
+              console.error("title conflict refresh failed", refreshError);
+            }
+          }
+          setSaveState("error");
+          onStatusRef.current(`save error: ${String(err)}`);
+          return false;
+        }
+      }
+    })();
+    titleSaveInFlight.current = pending;
     try {
-      const updated = await renamePage(current.uuid, nextTitle, current.titleRevision);
-      pageRef.current = updated;
-      onSavedRef.current(updated);
-      setSaveState("saved");
-      return true;
-    } catch (err) {
-      setSaveState("error");
-      onStatusRef.current(`save error: ${String(err)}`);
-      return false;
+      return await pending;
+    } finally {
+      if (titleSaveInFlight.current === pending) titleSaveInFlight.current = null;
     }
-  }, [autosave]);
+  }, [autosave, sessions]);
 
   const scheduleSave = useCallback(() => {
+    if (!canEdit) return;
     setSaveState("dirty");
     autosave.schedule(() => void flush(), AUTOSAVE_MS);
-  }, [autosave, flush]);
+  }, [autosave, canEdit, flush]);
 
   useEffect(() => {
-    autosave.cancel();
     pageRef.current = page;
-    setTitle(page.title ?? "");
-    setSaveState("idle");
-  }, [autosave, page]);
+    sessions.acceptTitleSnapshot(page.uuid, {
+      text: page.title ?? "",
+      revision: page.titleRevision,
+    });
+  }, [page, sessions]);
+
+  useEffect(() => {
+    const overlay = titleOverlay;
+    if (overlay?.conflict) setSaveState("error");
+    else if (overlay?.inFlight) setSaveState("saving");
+    else if (overlay) {
+      if (saveState !== "error") setSaveState("dirty");
+    } else if (saveState !== "saved") setSaveState("idle");
+  }, [saveState, titleOverlay]);
 
   useEffect(() => {
     setBodyFocusRequest(0);
   }, [page.uuid]);
 
   useEffect(() => {
-    if (!autoFocusTitle) return;
+    if (!autoFocusTitle || !canEdit) return;
     const input = titleInput.current;
     input?.focus();
     input?.select();
-  }, [autoFocusTitle, page.uuid]);
+  }, [autoFocusTitle, canEdit, page.uuid]);
 
   const changeLayout = async (layout: PageLayout) => {
-    if (
-      presentation === PagePresentation.Reading ||
-      layout === pageRef.current.layout ||
-      layoutBusy
-    )
-      return;
+    if (!canEdit || layout === pageRef.current.layout || layoutBusy) return;
     setLayoutBusy(true);
     try {
       await flush();
@@ -184,13 +257,15 @@ export function PageView({
           <Input
             ref={titleInput}
             value={title}
-            readOnly={presentation === PagePresentation.Reading}
-            onBlur={() => void flush()}
+            readOnly={!canEdit}
+            onBlur={() => {
+              if (canEdit) void flush();
+            }}
             onKeyDown={(event) => {
               if (event.nativeEvent.isComposing) return;
               if (event.key === "Enter") {
                 event.preventDefault();
-                if (presentation === PagePresentation.Reading) return;
+                if (!canEdit) return;
                 const input = event.currentTarget;
                 void (async () => {
                   if (!(await flush())) return;
@@ -200,7 +275,11 @@ export function PageView({
               }
             }}
             onChange={(e) => {
-              setTitle(e.currentTarget.value);
+              if (!canEdit) return;
+              sessions.editTitle(page.uuid, e.currentTarget.value, {
+                text: pageRef.current.title ?? "",
+                revision: pageRef.current.titleRevision,
+              });
               scheduleSave();
             }}
             placeholder="Untitled note"
@@ -219,6 +298,34 @@ export function PageView({
           </Button>
         </div>
       </div>
+
+      {titleOverlay?.conflict && canEdit && (
+        <div
+          role="alert"
+          className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs"
+        >
+          <span className="mr-auto text-foreground">
+            This title changed on another replica. Choose which version to keep.
+          </span>
+          <button
+            type="button"
+            onClick={() => sessions.useRemoteTitle(page.uuid)}
+            className="rounded-md border bg-background px-2 py-1 hover:bg-accent"
+          >
+            Use remote
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              sessions.keepLocalTitle(page.uuid);
+              scheduleSave();
+            }}
+            className="rounded-md bg-primary px-2 py-1 text-primary-foreground hover:bg-primary/90"
+          >
+            Keep mine
+          </button>
+        </div>
+      )}
 
       <div className="mt-4 mb-9 flex items-center gap-2">
         <span className="rounded-full bg-primary/10 px-2.5 py-1 text-[10px] font-semibold tracking-wide text-primary">
@@ -269,7 +376,7 @@ export function PageView({
               type="button"
               variant={page.layout === value ? "secondary" : "ghost"}
               size="xs"
-              disabled={layoutBusy || presentation === PagePresentation.Reading}
+              disabled={layoutBusy || !canEdit}
               aria-pressed={page.layout === value}
               onClick={() => void changeLayout(value)}
               className="rounded-md px-2 text-[10px]"
@@ -306,7 +413,7 @@ export function PageView({
           size="xs"
           className="ml-auto rounded-lg text-muted-foreground opacity-60 hover:text-destructive hover:opacity-100"
           aria-label="Delete page"
-          disabled={presentation === PagePresentation.Reading}
+          disabled={!canEdit}
           onClick={() => void onDelete(page)}
         >
           <Trash2 className="size-4" />
@@ -321,10 +428,15 @@ export function PageView({
           focusRequest={bodyFocusRequest}
           onOpenMarkdownLink={onOpenMarkdownLink}
           presentation={presentation}
+          readOnly={!canEdit}
         />
       </div>
       <div className="mt-16">
-        <AttachmentsCard location={{ kind: "page", uuid: page.uuid }} onStatus={onStatus} />
+        <AttachmentsCard
+          location={{ kind: "page", uuid: page.uuid }}
+          onStatus={onStatus}
+          readOnly={!canEdit}
+        />
       </div>
     </article>
   );

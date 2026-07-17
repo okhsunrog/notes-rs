@@ -66,7 +66,7 @@ export const commands = {
 	setBlockContent: (uuid: string, content: BlockContent, expectedRevision: ContentRevision) => typedError<Block, CommandError>(__TAURI_INVOKE("set_block_content", { uuid, content, expectedRevision })),
 	setBlockStyle: (uuid: string, style: BlockStyle) => typedError<Block, CommandError>(__TAURI_INVOKE("set_block_style", { uuid, style })),
 	setTaskState: (uuid: string, taskState: TaskState) => typedError<Block, CommandError>(__TAURI_INVOKE("set_task_state", { uuid, taskState })),
-	splitBlock: (uuid: string, parts: BlockContent[]) => typedError<Block[], CommandError>(__TAURI_INVOKE("split_block", { uuid, parts })),
+	splitBlock: (uuid: string, parts: BlockContent[], expectedRevision: ContentRevision) => typedError<Block[], CommandError>(__TAURI_INVOKE("split_block", { uuid, parts, expectedRevision })),
 	getContainingPage: (blockUuid: string) => typedError<{
 	uuid: string,
 	kind: PageKind,

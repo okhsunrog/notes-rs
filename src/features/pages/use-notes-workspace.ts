@@ -43,6 +43,7 @@ import {
   type SplitId,
 } from "@/features/workspace/workspace-model";
 import { PagePresentation } from "./page-presentation";
+import { usePageSessionRegistry } from "./page-session";
 
 export function useNotesWorkspace(
   ready: boolean,
@@ -50,6 +51,7 @@ export function useNotesWorkspace(
   showEditor: () => void,
 ) {
   const confirm = useConfirmation();
+  const pageSessions = usePageSessionRegistry();
   const queryClient = useQueryClient();
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [windowWorkspace, dispatchWorkspace] = useReducer(
@@ -94,10 +96,11 @@ export function useNotesWorkspace(
 
   useEffect(() => {
     if (activePageUuid !== null && activePageQuery.isSuccess && activePageQuery.data === null) {
+      pageSessions.discardPage(activePageUuid);
       dispatchWorkspace({ type: "forget_page", pageUuid: activePageUuid });
       setNewNote(null);
     }
-  }, [activePageQuery.data, activePageQuery.isSuccess, activePageUuid]);
+  }, [activePageQuery.data, activePageQuery.isSuccess, activePageUuid, pageSessions]);
 
   const createNewNote = useCallback(async () => {
     if (creatingNoteRef.current) return;
@@ -340,6 +343,7 @@ export function useNotesWorkspace(
         if (await deletePage(page.uuid)) {
           if (navigationEpoch !== navigationEpochRef.current) return;
           dispatchWorkspace({ type: "forget_page", pageUuid: page.uuid });
+          pageSessions.discardPage(page.uuid);
           queryClient.removeQueries({ queryKey: queryKeys.page(page.uuid), exact: true });
           setHits((current) =>
             current.filter(
@@ -352,7 +356,7 @@ export function useNotesWorkspace(
         onStatus(`delete error: ${String(error)}`);
       }
     },
-    [confirm, onStatus, queryClient],
+    [confirm, onStatus, pageSessions, queryClient],
   );
 
   const selectPage = useCallback(

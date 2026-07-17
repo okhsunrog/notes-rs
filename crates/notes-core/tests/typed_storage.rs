@@ -174,6 +174,7 @@ async fn page_layouts_block_styles_tree_and_split_have_stable_typed_ordering() {
                 markdown: "Quote three".into(),
             },
         ],
+        middle.markdown_revision.clone(),
     )
     .await
     .expect("split quote");

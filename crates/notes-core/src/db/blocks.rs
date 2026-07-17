@@ -246,52 +246,89 @@ pub async fn split_block(
     conn: &Connection,
     uuid: uuid::Uuid,
     parts: Vec<BlockContent>,
+    expected_revision: ContentRevision,
 ) -> Result<Vec<Block>> {
     if parts.is_empty() {
         return Err(crate::CoreError::invalid("split requires at least one part").into());
     }
-    let source = get_block(conn, uuid)
-        .await?
-        .ok_or_else(|| crate::CoreError::not_found("block was not found"))?;
-    let siblings = list_block_children(conn, source.page_uuid, source.parent_uuid).await?;
-    let source_index = siblings
-        .iter()
-        .position(|block| block.uuid == uuid)
-        .context("split source is absent from its siblings")?;
-    let now = chrono::Utc::now().timestamp();
-    let mut result_uuids = vec![uuid];
-    let mut kinds = vec![OpKind::BlockSetMarkdown(BlockSetMarkdown {
-        uuid,
-        markdown: parts[0].markdown.clone(),
-    })];
-    for part in parts.into_iter().skip(1) {
-        let block_uuid = uuid::Uuid::now_v7();
-        result_uuids.push(block_uuid);
-        kinds.push(OpKind::BlockCreate(BlockCreate {
-            uuid: block_uuid,
-            page_uuid: source.page_uuid,
-            parent_uuid: source.parent_uuid,
-            order_key: OrderKey::first(),
-            style: source.style,
-            markdown: part.markdown,
-            created_at: now,
+    conn.call_domain(move |database| -> crate::CoreResult<Vec<Block>> {
+        let transaction = database.transaction()?;
+        let block_sql = format!("SELECT {BLOCK_COLUMNS} FROM blocks WHERE uuid = ?1");
+        let source = transaction
+            .query_row(&block_sql, [uuid], row_to_block)
+            .optional()?
+            .ok_or_else(|| crate::CoreError::not_found("block was not found"))?;
+
+        // A split is a non-idempotent structural intent: even when its first
+        // part equals the current Markdown, retrying against a stale revision
+        // would create another set of sibling blocks.
+        if source.markdown_revision != expected_revision {
+            return Err(crate::CoreError::conflict(
+                "block content changed since split began",
+            ));
+        }
+
+        let siblings = {
+            let sql = format!(
+                "SELECT {BLOCK_COLUMNS} FROM blocks
+                  WHERE page_uuid = ?1 AND parent_uuid IS ?2
+                  ORDER BY order_key, uuid"
+            );
+            transaction
+                .prepare(&sql)?
+                .query_map(
+                    rusqlite::params![source.page_uuid, source.parent_uuid],
+                    row_to_block,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let source_index = siblings
+            .iter()
+            .position(|block| block.uuid == uuid)
+            .ok_or_else(|| {
+                crate::CoreError::conflict("split source is absent from its siblings")
+            })?;
+        let now = chrono::Utc::now().timestamp();
+        let mut result_uuids = vec![uuid];
+        let mut kinds = vec![OpKind::BlockSetMarkdown(BlockSetMarkdown {
+            uuid,
+            markdown: parts[0].markdown.clone(),
+        })];
+        for part in parts.into_iter().skip(1) {
+            let block_uuid = uuid::Uuid::now_v7();
+            result_uuids.push(block_uuid);
+            kinds.push(OpKind::BlockCreate(BlockCreate {
+                uuid: block_uuid,
+                page_uuid: source.page_uuid,
+                parent_uuid: source.parent_uuid,
+                order_key: OrderKey::first(),
+                style: source.style,
+                markdown: part.markdown,
+                created_at: now,
+            }));
+        }
+        let mut ordered = siblings.iter().map(|block| block.uuid).collect::<Vec<_>>();
+        ordered.splice(
+            source_index + 1..source_index + 1,
+            result_uuids.iter().skip(1).copied(),
+        );
+        kinds.extend(ordered.into_iter().enumerate().map(|(index, block_uuid)| {
+            OpKind::BlockMove(BlockMove {
+                uuid: block_uuid,
+                page_uuid: source.page_uuid,
+                parent_uuid: source.parent_uuid,
+                order_key: OrderKey::from_ordinal(index + 1),
+            })
         }));
-    }
-    let mut ordered = siblings.iter().map(|block| block.uuid).collect::<Vec<_>>();
-    ordered.splice(
-        source_index + 1..source_index + 1,
-        result_uuids.iter().skip(1).copied(),
-    );
-    kinds.extend(ordered.into_iter().enumerate().map(|(index, block_uuid)| {
-        OpKind::BlockMove(BlockMove {
-            uuid: block_uuid,
-            page_uuid: source.page_uuid,
-            parent_uuid: source.parent_uuid,
-            order_key: OrderKey::from_ordinal(index + 1),
-        })
-    }));
-    apply_local_action(conn, "split block", kinds).await?;
-    get_blocks(conn, result_uuids).await
+        apply_local_action_in_transaction(&transaction, "split block", kinds)?;
+        let blocks = result_uuids
+            .into_iter()
+            .map(|uuid| transaction.query_row(&block_sql, [uuid], row_to_block))
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        transaction.commit()?;
+        Ok(blocks)
+    })
+    .await
 }
 
 pub async fn move_block(

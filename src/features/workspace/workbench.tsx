@@ -10,6 +10,7 @@ import { HomeView } from "@/features/home/home-view";
 import type { MarkdownOpenHandler } from "@/features/markdown";
 import { PagePresentation } from "@/features/pages/page-presentation";
 import { PageView } from "@/features/pages/page-view";
+import { usePageSessionRegistry } from "@/features/pages/page-session";
 import { getPage, type Content, type JournalDate, type Page, type SearchHit } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
 import { cn } from "@/lib/utils";
@@ -289,11 +290,18 @@ function PagePane({
   paneId: PaneId;
   content: Extract<PaneContent, { kind: PaneContentKind.Page }>;
 }) {
+  const pageSessions = usePageSessionRegistry();
   const pageQuery = useQuery({
     queryKey: queryKeys.page(content.pageUuid),
     queryFn: () => getPage(content.pageUuid),
   });
   const page = pageQuery.data;
+
+  useEffect(() => {
+    if (pageQuery.isSuccess && page === null) {
+      pageSessions.discardPage(content.pageUuid);
+    }
+  }, [content.pageUuid, page, pageQuery.isSuccess, pageSessions]);
 
   if (pageQuery.isPending) {
     return <PaneLoading />;
@@ -308,6 +316,7 @@ function PagePane({
   return (
     <PageView
       key={page.uuid}
+      paneId={paneId}
       page={page}
       initialBlockUuid={
         props.newNote?.pageUuid === page.uuid ? props.newNote.blockUuid : content.blockUuid

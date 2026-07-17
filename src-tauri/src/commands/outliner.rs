@@ -113,8 +113,9 @@ pub async fn split_block(
     state: State<'_, AppState>,
     uuid: uuid::Uuid,
     parts: Vec<db::BlockContent>,
+    expected_revision: ContentRevision,
 ) -> CommandResult<Vec<db::Block>> {
-    let blocks = db::split_block(&state.conn, uuid, parts)
+    let blocks = db::split_block(&state.conn, uuid, parts, expected_revision)
         .await
         .map_err(err)?;
     emit_blocks_changed(&app, &blocks, []);

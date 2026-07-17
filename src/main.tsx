@@ -7,6 +7,7 @@ import { AppearanceProvider } from "@/app/appearance";
 import { ConfirmationProvider } from "@/app/confirmation";
 import { ErrorBoundary } from "@/app/error-boundary";
 import { disableViewportZoom } from "@/app/viewport-zoom";
+import { PageSessionProvider } from "@/features/pages/page-session";
 import "./index.css";
 
 import { createAppQueryClient, listenForDomainEvents } from "@/lib/query";
@@ -22,7 +23,9 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
         <AppearanceProvider>
           <ConfirmationProvider>
             <ErrorBoundary>
-              <App />
+              <PageSessionProvider>
+                <App />
+              </PageSessionProvider>
             </ErrorBoundary>
           </ConfirmationProvider>
         </AppearanceProvider>

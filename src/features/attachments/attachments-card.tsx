@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, ExternalLink, File, Loader2, Paperclip, Trash2 } from "lucide-react";
 import { useConfirmation } from "@/app/confirmation";
@@ -16,12 +16,16 @@ import { queryKeys } from "@/lib/query";
 export function AttachmentsCard({
   location,
   onStatus,
+  readOnly = false,
 }: {
   location: AttachmentOwner;
   onStatus: (message: string) => void;
+  readOnly?: boolean;
 }) {
   const confirm = useConfirmation();
   const queryClient = useQueryClient();
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
   const [busy, setBusy] = useState(false);
   const [expanded, setExpanded] = useState(false);
 
@@ -42,10 +46,19 @@ export function AttachmentsCard({
   }, [attachmentsQuery.error, onStatus]);
 
   async function add() {
+    if (readOnlyRef.current) return;
     setBusy(true);
     try {
       const attachment = await attachFile(location);
       if (attachment) {
+        // The native picker can outlive the pane's Editing presentation. Undo
+        // the just-created relation if write authority was lost while it was open.
+        if (readOnlyRef.current) {
+          await deleteAttachment(attachment.uuid);
+          await queryClient.invalidateQueries({ queryKey: queryKeys.attachments(location.uuid) });
+          onStatus("Attachment was not added because this pane is now read-only.");
+          return;
+        }
         await queryClient.invalidateQueries({ queryKey: queryKeys.attachments(location.uuid) });
         setExpanded(true);
         onStatus(`Attached ${attachment.filename}`);
@@ -58,6 +71,7 @@ export function AttachmentsCard({
   }
 
   async function remove(attachment: Attachment) {
+    if (readOnlyRef.current) return;
     if (
       !(await confirm({
         title: "Remove attachment?",
@@ -67,6 +81,7 @@ export function AttachmentsCard({
       }))
     )
       return;
+    if (readOnlyRef.current) return;
     try {
       if (await deleteAttachment(attachment.uuid)) {
         await queryClient.invalidateQueries({ queryKey: queryKeys.attachments(location.uuid) });
@@ -95,27 +110,29 @@ export function AttachmentsCard({
             </span>
           )}
         </button>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="rounded-lg text-muted-foreground"
-          disabled={busy}
-          onClick={() => void add()}
-        >
-          {busy ? (
-            <Loader2 className="size-3.5 animate-spin" />
-          ) : (
-            <Paperclip className="size-3.5" />
-          )}{" "}
-          Add file
-        </Button>
+        {!readOnly && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="rounded-lg text-muted-foreground"
+            disabled={busy}
+            onClick={() => void add()}
+          >
+            {busy ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <Paperclip className="size-3.5" />
+            )}{" "}
+            Add file
+          </Button>
+        )}
       </div>
       {expanded && (
         <div className="mt-3">
           <p className="mb-3 text-xs text-muted-foreground">
             Files are stored locally and included in portable archives.
           </p>
-          {attachments.length === 0 ? (
+          {attachments.length === 0 && !readOnly ? (
             <button
               type="button"
               onClick={() => void add()}
@@ -144,15 +161,17 @@ export function AttachmentsCard({
                   >
                     <ExternalLink className="size-3.5" />
                   </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    aria-label={`Remove ${attachment.filename}`}
-                    className="text-muted-foreground hover:text-destructive"
-                    onClick={() => void remove(attachment)}
-                  >
-                    <Trash2 className="size-3.5" />
-                  </Button>
+                  {!readOnly && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      aria-label={`Remove ${attachment.filename}`}
+                      className="text-muted-foreground hover:text-destructive"
+                      onClick={() => void remove(attachment)}
+                    >
+                      <Trash2 className="size-3.5" />
+                    </Button>
+                  )}
                 </li>
               ))}
             </ul>
