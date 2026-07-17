@@ -1,5 +1,5 @@
 use notes_core::db::{self, BlockContent, Content};
-use notes_core::{BlockStyle, Connection, PageLayout, TaskState};
+use notes_core::{AttachmentOwner, BlobHash, BlockStyle, Connection, PageLayout, TaskState};
 
 struct TestDatabase {
     _directory: tempfile::TempDir,
@@ -39,6 +39,56 @@ async fn baseline_has_typed_page_and_block_tables_without_legacy_graph_tables() 
     assert!(tables.iter().any(|table| table == "blocks"));
     assert!(!tables.iter().any(|table| table == "nodes"));
     assert!(!tables.iter().any(|table| table == "edges"));
+}
+
+#[tokio::test]
+async fn attachment_hashes_are_strict_32_byte_blobs() {
+    let database = database().await;
+    let page = db::create_page(&database.connection, "Attachments".into())
+        .await
+        .expect("create page");
+    let hash = BlobHash::from_bytes([0xab; 32]);
+    db::create_attachment(
+        &database.connection,
+        AttachmentOwner::Page(page.uuid),
+        hash,
+        "asset.png".into(),
+        "image/png".into(),
+        128,
+    )
+    .await
+    .expect("create attachment");
+
+    let storage = database
+        .connection
+        .call(|sqlite| {
+            sqlite.query_row(
+                "SELECT
+                   (SELECT typeof(blob_hash) FROM attachments LIMIT 1),
+                   (SELECT length(blob_hash) FROM attachments LIMIT 1),
+                   (SELECT typeof(blob_hash) FROM attachment_lww LIMIT 1),
+                   (SELECT length(blob_hash) FROM attachment_lww LIMIT 1)",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+        })
+        .await
+        .expect("inspect typed hash storage");
+    assert_eq!(storage, ("blob".into(), 32, "blob".into(), 32));
+
+    let error = database
+        .connection
+        .call(|sqlite| sqlite.execute("UPDATE attachments SET blob_hash = ?1", ["a".repeat(32)]))
+        .await
+        .expect_err("text must not satisfy the blob storage constraint");
+    assert!(error.to_string().contains("CHECK constraint"));
 }
 
 #[tokio::test]

@@ -11,24 +11,25 @@ pub mod stem;
 
 pub use error::{CoreError, CoreResult};
 pub use external_import::{
-    ExternalBlockId, ExternalImportBatch, ExternalImportBlock, ExternalImportDigest,
-    ExternalImportFormat, ExternalImportIdentityContext, ExternalImportOutcome, ExternalImportPage,
-    ExternalImportPageKind, ExternalImportProvenance, ExternalImportReceipt, ExternalPageId,
-    apply_external_import, external_import_receipt,
+    ExternalBlockId, ExternalImportAttachment, ExternalImportAttachmentOwner, ExternalImportBatch,
+    ExternalImportBlock, ExternalImportDigest, ExternalImportFormat, ExternalImportIdentityContext,
+    ExternalImportOutcome, ExternalImportPage, ExternalImportPageKind, ExternalImportProvenance,
+    ExternalImportReceipt, ExternalPageId, apply_external_import, external_import_receipt,
 };
 pub use hlc::Hlc;
 pub use model::{
     AttachmentOwner, BlockStyle, JournalDate, ObjectKind, OrderKey, PageAlias, PageKind,
     PageLayout, PageListFilter, ReorderDirection, TaskState, journal_page_uuid,
 };
+pub use notes_blob::BlobHash;
 pub use operation::{
     ApplyOutcome, AttachmentAdd, AttachmentRemove, BlockCreate, BlockDelete, BlockMove,
     BlockSetMarkdown, BlockSetStyle, Op, OpKind, Origin, PageAliasSet, PageCreate, PageDelete,
     PageSetLayout, PageSetTitle, SnapshotAttachment, SnapshotBlock, SnapshotBlockStructure,
     SnapshotPage, SnapshotPageAlias, SnapshotPageIdentity, SnapshotTombstone, SyncSnapshot,
     acknowledge_server_op, acknowledge_server_ops, apply, apply_batch, apply_sequenced,
-    apply_sequenced_batch, configure_sync, content_references_changed, export_sync_snapshot,
-    import_sync_snapshot, pending_outbox, sync_cursor, validate_attachment_filename,
-    validate_blob_hash,
+    apply_sequenced_batch, attachment_uuid, configure_sync, content_references_changed,
+    export_sync_snapshot, import_sync_snapshot, pending_outbox, sync_cursor,
+    validate_attachment_filename,
 };
 pub use sqlite::Connection;

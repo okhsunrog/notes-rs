@@ -1,5 +1,5 @@
 use notes_core::db::{self, DataArchive};
-use notes_core::{AttachmentOwner, BlockStyle, Connection, PageLayout, TaskState};
+use notes_core::{AttachmentOwner, BlobHash, BlockStyle, Connection, PageLayout, TaskState};
 
 struct TestDatabase {
     _directory: tempfile::TempDir,
@@ -17,8 +17,8 @@ async fn database() -> TestDatabase {
     }
 }
 
-fn hash(byte: char) -> String {
-    std::iter::repeat_n(byte, 64).collect()
+fn hash(byte: u8) -> BlobHash {
+    BlobHash::from_bytes([byte; 32])
 }
 
 #[tokio::test]
@@ -146,7 +146,7 @@ async fn undo_and_redo_restore_a_deleted_page_subtree_and_attachments_exactly() 
     let page_attachment = db::create_attachment(
         connection,
         AttachmentOwner::Page(note.page.uuid),
-        hash('a'),
+        hash(0xaa),
         "page.pdf".into(),
         "application/pdf".into(),
         42,
@@ -156,7 +156,7 @@ async fn undo_and_redo_restore_a_deleted_page_subtree_and_attachments_exactly() 
     let block_attachment = db::create_attachment(
         connection,
         AttachmentOwner::Block(child.uuid),
-        hash('b'),
+        hash(0xbb),
         "diagram.svg".into(),
         "image/svg+xml".into(),
         84,
@@ -266,7 +266,7 @@ async fn archive_roundtrip_replaces_typed_content_and_resets_incompatible_histor
     let attachment = db::create_attachment(
         &source.connection,
         AttachmentOwner::Block(root.uuid),
-        hash('c'),
+        hash(0xcc),
         "chapter.txt".into(),
         "text/plain".into(),
         7,
@@ -365,6 +365,7 @@ fn assert_archive_semantics(
     assert_eq!(archive.blocks[0].uuid, block_uuid);
     assert_eq!(archive.attachments.len(), 1);
     assert_eq!(archive.attachments[0].uuid, attachment_uuid);
+    assert_eq!(archive.attachments[0].blob_hash, hash(0xcc));
 }
 
 #[tokio::test]

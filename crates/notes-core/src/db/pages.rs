@@ -237,7 +237,7 @@ pub async fn delete_page(conn: &Connection, uuid: uuid::Uuid) -> Result<Option<D
             .map(|attachment| {
                 OpKind::AttachmentRemove(crate::operation::AttachmentRemove {
                     owner: attachment.owner,
-                    blob_hash: attachment.blob_hash.clone(),
+                    blob_hash: attachment.blob_hash,
                 })
             })
             .collect::<Vec<_>>();

@@ -1,11 +1,13 @@
 //! Versioned, UUID-addressed page/block operations and the single apply boundary.
 
+use crate::db::{blob_hash_bytes, row_blob_hash};
 use crate::model::{
     AttachmentOwner, BlockStyle, ObjectKind, OrderKey, PageAlias, PageKind, PageLayout,
     journal_page_uuid,
 };
 use crate::{Connection, CoreError, CoreResult, Hlc};
 use anyhow::{Context, Result};
+use notes_blob::BlobHash;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -121,7 +123,7 @@ pub struct BlockDelete {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AttachmentAdd {
     pub owner: AttachmentOwner,
-    pub blob_hash: String,
+    pub blob_hash: BlobHash,
     pub filename: String,
     pub mime: String,
     pub size: u64,
@@ -130,7 +132,7 @@ pub struct AttachmentAdd {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AttachmentRemove {
     pub owner: AttachmentOwner,
-    pub blob_hash: String,
+    pub blob_hash: BlobHash,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -216,7 +218,7 @@ pub struct SnapshotTombstone {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SnapshotAttachment {
     pub owner: AttachmentOwner,
-    pub blob_hash: String,
+    pub blob_hash: BlobHash,
     pub attachment_uuid: uuid::Uuid,
     pub hlc: Hlc,
     pub present: bool,
@@ -669,7 +671,6 @@ pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> 
         }
     }
     for attachment in &snapshot.attachments {
-        validate_blob_hash(&attachment.blob_hash)?;
         if attachment.attachment_uuid != attachment_uuid(attachment.owner, &attachment.blob_hash) {
             return Err(
                 CoreError::invalid("attachment UUID does not match its owner and hash").into(),
@@ -1052,7 +1053,7 @@ fn validate_snapshot(snapshot: &SyncSnapshot) -> CoreResult<()> {
         if !attachment_keys.insert((
             attachment.owner.kind(),
             attachment.owner.uuid(),
-            attachment.blob_hash.as_str(),
+            attachment.blob_hash,
         )) || !attachment_uuids.insert(attachment.attachment_uuid)
         {
             return Err(CoreError::invalid(
@@ -1184,7 +1185,6 @@ pub(crate) fn validate_kind(kind: &OpKind) -> CoreResult<()> {
         }
         OpKind::BlockSetMarkdown(_) | OpKind::BlockSetStyle(_) | OpKind::BlockDelete(_) => Ok(()),
         OpKind::AttachmentAdd(payload) => {
-            validate_blob_hash(&payload.blob_hash)?;
             validate_attachment_filename(&payload.filename)?;
             if payload.mime.trim().is_empty() {
                 return Err(CoreError::invalid("attachment MIME type is required"));
@@ -1194,7 +1194,7 @@ pub(crate) fn validate_kind(kind: &OpKind) -> CoreResult<()> {
             }
             Ok(())
         }
-        OpKind::AttachmentRemove(payload) => validate_blob_hash(&payload.blob_hash),
+        OpKind::AttachmentRemove(_) => Ok(()),
     }
 }
 
@@ -1204,15 +1204,6 @@ fn validate_title(title: Option<&str>) -> CoreResult<()> {
     } else {
         Ok(())
     }
-}
-
-pub fn validate_blob_hash(hash: &str) -> CoreResult<()> {
-    if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(CoreError::invalid(
-            "blob hash must be a 64-character hexadecimal SHA-256",
-        ));
-    }
-    Ok(())
 }
 
 pub fn validate_attachment_filename(filename: &str) -> CoreResult<()> {
@@ -1792,7 +1783,7 @@ fn apply_one_with_effects(
             ensure_object_kind(transaction, payload.owner.uuid(), payload.owner.kind())?;
             let snapshot = SnapshotAttachment {
                 owner: payload.owner,
-                blob_hash: payload.blob_hash.clone(),
+                blob_hash: payload.blob_hash,
                 attachment_uuid: attachment_uuid(payload.owner, &payload.blob_hash),
                 hlc: operation.hlc.clone(),
                 present: true,
@@ -1808,7 +1799,7 @@ fn apply_one_with_effects(
             ensure_object_kind(transaction, payload.owner.uuid(), payload.owner.kind())?;
             let snapshot = SnapshotAttachment {
                 owner: payload.owner,
-                blob_hash: payload.blob_hash.clone(),
+                blob_hash: payload.blob_hash,
                 attachment_uuid: attachment_uuid(payload.owner, &payload.blob_hash),
                 hlc: operation.hlc.clone(),
                 present: false,
@@ -2507,7 +2498,7 @@ fn write_attachment_intent(
         rusqlite::params![
             attachment.owner.kind(),
             attachment.owner.uuid(),
-            attachment.blob_hash,
+            blob_hash_bytes(&attachment.blob_hash),
             attachment.attachment_uuid,
             attachment.hlc.to_string(),
             attachment.present,
@@ -2531,7 +2522,7 @@ fn reconcile_all_attachments(transaction: &rusqlite::Transaction<'_>) -> rusqlit
                     ObjectKind::Page => AttachmentOwner::Page(uuid),
                     ObjectKind::Block => AttachmentOwner::Block(uuid),
                 };
-                Ok((owner, row.get::<_, String>(2)?))
+                Ok((owner, row_blob_hash(row, 2)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
@@ -2551,7 +2542,7 @@ fn reconcile_attachments_for_owner(
         )?;
         statement
             .query_map(rusqlite::params![owner.kind(), owner.uuid()], |row| {
-                row.get::<_, String>(0)
+                row_blob_hash(row, 0)
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
@@ -2564,14 +2555,14 @@ fn reconcile_attachments_for_owner(
 fn reconcile_attachment(
     transaction: &rusqlite::Transaction<'_>,
     owner: AttachmentOwner,
-    blob_hash: &str,
+    blob_hash: &BlobHash,
 ) -> rusqlite::Result<()> {
     let intent = transaction
         .query_row(
             "SELECT attachment_uuid, hlc, present, filename, mime, size
                FROM attachment_lww
               WHERE owner_kind = ?1 AND owner_uuid = ?2 AND blob_hash = ?3",
-            rusqlite::params![owner.kind(), owner.uuid(), blob_hash],
+            rusqlite::params![owner.kind(), owner.uuid(), blob_hash_bytes(blob_hash)],
             |row| {
                 Ok((
                     row.get::<_, uuid::Uuid>(0)?,
@@ -2622,7 +2613,7 @@ fn reconcile_attachment(
             uuid,
             page_uuid,
             block_uuid,
-            blob_hash,
+            blob_hash_bytes(blob_hash),
             filename,
             mime,
             size,
@@ -2632,7 +2623,7 @@ fn reconcile_attachment(
     Ok(())
 }
 
-fn attachment_uuid(owner: AttachmentOwner, blob_hash: &str) -> uuid::Uuid {
+pub fn attachment_uuid(owner: AttachmentOwner, blob_hash: &BlobHash) -> uuid::Uuid {
     uuid::Uuid::new_v5(
         &uuid::Uuid::NAMESPACE_OID,
         format!(
@@ -2653,7 +2644,7 @@ fn snapshot_attachment_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sna
     };
     Ok(SnapshotAttachment {
         owner,
-        blob_hash: row.get(2)?,
+        blob_hash: row_blob_hash(row, 2)?,
         attachment_uuid: row.get(3)?,
         hlc: sql_hlc(row.get(4)?, 4)?,
         present: row.get(5)?,
@@ -2836,9 +2827,15 @@ mod tests {
     #[test]
     fn attachment_identity_includes_the_typed_owner_kind() {
         let uuid = uuid::Uuid::now_v7();
-        let hash = "a".repeat(64);
+        let hash = BlobHash::from_bytes([0xaa; 32]);
+        let page_attachment = attachment_uuid(AttachmentOwner::Page(uuid), &hash);
+        assert_eq!(
+            page_attachment,
+            attachment_uuid(AttachmentOwner::Page(uuid), &hash)
+        );
+        assert_eq!(page_attachment.get_version_num(), 5);
         assert_ne!(
-            attachment_uuid(AttachmentOwner::Page(uuid), &hash),
+            page_attachment,
             attachment_uuid(AttachmentOwner::Block(uuid), &hash)
         );
     }

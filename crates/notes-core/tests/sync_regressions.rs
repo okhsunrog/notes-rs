@@ -435,7 +435,7 @@ async fn invalid_order_keys_and_attachment_snapshots_are_rejected_before_replaci
     db::create_attachment(
         &source.connection,
         AttachmentOwner::Page(page.uuid),
-        "a".repeat(64),
+        notes_core::BlobHash::from_bytes([0xaa; 32]),
         "file.txt".into(),
         "text/plain".into(),
         1,
@@ -467,15 +467,13 @@ async fn invalid_order_keys_and_attachment_snapshots_are_rejected_before_replaci
         .await
         .expect("create state that failed imports must preserve");
 
-    let mut invalid_hash = snapshot.clone();
-    invalid_hash.attachments[0].blob_hash = "bad".into();
-    assert!(
-        notes_core::import_sync_snapshot(&destination.connection, invalid_hash)
-            .await
-            .expect_err("invalid attachment hash")
-            .to_string()
-            .contains("64-character")
-    );
+    let mut invalid_hash = serde_json::to_value(&snapshot).unwrap();
+    invalid_hash["attachments"][0]["blob_hash"] = serde_json::json!("bad");
+    assert!(serde_json::from_value::<SyncSnapshot>(invalid_hash).is_err());
+    let mut uppercase_hash = serde_json::to_value(&snapshot).unwrap();
+    uppercase_hash["attachments"][0]["blob_hash"] =
+        serde_json::json!(snapshot.attachments[0].blob_hash.to_string().to_uppercase());
+    assert!(serde_json::from_value::<SyncSnapshot>(uppercase_hash).is_err());
     assert!(
         db::get_page(&destination.connection, sentinel.uuid)
             .await

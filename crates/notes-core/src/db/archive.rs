@@ -86,7 +86,7 @@ pub async fn export_archive(conn: &Connection) -> Result<DataArchive> {
                     Ok(Attachment {
                         uuid: row.get(0)?,
                         owner,
-                        blob_hash: row.get(3)?,
+                        blob_hash: row_blob_hash(row, 3)?,
                         filename: row.get(4)?,
                         mime: row.get(5)?,
                         size,
@@ -266,7 +266,7 @@ pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<(
                     (None, Some(uuid)) => AttachmentOwner::Block(uuid),
                     _ => return Err(rusqlite::Error::InvalidQuery),
                 };
-                Ok((owner, row.get::<_, String>(2)?))
+                Ok((owner, row_blob_hash(row, 2)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let current_blocks = transaction

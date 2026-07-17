@@ -4,11 +4,14 @@
 //! typed plan; this module validates the whole plan, emits ordinary synced
 //! operations in one SQLite transaction, and records a durable local receipt.
 
-use crate::model::{BlockStyle, JournalDate, OrderKey, PageAlias, PageKind, PageLayout};
-use crate::operation::{
-    self, BlockCreate, OpKind, PageAliasSet, PageCreate, validate_page_identity,
+use crate::model::{
+    AttachmentOwner, BlockStyle, JournalDate, OrderKey, PageAlias, PageKind, PageLayout,
 };
-use crate::{Connection, CoreError, CoreResult};
+use crate::operation::{
+    self, AttachmentAdd, BlockCreate, OpKind, PageAliasSet, PageCreate, attachment_uuid,
+    validate_attachment_filename, validate_page_identity,
+};
+use crate::{BlobHash, Connection, CoreError, CoreResult};
 use anyhow::Result;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -229,11 +232,42 @@ pub struct ExternalImportPage {
     pub blocks: Vec<ExternalImportBlock>,
 }
 
+/// A typed reference to an owner created by the same import batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+pub enum ExternalImportAttachmentOwner {
+    Page(ExternalPageId),
+    Block(ExternalBlockId),
+}
+
+impl ExternalImportAttachmentOwner {
+    const fn domain_owner(self) -> AttachmentOwner {
+        match self {
+            Self::Page(id) => AttachmentOwner::Page(id.uuid()),
+            Self::Block(id) => AttachmentOwner::Block(id.uuid()),
+        }
+    }
+}
+
+/// Attachment metadata materialized by an external importer. Blob bytes are
+/// installed separately before this atomic metadata transaction is attempted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExternalImportAttachment {
+    pub attachment_uuid: uuid::Uuid,
+    pub owner: ExternalImportAttachmentOwner,
+    pub blob_hash: BlobHash,
+    pub filename: String,
+    pub mime: String,
+    pub size: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExternalImportBatch {
     pub provenance: ExternalImportProvenance,
     pub pages: Vec<ExternalImportPage>,
+    pub attachments: Vec<ExternalImportAttachment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,6 +277,7 @@ pub enum ExternalImportOutcome {
         page_count: u64,
         block_count: u64,
         alias_count: u64,
+        attachment_count: u64,
         operation_count: u64,
         structure_reconciliations: u32,
     },
@@ -278,6 +313,7 @@ pub async fn external_import_receipt(
         .await
 }
 
+#[derive(Debug)]
 struct ValidatedBatch {
     batch: ExternalImportBatch,
     plan_digest: ExternalImportDigest,
@@ -285,13 +321,23 @@ struct ValidatedBatch {
     page_count: u64,
     block_count: u64,
     alias_count: u64,
+    attachment_count: u64,
+}
+
+#[derive(Serialize)]
+struct MaterializedPlan<'a> {
+    pages: &'a [ExternalImportPage],
+    attachments: &'a [ExternalImportAttachment],
 }
 
 impl ValidatedBatch {
     fn new(batch: ExternalImportBatch) -> CoreResult<Self> {
         validate_batch(&batch)?;
-        let plan_json = serde_json::to_vec(&batch.pages)
-            .map_err(|error| CoreError::invalid(format!("serializing import plan: {error}")))?;
+        let plan_json = serde_json::to_vec(&MaterializedPlan {
+            pages: &batch.pages,
+            attachments: &batch.attachments,
+        })
+        .map_err(|error| CoreError::invalid(format!("serializing import plan: {error}")))?;
         let plan_digest = ExternalImportDigest::from_bytes(Sha256::digest(plan_json).into());
         let provenance_json =
             serde_json::to_string(&batch.provenance.payload).map_err(|error| {
@@ -308,6 +354,7 @@ impl ValidatedBatch {
             .iter()
             .map(|page| page.aliases.len() as u64)
             .sum();
+        let attachment_count = batch.attachments.len() as u64;
         Ok(Self {
             batch,
             plan_digest,
@@ -315,6 +362,7 @@ impl ValidatedBatch {
             page_count,
             block_count,
             alias_count,
+            attachment_count,
         })
     }
 
@@ -327,7 +375,8 @@ impl ValidatedBatch {
                 total
                     .saturating_add(page.aliases.len())
                     .saturating_add(page.blocks.len())
-            });
+            })
+            .saturating_add(self.batch.attachments.len());
         let mut kinds = Vec::with_capacity(capacity);
         for page in &self.batch.pages {
             let (kind, title) = match &page.kind {
@@ -365,6 +414,15 @@ impl ValidatedBatch {
                     created_at: commit_timestamp,
                 }));
             }
+        }
+        for attachment in &self.batch.attachments {
+            kinds.push(OpKind::AttachmentAdd(AttachmentAdd {
+                owner: attachment.owner.domain_owner(),
+                blob_hash: attachment.blob_hash,
+                filename: attachment.filename.clone(),
+                mime: attachment.mime.clone(),
+                size: attachment.size,
+            }));
         }
         kinds
     }
@@ -453,6 +511,7 @@ pub async fn apply_external_import(
             page_count: validated.page_count,
             block_count: validated.block_count,
             alias_count: validated.alias_count,
+            attachment_count: validated.attachment_count,
             operation_count: applied.operations.len() as u64,
             structure_reconciliations: applied.stats.structure_reconciliations,
         };
@@ -706,6 +765,49 @@ fn validate_batch(batch: &ExternalImportBatch) -> CoreResult<()> {
             proven_acyclic.extend(path);
         }
     }
+
+    let mut attachment_keys = HashSet::new();
+    let mut attachment_uuids = HashSet::new();
+    for attachment in &batch.attachments {
+        let owner = attachment.owner.domain_owner();
+        let owner_exists = match attachment.owner {
+            ExternalImportAttachmentOwner::Page(id) => page_ids.contains(&id),
+            ExternalImportAttachmentOwner::Block(id) => block_pages.contains_key(&id),
+        };
+        if !owner_exists {
+            return Err(CoreError::invalid(format!(
+                "external attachment owner {} does not exist in the import plan",
+                owner.uuid()
+            )));
+        }
+        if !attachment_keys.insert((owner, attachment.blob_hash)) {
+            return Err(CoreError::invalid(format!(
+                "external import contains duplicate attachment for owner {} and hash {}",
+                owner.uuid(),
+                attachment.blob_hash
+            )));
+        }
+        if attachment.attachment_uuid.is_nil()
+            || !attachment_uuids.insert(attachment.attachment_uuid)
+        {
+            return Err(CoreError::invalid(
+                "external import contains a nil or duplicate attachment UUID",
+            ));
+        }
+        if attachment.attachment_uuid != attachment_uuid(owner, &attachment.blob_hash) {
+            return Err(CoreError::invalid(format!(
+                "external attachment UUID {} does not match its owner and hash",
+                attachment.attachment_uuid
+            )));
+        }
+        validate_attachment_filename(&attachment.filename)?;
+        if attachment.mime.trim().is_empty() {
+            return Err(CoreError::invalid("attachment MIME type is required"));
+        }
+        if attachment.size > i64::MAX as u64 {
+            return Err(CoreError::invalid("attachment size is too large"));
+        }
+    }
     Ok(())
 }
 
@@ -753,6 +855,8 @@ mod tests {
                 markdown: format!("block {index}"),
             })
             .collect();
+        let blob_hash = BlobHash::from_bytes([0xab; 32]);
+        let owner = ExternalImportAttachmentOwner::Page(page_id);
         ExternalImportBatch {
             provenance: ExternalImportProvenance {
                 format: ExternalImportFormat::Logseq,
@@ -772,6 +876,14 @@ mod tests {
                 layout: PageLayout::Outline,
                 aliases: vec![PageAlias::new("Imported.md").unwrap()],
                 blocks,
+            }],
+            attachments: vec![ExternalImportAttachment {
+                attachment_uuid: attachment_uuid(owner.domain_owner(), &blob_hash),
+                owner,
+                blob_hash,
+                filename: "asset.png".into(),
+                mime: "image/png".into(),
+                size: 128,
             }],
         }
     }
@@ -962,17 +1074,176 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn late_attachment_failure_rolls_back_the_whole_import() {
+        let (_file, connection) = database().await;
+        operation::configure_sync(&connection, "https://sync.example")
+            .await
+            .unwrap();
+        connection
+            .call(|database| {
+                database.execute_batch(
+                    "CREATE TRIGGER fail_external_import_attachment
+                       BEFORE INSERT ON attachments
+                       BEGIN SELECT RAISE(ABORT, 'attachment failpoint'); END;",
+                )
+            })
+            .await
+            .unwrap();
+
+        let input = batch(&connection, 2).await;
+        let error = apply_external_import(&connection, input)
+            .await
+            .expect_err("late attachment failure");
+        assert!(error.to_string().contains("attachment failpoint"));
+        let counts = connection
+            .call(|database| {
+                database.query_row(
+                    "SELECT
+                       (SELECT COUNT(*) FROM page_identities),
+                       (SELECT COUNT(*) FROM pages),
+                       (SELECT COUNT(*) FROM blocks),
+                       (SELECT COUNT(*) FROM page_alias_lww),
+                       (SELECT COUNT(*) FROM attachment_lww),
+                       (SELECT COUNT(*) FROM attachments),
+                       (SELECT COUNT(*) FROM applied_ops),
+                       (SELECT COUNT(*) FROM sync_outbox),
+                       (SELECT COUNT(*) FROM external_import_receipts),
+                       (SELECT COUNT(*) FROM local_device)",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, i64>(4)?,
+                            row.get::<_, i64>(5)?,
+                            row.get::<_, i64>(6)?,
+                            row.get::<_, i64>(7)?,
+                            row.get::<_, i64>(8)?,
+                            row.get::<_, i64>(9)?,
+                        ))
+                    },
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(counts, (0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn attachment_metadata_is_part_of_the_exact_rerun_digest() {
+        let (_file, connection) = database().await;
+        let input = batch(&connection, 1).await;
+        let original_digest = ValidatedBatch::new(input.clone()).unwrap().plan_digest;
+        apply_external_import(&connection, input.clone())
+            .await
+            .unwrap();
+        assert!(matches!(
+            apply_external_import(&connection, input.clone())
+                .await
+                .unwrap(),
+            ExternalImportOutcome::ExactNoOp { .. }
+        ));
+
+        let mut changed = input;
+        changed.attachments[0].filename = "renamed.png".into();
+        assert_ne!(
+            ValidatedBatch::new(changed.clone()).unwrap().plan_digest,
+            original_digest
+        );
+        let error = apply_external_import(&connection, changed)
+            .await
+            .expect_err("changed attachment metadata cannot be an exact rerun");
+        assert!(error.to_string().contains("different manifest, plan"));
+    }
+
+    #[tokio::test]
+    async fn attachment_hash_json_is_strictly_canonical() {
+        let (_file, connection) = database().await;
+        let input = batch(&connection, 1).await;
+        let mut invalid = serde_json::to_value(&input).unwrap();
+        invalid["attachments"][0]["blobHash"] = serde_json::json!("bad");
+        assert!(serde_json::from_value::<ExternalImportBatch>(invalid).is_err());
+
+        let mut uppercase = serde_json::to_value(&input).unwrap();
+        uppercase["attachments"][0]["blobHash"] =
+            serde_json::json!(input.attachments[0].blob_hash.to_string().to_uppercase());
+        assert!(serde_json::from_value::<ExternalImportBatch>(uppercase).is_err());
+    }
+
+    #[tokio::test]
+    async fn attachment_validation_rejects_missing_owners_and_duplicate_identities() {
+        let (_file, connection) = database().await;
+        let input = batch(&connection, 1).await;
+
+        let mut missing_owner = input.clone();
+        missing_owner.attachments[0].owner = ExternalImportAttachmentOwner::Block(
+            ExternalBlockId::new(uuid::Uuid::now_v7()).unwrap(),
+        );
+        assert!(
+            ValidatedBatch::new(missing_owner)
+                .expect_err("missing owner")
+                .to_string()
+                .contains("does not exist")
+        );
+
+        let mut duplicate_key = input.clone();
+        duplicate_key
+            .attachments
+            .push(duplicate_key.attachments[0].clone());
+        assert!(
+            ValidatedBatch::new(duplicate_key)
+                .expect_err("duplicate owner and hash")
+                .to_string()
+                .contains("duplicate attachment")
+        );
+
+        let mut mismatched_uuid = input;
+        mismatched_uuid.attachments[0].attachment_uuid = uuid::Uuid::now_v7();
+        assert!(
+            ValidatedBatch::new(mismatched_uuid)
+                .expect_err("mismatched attachment UUID")
+                .to_string()
+                .contains("does not match")
+        );
+
+        let input = batch(&connection, 1).await;
+        let mut duplicate_uuid = input.clone();
+        let mut second = duplicate_uuid.attachments[0].clone();
+        second.blob_hash = BlobHash::from_bytes([0x43; 32]);
+        duplicate_uuid.attachments.push(second);
+        assert!(
+            ValidatedBatch::new(duplicate_uuid)
+                .expect_err("duplicate attachment UUID")
+                .to_string()
+                .contains("duplicate attachment UUID")
+        );
+
+        let mut blank_filename = input.clone();
+        blank_filename.attachments[0].filename = " ".into();
+        assert!(ValidatedBatch::new(blank_filename).is_err());
+        let mut blank_mime = input.clone();
+        blank_mime.attachments[0].mime = " ".into();
+        assert!(ValidatedBatch::new(blank_mime).is_err());
+        let mut oversized = input;
+        oversized.attachments[0].size = u64::MAX;
+        assert!(ValidatedBatch::new(oversized).is_err());
+    }
+
+    #[tokio::test]
     async fn emits_normal_ops_outbox_and_no_interactive_history() {
         let (_file, connection) = database().await;
         operation::configure_sync(&connection, "https://sync.example")
             .await
             .unwrap();
         let input = batch(&connection, 2).await;
-        let expected_ops = 1 + 1 + 2;
+        let expected_ops = 1 + 1 + 2 + 1;
         let outcome = apply_external_import(&connection, input).await.unwrap();
         assert!(matches!(
             outcome,
             ExternalImportOutcome::Applied {
+                attachment_count: 1,
                 operation_count,
                 structure_reconciliations: 1,
                 ..
@@ -986,6 +1257,20 @@ mod tests {
         );
         assert!(ops.iter().all(|op| op.op_id.get_version_num() == 7));
         assert!(ops.windows(2).all(|pair| pair[0].hlc < pair[1].hlc));
+        assert!(matches!(
+            ops.last().map(|operation| &operation.kind),
+            Some(OpKind::AttachmentAdd(_))
+        ));
+        assert_eq!(
+            db::list_attachments(
+                &connection,
+                AttachmentOwner::Page(db::list_pages(&connection, 10).await.unwrap()[0].uuid)
+            )
+            .await
+            .unwrap()
+            .len(),
+            1
+        );
         let counts = connection
             .call(|database| {
                 database.query_row(
@@ -1092,6 +1377,11 @@ mod tests {
         let first_snapshot = operation::export_sync_snapshot(&first, 0).await.unwrap();
         let second_snapshot = operation::export_sync_snapshot(&second, 0).await.unwrap();
         assert_eq!(first_snapshot, second_snapshot);
+        assert_eq!(first_snapshot.attachments.len(), 1);
+        assert_eq!(
+            first_snapshot.attachments[0].blob_hash,
+            input.attachments[0].blob_hash
+        );
 
         let (_snapshot_file, snapshot_replica) = database().await;
         snapshot_replica
@@ -1141,6 +1431,11 @@ mod tests {
             .expect("source receipt");
         let archive = db::export_archive(&source).await.unwrap();
         assert_eq!(archive.external_import_receipts.len(), 1);
+        assert_eq!(archive.attachments.len(), 1);
+        assert_eq!(
+            archive.attachments[0].blob_hash,
+            input.attachments[0].blob_hash
+        );
 
         let (_destination_file, destination) = database().await;
         let workspace_uuid = input.provenance.identity.workspace_uuid;
@@ -1178,5 +1473,15 @@ mod tests {
             apply_external_import(&destination, input).await.unwrap(),
             ExternalImportOutcome::ExactNoOp { .. }
         ));
+        assert_eq!(
+            db::list_attachments(
+                &destination,
+                AttachmentOwner::Page(db::list_pages(&destination, 10).await.unwrap()[0].uuid)
+            )
+            .await
+            .unwrap()
+            .len(),
+            1
+        );
     }
 }

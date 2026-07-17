@@ -5,6 +5,7 @@ use crate::model::{
 use crate::operation::{self, OpKind};
 use crate::sqlite::Connection;
 use anyhow::{Context, Result};
+use notes_blob::BlobHash;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -89,7 +90,8 @@ pub struct Block {
 pub struct Attachment {
     pub uuid: uuid::Uuid,
     pub owner: AttachmentOwner,
-    pub blob_hash: String,
+    #[specta(type = String)]
+    pub blob_hash: BlobHash,
     pub filename: String,
     pub mime: String,
     pub size: u64,
@@ -163,6 +165,23 @@ pub(crate) fn row_to_block(row: &rusqlite::Row<'_>) -> rusqlite::Result<Block> {
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
     })
+}
+
+pub(crate) fn row_blob_hash(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<BlobHash> {
+    let value = row.get_ref(index)?;
+    let bytes = value.as_blob()?;
+    let bytes: [u8; 32] = bytes.try_into().map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Blob,
+            Box::new(error),
+        )
+    })?;
+    Ok(BlobHash::from_bytes(bytes))
+}
+
+pub(crate) const fn blob_hash_bytes(hash: &BlobHash) -> &[u8] {
+    hash.as_bytes().as_slice()
 }
 
 pub async fn get_content(conn: &Connection, uuid: uuid::Uuid) -> Result<Option<Content>> {

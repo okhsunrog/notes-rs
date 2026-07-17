@@ -3419,6 +3419,7 @@ dependencies = [
  "anyhow",
  "async-channel",
  "chrono",
+ "notes-blob",
  "proptest",
  "rusqlite",
  "rusqlite_migration",

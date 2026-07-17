@@ -26,7 +26,7 @@ pub(crate) fn row_to_attachment(row: &rusqlite::Row<'_>) -> rusqlite::Result<Att
     Ok(Attachment {
         uuid: row.get(0)?,
         owner,
-        blob_hash: row.get(3)?,
+        blob_hash: row_blob_hash(row, 3)?,
         filename: row.get(4)?,
         mime: row.get(5)?,
         size,
@@ -50,7 +50,7 @@ pub async fn get_attachment(conn: &Connection, uuid: uuid::Uuid) -> Result<Optio
 pub async fn create_attachment(
     conn: &Connection,
     owner: AttachmentOwner,
-    blob_hash: String,
+    blob_hash: BlobHash,
     filename: String,
     mime: String,
     size: u64,
@@ -66,7 +66,7 @@ pub async fn create_attachment(
         conn,
         vec![OpKind::AttachmentAdd(AttachmentAdd {
             owner,
-            blob_hash: blob_hash.clone(),
+            blob_hash,
             filename,
             mime,
             size,
@@ -80,7 +80,7 @@ pub async fn create_attachment(
         );
         database.query_row(
             &sql,
-            rusqlite::params![blob_hash, owner.uuid()],
+            rusqlite::params![blob_hash_bytes(&blob_hash), owner.uuid()],
             row_to_attachment,
         )
     })
@@ -110,13 +110,13 @@ pub async fn list_attachments(
 
 pub async fn attachment_path_ref_count(
     conn: &Connection,
-    blob_hash: String,
+    blob_hash: BlobHash,
     filename: String,
 ) -> Result<i64> {
     conn.call(move |database| {
         database.query_row(
             "SELECT COUNT(*) FROM attachments WHERE blob_hash = ?1 AND filename = ?2",
-            rusqlite::params![blob_hash, filename],
+            rusqlite::params![blob_hash_bytes(&blob_hash), filename],
             |row| row.get(0),
         )
     })
@@ -132,7 +132,7 @@ pub async fn delete_attachment(conn: &Connection, uuid: uuid::Uuid) -> Result<Op
         conn,
         vec![OpKind::AttachmentRemove(AttachmentRemove {
             owner: attachment.owner,
-            blob_hash: attachment.blob_hash.clone(),
+            blob_hash: attachment.blob_hash,
         })],
     )
     .await?;

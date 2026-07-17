@@ -11,6 +11,7 @@ description = "Domain model and SQLite storage engine for notes-rs"
 anyhow.workspace = true
 async-channel.workspace = true
 chrono.workspace = true
+notes-blob.workspace = true
 rusqlite.workspace = true
 rusqlite_migration.workspace = true
 rust-stemmers.workspace = true

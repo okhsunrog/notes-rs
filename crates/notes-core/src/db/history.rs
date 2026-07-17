@@ -149,7 +149,7 @@ fn capture_inverse(
             } else {
                 inverse.push(OpKind::AttachmentRemove(AttachmentRemove {
                     owner: payload.owner,
-                    blob_hash: payload.blob_hash.clone(),
+                    blob_hash: payload.blob_hash,
                 }));
             }
         }
@@ -221,13 +221,13 @@ fn capture_block(
 fn attachment_intent(
     database: &rusqlite::Connection,
     owner: AttachmentOwner,
-    blob_hash: &str,
+    blob_hash: &notes_blob::BlobHash,
 ) -> rusqlite::Result<Option<AttachmentAdd>> {
     database
         .query_row(
             "SELECT filename, mime, size FROM attachment_lww
               WHERE owner_kind = ?1 AND owner_uuid = ?2 AND blob_hash = ?3 AND present = 1",
-            rusqlite::params![owner.kind(), owner.uuid(), blob_hash],
+            rusqlite::params![owner.kind(), owner.uuid(), blob_hash_bytes(blob_hash)],
             |row| {
                 let size = u64::try_from(row.get::<_, i64>(2)?).map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(
@@ -238,7 +238,7 @@ fn attachment_intent(
                 })?;
                 Ok(AttachmentAdd {
                     owner,
-                    blob_hash: blob_hash.to_owned(),
+                    blob_hash: *blob_hash,
                     filename: row.get(0)?,
                     mime: row.get(1)?,
                     size,

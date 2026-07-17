@@ -118,7 +118,8 @@ CREATE TABLE attachments (
   uuid BLOB PRIMARY KEY CHECK (length(uuid) = 16),
   page_uuid BLOB REFERENCES pages(uuid) ON DELETE CASCADE,
   block_uuid BLOB REFERENCES blocks(uuid) ON DELETE CASCADE,
-  blob_hash TEXT NOT NULL CHECK (length(blob_hash) = 64),
+  blob_hash BLOB NOT NULL
+    CHECK (typeof(blob_hash) = 'blob' AND length(blob_hash) = 32),
   filename TEXT NOT NULL,
   mime TEXT NOT NULL,
   size INTEGER NOT NULL CHECK (size >= 0),
@@ -176,7 +177,8 @@ CREATE TABLE block_structure_lww (
 CREATE TABLE attachment_lww (
   owner_kind TEXT NOT NULL CHECK (owner_kind IN ('page', 'block')),
   owner_uuid BLOB NOT NULL CHECK (length(owner_uuid) = 16),
-  blob_hash TEXT NOT NULL CHECK (length(blob_hash) = 64),
+  blob_hash BLOB NOT NULL
+    CHECK (typeof(blob_hash) = 'blob' AND length(blob_hash) = 32),
   attachment_uuid BLOB NOT NULL CHECK (length(attachment_uuid) = 16),
   hlc TEXT NOT NULL,
   present INTEGER NOT NULL,
