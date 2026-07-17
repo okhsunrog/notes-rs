@@ -147,13 +147,29 @@ pub async fn export_archive(conn: &Connection) -> Result<DataArchive> {
             blocks,
             attachments,
             external_import_receipts,
-            files: Default::default(),
         })
     })
     .await
 }
 
 pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<()> {
+    import_archive_with_precommit(conn, archive, || Ok(())).await
+}
+
+/// Restores an archive while running a host-owned publication step inside the
+/// validated SQLite transaction immediately before commit.
+///
+/// Attachment hosts use this boundary to publish already-verified blob bytes
+/// only after every archive operation has applied successfully, while still
+/// guaranteeing that bytes become durable before their metadata is committed.
+pub async fn import_archive_with_precommit<F>(
+    conn: &Connection,
+    archive: DataArchive,
+    precommit: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Result<()> + Send + 'static,
+{
     if archive.format != ARCHIVE_FORMAT || archive.version != ARCHIVE_VERSION {
         return Err(crate::CoreError::invalid(format!(
             "unsupported archive format {} version {}",
@@ -229,7 +245,7 @@ pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<(
             .into());
         }
     }
-    conn.call_domain(move |database| -> crate::CoreResult<()> {
+    conn.call_domain(move |database| -> Result<()> {
         let transaction = database.transaction()?;
         let current_workspace_uuid = transaction_workspace_uuid(&transaction)?;
         if current_workspace_uuid != archive.workspace_uuid {
@@ -252,7 +268,8 @@ pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<(
             if has_state || sync_configured {
                 return Err(crate::CoreError::conflict(
                     "cannot restore an archive from a different workspace into a non-empty or synchronized replica",
-                ));
+                )
+                .into());
             }
         }
         let current_attachments = transaction
@@ -382,6 +399,7 @@ pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<(
         }
         transaction.execute("DELETE FROM history_undo", [])?;
         transaction.execute("DELETE FROM history_redo", [])?;
+        precommit()?;
         transaction.commit()?;
         Ok(())
     })

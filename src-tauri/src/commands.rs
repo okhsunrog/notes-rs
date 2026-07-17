@@ -1,5 +1,4 @@
 use anyhow::Context;
-use base64::Engine;
 use notes_core::Connection;
 use notes_core::db::{self, Block, Page, SearchHit};
 use notes_core::{BlockStyle, PageLayout, ReorderDirection, TaskState};

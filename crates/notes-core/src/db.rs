@@ -20,7 +20,7 @@ mod pages;
 mod search;
 mod workspace;
 
-pub use archive::{ARCHIVE_VERSION, export_archive, import_archive};
+pub use archive::{ARCHIVE_VERSION, export_archive, import_archive, import_archive_with_precommit};
 pub use attachments::{
     attachment_path_ref_count, create_attachment, delete_attachment, get_attachment,
     list_attachments,
@@ -279,6 +279,4 @@ pub struct DataArchive {
     pub blocks: Vec<Block>,
     pub attachments: Vec<Attachment>,
     pub external_import_receipts: Vec<crate::ExternalImportReceipt>,
-    #[serde(default)]
-    pub files: std::collections::BTreeMap<String, String>,
 }

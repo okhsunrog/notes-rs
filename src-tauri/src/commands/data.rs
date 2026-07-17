@@ -1,7 +1,33 @@
 use super::*;
 use notes_blob::{BlobHash, BlobStore};
 use std::collections::BTreeMap;
-use std::io::Read;
+use std::io::{Read, Write};
+use std::path::Path;
+
+const PORTABLE_ARCHIVE_MAGIC: &[u8; 16] = b"notes-rs-archive";
+const PORTABLE_CONTAINER_VERSION: u32 = 1;
+#[cfg(not(target_os = "android"))]
+const MAX_ARCHIVE_MANIFEST_BYTES: u64 = 32 * 1024 * 1024;
+#[cfg(target_os = "android")]
+const MAX_ARCHIVE_MANIFEST_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_ARCHIVE_BLOB_COUNT: u64 = 100_000;
+#[cfg(not(target_os = "android"))]
+const MAX_ARCHIVE_TOTAL_BLOB_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+#[cfg(target_os = "android")]
+const MAX_ARCHIVE_TOTAL_BLOB_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_ARCHIVE_PAGES: usize = 100_000;
+const MAX_ARCHIVE_BLOCKS: usize = 1_000_000;
+const MAX_ARCHIVE_ATTACHMENTS: usize = 100_000;
+const MAX_ARCHIVE_ALIASES: usize = 500_000;
+const MAX_ARCHIVE_RECEIPTS: usize = 16;
+const COPY_BUFFER_SIZE: usize = 64 * 1024;
+
+struct StagedPortableArchive {
+    archive: db::DataArchive,
+    blob_store: BlobStore,
+    expected_blobs: BTreeMap<BlobHash, u64>,
+    _directory: tempfile::TempDir,
+}
 
 #[tauri::command]
 #[specta::specta]
@@ -10,27 +36,32 @@ pub async fn export_data(
     state: State<'_, AppState>,
 ) -> CommandResult<Option<String>> {
     let filename = format!(
-        "notes-rs-{}.json",
+        "notes-rs-{}.notes",
         chrono::Utc::now().format("%Y%m%d-%H%M%S")
     );
-    let mut archive = db::export_archive(&state.conn).await.map_err(err)?;
-    add_archive_files(&state.blob_store, &mut archive).map_err(err)?;
-    let json = serde_json::to_string_pretty(&archive).map_err(err)?;
+    let archive = db::export_archive(&state.conn).await.map_err(err)?;
 
     #[cfg(not(target_os = "android"))]
     {
         let Some(path) = app
             .dialog()
             .file()
-            .add_filter("notes-rs archive", &["json"])
+            .add_filter("notes-rs archive", &["notes"])
             .set_file_name(filename)
             .blocking_save_file()
         else {
             return Ok(None);
         };
         let path = path.into_path().map_err(err)?;
-        std::fs::write(&path, json).map_err(err)?;
-        Ok(Some(path.to_string_lossy().into_owned()))
+        let destination = path.to_string_lossy().into_owned();
+        let blob_store = state.blob_store.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            write_archive_atomically(&path, archive, &blob_store, true)
+        })
+        .await
+        .map_err(err)?
+        .map_err(err)?;
+        Ok(Some(destination))
     }
 
     #[cfg(target_os = "android")]
@@ -40,14 +71,34 @@ pub async fn export_data(
         let api = app.android_fs_async();
         let Some(uri) = api
             .picker()
-            .save_file(None, filename, Some("application/json"), false)
+            .save_file(None, filename, Some("application/octet-stream"), false)
             .await
             .map_err(err)?
         else {
             return Ok(None);
         };
-        api.write(&uri, json.as_bytes()).await.map_err(err)?;
-        Ok(Some(uri.uri))
+        let file = api.open_file_writable(&uri).await.map_err(err)?;
+        let destination = uri.uri.clone();
+        let blob_store = state.blob_store.clone();
+        let write_result = tauri::async_runtime::spawn_blocking(move || {
+            let mut file = file;
+            // A ContentProvider may expose a pipe or socket-backed descriptor.
+            // Flushing and closing is its durability boundary; sync_all can
+            // return EINVAL even after a successful write.
+            write_portable_archive(&mut file, archive, &blob_store)
+        })
+        .await;
+        match write_result {
+            Ok(Ok(())) => Ok(Some(destination)),
+            Ok(Err(error)) => {
+                let _ = api.remove_file(&uri).await;
+                Err(err(error))
+            }
+            Err(error) => {
+                let _ = api.remove_file(&uri).await;
+                Err(err(error))
+            }
+        }
     }
 }
 
@@ -58,44 +109,65 @@ pub async fn import_data(
     state: State<'_, AppState>,
 ) -> CommandResult<Option<String>> {
     #[cfg(not(target_os = "android"))]
-    let (source, json) = {
+    let (source, file) = {
         let Some(path) = app
             .dialog()
             .file()
-            .add_filter("notes-rs archive", &["json"])
+            .add_filter("notes-rs archive", &["notes"])
             .blocking_pick_file()
         else {
             return Ok(None);
         };
         let path = path.into_path().map_err(err)?;
-        let json = std::fs::read_to_string(&path).map_err(err)?;
-        (path.to_string_lossy().into_owned(), json)
+        let file = std::fs::File::open(&path).map_err(err)?;
+        (path.to_string_lossy().into_owned(), file)
     };
 
     #[cfg(target_os = "android")]
-    let (source, json) = {
+    let (source, file) = {
         use tauri_plugin_android_fs::AndroidFsExt;
 
         let api = app.android_fs_async();
         let Some(uri) = api
             .picker()
-            .pick_file(None, &["application/json"], false)
+            .pick_file(None, &["application/octet-stream"], false)
             .await
             .map_err(err)?
         else {
             return Ok(None);
         };
-        let json = api.read_to_string(&uri).await.map_err(err)?;
-        (uri.uri, json)
+        let file = api.open_file_readable(&uri).await.map_err(err)?;
+        (uri.uri, file)
     };
 
-    let archive: db::DataArchive = serde_json::from_str(&json).map_err(err)?;
+    let staging_parent = app
+        .path()
+        .app_data_dir()
+        .map_err(err)?
+        .join("archive-staging");
+    std::fs::create_dir_all(&staging_parent).map_err(err)?;
+    let staged =
+        tauri::async_runtime::spawn_blocking(move || read_portable_archive(file, &staging_parent))
+            .await
+            .map_err(err)?
+            .map_err(err)?;
     write_backup(&app, &state.conn, &state.blob_store, "before-import")
         .await
         .map_err(err)?;
-    restore_archive(&state.blob_store, &state.conn, archive)
-        .await
-        .map_err(err)?;
+    let StagedPortableArchive {
+        archive,
+        blob_store: staged_blob_store,
+        expected_blobs,
+        _directory: staging_directory,
+    } = staged;
+    let destination_blob_store = state.blob_store.clone();
+    db::import_archive_with_precommit(&state.conn, archive, move || {
+        publish_staged_blobs(&staged_blob_store, &destination_blob_store, &expected_blobs)?;
+        drop(staging_directory);
+        Ok(())
+    })
+    .await
+    .map_err(err)?;
     emit_domain(&app, DomainEvent::WorkspaceChanged);
     emit_domain(&app, DomainEvent::HistoryChanged);
     Ok(Some(source))
@@ -121,19 +193,71 @@ pub(super) async fn write_backup(
     let directory = app.path().app_data_dir()?.join("backups");
     std::fs::create_dir_all(&directory)?;
     let path = directory.join(format!(
-        "notes-rs-{reason}-{}.json",
-        chrono::Utc::now().format("%Y%m%d-%H%M%S")
+        "notes-rs-{reason}-{}-{}.notes",
+        chrono::Utc::now().format("%Y%m%d-%H%M%S-%3f"),
+        uuid::Uuid::now_v7()
     ));
-    let mut archive = db::export_archive(connection).await?;
-    add_archive_files(blob_store, &mut archive)?;
-    std::fs::write(&path, serde_json::to_string_pretty(&archive)?)?;
+    let archive = db::export_archive(connection).await?;
+    let blob_store = blob_store.clone();
+    let published_path = path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        write_archive_atomically(&published_path, archive, &blob_store, false)
+    })
+    .await??;
     Ok(path)
 }
 
-fn add_archive_files(blob_store: &BlobStore, archive: &mut db::DataArchive) -> anyhow::Result<()> {
-    let expected = archive_blob_sizes(archive)?;
-    archive.files.clear();
+fn write_archive_atomically(
+    destination: &Path,
+    archive: db::DataArchive,
+    blob_store: &BlobStore,
+    replace: bool,
+) -> anyhow::Result<()> {
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .context("archive destination has no parent directory")?;
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".notes-rs-export-")
+        .tempfile_in(parent)?;
+    write_portable_archive(&mut temporary, archive, blob_store)?;
+    temporary.as_file_mut().sync_all()?;
+    let published = if replace {
+        temporary.persist(destination)?
+    } else {
+        temporary.persist_noclobber(destination)?
+    };
+    published.sync_all()?;
+    sync_directory(parent)?;
+    Ok(())
+}
+
+fn write_portable_archive(
+    writer: &mut impl Write,
+    archive: db::DataArchive,
+    blob_store: &BlobStore,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        archive.format == "notes-rs" && archive.version == db::ARCHIVE_VERSION,
+        "cannot export an unsupported notes-rs archive manifest"
+    );
+    validate_archive_shape(&archive)?;
+    let expected = archive_blob_sizes(&archive)?;
+    validate_archive_blob_budget(&expected)?;
+    let manifest = serde_json::to_vec(&archive)?;
+    anyhow::ensure!(
+        manifest.len() as u64 <= MAX_ARCHIVE_MANIFEST_BYTES,
+        "archive manifest exceeds the {MAX_ARCHIVE_MANIFEST_BYTES}-byte limit"
+    );
+
+    writer.write_all(PORTABLE_ARCHIVE_MAGIC)?;
+    writer.write_all(&PORTABLE_CONTAINER_VERSION.to_be_bytes())?;
+    write_u64(writer, manifest.len() as u64)?;
+    writer.write_all(&manifest)?;
+    write_u64(writer, expected.len() as u64)?;
     for (blob_hash, expected_size) in expected {
+        writer.write_all(blob_hash.as_bytes())?;
+        write_u64(writer, expected_size)?;
         let verified =
             blob_store.open_verified(blob_hash, super::attachments::MAX_ATTACHMENT_SIZE)?;
         anyhow::ensure!(
@@ -141,23 +265,125 @@ fn add_archive_files(blob_store: &BlobStore, archive: &mut db::DataArchive) -> a
             "attachment blob {blob_hash} has size {}, expected {expected_size}",
             verified.blob.size
         );
-        let mut bytes = Vec::with_capacity(usize::try_from(verified.blob.size)?);
-        verified.into_file().read_to_end(&mut bytes)?;
+        copy_verified_blob(verified.into_file(), writer, blob_hash, expected_size)?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+fn read_portable_archive(
+    mut reader: impl Read,
+    staging_parent: &Path,
+) -> anyhow::Result<StagedPortableArchive> {
+    let mut magic = [0_u8; PORTABLE_ARCHIVE_MAGIC.len()];
+    reader.read_exact(&mut magic)?;
+    anyhow::ensure!(
+        &magic == PORTABLE_ARCHIVE_MAGIC,
+        "selected file is not a notes-rs portable archive"
+    );
+    let version = read_u32(&mut reader)?;
+    anyhow::ensure!(
+        version == PORTABLE_CONTAINER_VERSION,
+        "unsupported notes-rs portable container version {version}"
+    );
+    let manifest_size = read_u64(&mut reader)?;
+    anyhow::ensure!(
+        manifest_size <= MAX_ARCHIVE_MANIFEST_BYTES,
+        "archive manifest exceeds the {MAX_ARCHIVE_MANIFEST_BYTES}-byte limit"
+    );
+    let manifest_size = usize::try_from(manifest_size)?;
+    let mut manifest = Vec::new();
+    manifest
+        .try_reserve_exact(manifest_size)
+        .context("reserving archive manifest memory")?;
+    manifest.resize(manifest_size, 0);
+    reader.read_exact(&mut manifest)?;
+    let archive: db::DataArchive = serde_json::from_slice(&manifest)?;
+    anyhow::ensure!(
+        archive.format == "notes-rs" && archive.version == db::ARCHIVE_VERSION,
+        "unsupported archive format {} version {}",
+        archive.format,
+        archive.version
+    );
+    validate_archive_shape(&archive)?;
+    let expected = archive_blob_sizes(&archive)?;
+    validate_archive_blob_budget(&expected)?;
+    let record_count = read_u64(&mut reader)?;
+    anyhow::ensure!(
+        record_count == expected.len() as u64,
+        "archive attachment metadata and blob records do not match"
+    );
+
+    let staging_directory = tempfile::Builder::new()
+        .prefix(".archive-stage-")
+        .tempdir_in(staging_parent)?;
+    let staging_blob_store = BlobStore::new(staging_directory.path());
+    for (expected_hash, expected_size) in &expected {
+        let mut raw_hash = [0_u8; 32];
+        reader.read_exact(&mut raw_hash)?;
+        let record_hash = BlobHash::from_bytes(raw_hash);
+        let record_size = read_u64(&mut reader)?;
         anyhow::ensure!(
-            bytes.len() as u64 == expected_size && BlobHash::digest(&bytes) == blob_hash,
-            "attachment blob {blob_hash} changed while it was being exported"
+            record_hash == *expected_hash && record_size == *expected_size,
+            "archive blob records are not canonical or do not match attachment metadata"
         );
-        archive.files.insert(
-            archive_blob_path(blob_hash),
-            base64::engine::general_purpose::STANDARD.encode(bytes),
+        let mut record = reader.by_ref().take(record_size);
+        let installed = staging_blob_store.install_reader(
+            &mut record,
+            record_hash,
+            super::attachments::MAX_ATTACHMENT_SIZE,
+        )?;
+        anyhow::ensure!(
+            record.limit() == 0 && installed.blob.size == *expected_size,
+            "archive blob {record_hash} is truncated or has the wrong size"
         );
     }
+    let mut trailing = [0_u8; 1];
+    anyhow::ensure!(
+        reader.read(&mut trailing)? == 0,
+        "archive contains trailing data"
+    );
+    Ok(StagedPortableArchive {
+        archive,
+        blob_store: staging_blob_store,
+        expected_blobs: expected,
+        _directory: staging_directory,
+    })
+}
+
+fn validate_archive_shape(archive: &db::DataArchive) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        archive.pages.len() <= MAX_ARCHIVE_PAGES
+            && archive.page_identities.len() <= MAX_ARCHIVE_PAGES,
+        "archive contains more than {MAX_ARCHIVE_PAGES} pages"
+    );
+    anyhow::ensure!(
+        archive.blocks.len() <= MAX_ARCHIVE_BLOCKS,
+        "archive contains more than {MAX_ARCHIVE_BLOCKS} blocks"
+    );
+    anyhow::ensure!(
+        archive.attachments.len() <= MAX_ARCHIVE_ATTACHMENTS,
+        "archive contains more than {MAX_ARCHIVE_ATTACHMENTS} attachments"
+    );
+    anyhow::ensure!(
+        archive.page_aliases.len() <= MAX_ARCHIVE_ALIASES,
+        "archive contains more than {MAX_ARCHIVE_ALIASES} aliases"
+    );
+    anyhow::ensure!(
+        archive.external_import_receipts.len() <= MAX_ARCHIVE_RECEIPTS,
+        "archive contains more than {MAX_ARCHIVE_RECEIPTS} import receipts"
+    );
     Ok(())
 }
 
 fn archive_blob_sizes(archive: &db::DataArchive) -> anyhow::Result<BTreeMap<BlobHash, u64>> {
     let mut expected = BTreeMap::new();
     for attachment in &archive.attachments {
+        anyhow::ensure!(
+            attachment.size <= super::attachments::MAX_ATTACHMENT_SIZE,
+            "attachment {} exceeds the supported size limit",
+            attachment.uuid
+        );
         if let Some(existing) = expected.insert(attachment.blob_hash, attachment.size) {
             anyhow::ensure!(
                 existing == attachment.size,
@@ -169,79 +395,130 @@ fn archive_blob_sizes(archive: &db::DataArchive) -> anyhow::Result<BTreeMap<Blob
     Ok(expected)
 }
 
-async fn restore_archive(
-    blob_store: &BlobStore,
-    connection: &Connection,
-    archive: db::DataArchive,
-) -> anyhow::Result<()> {
-    let expected = archive_blob_sizes(&archive)?;
-    let expected_files = expected
-        .keys()
-        .copied()
-        .map(archive_blob_path)
-        .collect::<std::collections::BTreeSet<_>>();
-    let actual_files = archive
-        .files
-        .keys()
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
+fn validate_archive_blob_budget(expected: &BTreeMap<BlobHash, u64>) -> anyhow::Result<()> {
     anyhow::ensure!(
-        actual_files == expected_files,
-        "archive attachment metadata and file payloads do not match"
+        expected.len() as u64 <= MAX_ARCHIVE_BLOB_COUNT,
+        "archive contains more than {MAX_ARCHIVE_BLOB_COUNT} distinct blobs"
     );
-    for (blob_hash, expected_size) in expected {
-        let path = archive_blob_path(blob_hash);
-        let encoded = archive
-            .files
-            .get(&path)
-            .with_context(|| format!("archive is missing blob {blob_hash}"))?;
-        let decoder = base64::read::DecoderReader::new(
-            encoded.as_bytes(),
-            &base64::engine::general_purpose::STANDARD,
+    let total = expected.values().try_fold(0_u64, |total, size| {
+        total
+            .checked_add(*size)
+            .context("archive blob size overflow")
+    })?;
+    anyhow::ensure!(
+        total <= MAX_ARCHIVE_TOTAL_BLOB_BYTES,
+        "archive blobs exceed the {MAX_ARCHIVE_TOTAL_BLOB_BYTES}-byte total limit"
+    );
+    Ok(())
+}
+
+fn publish_staged_blobs(
+    staging: &BlobStore,
+    destination: &BlobStore,
+    expected: &BTreeMap<BlobHash, u64>,
+) -> anyhow::Result<()> {
+    for (&blob_hash, &expected_size) in expected {
+        let verified = staging.open_verified(blob_hash, expected_size)?;
+        anyhow::ensure!(
+            verified.blob.size == expected_size,
+            "staged archive blob {blob_hash} has the wrong size"
         );
-        let installed = blob_store.install_reader(
-            decoder,
+        let installed = destination.install_reader(
+            verified.into_file(),
             blob_hash,
             super::attachments::MAX_ATTACHMENT_SIZE,
         )?;
         anyhow::ensure!(
             installed.blob.size == expected_size,
-            "archive blob {blob_hash} has size {}, expected {expected_size}",
-            installed.blob.size
+            "published archive blob {blob_hash} has the wrong size"
         );
     }
-    db::import_archive(connection, archive).await?;
     Ok(())
 }
 
-fn archive_blob_path(blob_hash: BlobHash) -> String {
-    let encoded = blob_hash.to_string();
-    format!("blobs/{}/{}", &encoded[..2], encoded)
+fn copy_verified_blob(
+    mut source: std::fs::File,
+    writer: &mut impl Write,
+    expected_hash: BlobHash,
+    expected_size: u64,
+) -> anyhow::Result<()> {
+    let mut hasher = Sha256::new();
+    let mut size = 0_u64;
+    let mut buffer = [0_u8; COPY_BUFFER_SIZE];
+    loop {
+        let count = source.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        size = size
+            .checked_add(count as u64)
+            .context("attachment size overflow while exporting")?;
+        anyhow::ensure!(
+            size <= expected_size,
+            "attachment blob {expected_hash} changed while it was being exported"
+        );
+        hasher.update(&buffer[..count]);
+        writer.write_all(&buffer[..count])?;
+    }
+    let actual_hash = BlobHash::from_bytes(hasher.finalize().into());
+    anyhow::ensure!(
+        size == expected_size && actual_hash == expected_hash,
+        "attachment blob {expected_hash} changed while it was being exported"
+    );
+    Ok(())
+}
+
+fn write_u64(writer: &mut impl Write, value: u64) -> std::io::Result<()> {
+    writer.write_all(&value.to_be_bytes())
+}
+
+fn read_u32(reader: &mut impl Read) -> std::io::Result<u32> {
+    let mut bytes = [0_u8; size_of::<u32>()];
+    reader.read_exact(&mut bytes)?;
+    Ok(u32::from_be_bytes(bytes))
+}
+
+fn read_u64(reader: &mut impl Read) -> std::io::Result<u64> {
+    let mut bytes = [0_u8; size_of::<u64>()];
+    reader.read_exact(&mut bytes)?;
+    Ok(u64::from_be_bytes(bytes))
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    std::fs::File::open(path)?.sync_all()
+}
+
+#[cfg(windows)]
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_SHARE_READ_WRITE_DELETE: u32 = 0x0000_0007;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(FILE_SHARE_READ_WRITE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?
+        .sync_all()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn sync_directory(_path: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "directory synchronization is unsupported on this platform",
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io;
 
-    #[test]
-    fn archive_blob_paths_are_canonical_and_filename_free() {
-        let hash = BlobHash::digest(b"portable payload");
-        let encoded = hash.to_string();
-        assert_eq!(
-            archive_blob_path(hash),
-            format!("blobs/{}/{}", &encoded[..2], encoded)
-        );
-    }
-
-    #[test]
-    fn archive_stores_one_payload_per_hash() {
-        let temporary = tempfile::tempdir().unwrap();
-        let blob_store = BlobStore::new(temporary.path());
-        let payload = b"shared attachment bytes";
-        let hash = BlobHash::digest(payload);
-        blob_store
-            .install_reader(payload.as_slice(), hash, payload.len() as u64)
-            .unwrap();
+    fn archive_with_duplicate_blob(hash: BlobHash, size: u64) -> db::DataArchive {
         let owner = notes_core::AttachmentOwner::Page(uuid::Uuid::now_v7());
         let attachment = |filename: &str| db::Attachment {
             uuid: uuid::Uuid::now_v7(),
@@ -249,12 +526,12 @@ mod tests {
             blob_hash: hash,
             filename: filename.into(),
             mime: "application/octet-stream".into(),
-            size: payload.len() as u64,
+            size,
             created_at: 0,
         };
-        let mut archive = db::DataArchive {
+        db::DataArchive {
             format: "notes-rs".into(),
-            version: 1,
+            version: db::ARCHIVE_VERSION,
             workspace_uuid: uuid::Uuid::now_v7(),
             exported_at: 0,
             page_identities: Vec::new(),
@@ -263,12 +540,158 @@ mod tests {
             blocks: Vec::new(),
             attachments: vec![attachment("one.bin"), attachment("two.bin")],
             external_import_receipts: Vec::new(),
-            files: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn portable_archive_streams_one_verified_record_per_hash() {
+        let source_directory = tempfile::tempdir().unwrap();
+        let source_store = BlobStore::new(source_directory.path());
+        let payload = b"shared attachment bytes";
+        let hash = BlobHash::digest(payload);
+        source_store
+            .install_reader(payload.as_slice(), hash, payload.len() as u64)
+            .unwrap();
+        let archive = archive_with_duplicate_blob(hash, payload.len() as u64);
+        let mut encoded = Vec::new();
+
+        write_portable_archive(&mut encoded, archive.clone(), &source_store).unwrap();
+
+        let destination_directory = tempfile::tempdir().unwrap();
+        let decoded =
+            read_portable_archive(encoded.as_slice(), destination_directory.path()).unwrap();
+        assert_eq!(
+            serde_json::to_value(decoded.archive).unwrap(),
+            serde_json::to_value(archive).unwrap()
+        );
+        let verified = decoded
+            .blob_store
+            .open_verified(hash, payload.len() as u64)
+            .unwrap();
+        assert_eq!(verified.blob.size, payload.len() as u64);
+    }
+
+    #[test]
+    fn portable_archive_rejects_corruption_and_trailing_data() {
+        let source_directory = tempfile::tempdir().unwrap();
+        let source_store = BlobStore::new(source_directory.path());
+        let payload = b"portable payload";
+        let hash = BlobHash::digest(payload);
+        source_store
+            .install_reader(payload.as_slice(), hash, payload.len() as u64)
+            .unwrap();
+        let archive = archive_with_duplicate_blob(hash, payload.len() as u64);
+        let mut encoded = Vec::new();
+        write_portable_archive(&mut encoded, archive, &source_store).unwrap();
+
+        let destination = tempfile::tempdir().unwrap();
+        let last = encoded.len() - 1;
+        encoded[last] ^= 0x01;
+        assert!(read_portable_archive(encoded.as_slice(), destination.path()).is_err());
+
+        let mut clean = Vec::new();
+        write_portable_archive(
+            &mut clean,
+            archive_with_duplicate_blob(hash, payload.len() as u64),
+            &source_store,
+        )
+        .unwrap();
+        clean.push(0);
+        assert!(read_portable_archive(clean.as_slice(), destination.path()).is_err());
+    }
+
+    #[test]
+    fn portable_archive_rejects_every_truncation_boundary() {
+        let source_directory = tempfile::tempdir().unwrap();
+        let source_store = BlobStore::new(source_directory.path());
+        let payload = b"all framing boundaries must be exact";
+        let hash = BlobHash::digest(payload);
+        source_store
+            .install_reader(payload.as_slice(), hash, payload.len() as u64)
+            .unwrap();
+        let mut encoded = Vec::new();
+        write_portable_archive(
+            &mut encoded,
+            archive_with_duplicate_blob(hash, payload.len() as u64),
+            &source_store,
+        )
+        .unwrap();
+
+        let staging_parent = tempfile::tempdir().unwrap();
+        for end in 0..encoded.len() {
+            assert!(
+                read_portable_archive(&encoded[..end], staging_parent.path()).is_err(),
+                "truncation at byte {end} was accepted"
+            );
+        }
+        read_portable_archive(encoded.as_slice(), staging_parent.path()).unwrap();
+    }
+
+    #[test]
+    fn portable_archive_rejects_oversized_manifest_before_allocating() {
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(PORTABLE_ARCHIVE_MAGIC);
+        encoded.extend_from_slice(&PORTABLE_CONTAINER_VERSION.to_be_bytes());
+        encoded.extend_from_slice(&(MAX_ARCHIVE_MANIFEST_BYTES + 1).to_be_bytes());
+        let staging_parent = tempfile::tempdir().unwrap();
+
+        let error = match read_portable_archive(encoded.as_slice(), staging_parent.path()) {
+            Ok(_) => panic!("oversized manifest was accepted"),
+            Err(error) => error,
         };
+        assert!(error.to_string().contains("manifest exceeds"));
+    }
 
-        add_archive_files(&blob_store, &mut archive).unwrap();
+    #[test]
+    fn failed_atomic_export_preserves_existing_destination() {
+        let source_directory = tempfile::tempdir().unwrap();
+        let source_store = BlobStore::new(source_directory.path());
+        let missing_payload = b"missing from the blob store";
+        let hash = BlobHash::digest(missing_payload);
+        let archive = archive_with_duplicate_blob(hash, missing_payload.len() as u64);
+        let export_directory = tempfile::tempdir().unwrap();
+        let destination = export_directory.path().join("existing.notes");
+        std::fs::write(&destination, b"previous valid export").unwrap();
 
-        assert_eq!(archive.files.len(), 1);
-        assert!(archive.files.contains_key(&archive_blob_path(hash)));
+        assert!(write_archive_atomically(&destination, archive, &source_store, true).is_err());
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            b"previous valid export"
+        );
+    }
+
+    struct FailAfter {
+        remaining: usize,
+    }
+
+    impl Write for FailAfter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(io::Error::other("injected writer failure"));
+            }
+            let count = bytes.len().min(self.remaining);
+            self.remaining -= count;
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn portable_archive_propagates_mid_stream_writer_failures() {
+        let source_directory = tempfile::tempdir().unwrap();
+        let source_store = BlobStore::new(source_directory.path());
+        let payload = b"writer failure payload";
+        let hash = BlobHash::digest(payload);
+        source_store
+            .install_reader(payload.as_slice(), hash, payload.len() as u64)
+            .unwrap();
+        let archive = archive_with_duplicate_blob(hash, payload.len() as u64);
+        let mut writer = FailAfter { remaining: 24 };
+
+        let error = write_portable_archive(&mut writer, archive, &source_store).unwrap_err();
+        assert!(error.to_string().contains("injected writer failure"));
     }
 }

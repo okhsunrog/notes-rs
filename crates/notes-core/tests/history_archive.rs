@@ -403,3 +403,74 @@ async fn archive_rejects_a_nil_workspace_identity() {
         .expect_err("nil workspace must fail");
     assert!(error.to_string().contains("cannot be nil"));
 }
+
+#[tokio::test]
+async fn archive_precommit_failure_rolls_back_the_entire_restore() {
+    let source = database().await;
+    let source_page = db::create_page(&source.connection, "Incoming".into())
+        .await
+        .unwrap();
+    let archive = db::export_archive(&source.connection).await.unwrap();
+
+    let destination = database().await;
+    let workspace_uuid = archive.workspace_uuid;
+    destination
+        .connection
+        .call(move |database| {
+            database.execute(
+                "UPDATE workspace SET uuid = ?1 WHERE singleton = 1",
+                [workspace_uuid],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let existing = db::create_page(&destination.connection, "Existing".into())
+        .await
+        .unwrap();
+    let callback_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let callback_flag = callback_ran.clone();
+
+    let error = db::import_archive_with_precommit(&destination.connection, archive, move || {
+        callback_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        Err(anyhow::anyhow!("injected publication failure"))
+    })
+    .await
+    .expect_err("precommit failure must abort archive restore");
+
+    assert!(error.to_string().contains("injected publication failure"));
+    assert!(callback_ran.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(
+        db::get_page(&destination.connection, existing.uuid)
+            .await
+            .unwrap()
+            .is_some(),
+        "the previous workspace state must survive rollback"
+    );
+    assert!(
+        db::get_page(&destination.connection, source_page.uuid)
+            .await
+            .unwrap()
+            .is_none(),
+        "no incoming metadata may survive rollback"
+    );
+}
+
+#[tokio::test]
+async fn invalid_archive_never_runs_the_precommit_callback() {
+    let source = database().await;
+    let mut archive = db::export_archive(&source.connection).await.unwrap();
+    archive.workspace_uuid = uuid::Uuid::nil();
+    let destination = database().await;
+    let callback_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let callback_flag = callback_ran.clone();
+
+    db::import_archive_with_precommit(&destination.connection, archive, move || {
+        callback_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    })
+    .await
+    .expect_err("invalid archive must fail before publication");
+
+    assert!(!callback_ran.load(std::sync::atomic::Ordering::SeqCst));
+}
