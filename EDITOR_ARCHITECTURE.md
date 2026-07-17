@@ -6,6 +6,10 @@ This decision defines how notes-rs presents and edits the same typed page/block 
 outliner and as a continuous Markdown document. It deliberately separates durable content from
 pane-local presentation and from server-side retrieval chunks.
 
+General side-by-side composition, navigation, linked preview panes, and the Assistant dock are
+defined in [`WORKSPACE_ARCHITECTURE.md`](WORKSPACE_ARCHITECTURE.md). Split is a workspace operation,
+not an editor mode.
+
 ## 1. Goals
 
 The editor must support both short block-first notes and long articles or project documentation
@@ -38,14 +42,14 @@ temporary UI state. It is not the target contract and will be replaced before re
 | State                    | Values                          | Owner and lifetime                        |
 | ------------------------ | ------------------------------- | ----------------------------------------- |
 | `PageLayout`             | `Outline`, `Document`           | Rust/SQLite; synced with the page         |
-| `DocumentView`           | `Editing`, `Reading`, `Split`   | React pane/session; never synced          |
+| `PagePresentation`       | `Editing`, `Reading`            | React pane/session; never synced          |
 | `EditingMode`            | `LivePreview`, `Source`         | Device-local application preference       |
 | active block/selection   | UUID, ranges, caret             | Editor component/session                  |
 | drafts/composition state | text, dirty state, IME session  | Editor component/session                  |
 | folding                  | collapsed block UUIDs           | Device-local UI state                     |
 | source content           | pages, blocks, styles, ordering | Rust/SQLite through typed commands/events |
 
-`DocumentView` may be remembered locally per window or page for convenience, but it must never be
+`PagePresentation` may be remembered locally per window or page for convenience, but it must never be
 part of an operation, archive, snapshot, or sync payload. A remote device must not change what the
 current pane is showing.
 
@@ -62,7 +66,7 @@ Outline has one primary workflow: Editing with Live Preview.
 - The focused block becomes editable in place.
 - Markdown markers are revealed only where the caret/selection needs them.
 - There is no persistent view-mode switcher in the page header.
-- Reading and Split are not Outline modes.
+- Reading is not an Outline mode; side-by-side panes belong to the workspace.
 - Raw Source for the active block may remain available as an advanced command, but is not a normal
   visible mode.
 
@@ -76,17 +80,15 @@ of UUID blocks.
 
 - `Editing` shows a continuous Markdown editor, using Live Preview by default.
 - `Reading` shows fully rendered Markdown without an editable surface.
-- `Split` shows the editor and a rendered preview of the current in-memory draft side by side.
 - `Source` uses the same text and editor state as Live Preview with preview decorations disabled.
-- On narrow/mobile layouts, Split may adapt to a stacked or single-pane transition without changing
-  the state model.
 
-Document view commands are always reachable from the note menu, command palette, and shortcuts.
-A device-local `Show document view controls` preference may pin a compact `Write / Read / Split`
-switcher in the header; it is hidden by default so it consumes no permanent space.
+Document presentation commands are always reachable from the note menu, command palette, and
+shortcuts. A device-local preference may pin a compact `Write / Read` control in the pane chrome;
+it is hidden by default so it consumes no permanent space.
 
-Reading and the preview side of Split use the same semantic Markdown renderer. A read-only editor
-DOM is not the reading surface.
+Reading uses the same semantic Markdown renderer as a linked preview pane. An editor-plus-preview
+layout opens a second Reading pane bound to the first pane's in-memory `PageSession`; it is not a
+third Document mode. A read-only editor DOM is not the reading surface.
 
 ## 4. Editor engine
 
@@ -134,8 +136,8 @@ All editing and rendering surfaces must share one documented dialect:
 
 The CodeMirror/Lezer grammar and the semantic renderer must have parity tests over the supported
 dialect. The current regex-only authored-note renderer is temporary and will be replaced by one
-AST-based renderer shared by Outline preview, Document Reading, Document Split, search excerpts,
-and any other authored-content preview.
+AST-based renderer shared by Outline preview, Document Reading, linked preview panes, search
+excerpts, and any other authored-content preview.
 
 Unsupported or incomplete inline syntax must remain recoverable in a block's source text. The
 visual editor must not silently drop unknown Markdown merely because it does not decorate it.
@@ -254,7 +256,8 @@ changes remain localized.
 3. Complete the CodeMirror spike and define the editor and versioned `DocumentCodec` contracts.
 4. Replace the active Outline textarea while preserving current block operations and conflict UI.
 5. Implement the continuous Document session and automatic segmentation fixtures.
-6. Add pane-local Write/Read/Split and device-local editor preferences.
+6. Add pane-local Write/Read and device-local editor preferences; compose side-by-side preview
+   through the general workspace pane architecture.
 7. Delete the old regex renderer, textarea editor, and any provisional view compatibility code.
 
 Because the project is unreleased, this migration updates the clean V001 baseline and requires a

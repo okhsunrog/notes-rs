@@ -11,6 +11,10 @@ The accepted editor and page-presentation target is recorded separately in
 where that decision differs from the current `PageView` implementation, the editor record is the
 target contract and this document continues to describe the code that exists today.
 
+General multi-pane composition, adjacent navigation, linked preview, responsive projection, and
+the collapsible AI companion are defined in
+[`WORKSPACE_ARCHITECTURE.md`](WORKSPACE_ARCHITECTURE.md).
+
 ## 1. Product boundary
 
 notes-rs is a local-first personal knowledge application for desktop and Android. Both clients use
@@ -79,8 +83,10 @@ A `Page` owns a title and an ordered tree of blocks. Its persisted `PageView` is
 Changing a view never converts or duplicates content.
 
 This is a provisional pre-release representation. The accepted editor architecture replaces it
-with persisted `PageLayout = Outline | Document`; Reading and Split become pane-local Document
-states and never enter operations or sync. See [`EDITOR_ARCHITECTURE.md`](EDITOR_ARCHITECTURE.md).
+with persisted `PageLayout = Outline | Document`; Reading becomes a pane-local presentation and
+side-by-side Split becomes a workspace layout operation. Neither enters content operations or sync.
+See [`EDITOR_ARCHITECTURE.md`](EDITOR_ARCHITECTURE.md) and
+[`WORKSPACE_ARCHITECTURE.md`](WORKSPACE_ARCHITECTURE.md).
 
 ### Blocks
 
@@ -351,14 +357,16 @@ Product and corpus support:
 
 1. Implement the accepted editor architecture: durable `PageLayout`, pane-local Document views,
    shared Markdown AST rendering, CodeMirror 6 Live Preview, and a continuous Document adapter.
-2. Add server-side retrieval chunking for large blocks/documents. The current index unit is one
+2. Replace the single-content shell with the accepted pane tree, adjacent navigation, linked
+   preview, responsive projection, and collapsible Assistant dock.
+3. Add server-side retrieval chunking for large blocks/documents. The current index unit is one
    page or block UUID, which is sufficient for the demo but not ideal for long articles.
-3. Add Markdown-vault, Obsidian, and Logseq import, including page properties, block UUIDs, nesting,
+4. Add Markdown-vault, Obsidian, and Logseq import, including page properties, block UUIDs, nesting,
    and assets; no legacy notes-rs database importer is planned.
-4. Add daily notes, templates, properties, saved queries, and an extension model.
-5. Add drag-and-drop movement, cross-block selection, transclusion, richer Markdown authoring,
+5. Add daily notes, templates, properties, saved queries, and an extension model.
+6. Add drag-and-drop movement, cross-block selection, transclusion, richer Markdown authoring,
    graph filters/layouts, and measured larger-corpus performance work.
-6. Add signed production packages and end-to-end UI/accessibility coverage on desktop and real
+7. Add signed production packages and end-to-end UI/accessibility coverage on desktop and real
    Android hardware.
 
 ## 12. Explicit non-goals
