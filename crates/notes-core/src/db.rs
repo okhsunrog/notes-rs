@@ -18,13 +18,28 @@ mod migrations;
 mod nodes;
 mod search;
 
-pub use archive::*;
-pub use attachments::*;
-pub use blocks::*;
-pub use graph::*;
-pub use history::*;
-pub use nodes::*;
-pub use search::*;
+pub use archive::{export_archive, import_archive};
+pub use attachments::{
+    attachment_path_ref_count, create_attachment, delete_attachment, list_attachments,
+};
+pub use blocks::{
+    create_block, delete_block, get_node_by_uuid, get_nodes_by_uuids, get_or_create_page_by_title,
+    get_page_by_title, indent_block, move_block, move_block_in_direction, outdent_block,
+    reorder_block,
+};
+pub use graph::{
+    find_backlinks, find_tagged, graph_snapshot, link_nodes, neighbors, read_ancestors,
+    read_subtree,
+};
+pub(crate) use graph::{page_uuid, replace_block_refs_tx_at, stable_node_id};
+pub use history::{history_status, redo_history, undo_history};
+pub use nodes::{
+    BlockContent, CreatedNote, DeletedPage, create_node, create_note, create_page, delete_page,
+    get_containing_page, get_node, list_block_children, list_entities, list_pages,
+    node_uuids_for_ids, rename_page, set_block_content, split_block, update_block_with_refs,
+    update_node,
+};
+pub use search::{search_blocks_fts, search_fts, search_pages_by_title};
 
 pub async fn open(path: impl AsRef<Path>) -> Result<Connection> {
     let conn = Connection::open(path.as_ref())
