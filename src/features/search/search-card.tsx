@@ -10,7 +10,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { search, type Mode, type Node, type SearchHit } from "@/lib/api";
+import { search, type Node, type SearchHit, type SearchMode } from "@/lib/api";
 
 type Props = {
   variant?: "card" | "inline" | "dialog";
@@ -22,7 +22,7 @@ type Props = {
 
 export function SearchCard({ variant = "card", hits, setHits, onOpenNode, onStatus }: Props) {
   const [query, setQuery] = useState("");
-  const [mode, setMode] = useState<Mode>("agentic");
+  const [mode, setMode] = useState<SearchMode>("fts");
   const [busy, setBusy] = useState(false);
 
   async function submit(e: React.FormEvent) {
@@ -58,15 +58,13 @@ export function SearchCard({ variant = "card", hits, setHits, onOpenNode, onStat
             onChange={(e) => setQuery(e.currentTarget.value)}
             className="flex-1"
           />
-          <Select value={mode} onValueChange={(v) => setMode(v as Mode)}>
+          <Select value={mode} onValueChange={(v) => setMode(v as SearchMode)}>
             <SelectTrigger className="w-full sm:w-48">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="agentic">agentic (rerank)</SelectItem>
-              <SelectItem value="hybrid">hybrid (RRF)</SelectItem>
-              <SelectItem value="fts">fts (BM25)</SelectItem>
-              <SelectItem value="vec">vec (semantic)</SelectItem>
+              <SelectItem value="fts">On this device (FTS)</SelectItem>
+              <SelectItem value="semantic">AI on server</SelectItem>
             </SelectContent>
           </Select>
           <Button type="submit" disabled={busy} className="rounded-xl">
@@ -87,7 +85,7 @@ export function SearchCard({ variant = "card", hits, setHits, onOpenNode, onStat
                   <Badge variant="secondary">#{h.node.id}</Badge>
                   {h.node.title && <span className="font-medium">{h.node.title}</span>}
                   <span className="ml-auto text-xs text-muted-foreground">
-                    #{index + 1} · {mode === "agentic" ? "reranked" : mode}
+                    #{index + 1} · {mode === "semantic" ? "server AI" : "local FTS"}
                   </span>
                 </div>
                 <p className="mt-1 line-clamp-3 text-muted-foreground whitespace-pre-wrap">

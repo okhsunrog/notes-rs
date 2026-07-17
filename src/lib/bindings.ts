@@ -60,11 +60,7 @@ export const commands = {
 	updated_at: number,
 } | null, CommandError>(__TAURI_INVOKE("get_containing_page", { id })),
 	neighbors: (id: number, depth: number) => typedError<Node[], CommandError>(__TAURI_INVOKE("neighbors", { id, depth })),
-	searchFts: (query: string, limit: number) => typedError<SearchHit[], CommandError>(__TAURI_INVOKE("search_fts", { query, limit })),
-	searchVec: (query: string, limit: number) => typedError<SearchHit[], CommandError>(__TAURI_INVOKE("search_vec", { query, limit })),
-	searchHybrid: (query: string, limit: number) => typedError<SearchHit[], CommandError>(__TAURI_INVOKE("search_hybrid", { query, limit })),
-	/**  Retrieve via hybrid RRF, then rerank with the configured provider. */
-	searchAgentic: (query: string, limit: number) => typedError<SearchHit[], CommandError>(__TAURI_INVOKE("search_agentic", { query, limit })),
+	searchNotes: (mode: SearchMode, query: string, limit: number) => typedError<SearchHit[], CommandError>(__TAURI_INVOKE("search_notes", { mode, query, limit })),
 	chatStream: (history: ChatTurn[], message: string, allowWrites: boolean, activeNodeUuid: string | null, requestId: string, onEvent: Channel<ChatEvent>) => typedError<string, CommandError>(__TAURI_INVOKE("chat_stream", { history, message, allowWrites, activeNodeUuid, requestId, onEvent })),
 	cancelChat: (requestId: string) => __TAURI_INVOKE<boolean>("cancel_chat", { requestId }),
 	listEntities: (limit: number | null) => typedError<Node[], CommandError>(__TAURI_INVOKE("list_entities", { limit })),
@@ -273,6 +269,8 @@ export type SearchHit = {
 	node: Node,
 	score: number | null,
 };
+
+export type SearchMode = "fts" | "semantic";
 
 export type SecretKey = "SYNC_TOKEN";
 

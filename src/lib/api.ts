@@ -14,6 +14,7 @@ import type {
   Node,
   SearchHit,
   SecretKey,
+  SearchMode,
   SettingsSnapshot,
   SettingsUpdate,
   StartupStatus,
@@ -34,6 +35,7 @@ export type {
   Node,
   SearchHit,
   SecretKey,
+  SearchMode,
   SettingsSnapshot,
   SettingsUpdate,
   StartupStatus,
@@ -63,8 +65,6 @@ function checkedCommand<Args extends unknown[], Value>(
 ) {
   return (...args: Args) => unwrapCommand(command(...args));
 }
-
-export type Mode = "fts" | "vec" | "hybrid" | "agentic";
 
 export type ToolCallView = {
   id: string;
@@ -169,15 +169,6 @@ export const searchPagesByTitle = (query: string, limit = 8) =>
 export const searchBlocksFts = (query: string, limit = 8) =>
   unwrapCommand(commands.searchBlocksFts(query, limit));
 
-export function search(mode: Mode, query: string, limit = 20) {
-  switch (mode) {
-    case "fts":
-      return unwrapCommand(commands.searchFts(query, limit));
-    case "vec":
-      return unwrapCommand(commands.searchVec(query, limit));
-    case "hybrid":
-      return unwrapCommand(commands.searchHybrid(query, limit));
-    case "agentic":
-      return unwrapCommand(commands.searchAgentic(query, limit));
-  }
+export function search(mode: SearchMode, query: string, limit = 20) {
+  return unwrapCommand(commands.searchNotes(mode, query, limit));
 }

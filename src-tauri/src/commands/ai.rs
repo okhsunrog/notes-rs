@@ -1,45 +1,26 @@
 use super::*;
+use serde::Deserialize;
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchMode {
+    Fts,
+    Semantic,
+}
 
 #[tauri::command]
 #[specta::specta]
-pub async fn search_fts(
+pub async fn search_notes(
     state: State<'_, AppState>,
+    mode: SearchMode,
     query: String,
     limit: u32,
 ) -> CommandResult<Vec<SearchHit>> {
     let limit = validate_search_request(&query, limit)?;
-    db::search_fts(&state.conn, query, limit).await.map_err(err)
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn search_vec(
-    state: State<'_, AppState>,
-    query: String,
-    limit: u32,
-) -> CommandResult<Vec<SearchHit>> {
-    remote_search(&state, query, limit).await
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn search_hybrid(
-    state: State<'_, AppState>,
-    query: String,
-    limit: u32,
-) -> CommandResult<Vec<SearchHit>> {
-    remote_search(&state, query, limit).await
-}
-
-/// Retrieve via hybrid RRF, then rerank with the configured provider.
-#[tauri::command]
-#[specta::specta]
-pub async fn search_agentic(
-    state: State<'_, AppState>,
-    query: String,
-    limit: u32,
-) -> CommandResult<Vec<SearchHit>> {
-    remote_search(&state, query, limit).await
+    match mode {
+        SearchMode::Fts => db::search_fts(&state.conn, query, limit).await.map_err(err),
+        SearchMode::Semantic => remote_search(&state, query, limit).await,
+    }
 }
 
 async fn remote_search(
@@ -47,7 +28,6 @@ async fn remote_search(
     query: String,
     limit: u32,
 ) -> CommandResult<Vec<SearchHit>> {
-    let limit = validate_search_request(&query, limit)?;
     let remote = state.remote_ai.as_ref().ok_or_else(|| CommandError {
         code: CommandErrorCode::Unavailable,
         message: "semantic search requires a configured notes-rs server; local FTS remains available offline".into(),
