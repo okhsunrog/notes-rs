@@ -82,6 +82,19 @@ export const commands = {
 	graphSnapshot: (focusUuid: string | null) => typedError<GraphSnapshot, CommandError>(__TAURI_INVOKE("graph_snapshot", { focusUuid })),
 	exportData: () => typedError<string | null, CommandError>(__TAURI_INVOKE("export_data")),
 	importData: () => typedError<string | null, CommandError>(__TAURI_INVOKE("import_data")),
+	logseqImportCapability: () => __TAURI_INVOKE<LogseqImportAvailability>("logseq_import_capability"),
+	prepareLogseqImport: (onProgress: Channel<LogseqImportProgress>) => typedError<{
+	sessionUuid: string,
+	sourceName: string,
+	manifestSha256: string,
+	destination: LogseqImportDestination,
+	blockers: LogseqImportBlocker[],
+	canCommit: boolean,
+	report: LogseqImportReportSummary,
+} | null, CommandError>(__TAURI_INVOKE("prepare_logseq_import", { onProgress })),
+	logseqImportDiagnostics: (sessionUuid: string, offset: number, limit: number) => typedError<LogseqImportDiagnosticPage, CommandError>(__TAURI_INVOKE("logseq_import_diagnostics", { sessionUuid, offset, limit })),
+	commitLogseqImport: (sessionUuid: string, onProgress: Channel<LogseqImportProgress>) => typedError<LogseqImportCommitResult, CommandError>(__TAURI_INVOKE("commit_logseq_import", { sessionUuid, onProgress })),
+	discardLogseqImport: (sessionUuid: string) => __TAURI_INVOKE<boolean>("discard_logseq_import", { sessionUuid }),
 	createBackup: () => typedError<string, CommandError>(__TAURI_INVOKE("create_backup")),
 	attachFile: (location: AttachmentOwner) => typedError<{
 	uuid: string,
@@ -252,6 +265,12 @@ export type CreatedNote = {
 	initialBlock: Block,
 };
 
+/**  Stable, machine-readable classification for an import diagnostic. */
+export type DiagnosticCode = "config_not_found" | "source_directory_not_found" | "unsupported_document_format" | "mixed_indentation" | "non_canonical_indentation" | "non_canonical_continuation_indentation" | "unclosed_fence" | "preserved_macro" | "empty_page_title" | "multiple_page_titles" | "duplicate_page_identity" | "duplicate_page_title" | "duplicate_journal_date" | "duplicate_target_uuid" | "invalid_block_uuid" | "multiple_block_identity_properties" | "duplicate_block_uuid" | "unresolved_page_reference" | "ambiguous_page_reference" | "invalid_block_reference" | "unresolved_block_reference" | "unsupported_nested_wikilink" | "missing_media_source" | "remote_media_blocked" | "unsafe_media_source" | "unsupported_inline_media";
+
+/**  Severity of a non-fatal issue discovered while preparing an import. */
+export type DiagnosticSeverity = "info" | "warning" | "error";
+
 /**
  *  The single frontend invalidation stream for persisted Rust state.
  *  Payloads carry affected IDs when a command can identify them; whole-workspace
@@ -286,6 +305,20 @@ export type HistoryStatus = {
 };
 
 /**
+ *  A loss-aware diagnostic suitable for a dry-run report.
+ *  `relative_path` is always relative to the selected graph root. Diagnostic
+ *  messages never contain note bodies or values from unknown Logseq forms.
+ */
+export type ImportDiagnostic = {
+	severity: DiagnosticSeverity,
+	code: DiagnosticCode,
+	relativePath: string | null,
+	range: SourceRange | null,
+	message: string,
+	remediation: string | null,
+};
+
+/**
  *  A calendar day without a timezone or time-of-day component.
  *  The private canonical string keeps the Tauri/Specta wire type simple while
  *  construction, serde, and SQLite reads all pass through strict validation.
@@ -298,6 +331,65 @@ export type JournalDate = string;
  *  an unbounded multi-year timeline in one RPC.
  */
 export type JournalListLimit = number;
+
+export type LogseqImportAvailability = { status: "available" } | { status: "unavailable"; reason: LogseqImportUnavailableReason };
+
+export type LogseqImportBlocker = "empty_import" | "non_empty_workspace" | "blocking_diagnostics" | "alias_collision" | "existing_import_changed" | "background_ai_enabled" | "server_ai_status_unavailable";
+
+export type LogseqImportCommitResult = { status: "applied"; receiptUuid: string; pageCount: number; blockCount: number; aliasCount: number; attachmentCount: number; operationCount: number; openPageUuid: string | null } | { status: "exact_no_op"; receiptUuid: string; openPageUuid: string | null };
+
+export type LogseqImportDestination = "empty" | "existing_receipt" | "not_empty";
+
+export type LogseqImportDiagnosticPage = {
+	offset: number,
+	total: number,
+	diagnostics: ImportDiagnostic[],
+};
+
+export type LogseqImportPreview = {
+	sessionUuid: string,
+	sourceName: string,
+	manifestSha256: string,
+	destination: LogseqImportDestination,
+	blockers: LogseqImportBlocker[],
+	canCommit: boolean,
+	report: LogseqImportReportSummary,
+};
+
+export type LogseqImportProgress = { progress: "indeterminate"; stage: LogseqImportStage } | { progress: "items"; stage: LogseqImportStage; completed: number; total: number };
+
+export type LogseqImportReportSummary = {
+	pageCount: number,
+	journalCount: number,
+	blockCount: number,
+	syntheticPreambleBlockCount: number,
+	taskCount: number,
+	referenceCount: number,
+	resolvedReferenceCount: number,
+	unresolvedReferenceCount: number,
+	mediaReferenceCount: number,
+	markdownImageCount: number,
+	deferredExcalidrawCount: number,
+	localMediaReferenceCount: number,
+	inlineMediaReferenceCount: number,
+	blockedRemoteMediaReferenceCount: number,
+	missingMediaReferenceCount: number,
+	blockedUnsafeMediaReferenceCount: number,
+	unsupportedMediaReferenceCount: number,
+	unreferencedAssetCount: number,
+	unreferencedDrawingCount: number,
+	preservedBlockUuidCount: number,
+	derivedBlockUuidCount: number,
+	warningCount: number,
+	blockingDiagnosticCount: number,
+	diagnosticCount: number,
+	diagnosticsTruncated: boolean,
+	diagnostics: ImportDiagnostic[],
+};
+
+export type LogseqImportStage = "scanning" | "parsing" | "preparing" | "verifying" | "materializing" | "installing" | "committing" | "complete";
+
+export type LogseqImportUnavailableReason = "mobile_platform";
 
 export type MobileSystemInfo = {
 	deviceName: string,
@@ -363,6 +455,20 @@ export type SettingsUpdate = {
 	syncServerUrl: string | null,
 	apiKeys?: Partial<{ [key in SecretKey]: string }>,
 	clearKeys?: SecretKey[],
+};
+
+export type SourcePosition = {
+	/**  One-based physical line number. */
+	line: number,
+	/**  One-based Unicode scalar column. */
+	column: number,
+	/**  Zero-based byte offset in the original UTF-8 source. */
+	byteOffset: number,
+};
+
+export type SourceRange = {
+	start: SourcePosition,
+	end: SourcePosition,
 };
 
 export type StartupErrorEvent = {

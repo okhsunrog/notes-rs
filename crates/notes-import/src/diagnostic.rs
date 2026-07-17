@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Severity of a non-fatal issue discovered while preparing an import.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticSeverity {
     Info,
@@ -10,7 +10,9 @@ pub enum DiagnosticSeverity {
 }
 
 /// Stable, machine-readable classification for an import diagnostic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, specta::Type,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticCode {
     ConfigNotFound,
@@ -41,7 +43,7 @@ pub enum DiagnosticCode {
     UnsupportedInlineMedia,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SourcePosition {
     /// One-based physical line number.
@@ -52,7 +54,7 @@ pub struct SourcePosition {
     pub byte_offset: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceRange {
     pub start: SourcePosition,
@@ -60,10 +62,9 @@ pub struct SourceRange {
 }
 
 /// A loss-aware diagnostic suitable for a dry-run report.
-///
 /// `relative_path` is always relative to the selected graph root. Diagnostic
 /// messages never contain note bodies or values from unknown Logseq forms.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportDiagnostic {
     pub severity: DiagnosticSeverity,

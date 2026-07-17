@@ -16,6 +16,7 @@ pulldown-cmark.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+specta.workspace = true
 thiserror.workspace = true
 unicode-normalization.workspace = true
 uuid.workspace = true

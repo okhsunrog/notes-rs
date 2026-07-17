@@ -52,6 +52,11 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::graph_snapshot,
             commands::export_data,
             commands::import_data,
+            commands::logseq_import_capability,
+            commands::prepare_logseq_import,
+            commands::logseq_import_diagnostics,
+            commands::commit_logseq_import,
+            commands::discard_logseq_import,
             commands::create_backup,
             commands::attach_file,
             commands::list_attachments,
@@ -134,6 +139,7 @@ pub fn run() {
             let data_dir = app.path().app_data_dir().expect("resolving app data dir");
             std::fs::create_dir_all(&data_dir).expect("creating data dir");
             let blob_store = notes_blob::BlobStore::new(data_dir.clone());
+            app.manage(commands::LogseqImportSessions::default());
 
             let startup = Arc::new(RwLock::new(commands::StartupStatus::Starting {
                 message: "Loading device settings…".into(),

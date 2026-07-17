@@ -28,6 +28,8 @@ mod lifecycle;
 pub use lifecycle::*;
 mod journals;
 pub use journals::*;
+mod logseq_import;
+pub use logseq_import::*;
 mod pages;
 pub use pages::*;
 mod outliner;

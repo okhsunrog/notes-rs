@@ -313,6 +313,16 @@ pub async fn external_import_receipt(
         .await
 }
 
+/// Reports whether a first external import may use the empty-workspace path.
+///
+/// Hosts use this read-only check for preview UX. The apply transaction repeats
+/// the same predicate, so this result is never treated as authorization to
+/// commit after concurrent local activity.
+pub async fn external_import_destination_is_empty(conn: &Connection) -> Result<bool> {
+    conn.call_domain(|database| -> CoreResult<bool> { Ok(!workspace_has_import_state(database)?) })
+        .await
+}
+
 #[derive(Debug)]
 struct ValidatedBatch {
     batch: ExternalImportBatch,
@@ -599,8 +609,19 @@ fn stored_receipt(
 }
 
 fn ensure_workspace_empty(transaction: &rusqlite::Transaction<'_>) -> CoreResult<()> {
-    let has_state: bool = transaction.query_row(
-        "SELECT EXISTS(
+    if workspace_has_import_state(transaction)? {
+        Err(CoreError::conflict(
+            "external import requires an empty workspace; implicit merge is not supported",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn workspace_has_import_state(database: &rusqlite::Connection) -> CoreResult<bool> {
+    database
+        .query_row(
+            "SELECT EXISTS(
             SELECT 1 FROM page_identities
             UNION ALL SELECT 1 FROM pages
             UNION ALL SELECT 1 FROM blocks
@@ -612,16 +633,10 @@ fn ensure_workspace_empty(transaction: &rusqlite::Transaction<'_>) -> CoreResult
             UNION ALL SELECT 1 FROM history_redo
             UNION ALL SELECT 1 FROM external_import_receipts
          )",
-        [],
-        |row| row.get(0),
-    )?;
-    if has_state {
-        Err(CoreError::conflict(
-            "external import requires an empty workspace; implicit merge is not supported",
-        ))
-    } else {
-        Ok(())
-    }
+            [],
+            |row| row.get(0),
+        )
+        .map_err(CoreError::from)
 }
 
 fn validate_batch(batch: &ExternalImportBatch) -> CoreResult<()> {
@@ -897,6 +912,23 @@ mod tests {
                 .await
                 .unwrap(),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn destination_readiness_uses_the_apply_empty_workspace_predicate() {
+        let (_file, connection) = database().await;
+        assert!(
+            external_import_destination_is_empty(&connection)
+                .await
+                .unwrap()
+        );
+
+        db::create_note(&connection).await.unwrap();
+        assert!(
+            !external_import_destination_is_empty(&connection)
+                .await
+                .unwrap()
         );
     }
 
