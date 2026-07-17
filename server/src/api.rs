@@ -11,6 +11,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use futures::{SinkExt, StreamExt};
+use notes_blob::{BlobStore, BlobStoreError, InstallOutcome, VerifiedBlob};
 use notes_core::BlobHash;
 use notes_core::db::SearchHit;
 use notes_protocol::{
@@ -19,7 +20,6 @@ use notes_protocol::{
     ClientMessage, OpsBatch, PushOps, ServerErrorCode, ServerInfo, ServerMessage,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::path::{Path as FilePath, PathBuf};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
@@ -601,55 +601,39 @@ async fn put_blob(
     body: Body,
 ) -> Result<StatusCode, ApiError> {
     let hash = parse_blob_hash(&raw_hash)?;
-    let target = blob_path(&state.data_dir, &hash);
-    if tokio::fs::try_exists(&target)
-        .await
-        .map_err(|error| ApiError::internal(error.into()))?
-    {
-        return Ok(StatusCode::NO_CONTENT);
-    }
-    let parent = target.parent().expect("blob path has a parent");
-    tokio::fs::create_dir_all(parent)
-        .await
-        .map_err(|error| ApiError::internal(error.into()))?;
-    let temporary = parent.join(format!(".{}.tmp", uuid::Uuid::now_v7()));
-    let result = write_blob(&temporary, body, state.max_blob_bytes).await;
-    let (actual_hash, _) = match result {
-        Ok(result) => result,
-        Err(error) => {
-            let _ = tokio::fs::remove_file(&temporary).await;
-            return Err(error);
-        }
-    };
-    if actual_hash != hash {
-        let _ = tokio::fs::remove_file(&temporary).await;
-        return Err(ApiError::bad_request(
-            "request body SHA-256 does not match the blob URL",
-        ));
-    }
-    match tokio::fs::rename(&temporary, &target).await {
-        Ok(()) => Ok(StatusCode::CREATED),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let _ = tokio::fs::remove_file(&temporary).await;
-            Ok(StatusCode::NO_CONTENT)
-        }
-        Err(error) => {
-            let _ = tokio::fs::remove_file(&temporary).await;
-            Err(ApiError::internal(error.into()))
-        }
-    }
+    let staging = stage_blob(&state.data_dir, body, state.max_blob_bytes).await?;
+    let staging_path = staging.to_path_buf();
+    let store = BlobStore::new(state.data_dir.clone());
+    let maximum = state.max_blob_bytes;
+    let installed =
+        tokio::task::spawn_blocking(move || store.install_file(&staging_path, hash, maximum))
+            .await
+            .map_err(|error| ApiError::internal(error.into()))?
+            .map_err(map_blob_install_error)?;
+    Ok(match installed.outcome {
+        InstallOutcome::Installed => StatusCode::CREATED,
+        InstallOutcome::AlreadyPresent => StatusCode::NO_CONTENT,
+    })
 }
 
-async fn write_blob(
-    path: &FilePath,
+async fn stage_blob(
+    data_dir: &FilePath,
     body: Body,
     maximum: u64,
-) -> Result<(BlobHash, u64), ApiError> {
-    let mut file = tokio::fs::File::create(path)
-        .await
-        .map_err(|error| ApiError::internal(error.into()))?;
+) -> Result<tempfile::TempPath, ApiError> {
+    let staging_dir = data_dir.join("blob-staging");
+    let (file, staging) = tokio::task::spawn_blocking(move || {
+        std::fs::create_dir_all(&staging_dir)?;
+        let temporary = tempfile::Builder::new()
+            .prefix(".upload-")
+            .tempfile_in(staging_dir)?;
+        Ok::<_, std::io::Error>(temporary.into_parts())
+    })
+    .await
+    .map_err(|error| ApiError::internal(error.into()))?
+    .map_err(|error| ApiError::internal(error.into()))?;
+    let mut file = tokio::fs::File::from_std(file);
     let mut stream = body.into_data_stream();
-    let mut digest = Sha256::new();
     let mut size = 0_u64;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|error| ApiError::bad_request(error.to_string()))?;
@@ -661,7 +645,6 @@ async fn write_blob(
                 "blob exceeds the configured {maximum} byte limit"
             )));
         }
-        digest.update(&chunk);
         file.write_all(&chunk)
             .await
             .map_err(|error| ApiError::internal(error.into()))?;
@@ -669,7 +652,8 @@ async fn write_blob(
     file.flush()
         .await
         .map_err(|error| ApiError::internal(error.into()))?;
-    Ok((BlobHash::from_bytes(digest.finalize().into()), size))
+    drop(file);
+    Ok(staging)
 }
 
 async fn head_blob(
@@ -678,7 +662,8 @@ async fn head_blob(
     Path(raw_hash): Path<String>,
 ) -> Result<Response, ApiError> {
     let hash = parse_blob_hash(&raw_hash)?;
-    blob_response_headers(&state, &user.0, &hash).await
+    let verified = open_authorized_blob(&state, &user.0, hash).await?;
+    Ok(blob_response_headers(verified.blob.size))
 }
 
 async fn get_blob(
@@ -687,31 +672,30 @@ async fn get_blob(
     Path(raw_hash): Path<String>,
 ) -> Result<Response, ApiError> {
     let hash = parse_blob_hash(&raw_hash)?;
-    let mut response = blob_response_headers(&state, &user.0, &hash).await?;
-    let file = tokio::fs::File::open(blob_path(&state.data_dir, &hash))
-        .await
-        .map_err(|error| ApiError::internal(error.into()))?;
+    let verified = open_authorized_blob(&state, &user.0, hash).await?;
+    let mut response = blob_response_headers(verified.blob.size);
+    let file = tokio::fs::File::from_std(verified.into_file());
     *response.body_mut() = Body::from_stream(ReaderStream::new(file));
     Ok(response)
 }
 
-async fn blob_response_headers(
+async fn open_authorized_blob(
     state: &AppState,
     user: &UserState,
-    hash: &BlobHash,
-) -> Result<Response, ApiError> {
-    if !user_references_blob(user, hash).await? {
+    hash: BlobHash,
+) -> Result<VerifiedBlob, ApiError> {
+    if !user_references_blob(user, &hash).await? {
         return Err(ApiError::not_found("blob not found"));
     }
-    let metadata = tokio::fs::metadata(blob_path(&state.data_dir, hash))
+    let store = BlobStore::new(state.data_dir.clone());
+    let maximum = state.max_blob_bytes;
+    tokio::task::spawn_blocking(move || store.open_verified(hash, maximum))
         .await
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                ApiError::not_found("blob not found")
-            } else {
-                ApiError::internal(error.into())
-            }
-        })?;
+        .map_err(|error| ApiError::internal(error.into()))?
+        .map_err(map_blob_open_error)
+}
+
+fn blob_response_headers(size: u64) -> Response {
     let mut response = Response::new(Body::empty());
     response.headers_mut().insert(
         CONTENT_TYPE,
@@ -719,9 +703,9 @@ async fn blob_response_headers(
     );
     response.headers_mut().insert(
         CONTENT_LENGTH,
-        HeaderValue::from_str(&metadata.len().to_string()).expect("valid content length"),
+        HeaderValue::from_str(&size.to_string()).expect("valid content length"),
     );
-    Ok(response)
+    response
 }
 
 async fn user_references_blob(user: &UserState, hash: &BlobHash) -> Result<bool, ApiError> {
@@ -746,9 +730,40 @@ fn parse_blob_hash(hash: &str) -> Result<BlobHash, ApiError> {
         .map_err(|error| ApiError::bad_request(error.to_string()))
 }
 
-fn blob_path(data_dir: &FilePath, hash: &BlobHash) -> PathBuf {
-    let canonical = hash.to_string();
-    data_dir.join("blobs").join(&canonical[..2]).join(canonical)
+fn map_blob_install_error(error: BlobStoreError) -> ApiError {
+    match error {
+        BlobStoreError::HashMismatch { .. } => {
+            ApiError::bad_request("request body SHA-256 does not match the blob URL")
+        }
+        BlobStoreError::TooLarge { limit } => {
+            ApiError::too_large(format!("blob exceeds the configured {limit} byte limit"))
+        }
+        BlobStoreError::CorruptBlob { .. }
+        | BlobStoreError::ExistingSizeMismatch { .. }
+        | BlobStoreError::UnsafeFilesystemEntry { .. } => {
+            ApiError::conflict("an existing stored blob failed integrity verification")
+        }
+        other => ApiError::internal(other.into()),
+    }
+}
+
+fn map_blob_open_error(error: BlobStoreError) -> ApiError {
+    match error {
+        BlobStoreError::NotFound { .. } => ApiError::not_found("blob not found"),
+        BlobStoreError::TooLarge { .. } | BlobStoreError::StoredBlobTooLarge { .. } => {
+            ApiError::conflict("stored blob exceeds the configured size limit")
+        }
+        BlobStoreError::CorruptBlob { .. }
+        | BlobStoreError::ExistingSizeMismatch { .. }
+        | BlobStoreError::HashMismatch { .. }
+        | BlobStoreError::UnsafeFilesystemEntry { .. } => {
+            ApiError::conflict("stored blob failed integrity verification")
+        }
+        BlobStoreError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+            ApiError::not_found("blob not found")
+        }
+        other => ApiError::internal(other.into()),
+    }
 }
 
 const fn default_ops_limit() -> usize {
@@ -839,6 +854,81 @@ mod tests {
         token: &str,
     ) -> axum::http::request::Builder {
         request.header(AUTHORIZATION, format!("Bearer {token}"))
+    }
+
+    async fn reference_blob(app: &Router, page_uuid: uuid::Uuid, hash: BlobHash, size: u64) {
+        let response = app
+            .clone()
+            .oneshot(
+                authorized(Request::builder())
+                    .method("POST")
+                    .uri("/v1/ops")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&PushOps {
+                            ops: vec![
+                                page_operation(page_uuid),
+                                operation(
+                                    2,
+                                    OpKind::AttachmentAdd(AttachmentAdd {
+                                        owner: AttachmentOwner::Page(page_uuid),
+                                        blob_hash: hash,
+                                        filename: "attachment.bin".into(),
+                                        mime: "application/octet-stream".into(),
+                                        size,
+                                    }),
+                                ),
+                            ],
+                        })
+                        .expect("reference request JSON"),
+                    ))
+                    .expect("reference request"),
+            )
+            .await
+            .expect("reference response");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    fn assert_no_blob_temporaries(directory: &tempfile::TempDir, hash: BlobHash) {
+        let staging = directory.path().join("blob-staging");
+        if staging.exists() {
+            assert!(
+                std::fs::read_dir(&staging)
+                    .expect("read blob staging")
+                    .next()
+                    .is_none(),
+                "server staging files must be removed"
+            );
+        }
+        let shard = BlobStore::new(directory.path())
+            .path_for(hash)
+            .parent()
+            .expect("blob shard")
+            .to_path_buf();
+        if shard.exists() {
+            assert!(
+                std::fs::read_dir(shard)
+                    .expect("read blob shard")
+                    .filter_map(Result::ok)
+                    .all(|entry| !entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".incoming-")),
+                "blob-store incoming files must be removed"
+            );
+        }
+    }
+
+    async fn typed_error(response: Response) -> ApiErrorResponse {
+        serde_json::from_slice(
+            &response
+                .into_body()
+                .collect()
+                .await
+                .expect("error body")
+                .to_bytes(),
+        )
+        .expect("typed API error")
     }
 
     #[tokio::test]
@@ -1080,11 +1170,173 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_identical_puts_publish_once_and_clean_all_temporaries() {
+        let (directory, app) = test_app().await;
+        let contents = b"concurrent durable blob";
+        let hash = BlobHash::digest(contents);
+        let uploads = (0..8).map(|_| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    authorized(Request::builder())
+                        .method("PUT")
+                        .uri(format!("/v1/blobs/{hash}"))
+                        .body(Body::from(contents.as_slice()))
+                        .expect("concurrent request"),
+                )
+                .await
+                .expect("concurrent upload response")
+                .status()
+            }
+        });
+        let statuses = futures::future::join_all(uploads).await;
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| **status == StatusCode::CREATED)
+                .count(),
+            1
+        );
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| **status == StatusCode::NO_CONTENT)
+                .count(),
+            7
+        );
+        let verified = BlobStore::new(directory.path())
+            .open_verified(hash, 1_024)
+            .expect("published blob verifies");
+        assert_eq!(verified.blob.size, contents.len() as u64);
+        assert_no_blob_temporaries(&directory, hash);
+
+        let wrong_hash = BlobHash::digest(b"different expected bytes");
+        let rejected = app
+            .oneshot(
+                authorized(Request::builder())
+                    .method("PUT")
+                    .uri(format!("/v1/blobs/{wrong_hash}"))
+                    .body(Body::from(contents.as_slice()))
+                    .expect("mismatched request"),
+            )
+            .await
+            .expect("mismatched upload response");
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        assert_no_blob_temporaries(&directory, wrong_hash);
+    }
+
+    #[tokio::test]
+    async fn corrupt_existing_blob_is_never_overwritten_or_streamed() {
+        let (directory, app) = test_app().await;
+        let contents = b"expected attachment bytes";
+        let corrupt = vec![b'x'; contents.len()];
+        let hash = BlobHash::digest(contents);
+        reference_blob(
+            &app,
+            uuid::Uuid::from_u128(0xB10B),
+            hash,
+            contents.len() as u64,
+        )
+        .await;
+        let path = BlobStore::new(directory.path()).path_for(hash);
+        std::fs::create_dir_all(path.parent().expect("blob shard")).expect("create blob shard");
+        std::fs::write(&path, &corrupt).expect("write corrupt existing blob");
+
+        let upload = app
+            .clone()
+            .oneshot(
+                authorized(Request::builder())
+                    .method("PUT")
+                    .uri(format!("/v1/blobs/{hash}"))
+                    .body(Body::from(contents.as_slice()))
+                    .expect("replacement request"),
+            )
+            .await
+            .expect("replacement response");
+        assert_eq!(upload.status(), StatusCode::CONFLICT);
+        let error = typed_error(upload).await;
+        assert_eq!(error.error.code, ApiErrorCode::Conflict);
+        assert!(
+            !error
+                .error
+                .message
+                .contains(&directory.path().display().to_string())
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("read preserved corrupt blob"),
+            corrupt
+        );
+
+        for method in ["GET", "HEAD"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    authorized(Request::builder())
+                        .method(method)
+                        .uri(format!("/v1/blobs/{hash}"))
+                        .body(Body::empty())
+                        .expect("verified read request"),
+                )
+                .await
+                .expect("verified read response");
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            if method == "GET" {
+                let error = typed_error(response).await;
+                assert_eq!(error.error.code, ApiErrorCode::Conflict);
+                assert!(!error.error.message.contains(&path.display().to_string()));
+            }
+        }
+        assert_no_blob_temporaries(&directory, hash);
+    }
+
+    #[tokio::test]
+    async fn oversized_stored_blob_is_rejected_by_get_and_head() {
+        let (directory, app) = test_app().await;
+        let contents = vec![0x5a; 1_025];
+        let hash = BlobHash::digest(&contents);
+        reference_blob(
+            &app,
+            uuid::Uuid::from_u128(0xB10C),
+            hash,
+            contents.len() as u64,
+        )
+        .await;
+        let path = BlobStore::new(directory.path()).path_for(hash);
+        std::fs::create_dir_all(path.parent().expect("blob shard")).expect("create blob shard");
+        std::fs::write(&path, contents).expect("write oversized stored blob");
+
+        for method in ["GET", "HEAD"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    authorized(Request::builder())
+                        .method(method)
+                        .uri(format!("/v1/blobs/{hash}"))
+                        .body(Body::empty())
+                        .expect("oversized read request"),
+                )
+                .await
+                .expect("oversized read response");
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            if method == "GET" {
+                let error = typed_error(response).await;
+                assert_eq!(error.error.code, ApiErrorCode::Conflict);
+                assert_eq!(
+                    error.error.message,
+                    "stored blob exceeds the configured size limit"
+                );
+                assert!(!error.error.message.contains(&path.display().to_string()));
+            }
+        }
+        assert_no_blob_temporaries(&directory, hash);
+    }
+
+    #[tokio::test]
     async fn historical_blob_access_survives_remove_but_remains_user_scoped() {
         let (_directory, app) = test_app().await;
         let page_uuid = uuid::Uuid::from_u128(100);
         let contents = b"portable attachment";
-        let hash = BlobHash::from_bytes(Sha256::digest(contents).into());
+        let hash = BlobHash::digest(contents);
         let operations = vec![
             page_operation(page_uuid),
             operation(
@@ -1174,7 +1426,7 @@ mod tests {
         );
 
         let unrelated_contents = b"unrelated blob";
-        let unrelated_hash = BlobHash::from_bytes(Sha256::digest(unrelated_contents).into());
+        let unrelated_hash = BlobHash::digest(unrelated_contents);
         let unrelated_upload = app
             .clone()
             .oneshot(

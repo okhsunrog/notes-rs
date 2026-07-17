@@ -13,6 +13,7 @@ axum.workspace = true
 clap.workspace = true
 futures.workspace = true
 notes-ai.workspace = true
+notes-blob.workspace = true
 notes-core.workspace = true
 notes-protocol.workspace = true
 notes-sync.workspace = true
@@ -20,7 +21,7 @@ llm-relay.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 toml.workspace = true
@@ -32,6 +33,5 @@ url.workspace = true
 
 [dev-dependencies]
 http-body-util = "0.1.4"
-tempfile.workspace = true
 tokio-tungstenite.workspace = true
 tower.workspace = true
