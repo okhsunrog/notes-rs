@@ -50,6 +50,79 @@ impl rusqlite::types::FromSql for ContentRevision {
     }
 }
 
+/// Opaque revision of a complete page document projection.
+/// The value is always the canonical lowercase hexadecimal representation of
+/// one SHA-256 digest. Callers may compare and round-trip it, but the digest
+/// framing remains an implementation detail of the document snapshot service.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, specta::Type)]
+#[serde(transparent)]
+pub struct DocumentRevision(#[specta(type = String)] String);
+
+impl DocumentRevision {
+    pub(crate) fn from_digest(bytes: [u8; 32]) -> Self {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut value = String::with_capacity(64);
+        for byte in bytes {
+            value.push(char::from(HEX[usize::from(byte >> 4)]));
+            value.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+        Self(value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for DocumentRevision {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl FromStr for DocumentRevision {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        anyhow::ensure!(
+            value.len() == 64,
+            "document revision must contain 64 hexadecimal characters"
+        );
+        anyhow::ensure!(
+            value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "document revision must be canonical lowercase hexadecimal"
+        );
+        Ok(Self(value.to_owned()))
+    }
+}
+
+impl<'de> Deserialize<'de> for DocumentRevision {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl rusqlite::types::ToSql for DocumentRevision {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(self.0.as_str().into())
+    }
+}
+
+impl rusqlite::types::FromSql for DocumentRevision {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        value.as_str()?.parse().map_err(|error: anyhow::Error| {
+            rusqlite::types::FromSqlError::Other(error.into_boxed_dyn_error())
+        })
+    }
+}
+
 pub fn normalize_title(title: &str) -> String {
     title.trim().nfkc().flat_map(char::to_lowercase).collect()
 }

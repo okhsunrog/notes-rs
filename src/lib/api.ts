@@ -18,6 +18,7 @@ import type {
   Content,
   ContentRevision,
   CreatedNote,
+  DocumentRevision,
   GraphEdge,
   GraphItem,
   GraphSnapshot,
@@ -36,6 +37,7 @@ import type {
   LogseqDrawingConversionState,
   ObjectKind,
   Page,
+  PageDocumentSnapshot,
   PageKind,
   PageLayout,
   PageListFilter,
@@ -68,6 +70,7 @@ export type {
   Content,
   ContentRevision,
   CreatedNote,
+  DocumentRevision,
   GraphEdge,
   GraphItem,
   GraphSnapshot,
@@ -86,6 +89,7 @@ export type {
   LogseqDrawingConversionState,
   ObjectKind,
   Page,
+  PageDocumentSnapshot,
   PageKind,
   PageLayout,
   PageListFilter,
@@ -250,6 +254,7 @@ export const getHistoryStatus = checkedCommand(commands.historyStatus);
 export const undo = checkedCommand(commands.undo);
 export const redo = checkedCommand(commands.redo);
 export const getPage = checkedCommand(commands.getPage);
+export const getPageDocument = checkedCommand(commands.getPageDocument);
 export const getBlock = checkedCommand(commands.getBlock);
 export const getContainingPage = checkedCommand(commands.getContainingPage);
 export const listBlockChildren = checkedCommand(commands.listBlockChildren);

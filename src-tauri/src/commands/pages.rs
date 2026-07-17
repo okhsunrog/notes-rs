@@ -86,6 +86,15 @@ pub async fn get_page(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn get_page_document(
+    state: State<'_, AppState>,
+    uuid: uuid::Uuid,
+) -> CommandResult<Option<db::PageDocumentSnapshot>> {
+    db::get_page_document(&state.conn, uuid).await.map_err(err)
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn get_containing_page(
     state: State<'_, AppState>,
     block_uuid: uuid::Uuid,

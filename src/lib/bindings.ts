@@ -52,6 +52,11 @@ export const commands = {
 	createdAt: number,
 	updatedAt: number,
 } | null, CommandError>(__TAURI_INVOKE("get_page", { uuid })),
+	getPageDocument: (uuid: string) => typedError<{
+	pageUuid: string,
+	revision: DocumentRevision,
+	blocks: Block[],
+} | null, CommandError>(__TAURI_INVOKE("get_page_document", { uuid })),
 	getBlock: (uuid: string) => typedError<{
 	uuid: string,
 	pageUuid: string,
@@ -286,6 +291,14 @@ export type DiagnosticCode = "config_not_found" | "source_directory_not_found" |
 export type DiagnosticSeverity = "info" | "warning" | "error";
 
 /**
+ *  Opaque revision of a complete page document projection.
+ *  The value is always the canonical lowercase hexadecimal representation of
+ *  one SHA-256 digest. Callers may compare and round-trip it, but the digest
+ *  framing remains an implementation detail of the document snapshot service.
+ */
+export type DocumentRevision = string;
+
+/**
  *  The single frontend invalidation stream for persisted Rust state.
  *  Payloads carry affected IDs when a command can identify them; whole-workspace
  *  replacements (import/sync) deliberately request a full cache refresh.
@@ -430,6 +443,16 @@ export type Page = {
 	titleRevision: ContentRevision,
 	createdAt: number,
 	updatedAt: number,
+};
+
+/**
+ *  One transactionally consistent, deterministic projection of a page's
+ *  complete current block tree.
+ */
+export type PageDocumentSnapshot = {
+	pageUuid: string,
+	revision: DocumentRevision,
+	blocks: Block[],
 };
 
 export type PageKind = { kind: "note" } | { kind: "journal"; date: JournalDate };

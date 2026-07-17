@@ -12,6 +12,7 @@ use std::path::Path;
 mod archive;
 mod attachments;
 mod blocks;
+mod document;
 mod graph;
 mod history;
 mod journals;
@@ -33,6 +34,7 @@ pub use blocks::{
     list_block_children, move_block, move_block_in_direction, outdent_block, reorder_block,
     set_block_content, set_block_content_if_revision, set_block_style, set_task_state, split_block,
 };
+pub use document::{PageDocumentSnapshot, get_page_document};
 pub use graph::{find_backlinks, graph_snapshot, neighbors, read_ancestors, read_subtree};
 pub use history::{HistoryStatus, history_status, redo_history, undo_history};
 pub use journals::{
