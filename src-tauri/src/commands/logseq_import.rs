@@ -1,27 +1,40 @@
 use super::*;
+#[cfg(not(target_os = "android"))]
 use anyhow::Context;
+#[cfg(not(target_os = "android"))]
 use notes_blob::{BlobHash, BlobStore, InstallOutcome};
+#[cfg(not(target_os = "android"))]
 use notes_core::{
     BlockStyle, ExternalBlockId, ExternalImportAttachment, ExternalImportAttachmentOwner,
     ExternalImportBatch, ExternalImportDigest, ExternalImportFormat, ExternalImportIdentityContext,
     ExternalImportOutcome, ExternalImportPage, ExternalImportPageKind, ExternalImportProvenance,
     ExternalPageId, JournalDate, OrderKey, PageAlias, PageLayout, TaskState,
 };
+use notes_import::ImportDiagnostic;
+#[cfg(not(target_os = "android"))]
 use notes_import::{
     DiagnosticSeverity, DocumentFormat, DrawingConversionPublication, DrawingConversionStatus,
-    IdentityContext, ImportBlockPresentation, ImportDiagnostic, ImportMediaKind, ImportMediaOwner,
+    IdentityContext, ImportBlockPresentation, ImportMediaKind, ImportMediaOwner,
     ImportMediaResolution, ImportPageKind, ImportTaskState, LoadDrawingConversionErrorCode,
     MaterializedMediaBlob, MediaMaterializationPlan, PreparedImport, SourceKind,
 };
+#[cfg(not(target_os = "android"))]
 use std::collections::{BTreeMap, HashMap};
+#[cfg(not(target_os = "android"))]
 use std::fs::File;
+#[cfg(not(target_os = "android"))]
 use std::io::Read;
+#[cfg(not(target_os = "android"))]
 use std::path::{Path, PathBuf};
+#[cfg(not(target_os = "android"))]
 use std::sync::Mutex;
 
+#[cfg(not(target_os = "android"))]
 const MAX_PREVIEW_DIAGNOSTICS: usize = 200;
+#[cfg(not(target_os = "android"))]
 const DOCUMENT_READ_BUFFER_BYTES: usize = 64 * 1024;
 
+#[cfg(not(target_os = "android"))]
 #[derive(Debug)]
 struct LogseqImportSession {
     session_uuid: uuid::Uuid,
@@ -32,11 +45,13 @@ struct LogseqImportSession {
     static_commit_allowed: bool,
 }
 
+#[cfg(not(target_os = "android"))]
 struct PreparedGraph {
     prepared: PreparedImport,
     scan_diagnostics: Vec<ImportDiagnostic>,
 }
 
+#[cfg(not(target_os = "android"))]
 #[derive(Debug, thiserror::Error)]
 enum PrepareGraphError {
     #[error(transparent)]
@@ -55,6 +70,7 @@ enum PrepareGraphError {
     Prepare(#[from] notes_import::PrepareImportError),
 }
 
+#[cfg(not(target_os = "android"))]
 #[derive(Debug, thiserror::Error)]
 enum CommitPlanError {
     #[error(transparent)]
@@ -67,6 +83,7 @@ enum CommitPlanError {
     Adapter(anyhow::Error),
 }
 
+#[cfg(not(target_os = "android"))]
 #[derive(Default)]
 struct LogseqImportSessionState {
     preparing: bool,
@@ -76,13 +93,16 @@ struct LogseqImportSessionState {
 
 #[derive(Default)]
 pub struct LogseqImportSessions {
+    #[cfg(not(target_os = "android"))]
     state: Mutex<LogseqImportSessionState>,
 }
 
+#[cfg(not(target_os = "android"))]
 struct PreparingGuard<'sessions> {
     sessions: &'sessions LogseqImportSessions,
 }
 
+#[cfg(not(target_os = "android"))]
 impl Drop for PreparingGuard<'_> {
     fn drop(&mut self) {
         self.sessions
@@ -93,10 +113,12 @@ impl Drop for PreparingGuard<'_> {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 struct CommittingGuard<'sessions> {
     sessions: &'sessions LogseqImportSessions,
 }
 
+#[cfg(not(target_os = "android"))]
 impl Drop for CommittingGuard<'_> {
     fn drop(&mut self) {
         self.sessions
@@ -109,6 +131,7 @@ impl Drop for CommittingGuard<'_> {
 
 #[derive(Debug, Clone, Copy, Serialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(target_os = "android", allow(dead_code))]
 pub enum LogseqImportStage {
     Scanning,
     Parsing,
@@ -122,6 +145,7 @@ pub enum LogseqImportStage {
 
 #[derive(Debug, Clone, Serialize, specta::Type)]
 #[serde(tag = "progress", rename_all = "snake_case")]
+#[cfg_attr(target_os = "android", allow(dead_code))]
 pub enum LogseqImportProgress {
     Indeterminate {
         stage: LogseqImportStage,
@@ -135,6 +159,7 @@ pub enum LogseqImportProgress {
 
 #[derive(Debug, Clone, Copy, Serialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(target_os = "android", allow(dead_code))]
 pub enum LogseqImportDestination {
     Empty,
     ExistingReceipt,
@@ -143,6 +168,7 @@ pub enum LogseqImportDestination {
 
 #[derive(Debug, Clone, Copy, Serialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(target_os = "android", allow(dead_code))]
 pub enum LogseqImportBlocker {
     EmptyImport,
     NonEmptyWorkspace,
@@ -155,9 +181,10 @@ pub enum LogseqImportBlocker {
 
 #[derive(Debug, Clone, Copy, Serialize, specta::Type)]
 #[serde(tag = "status", rename_all = "snake_case")]
-#[allow(dead_code)] // Both variants remain in the cross-platform Specta contract.
 pub enum LogseqImportAvailability {
+    #[cfg_attr(target_os = "android", allow(dead_code))]
     Available,
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     Unavailable {
         reason: LogseqImportUnavailableReason,
     },
@@ -165,7 +192,7 @@ pub enum LogseqImportAvailability {
 
 #[derive(Debug, Clone, Copy, Serialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
-#[allow(dead_code)] // Constructed by the Android target, absent from desktop codegen.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub enum LogseqImportUnavailableReason {
     MobilePlatform,
 }
@@ -213,6 +240,7 @@ pub struct LogseqImportReportSummary {
 
 #[derive(Debug, Clone, Copy, Serialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(target_os = "android", allow(dead_code))]
 pub enum LogseqDrawingConversionState {
     Absent,
     Prepared,
@@ -237,6 +265,7 @@ pub struct LogseqImportPreview {
     rename_all = "snake_case",
     rename_all_fields = "camelCase"
 )]
+#[cfg_attr(target_os = "android", allow(dead_code))]
 pub enum LogseqImportCommitResult {
     Applied {
         receipt_uuid: uuid::Uuid,
@@ -276,43 +305,55 @@ pub fn logseq_import_diagnostics(
     offset: u64,
     limit: u32,
 ) -> CommandResult<LogseqImportDiagnosticPage> {
-    if !(1..=200).contains(&limit) {
-        return Err(CommandError::invalid(
-            "diagnostic page limit must be between 1 and 200",
-        ));
+    #[cfg(target_os = "android")]
+    {
+        let _ = (sessions, session_uuid, offset, limit);
+        Err(CommandError::new(
+            CommandErrorCode::Unavailable,
+            "direct Logseq folder import is available on desktop only",
+        ))
     }
-    let state = sessions
-        .state
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let session = state.active.as_ref().ok_or_else(|| {
-        CommandError::new(
-            CommandErrorCode::NotFound,
-            "the Logseq import session is not active",
-        )
-    })?;
-    if session.session_uuid != session_uuid {
-        return Err(CommandError::conflict(
-            "a newer Logseq dry run replaced this import session",
-        ));
-    }
-    let diagnostics = session
-        .scan_diagnostics
-        .iter()
-        .chain(&session.prepared.report.diagnostics)
-        .collect::<Vec<_>>();
-    let start = usize::try_from(offset)
-        .unwrap_or(usize::MAX)
-        .min(diagnostics.len());
-    let end = start.saturating_add(limit as usize).min(diagnostics.len());
-    Ok(LogseqImportDiagnosticPage {
-        offset: start as u64,
-        total: diagnostics.len() as u64,
-        diagnostics: diagnostics[start..end]
+
+    #[cfg(not(target_os = "android"))]
+    {
+        if !(1..=200).contains(&limit) {
+            return Err(CommandError::invalid(
+                "diagnostic page limit must be between 1 and 200",
+            ));
+        }
+        let state = sessions
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let session = state.active.as_ref().ok_or_else(|| {
+            CommandError::new(
+                CommandErrorCode::NotFound,
+                "the Logseq import session is not active",
+            )
+        })?;
+        if session.session_uuid != session_uuid {
+            return Err(CommandError::conflict(
+                "a newer Logseq dry run replaced this import session",
+            ));
+        }
+        let diagnostics = session
+            .scan_diagnostics
             .iter()
-            .map(|diagnostic| (*diagnostic).clone())
-            .collect(),
-    })
+            .chain(&session.prepared.report.diagnostics)
+            .collect::<Vec<_>>();
+        let start = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(diagnostics.len());
+        let end = start.saturating_add(limit as usize).min(diagnostics.len());
+        Ok(LogseqImportDiagnosticPage {
+            offset: start as u64,
+            total: diagnostics.len() as u64,
+            diagnostics: diagnostics[start..end]
+                .iter()
+                .map(|diagnostic| (*diagnostic).clone())
+                .collect(),
+        })
+    }
 }
 
 #[tauri::command]
@@ -618,12 +659,14 @@ pub async fn commit_logseq_import(
     }
 }
 
+#[cfg(not(target_os = "android"))]
 enum BackgroundAiSafety {
     Safe,
     Enabled,
     Unavailable,
 }
 
+#[cfg(not(target_os = "android"))]
 async fn background_ai_safety(state: &AppState) -> BackgroundAiSafety {
     let Some(remote) = state.remote_ai.as_ref() else {
         return BackgroundAiSafety::Safe;
@@ -638,6 +681,7 @@ async fn background_ai_safety(state: &AppState) -> BackgroundAiSafety {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 async fn ensure_background_ai_disabled(state: &AppState) -> CommandResult<()> {
     match background_ai_safety(state).await {
         BackgroundAiSafety::Safe => Ok(()),
@@ -657,22 +701,32 @@ pub fn discard_logseq_import(
     sessions: State<'_, LogseqImportSessions>,
     session_uuid: uuid::Uuid,
 ) -> bool {
-    let mut state = sessions
-        .state
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    if state
-        .active
-        .as_ref()
-        .is_some_and(|session| session.session_uuid == session_uuid)
+    #[cfg(target_os = "android")]
     {
-        state.active.take();
-        true
-    } else {
+        let _ = (sessions, session_uuid);
         false
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let mut state = sessions
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if state
+            .active
+            .as_ref()
+            .is_some_and(|session| session.session_uuid == session_uuid)
+        {
+            state.active.take();
+            true
+        } else {
+            false
+        }
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn begin_preparing(sessions: &LogseqImportSessions) -> CommandResult<PreparingGuard<'_>> {
     let mut state = sessions
         .state
@@ -688,6 +742,7 @@ fn begin_preparing(sessions: &LogseqImportSessions) -> CommandResult<PreparingGu
     Ok(PreparingGuard { sessions })
 }
 
+#[cfg(not(target_os = "android"))]
 fn begin_commit(
     sessions: &LogseqImportSessions,
     session_uuid: uuid::Uuid,
@@ -719,6 +774,7 @@ fn begin_commit(
     Ok((session, CommittingGuard { sessions }))
 }
 
+#[cfg(not(target_os = "android"))]
 fn preferred_open_page(prepared: &PreparedImport) -> Option<uuid::Uuid> {
     let today = chrono::Local::now()
         .date_naive()
@@ -734,6 +790,7 @@ fn preferred_open_page(prepared: &PreparedImport) -> Option<uuid::Uuid> {
         .map(|page| page.uuid)
 }
 
+#[cfg(not(target_os = "android"))]
 fn build_external_import_batch(
     mut prepared: PreparedImport,
     scan_diagnostics: Vec<ImportDiagnostic>,
@@ -840,10 +897,12 @@ fn build_external_import_batch(
     ))
 }
 
+#[cfg(not(target_os = "android"))]
 fn validate_destination_aliases(prepared: &PreparedImport) -> anyhow::Result<()> {
     destination_aliases(prepared).map(|_| ())
 }
 
+#[cfg(not(target_os = "android"))]
 fn destination_aliases(
     prepared: &PreparedImport,
 ) -> anyhow::Result<BTreeMap<uuid::Uuid, Vec<PageAlias>>> {
@@ -889,6 +948,7 @@ fn destination_aliases(
     Ok(result)
 }
 
+#[cfg(not(target_os = "android"))]
 fn imported_block_style(block: &notes_import::ImportBlock) -> BlockStyle {
     if let Some(task) = &block.task {
         return BlockStyle::task(match task.target_state {
@@ -908,6 +968,7 @@ fn imported_block_style(block: &notes_import::ImportBlock) -> BlockStyle {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn apply_media_rewrites(
     prepared: &mut PreparedImport,
     materialized: &MediaMaterializationPlan,
@@ -948,6 +1009,7 @@ fn apply_media_rewrites(
     Ok(())
 }
 
+#[cfg(not(target_os = "android"))]
 fn install_import_blobs(
     store: &BlobStore,
     blobs: Vec<MaterializedMediaBlob>,
@@ -978,6 +1040,7 @@ fn install_import_blobs(
     Ok(())
 }
 
+#[cfg(not(target_os = "android"))]
 async fn cleanup_failed_import(
     connection: &Connection,
     store: &BlobStore,
@@ -1009,6 +1072,7 @@ async fn cleanup_failed_import(
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn prepare_selected_graph(
     source_root: &Path,
     identity: IdentityContext,
@@ -1059,6 +1123,7 @@ fn prepare_selected_graph(
     })
 }
 
+#[cfg(not(target_os = "android"))]
 fn map_prepare_graph_error(error: PrepareGraphError) -> CommandError {
     let code = match &error {
         PrepareGraphError::SourceChanged => CommandErrorCode::Conflict,
@@ -1091,6 +1156,7 @@ fn map_prepare_graph_error(error: PrepareGraphError) -> CommandError {
     CommandError::new(code, error.to_string())
 }
 
+#[cfg(not(target_os = "android"))]
 fn map_commit_plan_error(error: CommitPlanError) -> CommandError {
     let code = match &error {
         CommitPlanError::Scan(_) | CommitPlanError::SourceChanged => CommandErrorCode::Conflict,
@@ -1109,6 +1175,7 @@ fn map_commit_plan_error(error: CommitPlanError) -> CommandError {
     CommandError::new(code, error.to_string())
 }
 
+#[cfg(not(target_os = "android"))]
 fn read_manifest_document(
     source_root: &Path,
     entry: &notes_import::ManifestEntry,
@@ -1143,6 +1210,7 @@ fn read_manifest_document(
     Ok(bytes)
 }
 
+#[cfg(not(target_os = "android"))]
 struct DrawingConversionSelection {
     publication: Option<DrawingConversionPublication>,
     state: LogseqDrawingConversionState,
@@ -1150,6 +1218,7 @@ struct DrawingConversionSelection {
     preserved_count: u64,
 }
 
+#[cfg(not(target_os = "android"))]
 fn select_drawing_conversions(
     state: &AppState,
     source_root: &Path,
@@ -1249,6 +1318,7 @@ fn select_drawing_conversions(
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn summarize_report(
     prepared: &PreparedImport,
     scan_diagnostics: &[ImportDiagnostic],
@@ -1300,6 +1370,7 @@ fn summarize_report(
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn send_import_progress(
     channel: &Channel<LogseqImportProgress>,
     stage: LogseqImportStage,
@@ -1314,6 +1385,7 @@ fn send_import_progress(
     });
 }
 
+#[cfg(not(target_os = "android"))]
 fn send_indeterminate_import_progress(
     channel: &Channel<LogseqImportProgress>,
     stage: LogseqImportStage,
@@ -1321,7 +1393,7 @@ fn send_indeterminate_import_progress(
     let _ = channel.send(LogseqImportProgress::Indeterminate { stage });
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "android")))]
 mod tests {
     use super::*;
     use notes_core::AttachmentOwner;
