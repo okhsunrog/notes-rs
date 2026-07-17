@@ -1,5 +1,5 @@
 use notes_core::db::{self, BlockContent, Content};
-use notes_core::{BlockStyle, Connection, PageLayout};
+use notes_core::{BlockStyle, Connection, PageLayout, TaskState};
 
 struct TestDatabase {
     _directory: tempfile::TempDir,
@@ -72,7 +72,7 @@ async fn page_layouts_block_styles_tree_and_split_have_stable_typed_ordering() {
         first_page.uuid,
         None,
         None,
-        BlockStyle::Task,
+        BlockStyle::task(TaskState::Todo),
         "Ship it".into(),
     )
     .await
@@ -238,7 +238,13 @@ async fn every_page_layout_and_block_style_roundtrips_through_sqlite() {
         BlockStyle::Paragraph,
         BlockStyle::Bullet,
         BlockStyle::Numbered,
-        BlockStyle::Task,
+        BlockStyle::task(TaskState::Todo),
+        BlockStyle::task(TaskState::Doing),
+        BlockStyle::task(TaskState::Now),
+        BlockStyle::task(TaskState::Later),
+        BlockStyle::task(TaskState::Done),
+        BlockStyle::task(TaskState::Waiting),
+        BlockStyle::task(TaskState::Cancelled),
         BlockStyle::Heading1,
         BlockStyle::Heading2,
         BlockStyle::Heading3,

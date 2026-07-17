@@ -50,7 +50,9 @@ CREATE TABLE blocks (
   order_key TEXT NOT NULL
     CHECK (length(order_key) = 16 AND order_key NOT GLOB '*[^0-9A-F]*'),
   style TEXT NOT NULL DEFAULT 'paragraph'
-    CHECK (style IN ('paragraph', 'bullet', 'numbered', 'task',
+    CHECK (style IN ('paragraph', 'bullet', 'numbered',
+                     'task:todo', 'task:doing', 'task:now', 'task:later',
+                     'task:done', 'task:waiting', 'task:cancelled',
                      'heading_1', 'heading_2', 'heading_3', 'quote',
                      'code', 'divider')),
   markdown TEXT NOT NULL DEFAULT '',

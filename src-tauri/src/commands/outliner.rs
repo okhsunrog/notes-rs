@@ -82,6 +82,23 @@ pub async fn set_block_style(
         .await
         .map_err(err)?;
     emit_blocks_changed(&app, std::slice::from_ref(&block), []);
+    emit_domain(&app, DomainEvent::HistoryChanged);
+    Ok(block)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn set_task_state(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    uuid: uuid::Uuid,
+    task_state: TaskState,
+) -> CommandResult<db::Block> {
+    let block = db::set_task_state(&state.conn, uuid, task_state)
+        .await
+        .map_err(err)?;
+    emit_blocks_changed(&app, std::slice::from_ref(&block), []);
+    emit_domain(&app, DomainEvent::HistoryChanged);
     Ok(block)
 }
 

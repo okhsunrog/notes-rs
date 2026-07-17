@@ -223,20 +223,210 @@ impl AttachmentOwner {
 }
 
 string_enum! {
-    /// Semantic Markdown shape of a block. Outline bullets are editor chrome
-    /// and deliberately do not change this value.
+    /// Durable workflow state carried only by a task block.
     #[serde(rename_all = "snake_case")]
-    pub enum BlockStyle {
-        Paragraph => "paragraph",
-        Bullet => "bullet",
-        Numbered => "numbered",
-        Task => "task",
-        Heading1 => "heading_1",
-        Heading2 => "heading_2",
-        Heading3 => "heading_3",
-        Quote => "quote",
-        Code => "code",
-        Divider => "divider",
+    pub enum TaskState {
+        Todo => "todo",
+        Doing => "doing",
+        Now => "now",
+        Later => "later",
+        Done => "done",
+        Waiting => "waiting",
+        Cancelled => "cancelled",
+    }
+}
+
+impl TaskState {
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Done | Self::Cancelled)
+    }
+
+    /// Checkbox semantics are deliberately binary: any open workflow state is
+    /// completed as `Done`, while a terminal state is reopened as `Todo`.
+    pub const fn toggled(self) -> Self {
+        if self.is_terminal() {
+            Self::Todo
+        } else {
+            Self::Done
+        }
+    }
+}
+
+/// Semantic Markdown shape of a block. Task state is part of the style value,
+/// so neither the Rust nor generated TypeScript contract can represent a task
+/// without state or attach task state to a non-task block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, specta::Type)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BlockStyle {
+    Paragraph,
+    Bullet,
+    Numbered,
+    Task {
+        state: TaskState,
+    },
+    #[serde(rename = "heading_1")]
+    Heading1,
+    #[serde(rename = "heading_2")]
+    Heading2,
+    #[serde(rename = "heading_3")]
+    Heading3,
+    Quote,
+    Code,
+    Divider,
+}
+
+impl<'de> Deserialize<'de> for BlockStyle {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Default)]
+        enum StateField {
+            #[default]
+            Missing,
+            Present(Option<TaskState>),
+        }
+
+        fn deserialize_state_field<'de, D>(deserializer: D) -> Result<StateField, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            Option::<TaskState>::deserialize(deserializer).map(StateField::Present)
+        }
+
+        #[derive(Deserialize)]
+        struct WireStyle {
+            kind: String,
+            #[serde(default, deserialize_with = "deserialize_state_field")]
+            state: StateField,
+            #[serde(flatten)]
+            extra: std::collections::BTreeMap<String, serde::de::IgnoredAny>,
+        }
+
+        let wire = WireStyle::deserialize(deserializer)?;
+        if !wire.extra.is_empty() {
+            return Err(serde::de::Error::custom("unknown block style field"));
+        }
+        match (wire.kind.as_str(), wire.state) {
+            ("paragraph", StateField::Missing) => Ok(Self::Paragraph),
+            ("bullet", StateField::Missing) => Ok(Self::Bullet),
+            ("numbered", StateField::Missing) => Ok(Self::Numbered),
+            ("task", StateField::Present(Some(state))) => Ok(Self::Task { state }),
+            ("heading_1", StateField::Missing) => Ok(Self::Heading1),
+            ("heading_2", StateField::Missing) => Ok(Self::Heading2),
+            ("heading_3", StateField::Missing) => Ok(Self::Heading3),
+            ("quote", StateField::Missing) => Ok(Self::Quote),
+            ("code", StateField::Missing) => Ok(Self::Code),
+            ("divider", StateField::Missing) => Ok(Self::Divider),
+            ("task", _) => Err(serde::de::Error::custom("task block style requires state")),
+            (_, StateField::Present(_)) => Err(serde::de::Error::custom(
+                "task state is only valid for task block style",
+            )),
+            _ => Err(serde::de::Error::custom("unsupported block style kind")),
+        }
+    }
+}
+
+impl BlockStyle {
+    pub const fn task(state: TaskState) -> Self {
+        Self::Task { state }
+    }
+
+    pub const fn task_state(self) -> Option<TaskState> {
+        match self {
+            Self::Task { state } => Some(state),
+            _ => None,
+        }
+    }
+
+    /// Canonical single-column SQLite representation. The state is encoded in
+    /// the same value as the visual style and therefore shares one LWW clock.
+    pub const fn storage_value(self) -> &'static str {
+        match self {
+            Self::Paragraph => "paragraph",
+            Self::Bullet => "bullet",
+            Self::Numbered => "numbered",
+            Self::Task {
+                state: TaskState::Todo,
+            } => "task:todo",
+            Self::Task {
+                state: TaskState::Doing,
+            } => "task:doing",
+            Self::Task {
+                state: TaskState::Now,
+            } => "task:now",
+            Self::Task {
+                state: TaskState::Later,
+            } => "task:later",
+            Self::Task {
+                state: TaskState::Done,
+            } => "task:done",
+            Self::Task {
+                state: TaskState::Waiting,
+            } => "task:waiting",
+            Self::Task {
+                state: TaskState::Cancelled,
+            } => "task:cancelled",
+            Self::Heading1 => "heading_1",
+            Self::Heading2 => "heading_2",
+            Self::Heading3 => "heading_3",
+            Self::Quote => "quote",
+            Self::Code => "code",
+            Self::Divider => "divider",
+        }
+    }
+}
+
+impl fmt::Display for BlockStyle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.storage_value())
+    }
+}
+
+impl FromStr for BlockStyle {
+    type Err = ParseEnumError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let style = match value {
+            "paragraph" => Self::Paragraph,
+            "bullet" => Self::Bullet,
+            "numbered" => Self::Numbered,
+            "task:todo" => Self::task(TaskState::Todo),
+            "task:doing" => Self::task(TaskState::Doing),
+            "task:now" => Self::task(TaskState::Now),
+            "task:later" => Self::task(TaskState::Later),
+            "task:done" => Self::task(TaskState::Done),
+            "task:waiting" => Self::task(TaskState::Waiting),
+            "task:cancelled" => Self::task(TaskState::Cancelled),
+            "heading_1" => Self::Heading1,
+            "heading_2" => Self::Heading2,
+            "heading_3" => Self::Heading3,
+            "quote" => Self::Quote,
+            "code" => Self::Code,
+            "divider" => Self::Divider,
+            _ => {
+                return Err(ParseEnumError {
+                    type_name: "BlockStyle",
+                    value: value.to_owned(),
+                });
+            }
+        };
+        Ok(style)
+    }
+}
+
+impl rusqlite::types::ToSql for BlockStyle {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(self.storage_value().into())
+    }
+}
+
+impl rusqlite::types::FromSql for BlockStyle {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        value
+            .as_str()?
+            .parse()
+            .map_err(|error| rusqlite::types::FromSqlError::Other(Box::new(error)))
     }
 }
 
@@ -340,24 +530,62 @@ mod tests {
     use super::*;
 
     #[test]
-    fn block_style_uses_one_canonical_wire_and_sql_value() {
-        for style in [
-            BlockStyle::Paragraph,
-            BlockStyle::Bullet,
-            BlockStyle::Numbered,
-            BlockStyle::Task,
-            BlockStyle::Heading1,
-            BlockStyle::Heading2,
-            BlockStyle::Heading3,
-            BlockStyle::Quote,
-            BlockStyle::Code,
-            BlockStyle::Divider,
+    fn block_style_wire_shape_cannot_represent_an_invalid_task() {
+        assert_eq!(
+            serde_json::to_value(BlockStyle::Paragraph).unwrap(),
+            serde_json::json!({ "kind": "paragraph" })
+        );
+        assert_eq!(
+            serde_json::to_value(BlockStyle::task(TaskState::Now)).unwrap(),
+            serde_json::json!({ "kind": "task", "state": "now" })
+        );
+        assert!(
+            serde_json::from_value::<BlockStyle>(serde_json::json!({ "kind": "task" })).is_err()
+        );
+        assert!(
+            serde_json::from_value::<BlockStyle>(
+                serde_json::json!({ "kind": "paragraph", "state": "done" })
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<BlockStyle>(
+                serde_json::json!({ "kind": "paragraph", "state": null })
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn task_state_has_explicit_terminal_toggle_behavior() {
+        for state in [
+            TaskState::Todo,
+            TaskState::Doing,
+            TaskState::Now,
+            TaskState::Later,
+            TaskState::Waiting,
         ] {
-            assert_eq!(
-                serde_json::to_value(style).unwrap(),
-                serde_json::Value::String(style.as_str().into())
-            );
+            assert_eq!(state.toggled(), TaskState::Done);
         }
+        assert_eq!(TaskState::Done.toggled(), TaskState::Todo);
+        assert_eq!(TaskState::Cancelled.toggled(), TaskState::Todo);
+    }
+
+    #[test]
+    fn task_state_is_part_of_the_canonical_sql_style_value() {
+        for state in [
+            TaskState::Todo,
+            TaskState::Doing,
+            TaskState::Now,
+            TaskState::Later,
+            TaskState::Done,
+            TaskState::Waiting,
+            TaskState::Cancelled,
+        ] {
+            let style = BlockStyle::task(state);
+            assert_eq!(style.storage_value().parse::<BlockStyle>().unwrap(), style);
+        }
+        assert!("task".parse::<BlockStyle>().is_err());
     }
 
     #[test]

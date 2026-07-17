@@ -6,7 +6,7 @@ use crate::operation::{
 use std::collections::{HashMap, HashSet};
 
 pub const ARCHIVE_FORMAT: &str = "notes-rs";
-pub const ARCHIVE_VERSION: u32 = 4;
+pub const ARCHIVE_VERSION: u32 = 5;
 
 pub async fn export_archive(conn: &Connection) -> Result<DataArchive> {
     conn.call(|database| {

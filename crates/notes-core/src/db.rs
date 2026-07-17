@@ -1,5 +1,6 @@
 use crate::model::{
     AttachmentOwner, BlockStyle, ObjectKind, OrderKey, PageKind, PageLayout, ReorderDirection,
+    TaskState,
 };
 use crate::operation::{self, OpKind};
 use crate::sqlite::Connection;
@@ -26,7 +27,7 @@ pub use attachments::{
 pub use blocks::{
     BlockContent, create_block, delete_block, get_block, get_blocks, indent_block,
     list_block_children, move_block, move_block_in_direction, outdent_block, reorder_block,
-    set_block_content, set_block_style, split_block,
+    set_block_content, set_block_style, set_task_state, split_block,
 };
 pub use graph::{find_backlinks, graph_snapshot, neighbors, read_ancestors, read_subtree};
 pub use history::{HistoryStatus, history_status, redo_history, undo_history};

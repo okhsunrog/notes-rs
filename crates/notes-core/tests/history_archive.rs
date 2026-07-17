@@ -1,5 +1,5 @@
 use notes_core::db::{self, DataArchive};
-use notes_core::{AttachmentOwner, BlockStyle, Connection, PageLayout};
+use notes_core::{AttachmentOwner, BlockStyle, Connection, PageLayout, TaskState};
 
 struct TestDatabase {
     _directory: tempfile::TempDir,
@@ -19,6 +19,110 @@ async fn database() -> TestDatabase {
 
 fn hash(byte: char) -> String {
     std::iter::repeat_n(byte, 64).collect()
+}
+
+#[tokio::test]
+async fn task_state_updates_are_typed_undoable_and_reject_non_tasks() {
+    let database = database().await;
+    let note = db::create_note(&database.connection)
+        .await
+        .expect("create note");
+
+    let error = db::set_task_state(
+        &database.connection,
+        note.initial_block.uuid,
+        TaskState::Done,
+    )
+    .await
+    .expect_err("a paragraph cannot carry task state");
+    assert!(error.to_string().contains("requires a task block"));
+
+    db::set_block_style(
+        &database.connection,
+        note.initial_block.uuid,
+        BlockStyle::task(TaskState::Now),
+    )
+    .await
+    .expect("turn block into task");
+    let completed = db::set_task_state(
+        &database.connection,
+        note.initial_block.uuid,
+        TaskState::Done,
+    )
+    .await
+    .expect("complete task");
+    assert_eq!(completed.style, BlockStyle::task(TaskState::Done));
+
+    assert!(
+        db::undo_history(&database.connection)
+            .await
+            .expect("undo state")
+    );
+    assert_eq!(
+        db::get_block(&database.connection, note.initial_block.uuid)
+            .await
+            .expect("read task")
+            .expect("task exists")
+            .style,
+        BlockStyle::task(TaskState::Now)
+    );
+    assert!(
+        db::redo_history(&database.connection)
+            .await
+            .expect("redo state")
+    );
+    assert_eq!(
+        db::get_block(&database.connection, note.initial_block.uuid)
+            .await
+            .expect("read task")
+            .expect("task exists")
+            .style,
+        BlockStyle::task(TaskState::Done)
+    );
+}
+
+#[tokio::test]
+async fn archive_roundtrip_preserves_task_state_inside_block_style() {
+    let source = database().await;
+    let note = db::create_note(&source.connection)
+        .await
+        .expect("create note");
+    db::set_block_style(
+        &source.connection,
+        note.initial_block.uuid,
+        BlockStyle::task(TaskState::Waiting),
+    )
+    .await
+    .expect("set waiting task");
+    let archive = db::export_archive(&source.connection)
+        .await
+        .expect("export archive");
+
+    let destination = database().await;
+    let workspace_uuid = archive.workspace_uuid;
+    destination
+        .connection
+        .call(move |database| {
+            database.execute(
+                "UPDATE workspace SET uuid = ?1 WHERE singleton = 1",
+                [workspace_uuid],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("align workspace");
+    db::import_archive(&destination.connection, archive)
+        .await
+        .expect("import archive");
+
+    assert_eq!(
+        db::get_block(&destination.connection, note.initial_block.uuid)
+            .await
+            .expect("read imported task")
+            .expect("task imported")
+            .style,
+        BlockStyle::task(TaskState::Waiting)
+    );
 }
 
 #[tokio::test]
@@ -247,7 +351,7 @@ fn assert_archive_semantics(
     attachment_uuid: uuid::Uuid,
 ) {
     assert_eq!(archive.format, "notes-rs");
-    assert_eq!(archive.version, 4);
+    assert_eq!(archive.version, 5);
     assert!(
         archive
             .page_identities

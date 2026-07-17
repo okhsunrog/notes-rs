@@ -151,7 +151,7 @@ export function useNotesWorkspace(
       journalBusyRef.current = true;
       setJournalBusy(true);
       try {
-        const block = await appendToJournal(date, { markdown }, "paragraph");
+        const block = await appendToJournal(date, { markdown }, { kind: "paragraph" });
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: queryKeys.children(block.pageUuid) }),
           queryClient.invalidateQueries({ queryKey: queryKeys.journals }),

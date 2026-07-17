@@ -4,7 +4,8 @@ use notes_core::operation::{
     PageSetLayout, PageSetTitle,
 };
 use notes_core::{
-    BlockStyle, Connection, Hlc, Op, OpKind, OrderKey, Origin, PageLayout, apply, apply_batch,
+    BlockStyle, Connection, Hlc, Op, OpKind, OrderKey, Origin, PageLayout, TaskState, apply,
+    apply_batch,
 };
 use proptest::prelude::*;
 
@@ -141,6 +142,85 @@ async fn source_state(connection: &Connection) -> SourceState {
         })
         .await
         .expect("read source state")
+}
+
+#[tokio::test]
+async fn concurrent_task_state_and_non_task_style_share_one_lww_clock() {
+    let (_left_dir, left) = database().await;
+    let (_right_dir, right) = database().await;
+    let page_uuid = uuid::Uuid::from_u128(0xB300);
+    let block_uuid = uuid::Uuid::from_u128(0xB301);
+    let initial = [
+        op(
+            0,
+            1_000,
+            OpKind::PageCreate(PageCreate {
+                uuid: page_uuid,
+                kind: notes_core::PageKind::Note,
+                title: Some("Tasks".into()),
+                layout: PageLayout::Outline,
+                created_at: 1,
+            }),
+        ),
+        op(
+            1,
+            1_001,
+            OpKind::BlockCreate(BlockCreate {
+                uuid: block_uuid,
+                page_uuid,
+                parent_uuid: None,
+                order_key: OrderKey::first(),
+                style: BlockStyle::task(TaskState::Todo),
+                markdown: "ship B3".into(),
+                created_at: 1,
+            }),
+        ),
+    ];
+    for connection in [&left, &right] {
+        apply_batch(connection, &initial, Origin::Remote)
+            .await
+            .expect("apply initial task");
+    }
+
+    let complete = op(
+        2,
+        2_000,
+        OpKind::BlockSetStyle(BlockSetStyle {
+            uuid: block_uuid,
+            style: BlockStyle::task(TaskState::Done),
+        }),
+    );
+    let convert_to_quote = op(
+        3,
+        2_001,
+        OpKind::BlockSetStyle(BlockSetStyle {
+            uuid: block_uuid,
+            style: BlockStyle::Quote,
+        }),
+    );
+    apply(&left, &complete, Origin::Remote)
+        .await
+        .expect("left complete");
+    apply(&left, &convert_to_quote, Origin::Remote)
+        .await
+        .expect("left convert");
+    apply(&right, &convert_to_quote, Origin::Remote)
+        .await
+        .expect("right convert");
+    apply(&right, &complete, Origin::Remote)
+        .await
+        .expect("right stale complete");
+
+    assert_eq!(source_state(&left).await, source_state(&right).await);
+    assert_eq!(
+        db::get_block(&left, block_uuid)
+            .await
+            .expect("read block")
+            .expect("block exists")
+            .style,
+        BlockStyle::Quote,
+        "task state and style must not race through independent clocks"
+    );
 }
 
 fn build_operation(

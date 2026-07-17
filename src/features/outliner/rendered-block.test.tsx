@@ -3,7 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import type { Block, BlockStyle } from "@/lib/api";
 import { RenderedBlock } from "./rendered-block";
 
-function block(markdown: string, style: BlockStyle = "paragraph"): Block {
+function block(markdown: string, style: BlockStyle = { kind: "paragraph" }): Block {
   return {
     uuid: "019c8d1a-4ab1-7f31-8f00-f594337c3ca5",
     pageUuid: "019c8d1a-4ab1-7f31-8f00-f594337c3ca6",
@@ -16,7 +16,7 @@ function block(markdown: string, style: BlockStyle = "paragraph"): Block {
   };
 }
 
-function render(markdown: string, style: BlockStyle = "paragraph", readOnly = false) {
+function render(markdown: string, style: BlockStyle = { kind: "paragraph" }, readOnly = false) {
   return renderToStaticMarkup(
     <RenderedBlock
       block={block(markdown, style)}
@@ -24,6 +24,8 @@ function render(markdown: string, style: BlockStyle = "paragraph", readOnly = fa
       onOpenLink={() => undefined}
       ordinal={3}
       readOnly={readOnly}
+      taskBusy={false}
+      onTaskStateChange={() => undefined}
     />,
   );
 }
@@ -39,7 +41,7 @@ describe("RenderedBlock Markdown integration", () => {
   });
 
   it("uses inline Markdown inside typed heading chrome", () => {
-    const html = render("## **Architecture**", "heading_1", true);
+    const html = render("## **Architecture**", { kind: "heading_1" }, true);
 
     expect(html).toContain("<h2");
     expect(html).toContain("<strong>Architecture</strong>");
@@ -48,7 +50,7 @@ describe("RenderedBlock Markdown integration", () => {
   });
 
   it("keeps raw code blocks literal", () => {
-    const html = render("[[Not a link]]\n<script>not executable</script>", "code");
+    const html = render("[[Not a link]]\n<script>not executable</script>", { kind: "code" });
 
     expect(html).toContain("<pre");
     expect(html).toContain("[[Not a link]]");
@@ -57,9 +59,41 @@ describe("RenderedBlock Markdown integration", () => {
   });
 
   it("preserves numbered document block chrome", () => {
-    const html = render("item with *emphasis*", "numbered");
+    const html = render("item with *emphasis*", { kind: "numbered" });
 
     expect(html).toContain(">3.</span>");
     expect(html).toContain("<em>emphasis</em>");
+  });
+
+  it("renders a real accessible task action with its typed state", () => {
+    const html = render("Ship the release", { kind: "task", state: "now" });
+
+    expect(html).toContain('role="checkbox"');
+    expect(html).toContain('aria-checked="false"');
+    expect(html).toContain("Now task; change to Done");
+    expect(html).not.toContain('disabled=""');
+  });
+
+  it("renders terminal task states distinctly", () => {
+    const done = render("Shipped", { kind: "task", state: "done" });
+    const cancelled = render("Dropped", { kind: "task", state: "cancelled" });
+
+    expect(done).toContain('aria-checked="true"');
+    expect(cancelled).toContain('aria-checked="mixed"');
+  });
+
+  it("keeps reading presentation semantic and non-mutating", () => {
+    const html = render("Ship the release", { kind: "task", state: "waiting" }, true);
+
+    expect(html).toContain('role="img"');
+    expect(html).toContain('aria-label="Waiting task"');
+    expect(html).not.toContain('role="checkbox"');
+  });
+
+  it("keeps task chrome for an empty task block", () => {
+    const html = render("", { kind: "task", state: "todo" });
+
+    expect(html).toContain('role="checkbox"');
+    expect(html).toContain("Start writing…");
   });
 });

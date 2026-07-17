@@ -62,6 +62,7 @@ export const commands = {
 } | null, CommandError>(__TAURI_INVOKE("get_block", { uuid })),
 	setBlockContent: (uuid: string, content: BlockContent) => typedError<Block, CommandError>(__TAURI_INVOKE("set_block_content", { uuid, content })),
 	setBlockStyle: (uuid: string, style: BlockStyle) => typedError<Block, CommandError>(__TAURI_INVOKE("set_block_style", { uuid, style })),
+	setTaskState: (uuid: string, taskState: TaskState) => typedError<Block, CommandError>(__TAURI_INVOKE("set_task_state", { uuid, taskState })),
 	splitBlock: (uuid: string, parts: BlockContent[]) => typedError<Block[], CommandError>(__TAURI_INVOKE("split_block", { uuid, parts })),
 	getContainingPage: (blockUuid: string) => typedError<{
 	uuid: string,
@@ -214,10 +215,11 @@ export type BlockContent = {
 };
 
 /**
- *  Semantic Markdown shape of a block. Outline bullets are editor chrome
- *  and deliberately do not change this value.
+ *  Semantic Markdown shape of a block. Task state is part of the style value,
+ *  so neither the Rust nor generated TypeScript contract can represent a task
+ *  without state or attach task state to a non-task block.
  */
-export type BlockStyle = "paragraph" | "bullet" | "numbered" | "task" | "heading_1" | "heading_2" | "heading_3" | "quote" | "code" | "divider";
+export type BlockStyle = { kind: "paragraph" } | { kind: "bullet" } | { kind: "numbered" } | { kind: "task"; state: TaskState } | { kind: "heading_1" } | { kind: "heading_2" } | { kind: "heading_3" } | { kind: "quote" } | { kind: "code" } | { kind: "divider" };
 
 export type ChatEvent = { kind: "text_delta"; text: string } | { kind: "reasoning"; text: string } | { kind: "tool_start"; id: string; name: string; args: unknown } | { kind: "tool_end"; id: string; result: string } | { kind: "done"; text: string } | { kind: "error"; message: string } | { kind: "usage"; inputTokens: number; outputTokens: number; totalTokens: number } | { kind: "cancelled" };
 
@@ -369,6 +371,9 @@ export type SyncStatus = {
 	pendingOperations: number,
 	message: string | null,
 };
+
+/**  Durable workflow state carried only by a task block. */
+export type TaskState = "todo" | "doing" | "now" | "later" | "done" | "waiting" | "cancelled";
 
 export type WindowDecorationMode = "native" | "borderless";
 

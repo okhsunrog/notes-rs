@@ -38,6 +38,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::get_block,
             commands::set_block_content,
             commands::set_block_style,
+            commands::set_task_state,
             commands::split_block,
             commands::get_containing_page,
             commands::neighbors,

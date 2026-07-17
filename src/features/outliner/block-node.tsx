@@ -29,9 +29,11 @@ import {
   splitBlock,
   setBlockContent,
   setBlockStyle,
+  setTaskState,
   type Block,
   type BlockContent,
   type BlockStyle,
+  type TaskState,
 } from "@/lib/api";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { BlockChildren } from "./block-tree";
@@ -51,8 +53,13 @@ import { cn } from "@/lib/utils";
 import { reconcileRemoteDraft } from "./editor-sync";
 import {
   BLOCK_STYLE_OPTIONS,
+  TASK_STATE_OPTIONS,
+  blockStyleForKind,
+  blockStylesEqual,
   getBlockStyleOption,
-  isBlockStyle,
+  getTaskStateOption,
+  isBlockStyleKind,
+  isTaskState,
   replaceCachedBlock,
   type BlockStyleIcon,
 } from "./block-style";
@@ -91,6 +98,7 @@ export function BlockNode({ block, depth, ordinal }: Props) {
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(collapseKey) === "1");
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [styleBusy, setStyleBusy] = useState(false);
+  const styleBusyRef = useRef(false);
 
   const draftRef = useRef(block.markdown);
   const blockRef = useRef(block);
@@ -216,14 +224,16 @@ export function BlockNode({ block, depth, ordinal }: Props) {
   }, [applyBlockSnapshot]);
 
   const changeBlockStyle = async (value: string) => {
-    if (!isBlockStyle(value) || styleBusy || readOnly) return;
-    if (value === blockRef.current.style) return;
+    if (!isBlockStyleKind(value) || styleBusyRef.current || readOnly) return;
+    const nextStyle = blockStyleForKind(value, blockRef.current.style);
+    if (blockStylesEqual(nextStyle, blockRef.current.style)) return;
 
+    styleBusyRef.current = true;
     setStyleBusy(true);
     try {
       if (!(await flush())) return;
       const current = blockRef.current;
-      const updated = await setBlockStyle(current.uuid, value);
+      const updated = await setBlockStyle(current.uuid, nextStyle);
       applyBlockSnapshot(updated);
       setSaveState("idle");
     } catch (error) {
@@ -231,6 +241,29 @@ export function BlockNode({ block, depth, ordinal }: Props) {
       setSaveState("error");
       toast.error("Could not change the block style.");
     } finally {
+      styleBusyRef.current = false;
+      setStyleBusy(false);
+    }
+  };
+
+  const changeTaskState = async (value: string) => {
+    if (!isTaskState(value) || styleBusyRef.current || readOnly) return;
+    const current = blockRef.current;
+    if (current.style.kind !== "task" || current.style.state === value) return;
+
+    styleBusyRef.current = true;
+    setStyleBusy(true);
+    try {
+      if (!(await flush())) return;
+      const updated = await setTaskState(current.uuid, value);
+      applyBlockSnapshot(updated);
+      setSaveState("idle");
+    } catch (error) {
+      console.error("task state update failed", error);
+      setSaveState("error");
+      toast.error("Could not update the task state.");
+    } finally {
+      styleBusyRef.current = false;
       setStyleBusy(false);
     }
   };
@@ -569,7 +602,11 @@ export function BlockNode({ block, depth, ordinal }: Props) {
   };
 
   return (
-    <li className="flex flex-col" data-block-style={block.style}>
+    <li
+      className="flex flex-col"
+      data-block-style={block.style.kind}
+      data-task-state={block.style.kind === "task" ? block.style.state : undefined}
+    >
       <div
         className={`group flex items-start transition-colors ${
           outline
@@ -676,10 +713,21 @@ export function BlockNode({ block, depth, ordinal }: Props) {
                 layout={store.layout}
                 readOnly={readOnly}
                 onOpenLink={store.onOpenMarkdownLink}
+                taskBusy={styleBusy}
+                onTaskStateChange={(state) => void changeTaskState(state)}
               />
             </div>
           )}
         </div>
+        {block.style.kind === "task" && !readOnly && (
+          <TaskStatePicker
+            state={block.style.state}
+            editing={editing}
+            busy={styleBusy}
+            onChange={(value) => void changeTaskState(value)}
+            onRestoreEditorFocus={() => editRef.current?.focus()}
+          />
+        )}
         {!readOnly && (
           <BlockStylePicker
             style={block.style}
@@ -739,7 +787,7 @@ function BlockStylePicker({
 
   return (
     <Select
-      value={style}
+      value={style.kind}
       open={open}
       onOpenChange={setOpen}
       onValueChange={onChange}
@@ -783,6 +831,59 @@ function BlockStylePicker({
             </SelectItem>
           );
         })}
+      </SelectContent>
+    </Select>
+  );
+}
+
+function TaskStatePicker({
+  state,
+  editing,
+  busy,
+  onChange,
+  onRestoreEditorFocus,
+}: {
+  state: TaskState;
+  editing: boolean;
+  busy: boolean;
+  onChange: (value: string) => void;
+  onRestoreEditorFocus: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const current = getTaskStateOption(state);
+
+  return (
+    <Select
+      value={state}
+      open={open}
+      onOpenChange={setOpen}
+      onValueChange={onChange}
+      disabled={busy}
+    >
+      <SelectTrigger
+        size="sm"
+        aria-label={`Task state: ${current.label}`}
+        title={`Task state: ${current.label}`}
+        className="mt-0.5 h-7 min-w-16 shrink-0 rounded-lg border-primary/15 bg-primary/5 px-2 text-[10px] font-semibold tracking-wide text-primary uppercase shadow-none hover:bg-primary/10 focus-visible:ring-2"
+      >
+        {busy ? <Loader2 className="size-3 animate-spin" /> : <span>{current.label}</span>}
+      </SelectTrigger>
+      <SelectContent
+        position="popper"
+        align="end"
+        sideOffset={4}
+        className="min-w-40 rounded-xl border-border/70 p-1 shadow-xl"
+        onCloseAutoFocus={(event) => {
+          if (!editing) return;
+          event.preventDefault();
+          onRestoreEditorFocus();
+        }}
+      >
+        {TASK_STATE_OPTIONS.map((option) => (
+          <SelectItem key={option.value} value={option.value} className="rounded-lg py-2">
+            {option.label}
+          </SelectItem>
+        ))}
       </SelectContent>
     </Select>
   );

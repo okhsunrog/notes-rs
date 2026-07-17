@@ -33,6 +33,7 @@ import type {
   SettingsUpdate,
   StartupStatus,
   SyncStatus,
+  TaskState,
   WindowDecorationMode,
 } from "@/lib/bindings";
 
@@ -69,6 +70,7 @@ export type {
   SettingsUpdate,
   StartupStatus,
   SyncStatus,
+  TaskState,
   WindowDecorationMode,
 };
 
@@ -164,6 +166,7 @@ export function contentText(content: Content) {
 
 export const setBlockContent = checkedCommand(commands.setBlockContent);
 export const setBlockStyle = checkedCommand(commands.setBlockStyle);
+export const setTaskState = checkedCommand(commands.setTaskState);
 export const renamePage = checkedCommand(commands.renamePage);
 export const setPageLayout = checkedCommand(commands.setPageLayout);
 export const createNote = checkedCommand(commands.createNote);
@@ -231,7 +234,7 @@ export function createBlock(args: {
       args.pageUuid,
       args.parentUuid,
       args.afterUuid,
-      args.style ?? "paragraph",
+      args.style ?? { kind: "paragraph" },
       args.markdown ?? "",
     ),
   );

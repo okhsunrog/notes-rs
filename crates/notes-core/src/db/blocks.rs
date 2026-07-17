@@ -176,8 +176,9 @@ pub async fn set_block_style(
         .await?
         .ok_or_else(|| crate::CoreError::not_found("block was not found"))?;
     if block.style != style {
-        apply_local(
+        apply_local_action(
             conn,
+            "set block style",
             vec![OpKind::BlockSetStyle(BlockSetStyle { uuid, style })],
         )
         .await?;
@@ -185,6 +186,20 @@ pub async fn set_block_style(
     get_block(conn, uuid)
         .await?
         .context("updated block disappeared")
+}
+
+pub async fn set_task_state(
+    conn: &Connection,
+    uuid: uuid::Uuid,
+    state: TaskState,
+) -> Result<Block> {
+    let block = get_block(conn, uuid)
+        .await?
+        .ok_or_else(|| crate::CoreError::not_found("block was not found"))?;
+    if block.style.task_state().is_none() {
+        return Err(crate::CoreError::invalid("task state requires a task block").into());
+    }
+    set_block_style(conn, uuid, BlockStyle::task(state)).await
 }
 
 pub async fn split_block(

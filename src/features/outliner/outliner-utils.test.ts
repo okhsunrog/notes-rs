@@ -9,7 +9,7 @@ function block(uuid: string, orderKey: string): Block {
     pageUuid: "page-a",
     parentUuid: null,
     orderKey,
-    style: "paragraph",
+    style: { kind: "paragraph" },
     markdown: "",
     createdAt: 0,
     updatedAt: 0,
