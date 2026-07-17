@@ -26,7 +26,11 @@ chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.2", features = ["derive"] }
 futures = "0.3.32"
 fastembed = "5.17.3"
-llm-relay = { path = "../llm-relay", features = ["embeddings", "rig", "streaming"] }
+llm-relay = { git = "https://github.com/okhsunrog/llm-relay", rev = "57b0cabe41ad5c161f486afa8980b51fa2383a83", features = [
+  "embeddings",
+  "rig",
+  "streaming",
+] }
 notes-ai = { path = "crates/notes-ai" }
 notes-core = { path = "crates/notes-core" }
 notes-protocol = { path = "crates/notes-protocol" }
