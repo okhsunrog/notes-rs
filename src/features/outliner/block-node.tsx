@@ -32,7 +32,7 @@ import {
   type Block,
   type BlockContent,
   type BlockStyle,
-  type PageView,
+  type PageLayout,
 } from "@/lib/api";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { BlockChildren } from "./block-tree";
@@ -84,9 +84,9 @@ function lastOrderedBlock(blocks: Block[]) {
 export function BlockNode({ block, depth, ordinal }: Props) {
   const store = useOutliner();
   const queryClient = useQueryClient();
-  const editing = store.view !== "reading" && store.editingUuid === block.uuid;
-  const outline = store.view === "outline";
-  const readOnly = store.view === "reading";
+  const editing = !store.readOnly && store.editingUuid === block.uuid;
+  const outline = store.layout === "outline";
+  const readOnly = store.readOnly;
   const containerUuid = block.parentUuid ?? block.pageUuid;
   const collapseKey = `outliner.collapsed.${block.uuid}`;
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(collapseKey) === "1");
@@ -671,7 +671,7 @@ export function BlockNode({ block, depth, ordinal }: Props) {
             </>
           ) : (
             <div className={readOnly ? "cursor-default" : "cursor-text"}>
-              <RenderedBlock block={block} ordinal={ordinal} view={store.view} />
+              <RenderedBlock block={block} ordinal={ordinal} layout={store.layout} />
             </div>
           )}
         </div>
@@ -786,11 +786,11 @@ function BlockStylePicker({
 function RenderedBlock({
   block,
   ordinal,
-  view,
+  layout,
 }: {
   block: Block;
   ordinal: number;
-  view: PageView;
+  layout: PageLayout;
 }) {
   if (block.style === "divider") return <hr className="my-4 border-border/70" />;
   if (!block.markdown) {
@@ -821,7 +821,7 @@ function RenderedBlock({
       </blockquote>
     );
   }
-  if (view === "outline" && (block.style === "bullet" || block.style === "numbered")) {
+  if (layout === "outline" && (block.style === "bullet" || block.style === "numbered")) {
     return <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{content}</p>;
   }
   if (block.style === "bullet" || block.style === "numbered" || block.style === "task") {

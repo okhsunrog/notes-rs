@@ -2,7 +2,7 @@ use anyhow::Context;
 use base64::Engine;
 use notes_core::Connection;
 use notes_core::db::{self, Block, Page, SearchHit};
-use notes_core::{BlockStyle, PageView, ReorderDirection};
+use notes_core::{BlockStyle, PageLayout, ReorderDirection};
 use notes_protocol::{
     AiIndexStatus, AiProviderProbeResult, AiProviderSettingsUpdate, AiRuntimeSettings, ChatEvent,
     ChatTurn,

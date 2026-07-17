@@ -82,13 +82,12 @@ macro_rules! string_enum {
 }
 
 string_enum! {
-    /// The durable presentation a page opens with. The content model is the
-    /// same in every view; this only changes editing and rendering semantics.
+    /// The durable structural layout of a page. Reading is pane-local
+    /// presentation state and deliberately does not cross this boundary.
     #[serde(rename_all = "snake_case")]
-    pub enum PageView {
+    pub enum PageLayout {
         Outline => "outline",
         Document => "document",
-        Reading => "reading",
     }
 }
 

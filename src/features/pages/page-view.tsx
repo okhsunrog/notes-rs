@@ -13,8 +13,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Outliner } from "@/features/outliner/outliner";
 import { AttachmentsCard } from "@/features/attachments/attachments-card";
-import { renamePage, setPageView, type Page, type PageView } from "@/lib/api";
+import { renamePage, setPageLayout, type Page, type PageLayout } from "@/lib/api";
 import { DebouncedAction } from "@/lib/debounced-action";
+import type { PagePresentation } from "./page-presentation";
 
 type Props = {
   page: Page;
@@ -41,7 +42,8 @@ export function PageView({
 }: Props) {
   const [title, setTitle] = useState(page.title ?? "");
   const [saveState, setSaveState] = useState<SaveState>("idle");
-  const [viewBusy, setViewBusy] = useState(false);
+  const [layoutBusy, setLayoutBusy] = useState(false);
+  const [presentation, setPresentation] = useState<PagePresentation>("editing");
   const [bodyFocusRequest, setBodyFocusRequest] = useState(0);
 
   const autosave = useRef(new DebouncedAction()).current;
@@ -87,10 +89,12 @@ export function PageView({
     pageRef.current = page;
     setTitle(page.title ?? "");
     setSaveState("idle");
+    if (page.layout === "outline") setPresentation("editing");
   }, [autosave, page]);
 
   useEffect(() => {
     setBodyFocusRequest(0);
+    setPresentation("editing");
   }, [page.uuid]);
 
   useEffect(() => {
@@ -100,18 +104,19 @@ export function PageView({
     input?.select();
   }, [autoFocusTitle, page.uuid]);
 
-  const changeView = async (view: PageView) => {
-    if (view === pageRef.current.defaultView || viewBusy) return;
-    setViewBusy(true);
+  const changeLayout = async (layout: PageLayout) => {
+    if (layout === pageRef.current.layout || layoutBusy) return;
+    setLayoutBusy(true);
     try {
       await flush();
-      const updated = await setPageView(pageRef.current.uuid, view);
+      const updated = await setPageLayout(pageRef.current.uuid, layout);
       pageRef.current = updated;
       onSavedRef.current(updated);
+      if (layout === "outline") setPresentation("editing");
     } catch (error) {
-      onStatusRef.current(`view error: ${String(error)}`);
+      onStatusRef.current(`layout error: ${String(error)}`);
     } finally {
-      setViewBusy(false);
+      setLayoutBusy(false);
     }
   };
 
@@ -144,13 +149,13 @@ export function PageView({
         <Input
           ref={titleInput}
           value={title}
-          readOnly={page.defaultView === "reading"}
+          readOnly={presentation === "reading"}
           onBlur={() => void flush()}
           onKeyDown={(event) => {
             if (event.nativeEvent.isComposing) return;
             if (event.key === "Enter") {
               event.preventDefault();
-              if (pageRef.current.defaultView === "reading") return;
+              if (presentation === "reading") return;
               const input = event.currentTarget;
               void (async () => {
                 if (!(await flush())) return;
@@ -181,22 +186,22 @@ export function PageView({
 
       <div className="mt-4 mb-9 flex items-center gap-2">
         <span className="rounded-full bg-primary/10 px-2.5 py-1 text-[10px] font-semibold tracking-wide text-primary">
-          {page.defaultView.toUpperCase()}
+          {page.layout.toUpperCase()}
         </span>
         <div
           role="group"
-          aria-label="Page view"
+          aria-label="Page layout"
           className="ml-1 flex items-center rounded-lg border border-border/60 bg-card/55 p-0.5"
         >
-          {PAGE_VIEWS.map(({ value, label, icon: Icon }) => (
+          {PAGE_LAYOUTS.map(({ value, label, icon: Icon }) => (
             <Button
               key={value}
               type="button"
-              variant={page.defaultView === value ? "secondary" : "ghost"}
+              variant={page.layout === value ? "secondary" : "ghost"}
               size="xs"
-              disabled={viewBusy}
-              aria-pressed={page.defaultView === value}
-              onClick={() => void changeView(value)}
+              disabled={layoutBusy}
+              aria-pressed={page.layout === value}
+              onClick={() => void changeLayout(value)}
               className="rounded-md px-2 text-[10px]"
             >
               <Icon className="size-3" />
@@ -204,6 +209,28 @@ export function PageView({
             </Button>
           ))}
         </div>
+        {page.layout === "document" && (
+          <div
+            role="group"
+            aria-label="Document presentation"
+            className="flex items-center rounded-lg border border-border/60 bg-card/55 p-0.5"
+          >
+            {DOCUMENT_PRESENTATIONS.map(({ value, label, icon: Icon }) => (
+              <Button
+                key={value}
+                type="button"
+                variant={presentation === value ? "secondary" : "ghost"}
+                size="xs"
+                aria-pressed={presentation === value}
+                onClick={() => setPresentation(value)}
+                className="rounded-md px-2 text-[10px]"
+              >
+                <Icon className="size-3" />
+                <span className="hidden sm:inline">{label}</span>
+              </Button>
+            ))}
+          </div>
+        )}
         <Button
           variant="ghost"
           size="xs"
@@ -221,6 +248,7 @@ export function PageView({
           page={page}
           initialEditingUuid={initialBlockUuid}
           focusRequest={bodyFocusRequest}
+          presentation={presentation}
         />
       </div>
       <div className="mt-16">
@@ -230,14 +258,22 @@ export function PageView({
   );
 }
 
-const PAGE_VIEWS: Array<{
-  value: PageView;
+const PAGE_LAYOUTS: Array<{
+  value: PageLayout;
   label: string;
   icon: typeof ListTree;
 }> = [
   { value: "outline", label: "Outline", icon: ListTree },
   { value: "document", label: "Document", icon: FileText },
-  { value: "reading", label: "Reading", icon: BookOpen },
+];
+
+const DOCUMENT_PRESENTATIONS: Array<{
+  value: PagePresentation;
+  label: string;
+  icon: typeof FileText;
+}> = [
+  { value: "editing", label: "Write", icon: FileText },
+  { value: "reading", label: "Read", icon: BookOpen },
 ];
 
 function SaveIndicator({ state }: { state: SaveState }) {

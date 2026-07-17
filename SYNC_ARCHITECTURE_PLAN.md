@@ -7,9 +7,9 @@ has no users or valuable production databases yet, so storage and wire formats m
 deliberately before the first release.
 
 The accepted editor and page-presentation target is recorded separately in
-[`EDITOR_ARCHITECTURE.md`](EDITOR_ARCHITECTURE.md). Its migration is explicitly marked pending;
-where that decision differs from the current `PageView` implementation, the editor record is the
-target contract and this document continues to describe the code that exists today.
+[`EDITOR_ARCHITECTURE.md`](EDITOR_ARCHITECTURE.md). The durable `PageLayout` versus pane-local
+Reading boundary is implemented; CodeMirror, continuous Document editing, and linked preview
+sessions remain pending.
 
 General multi-pane composition, adjacent navigation, linked preview, responsive projection, and
 the collapsible AI companion are defined in
@@ -79,18 +79,18 @@ Workspace ownership follows that boundary:
 
 ### Pages
 
-A `Page` owns a title and an ordered tree of blocks. Its persisted `PageView` is one of:
+A `Page` owns a title and an ordered tree of blocks. Its persisted `PageLayout` is one of:
 
 - `Outline`: block hierarchy is shown explicitly and bullets are editor chrome;
-- `Document`: the same hierarchy is presented as a continuous editable document;
-- `Reading`: the same content is rendered read-only.
+- `Document`: the same hierarchy is presented as a document.
 
-Changing a view never converts or duplicates content.
+Changing layout never converts or duplicates content. `PagePresentation = Editing | Reading` is
+pane/component-local state and never enters SQLite, operations, archives, snapshots, RPC, or sync.
+The current Document renderer still uses the block tree; its continuous CodeMirror adapter remains
+an editor migration task.
 
-This is a provisional pre-release representation. The accepted editor architecture replaces it
-with persisted `PageLayout = Outline | Document`; Reading becomes a pane-local presentation and
-side-by-side Split becomes a workspace layout operation. Neither enters content operations or sync.
-See [`EDITOR_ARCHITECTURE.md`](EDITOR_ARCHITECTURE.md) and
+Side-by-side Split remains a future workspace layout operation and likewise never enters content
+operations or sync. See [`EDITOR_ARCHITECTURE.md`](EDITOR_ARCHITECTURE.md) and
 [`WORKSPACE_ARCHITECTURE.md`](WORKSPACE_ARCHITECTURE.md).
 
 The accepted Journal target adds a closed `PageKind = Note | Journal { date }` independently of
@@ -177,7 +177,7 @@ The closed operation set is:
 | Block      | `block_create`, `block_set_markdown`, `block_set_style`, `block_move`, `block_delete` |
 | Attachment | `attachment_add`, `attachment_remove`                                                 |
 
-`PageCreate` carries `PageView`. `BlockCreate` carries page/parent UUIDs, `OrderKey`,
+`PageCreate` carries `PageLayout`. `BlockCreate` carries page/parent UUIDs, `OrderKey`,
 `BlockStyle`, Markdown, and creation time. A block move carries its page, optional parent, and
 order key. Attachment operations carry a typed owner rather than a generic content ID.
 

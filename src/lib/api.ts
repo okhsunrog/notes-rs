@@ -21,7 +21,7 @@ import type {
   HistoryStatus,
   ObjectKind,
   Page,
-  PageView,
+  PageLayout,
   SearchHit,
   SecretKey,
   SearchMode,
@@ -53,7 +53,7 @@ export type {
   HistoryStatus,
   ObjectKind,
   Page,
-  PageView,
+  PageLayout,
   SearchHit,
   SecretKey,
   SearchMode,
@@ -154,7 +154,7 @@ export function contentText(content: Content) {
 export const setBlockContent = checkedCommand(commands.setBlockContent);
 export const setBlockStyle = checkedCommand(commands.setBlockStyle);
 export const renamePage = checkedCommand(commands.renamePage);
-export const setPageView = checkedCommand(commands.setPageView);
+export const setPageLayout = checkedCommand(commands.setPageLayout);
 export const createNote = checkedCommand(commands.createNote);
 export const splitBlock = checkedCommand(commands.splitBlock);
 export const isReady = commands.isReady;

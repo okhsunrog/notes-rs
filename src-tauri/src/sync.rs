@@ -444,7 +444,7 @@ async fn emit_operation_changes(
                 changed_pages.insert(payload.uuid);
                 graph.insert(payload.uuid);
             }
-            OpKind::PageSetView(payload) => {
+            OpKind::PageSetLayout(payload) => {
                 changed_pages.insert(payload.uuid);
             }
             OpKind::PageDelete(payload) => {

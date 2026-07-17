@@ -28,7 +28,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::undo,
             commands::redo,
             commands::rename_page,
-            commands::set_page_view,
+            commands::set_page_layout,
             commands::create_note,
             commands::get_page,
             commands::get_block,

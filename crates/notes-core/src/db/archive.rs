@@ -4,7 +4,7 @@ use crate::operation::{
 };
 
 pub const ARCHIVE_FORMAT: &str = "notes-rs";
-pub const ARCHIVE_VERSION: u32 = 2;
+pub const ARCHIVE_VERSION: u32 = 3;
 
 pub async fn export_archive(conn: &Connection) -> Result<DataArchive> {
     conn.call(|database| {
@@ -124,7 +124,7 @@ pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<(
             OpKind::PageCreate(PageCreate {
                 uuid: page.uuid,
                 title: page.title,
-                default_view: page.default_view,
+                layout: page.layout,
                 created_at: page.created_at,
             })
         }));

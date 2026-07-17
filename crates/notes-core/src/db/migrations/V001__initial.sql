@@ -3,10 +3,10 @@ CREATE TABLE pages (
   uuid BLOB UNIQUE NOT NULL CHECK (length(uuid) = 16),
   title TEXT,
   normalized_title TEXT,
-  default_view TEXT NOT NULL DEFAULT 'outline'
-    CHECK (default_view IN ('outline', 'document', 'reading')),
+  layout TEXT NOT NULL DEFAULT 'outline'
+    CHECK (layout IN ('outline', 'document')),
   title_hlc TEXT,
-  view_hlc TEXT,
+  layout_hlc TEXT,
   existence_hlc TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL

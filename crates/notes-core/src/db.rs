@@ -1,4 +1,6 @@
-use crate::model::{AttachmentOwner, BlockStyle, ObjectKind, OrderKey, PageView, ReorderDirection};
+use crate::model::{
+    AttachmentOwner, BlockStyle, ObjectKind, OrderKey, PageLayout, ReorderDirection,
+};
 use crate::operation::{self, OpKind};
 use crate::sqlite::Connection;
 use anyhow::{Context, Result};
@@ -29,7 +31,7 @@ pub use history::{HistoryStatus, history_status, redo_history, undo_history};
 pub use pages::{
     CreatedNote, DeletedPage, create_note, create_page, delete_page, get_containing_page,
     get_or_create_page_by_title, get_page, get_page_by_title, list_pages, rename_page,
-    set_page_view,
+    set_page_layout,
 };
 pub use search::{search_blocks_fts, search_fts, search_pages_by_title};
 
@@ -54,7 +56,7 @@ pub async fn open(path: impl AsRef<Path>) -> Result<Connection> {
 pub struct Page {
     pub uuid: uuid::Uuid,
     pub title: Option<String>,
-    pub default_view: PageView,
+    pub layout: PageLayout,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -114,7 +116,7 @@ impl Content {
     }
 }
 
-pub(crate) const PAGE_COLUMNS: &str = "uuid, title, default_view, created_at, updated_at";
+pub(crate) const PAGE_COLUMNS: &str = "uuid, title, layout, created_at, updated_at";
 pub(crate) const BLOCK_COLUMNS: &str =
     "uuid, page_uuid, parent_uuid, order_key, style, markdown, created_at, updated_at";
 pub(crate) const QUALIFIED_BLOCK_COLUMNS: &str = "blocks.uuid, blocks.page_uuid, blocks.parent_uuid, blocks.order_key, blocks.style, \
@@ -124,7 +126,7 @@ pub(crate) fn row_to_page(row: &rusqlite::Row<'_>) -> rusqlite::Result<Page> {
     Ok(Page {
         uuid: row.get(0)?,
         title: row.get(1)?,
-        default_view: row.get(2)?,
+        layout: row.get(2)?,
         created_at: row.get(3)?,
         updated_at: row.get(4)?,
     })

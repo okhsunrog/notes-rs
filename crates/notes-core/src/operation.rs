@@ -1,13 +1,13 @@
 //! Versioned, UUID-addressed page/block operations and the single apply boundary.
 
-use crate::model::{AttachmentOwner, BlockStyle, ObjectKind, OrderKey, PageView};
+use crate::model::{AttachmentOwner, BlockStyle, ObjectKind, OrderKey, PageLayout};
 use crate::{Connection, CoreError, CoreResult, Hlc};
 use anyhow::{Context, Result};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
@@ -30,7 +30,7 @@ pub struct Op {
 pub enum OpKind {
     PageCreate(PageCreate),
     PageSetTitle(PageSetTitle),
-    PageSetView(PageSetView),
+    PageSetLayout(PageSetLayout),
     PageDelete(PageDelete),
     BlockCreate(BlockCreate),
     BlockSetMarkdown(BlockSetMarkdown),
@@ -45,7 +45,7 @@ pub enum OpKind {
 pub struct PageCreate {
     pub uuid: uuid::Uuid,
     pub title: Option<String>,
-    pub default_view: PageView,
+    pub layout: PageLayout,
     pub created_at: i64,
 }
 
@@ -56,9 +56,9 @@ pub struct PageSetTitle {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct PageSetView {
+pub struct PageSetLayout {
     pub uuid: uuid::Uuid,
-    pub default_view: PageView,
+    pub layout: PageLayout,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -148,9 +148,9 @@ pub struct SnapshotBlockStructure {
 pub struct SnapshotPage {
     pub uuid: uuid::Uuid,
     pub title: Option<String>,
-    pub default_view: PageView,
+    pub layout: PageLayout,
     pub title_hlc: Option<Hlc>,
-    pub view_hlc: Option<Hlc>,
+    pub layout_hlc: Option<Hlc>,
     pub existence_hlc: Hlc,
     pub created_at: i64,
     pub updated_at: i64,
@@ -452,7 +452,7 @@ pub async fn export_sync_snapshot(conn: &Connection, seq: u64) -> Result<SyncSna
     conn.call(move |database| {
         let pages = database
             .prepare(
-                "SELECT uuid, title, default_view, title_hlc, view_hlc, existence_hlc,
+                "SELECT uuid, title, layout, title_hlc, layout_hlc, existence_hlc,
                         created_at, updated_at
                    FROM pages ORDER BY uuid",
             )?
@@ -460,9 +460,9 @@ pub async fn export_sync_snapshot(conn: &Connection, seq: u64) -> Result<SyncSna
                 Ok(SnapshotPage {
                     uuid: row.get(0)?,
                     title: row.get(1)?,
-                    default_view: row.get(2)?,
+                    layout: row.get(2)?,
                     title_hlc: optional_sql_hlc(row.get(3)?, 3)?,
-                    view_hlc: optional_sql_hlc(row.get(4)?, 4)?,
+                    layout_hlc: optional_sql_hlc(row.get(4)?, 4)?,
                     existence_hlc: sql_hlc(row.get(5)?, 5)?,
                     created_at: row.get(6)?,
                     updated_at: row.get(7)?,
@@ -606,16 +606,16 @@ pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> 
         for page in snapshot.pages {
             let normalized_title = page.title.as_deref().map(crate::model::normalize_title);
             transaction.execute(
-                "INSERT INTO pages(uuid, title, normalized_title, default_view, title_hlc,
-                                   view_hlc, existence_hlc, created_at, updated_at)
+                "INSERT INTO pages(uuid, title, normalized_title, layout, title_hlc,
+                                   layout_hlc, existence_hlc, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 rusqlite::params![
                     page.uuid,
                     page.title,
                     normalized_title,
-                    page.default_view,
+                    page.layout,
                     page.title_hlc.map(|value| value.to_string()),
-                    page.view_hlc.map(|value| value.to_string()),
+                    page.layout_hlc.map(|value| value.to_string()),
                     page.existence_hlc.to_string(),
                     page.created_at,
                     page.updated_at,
@@ -943,7 +943,7 @@ fn validate(operation: &Op) -> CoreResult<()> {
     match &operation.kind {
         OpKind::PageCreate(payload) => validate_title(payload.title.as_deref()),
         OpKind::PageSetTitle(payload) => validate_title(payload.title.as_deref()),
-        OpKind::PageSetView(_) | OpKind::PageDelete(_) => Ok(()),
+        OpKind::PageSetLayout(_) | OpKind::PageDelete(_) => Ok(()),
         OpKind::BlockCreate(payload) => {
             if payload.parent_uuid == Some(payload.uuid) {
                 Err(CoreError::invalid("a block cannot be its own parent"))
@@ -1068,7 +1068,7 @@ fn apply_one(
                 rusqlite::params![payload.uuid, operation.hlc.to_string()],
             )?;
             transaction.execute(
-                "INSERT INTO pages(uuid, title, normalized_title, default_view, title_hlc, view_hlc,
+                "INSERT INTO pages(uuid, title, normalized_title, layout, title_hlc, layout_hlc,
                                    existence_hlc, created_at, updated_at)
                  VALUES (?1, NULL, NULL, ?2, NULL, NULL, ?3, ?4, ?5)
                  ON CONFLICT(uuid) DO UPDATE SET
@@ -1078,7 +1078,7 @@ fn apply_one(
                  WHERE pages.existence_hlc < excluded.existence_hlc",
                 rusqlite::params![
                     payload.uuid,
-                    payload.default_view,
+                    payload.layout,
                     operation.hlc.to_string(),
                     payload.created_at,
                     timestamp,
@@ -1095,10 +1095,10 @@ fn apply_one(
                 operation,
                 timestamp,
             )?;
-            apply_page_view(
+            apply_page_layout(
                 transaction,
                 payload.uuid,
-                payload.default_view,
+                payload.layout,
                 operation,
                 timestamp,
             )?;
@@ -1119,13 +1119,13 @@ fn apply_one(
             }
             Ok(vec![payload.uuid])
         }
-        OpKind::PageSetView(payload) => {
+        OpKind::PageSetLayout(payload) => {
             ensure_object_kind(transaction, payload.uuid, ObjectKind::Page)?;
             if !is_tombstoned(transaction, payload.uuid)? {
-                apply_page_view(
+                apply_page_layout(
                     transaction,
                     payload.uuid,
-                    payload.default_view,
+                    payload.layout,
                     operation,
                     timestamp,
                 )?;
@@ -1495,16 +1495,16 @@ fn apply_page_title(
     Ok(())
 }
 
-fn apply_page_view(
+fn apply_page_layout(
     transaction: &rusqlite::Transaction<'_>,
     uuid: uuid::Uuid,
-    view: PageView,
+    layout: PageLayout,
     operation: &Op,
     timestamp: i64,
 ) -> rusqlite::Result<()> {
     let current = transaction
         .query_row(
-            "SELECT view_hlc FROM pages WHERE uuid = ?1",
+            "SELECT layout_hlc FROM pages WHERE uuid = ?1",
             [uuid],
             |row| row.get::<_, Option<String>>(0),
         )
@@ -1512,10 +1512,10 @@ fn apply_page_view(
         .flatten();
     if hlc_wins(current.as_deref(), &operation.hlc) {
         transaction.execute(
-            "UPDATE pages SET default_view = ?2, view_hlc = ?3,
+            "UPDATE pages SET layout = ?2, layout_hlc = ?3,
                               updated_at = MAX(updated_at, ?4)
               WHERE uuid = ?1",
-            rusqlite::params![uuid, view, operation.hlc.to_string(), timestamp],
+            rusqlite::params![uuid, layout, operation.hlc.to_string(), timestamp],
         )?;
     }
     Ok(())
@@ -2155,7 +2155,7 @@ fn observe_max_persisted_hlc(transaction: &rusqlite::Transaction<'_>) -> rusqlit
     let value = transaction.query_row(
         "SELECT MAX(value) FROM (
            SELECT title_hlc AS value FROM pages
-           UNION ALL SELECT view_hlc FROM pages
+           UNION ALL SELECT layout_hlc FROM pages
            UNION ALL SELECT existence_hlc FROM pages
            UNION ALL SELECT markdown_hlc FROM blocks
            UNION ALL SELECT style_hlc FROM blocks

@@ -1,5 +1,5 @@
 use notes_core::db::{self, DataArchive};
-use notes_core::{AttachmentOwner, BlockStyle, Connection, PageView};
+use notes_core::{AttachmentOwner, BlockStyle, Connection, PageLayout};
 
 struct TestDatabase {
     _directory: tempfile::TempDir,
@@ -88,7 +88,7 @@ async fn undo_and_redo_restore_a_deleted_page_subtree_and_attachments_exactly() 
         .await
         .expect("read restored page")
         .expect("page restored");
-    assert_eq!(restored_page.default_view, PageView::Outline);
+    assert_eq!(restored_page.layout, PageLayout::Outline);
     let restored_root = db::get_block(connection, root.uuid)
         .await
         .expect("read restored root")
@@ -146,9 +146,9 @@ async fn archive_roundtrip_replaces_typed_content_and_resets_incompatible_histor
     let page = db::create_page(&source.connection, "Long document".into())
         .await
         .expect("create source page");
-    db::set_page_view(&source.connection, page.uuid, PageView::Reading)
+    db::set_page_layout(&source.connection, page.uuid, PageLayout::Document)
         .await
-        .expect("set reading view");
+        .expect("set document layout");
     let root = db::create_block(
         &source.connection,
         page.uuid,
@@ -194,7 +194,7 @@ async fn archive_roundtrip_replaces_typed_content_and_resets_incompatible_histor
     assert_eq!(pages.len(), 1);
     assert_eq!(pages[0].uuid, page.uuid);
     assert_eq!(pages[0].title.as_deref(), Some("Long document"));
-    assert_eq!(pages[0].default_view, PageView::Reading);
+    assert_eq!(pages[0].layout, PageLayout::Document);
     let imported_root = db::get_block(&destination.connection, root.uuid)
         .await
         .expect("read imported block")
@@ -234,7 +234,7 @@ fn assert_archive_semantics(
     attachment_uuid: uuid::Uuid,
 ) {
     assert_eq!(archive.format, "notes-rs");
-    assert_eq!(archive.version, 2);
+    assert_eq!(archive.version, 3);
     assert_eq!(archive.pages.len(), 1);
     assert_eq!(archive.pages[0].uuid, page_uuid);
     assert_eq!(archive.blocks.len(), 1);

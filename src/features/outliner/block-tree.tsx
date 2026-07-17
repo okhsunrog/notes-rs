@@ -29,7 +29,7 @@ export function BlockChildren({ pageUuid, parentUuid, depth, focusFirstBlockRequ
   useEffect(() => {
     if (
       focusFirstBlockRequest <= handledFocusRequest.current ||
-      store.view === "reading" ||
+      store.readOnly ||
       !blocks?.length
     ) {
       return;
@@ -71,7 +71,7 @@ export function BlockChildren({ pageUuid, parentUuid, depth, focusFirstBlockRequ
       return (
         <div className="rounded-md border border-dashed bg-card/30 p-6 text-center text-sm text-muted-foreground">
           <p>No blocks yet on this page.</p>
-          {store.view !== "reading" && (
+          {!store.readOnly && (
             <button
               type="button"
               onClick={() => void addBlock()}
@@ -94,7 +94,7 @@ export function BlockChildren({ pageUuid, parentUuid, depth, focusFirstBlockRequ
           <BlockNode key={block.uuid} block={block} depth={depth} ordinal={index + 1} />
         ))}
       </ul>
-      {depth === 0 && store.view !== "reading" && (
+      {depth === 0 && !store.readOnly && (
         <button
           type="button"
           onClick={() => void addBlock()}

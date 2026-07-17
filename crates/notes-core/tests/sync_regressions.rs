@@ -1,7 +1,7 @@
 use notes_core::db;
 use notes_core::{
     AttachmentOwner, BlockCreate, BlockMove, BlockStyle, Connection, Hlc, ObjectKind, Op, OpKind,
-    OrderKey, Origin, PageCreate, PageDelete, PageView, SnapshotAttachment, SyncSnapshot,
+    OrderKey, Origin, PageCreate, PageDelete, PageLayout, SnapshotAttachment, SyncSnapshot,
 };
 
 struct TestDatabase {
@@ -38,7 +38,7 @@ fn page_create(index: u128, page_uuid: uuid::Uuid) -> Op {
         OpKind::PageCreate(PageCreate {
             uuid: page_uuid,
             title: Some(format!("Page {index}")),
-            default_view: PageView::Outline,
+            layout: PageLayout::Outline,
             created_at: index as i64,
         }),
     )
@@ -158,7 +158,7 @@ async fn snapshots_preserve_raw_structure_intents_and_reobserve_future_hlc() {
             OpKind::PageCreate(PageCreate {
                 uuid: page_uuid,
                 title: Some("Future title".into()),
-                default_view: PageView::Outline,
+                layout: PageLayout::Outline,
                 created_at: 1,
             }),
         ),
@@ -485,7 +485,7 @@ async fn concurrent_same_title_creation_converges_without_rejecting_either_page(
         OpKind::PageCreate(PageCreate {
             uuid: first_uuid,
             title: Some("Проект Ёж".into()),
-            default_view: PageView::Outline,
+            layout: PageLayout::Outline,
             created_at: 1,
         }),
     );
@@ -495,7 +495,7 @@ async fn concurrent_same_title_creation_converges_without_rejecting_either_page(
         OpKind::PageCreate(PageCreate {
             uuid: second_uuid,
             title: Some("Проект Ёж".into()),
-            default_view: PageView::Document,
+            layout: PageLayout::Document,
             created_at: 2,
         }),
     );
@@ -546,7 +546,7 @@ async fn page_delete_and_delayed_block_create_produce_the_same_tombstones() {
         OpKind::PageCreate(PageCreate {
             uuid: page_uuid,
             title: Some("Deleted page".into()),
-            default_view: PageView::Outline,
+            layout: PageLayout::Outline,
             created_at: 1,
         }),
     );
@@ -604,7 +604,7 @@ async fn page_recreation_is_a_generation_boundary_for_delayed_blocks() {
         OpKind::PageCreate(PageCreate {
             uuid: page_uuid,
             title: Some("Initial generation".into()),
-            default_view: PageView::Outline,
+            layout: PageLayout::Outline,
             created_at: 1,
         }),
     );
@@ -628,7 +628,7 @@ async fn page_recreation_is_a_generation_boundary_for_delayed_blocks() {
         OpKind::PageCreate(PageCreate {
             uuid: page_uuid,
             title: Some("Recreated generation".into()),
-            default_view: PageView::Document,
+            layout: PageLayout::Document,
             created_at: 3,
         }),
     );
@@ -665,7 +665,7 @@ async fn page_recreation_is_a_generation_boundary_for_delayed_blocks() {
         snapshots[0].pages[0].title.as_deref(),
         Some("Recreated generation")
     );
-    assert_eq!(snapshots[0].pages[0].default_view, PageView::Document);
+    assert_eq!(snapshots[0].pages[0].layout, PageLayout::Document);
     let block_tombstone = snapshots[0]
         .tombstones
         .iter()
@@ -687,7 +687,7 @@ async fn raw_parent_intent_is_order_independent_across_parent_recreation() {
         OpKind::PageCreate(PageCreate {
             uuid: page_uuid,
             title: Some("Structure generations".into()),
-            default_view: PageView::Outline,
+            layout: PageLayout::Outline,
             created_at: 1,
         }),
     );
@@ -832,7 +832,7 @@ async fn uuid_identity_cannot_change_between_page_and_block_kinds() {
         OpKind::PageCreate(PageCreate {
             uuid: page_uuid,
             title: Some("Global UUID".into()),
-            default_view: PageView::Outline,
+            layout: PageLayout::Outline,
             created_at: 1,
         }),
     );

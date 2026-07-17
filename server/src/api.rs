@@ -746,7 +746,7 @@ mod tests {
     use crate::config::{ServerConfig, UserConfig};
     use axum::http::Request;
     use http_body_util::BodyExt;
-    use notes_core::{AttachmentOwner, Hlc, Op, OpKind, PageView};
+    use notes_core::{AttachmentOwner, Hlc, Op, OpKind, PageLayout};
     use notes_sync::{AttachmentAdd, PageCreate};
     use tower::ServiceExt;
 
@@ -787,7 +787,7 @@ mod tests {
             OpKind::PageCreate(PageCreate {
                 uuid: page_uuid,
                 title: Some("Synced page".into()),
-                default_view: PageView::Outline,
+                layout: PageLayout::Outline,
                 created_at: 1,
             }),
         )

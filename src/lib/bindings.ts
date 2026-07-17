@@ -29,12 +29,12 @@ export const commands = {
 	undo: () => typedError<boolean, CommandError>(__TAURI_INVOKE("undo")),
 	redo: () => typedError<boolean, CommandError>(__TAURI_INVOKE("redo")),
 	renamePage: (uuid: string, title: string | null) => typedError<Page, CommandError>(__TAURI_INVOKE("rename_page", { uuid, title })),
-	setPageView: (uuid: string, view: PageView) => typedError<Page, CommandError>(__TAURI_INVOKE("set_page_view", { uuid, view })),
+	setPageLayout: (uuid: string, layout: PageLayout) => typedError<Page, CommandError>(__TAURI_INVOKE("set_page_layout", { uuid, layout })),
 	createNote: () => typedError<CreatedNote, CommandError>(__TAURI_INVOKE("create_note")),
 	getPage: (uuid: string) => typedError<{
 	uuid: string,
 	title: string | null,
-	defaultView: PageView,
+	layout: PageLayout,
 	createdAt: number,
 	updatedAt: number,
 } | null, CommandError>(__TAURI_INVOKE("get_page", { uuid })),
@@ -54,7 +54,7 @@ export const commands = {
 	getContainingPage: (blockUuid: string) => typedError<{
 	uuid: string,
 	title: string | null,
-	defaultView: PageView,
+	layout: PageLayout,
 	createdAt: number,
 	updatedAt: number,
 } | null, CommandError>(__TAURI_INVOKE("get_containing_page", { blockUuid })),
@@ -93,7 +93,7 @@ export const commands = {
 	getPageByTitle: (title: string) => typedError<{
 	uuid: string,
 	title: string | null,
-	defaultView: PageView,
+	layout: PageLayout,
 	createdAt: number,
 	updatedAt: number,
 } | null, CommandError>(__TAURI_INVOKE("get_page_by_title", { title })),
@@ -274,16 +274,16 @@ export type OrderKey = string;
 export type Page = {
 	uuid: string,
 	title: string | null,
-	defaultView: PageView,
+	layout: PageLayout,
 	createdAt: number,
 	updatedAt: number,
 };
 
 /**
- *  The durable presentation a page opens with. The content model is the
- *  same in every view; this only changes editing and rendering semantics.
+ *  The durable structural layout of a page. Reading is pane-local
+ *  presentation state and deliberately does not cross this boundary.
  */
-export type PageView = "outline" | "document" | "reading";
+export type PageLayout = "outline" | "document";
 
 export type SafeAreaInsets = {
 	top: number | null,

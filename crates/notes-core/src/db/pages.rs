@@ -1,6 +1,6 @@
 use super::*;
 use crate::operation::{
-    BlockCreate, BlockDelete, PageCreate, PageDelete, PageSetTitle, PageSetView,
+    BlockCreate, BlockDelete, PageCreate, PageDelete, PageSetLayout, PageSetTitle,
 };
 use rusqlite::OptionalExtension;
 
@@ -54,7 +54,7 @@ pub async fn create_page(conn: &Connection, title: String) -> Result<Page> {
         vec![OpKind::PageCreate(PageCreate {
             uuid,
             title: Some(title),
-            default_view: PageView::Outline,
+            layout: PageLayout::Outline,
             created_at: chrono::Utc::now().timestamp(),
         })],
     )
@@ -94,18 +94,18 @@ pub async fn rename_page(
         .context("renamed page disappeared")
 }
 
-pub async fn set_page_view(
+pub async fn set_page_layout(
     conn: &Connection,
     uuid: uuid::Uuid,
-    default_view: PageView,
+    layout: PageLayout,
 ) -> Result<Page> {
     let page = get_page(conn, uuid)
         .await?
         .ok_or_else(|| crate::CoreError::not_found("page not found"))?;
-    if page.default_view != default_view {
+    if page.layout != layout {
         apply_local(
             conn,
-            vec![OpKind::PageSetView(PageSetView { uuid, default_view })],
+            vec![OpKind::PageSetLayout(PageSetLayout { uuid, layout })],
         )
         .await?;
     }
@@ -132,7 +132,7 @@ pub async fn create_note(conn: &Connection) -> Result<CreatedNote> {
             OpKind::PageCreate(PageCreate {
                 uuid: page_uuid,
                 title: None,
-                default_view: PageView::Outline,
+                layout: PageLayout::Outline,
                 created_at: now,
             }),
             OpKind::BlockCreate(BlockCreate {

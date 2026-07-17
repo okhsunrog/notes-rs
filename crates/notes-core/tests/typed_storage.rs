@@ -1,5 +1,5 @@
 use notes_core::db::{self, BlockContent, Content};
-use notes_core::{BlockStyle, Connection, PageView};
+use notes_core::{BlockStyle, Connection, PageLayout};
 
 struct TestDatabase {
     _directory: tempfile::TempDir,
@@ -42,7 +42,7 @@ async fn baseline_has_typed_page_and_block_tables_without_legacy_graph_tables() 
 }
 
 #[tokio::test]
-async fn page_views_block_styles_tree_and_split_have_stable_typed_ordering() {
+async fn page_layouts_block_styles_tree_and_split_have_stable_typed_ordering() {
     let database = database().await;
     let connection = &database.connection;
     let first_page = db::create_page(connection, "Architecture".into())
@@ -52,10 +52,10 @@ async fn page_views_block_styles_tree_and_split_have_stable_typed_ordering() {
         .await
         .expect("create second page");
 
-    let first_page = db::set_page_view(connection, first_page.uuid, PageView::Document)
+    let first_page = db::set_page_layout(connection, first_page.uuid, PageLayout::Document)
         .await
-        .expect("set document view");
-    assert_eq!(first_page.default_view, PageView::Document);
+        .expect("set document layout");
+    assert_eq!(first_page.layout, PageLayout::Document);
 
     let first = db::create_block(
         connection,
@@ -212,25 +212,25 @@ async fn page_views_block_styles_tree_and_split_have_stable_typed_ordering() {
 }
 
 #[tokio::test]
-async fn every_page_view_and_block_style_roundtrips_through_sqlite() {
+async fn every_page_layout_and_block_style_roundtrips_through_sqlite() {
     let database = database().await;
     let connection = &database.connection;
     let page = db::create_page(connection, "Typed variants".into())
         .await
         .expect("create page");
 
-    for view in [PageView::Outline, PageView::Document, PageView::Reading] {
-        let updated = db::set_page_view(connection, page.uuid, view)
+    for layout in [PageLayout::Outline, PageLayout::Document] {
+        let updated = db::set_page_layout(connection, page.uuid, layout)
             .await
-            .expect("set page view");
-        assert_eq!(updated.default_view, view);
+            .expect("set page layout");
+        assert_eq!(updated.layout, layout);
         assert_eq!(
             db::get_page(connection, page.uuid)
                 .await
                 .expect("read page")
                 .expect("page exists")
-                .default_view,
-            view
+                .layout,
+            layout
         );
     }
 

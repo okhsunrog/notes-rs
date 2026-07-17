@@ -1,6 +1,7 @@
 # Editor and Page Presentation Architecture
 
-Status: accepted on 2026-07-17. Implementation is pending.
+Status: accepted on 2026-07-17. The durable layout/presentation boundary is implemented; editor,
+renderer, Document adapter, and pane work remain pending.
 
 This decision defines how notes-rs presents and edits the same typed page/block model as an
 outliner and as a continuous Markdown document. It deliberately separates durable content from
@@ -39,8 +40,8 @@ bullet, one CodeMirror syntax node, or one embedding document.
 
 ## 2. State ownership
 
-The current persisted `PageView = Outline | Document | Reading` conflates durable page layout with
-temporary UI state. It is not the target contract and will be replaced before release.
+The former persisted `PageView = Outline | Document | Reading` has been replaced by the following
+state ownership boundary. Reading no longer crosses the Rust/RPC/sync contract.
 
 | State                    | Values                          | Owner and lifetime                        |
 | ------------------------ | ------------------------------- | ----------------------------------------- |
@@ -253,8 +254,8 @@ changes remain localized.
 
 ## 11. Migration sequence
 
-1. Replace persisted `PageView` with `PageLayout = Outline | Document`; remove Reading from schema,
-   operations, snapshots, archives, RPC, and sync.
+1. **Completed:** replace persisted `PageView` with `PageLayout = Outline | Document`; remove
+   Reading from schema, operations, snapshots, archives, RPC, and sync.
 2. Introduce the shared Markdown dialect and AST renderer.
 3. Complete the CodeMirror spike and define the editor and versioned `DocumentCodec` contracts.
 4. Replace the active Outline textarea while preserving current block operations and conflict UI.

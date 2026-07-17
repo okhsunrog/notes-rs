@@ -17,13 +17,13 @@ pub async fn rename_page(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn set_page_view(
+pub async fn set_page_layout(
     app: AppHandle,
     state: State<'_, AppState>,
     uuid: uuid::Uuid,
-    view: PageView,
+    layout: PageLayout,
 ) -> CommandResult<db::Page> {
-    let page = db::set_page_view(&state.conn, uuid, view)
+    let page = db::set_page_layout(&state.conn, uuid, layout)
         .await
         .map_err(err)?;
     emit_pages_changed(&app, std::slice::from_ref(&page));

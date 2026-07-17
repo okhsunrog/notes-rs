@@ -1,10 +1,11 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
-import type { PageView } from "@/lib/api";
+import type { PageLayout } from "@/lib/api";
 
 type Store = {
   editingUuid: string | null;
   setEditing: (uuid: string | null) => void;
-  view: PageView;
+  layout: PageLayout;
+  readOnly: boolean;
 };
 
 const OutlinerCtx = createContext<Store | null>(null);
@@ -21,12 +22,14 @@ export function OutlinerProvider({
   children,
   initialEditingUuid = null,
   initialEditingRequest = 0,
-  view,
+  layout,
+  readOnly,
 }: {
   children: React.ReactNode;
   initialEditingUuid?: string | null;
   initialEditingRequest?: number;
-  view: PageView;
+  layout: PageLayout;
+  readOnly: boolean;
 }) {
   const [editingUuid, setEditing] = useState<string | null>(
     initialEditingRequest > 0 ? initialEditingUuid : null,
@@ -39,10 +42,13 @@ export function OutlinerProvider({
   }, [initialEditingRequest, initialEditingUuid]);
 
   useEffect(() => {
-    if (view === "reading") setEditing(null);
-  }, [view]);
+    if (readOnly) setEditing(null);
+  }, [readOnly]);
 
-  const store = useMemo(() => ({ editingUuid, setEditing, view }), [editingUuid, view]);
+  const store = useMemo(
+    () => ({ editingUuid, setEditing, layout, readOnly }),
+    [editingUuid, layout, readOnly],
+  );
 
   return <OutlinerCtx.Provider value={store}>{children}</OutlinerCtx.Provider>;
 }

@@ -956,14 +956,14 @@ mod tests {
             Content::Page(Page {
                 uuid: uuid::Uuid::from_u128(1),
                 title: Some("First note".into()),
-                default_view: notes_core::PageView::Outline,
+                layout: notes_core::PageLayout::Outline,
                 created_at: 0,
                 updated_at: 0,
             }),
             Content::Page(Page {
                 uuid: uuid::Uuid::from_u128(2),
                 title: Some("Second note".into()),
-                default_view: notes_core::PageView::Outline,
+                layout: notes_core::PageLayout::Outline,
                 created_at: 0,
                 updated_at: 0,
             }),

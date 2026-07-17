@@ -170,7 +170,7 @@ fn json_error(error: serde_json::Error) -> rusqlite::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notes_core::{Hlc, Op, OpKind, PageView, operation::FORMAT_VERSION};
+    use notes_core::{Hlc, Op, OpKind, PageLayout, operation::FORMAT_VERSION};
     use notes_sync::PageCreate;
 
     fn operation(index: u128) -> Op {
@@ -183,7 +183,7 @@ mod tests {
             kind: OpKind::PageCreate(PageCreate {
                 uuid: uuid::Uuid::from_u128(index + 100),
                 title: Some(format!("Page {index}")),
-                default_view: PageView::Outline,
+                layout: PageLayout::Outline,
                 created_at: index as i64,
             }),
         }

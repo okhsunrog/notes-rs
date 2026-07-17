@@ -1,7 +1,7 @@
 use super::*;
 use crate::operation::{
     AttachmentAdd, AttachmentRemove, BlockCreate, BlockDelete, BlockMove, BlockSetMarkdown,
-    BlockSetStyle, PageCreate, PageDelete, PageSetTitle, PageSetView,
+    BlockSetStyle, PageCreate, PageDelete, PageSetLayout, PageSetTitle,
 };
 use rusqlite::OptionalExtension;
 
@@ -50,18 +50,18 @@ fn capture_inverse(
                 }));
             }
         }
-        OpKind::PageSetView(payload) => {
-            if let Some(default_view) = database
+        OpKind::PageSetLayout(payload) => {
+            if let Some(layout) = database
                 .query_row(
-                    "SELECT default_view FROM pages WHERE uuid = ?1",
+                    "SELECT layout FROM pages WHERE uuid = ?1",
                     [payload.uuid],
-                    |row| row.get::<_, PageView>(0),
+                    |row| row.get::<_, PageLayout>(0),
                 )
                 .optional()?
             {
-                inverse.push(OpKind::PageSetView(PageSetView {
+                inverse.push(OpKind::PageSetLayout(PageSetLayout {
                     uuid: payload.uuid,
-                    default_view,
+                    layout,
                 }));
             }
         }
@@ -153,13 +153,13 @@ fn capture_page(
 ) -> rusqlite::Result<Option<PageCreate>> {
     database
         .query_row(
-            "SELECT title, default_view, created_at FROM pages WHERE uuid = ?1",
+            "SELECT title, layout, created_at FROM pages WHERE uuid = ?1",
             [uuid],
             |row| {
                 Ok(PageCreate {
                     uuid,
                     title: row.get(0)?,
-                    default_view: row.get(1)?,
+                    layout: row.get(1)?,
                     created_at: row.get(2)?,
                 })
             },

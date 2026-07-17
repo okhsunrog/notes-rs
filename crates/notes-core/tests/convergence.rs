@@ -1,10 +1,10 @@
 use notes_core::db;
 use notes_core::operation::{
-    BlockCreate, BlockDelete, BlockMove, BlockSetMarkdown, BlockSetStyle, PageCreate, PageSetTitle,
-    PageSetView,
+    BlockCreate, BlockDelete, BlockMove, BlockSetMarkdown, BlockSetStyle, PageCreate,
+    PageSetLayout, PageSetTitle,
 };
 use notes_core::{
-    BlockStyle, Connection, Hlc, Op, OpKind, OrderKey, Origin, PageView, apply, apply_batch,
+    BlockStyle, Connection, Hlc, Op, OpKind, OrderKey, Origin, PageLayout, apply, apply_batch,
 };
 use proptest::prelude::*;
 
@@ -52,7 +52,7 @@ fn op(index: usize, wall_ms: u64, kind: OpKind) -> Op {
         ),
         device_id,
         hlc: Hlc::new(wall_ms, 0, device_id),
-        format_version: 2,
+        format_version: notes_core::operation::FORMAT_VERSION,
         kind,
     }
 }
@@ -62,7 +62,7 @@ async fn source_state(connection: &Connection) -> SourceState {
         .call(|database| {
             let pages = database
                 .prepare(
-                    "SELECT uuid, title, default_view, title_hlc, view_hlc
+                    "SELECT uuid, title, layout, title_hlc, layout_hlc
                        FROM pages ORDER BY uuid",
                 )?
                 .query_map([], |row| {
@@ -170,12 +170,12 @@ fn build_operation(
                 BlockStyle::Bullet
             },
         }),
-        5 => OpKind::PageSetView(PageSetView {
+        5 => OpKind::PageSetLayout(PageSetLayout {
             uuid: page,
-            default_view: if clock.is_multiple_of(2) {
-                PageView::Outline
+            layout: if clock.is_multiple_of(2) {
+                PageLayout::Outline
             } else {
-                PageView::Document
+                PageLayout::Document
             },
         }),
         _ => OpKind::BlockDelete(BlockDelete {
@@ -211,7 +211,7 @@ proptest! {
                 op(0, 1_000, OpKind::PageCreate(PageCreate {
                     uuid: page,
                     title: Some("Root".into()),
-                    default_view: PageView::Outline,
+                    layout: PageLayout::Outline,
                     created_at: 1,
                 })),
                 op(1, 1_001, OpKind::BlockCreate(BlockCreate {
