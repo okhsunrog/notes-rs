@@ -5,16 +5,17 @@ Audience: implementing agent/developer. This document is self-contained; read it
 
 ## 1. Context
 
-notes-rs is a graph-native personal knowledge app: Tauri 2 + React frontend, Rust backend, SQLite with FTS5 (`nodes_fts`), sqlite-vec (`vec_nodes`), background workers for embeddings (`src-tauri/src/embed.rs`) and LLM entity extraction (`src-tauri/src/extract.rs`), and an OpenRouter-backed agent (`src-tauri/src/agent.rs`). Notes are an outline of blocks in a `nodes` table (stable `uuid`, `parent_id`, fractional `position REAL`), typed `edges`, attachments as files in app data. Current "sync" is manual snapshot push/pull to a folder.
+notes-rs is a graph-native personal knowledge app: Tauri 2 + React clients, a Rust/Axum server, local SQLite with FTS5, and a server-owned AI subsystem with sqlite-vec, background embedding/entity-extraction workers, and an agent. Notes are an outline of blocks in a `nodes` table (stable `uuid`, local `parent_id`, fractional `position REAL`), typed `edges`, and content-addressed attachments.
 
 The app is pre-release with no users and no data to migrate. Breaking changes to storage are acceptable; a schema-version bump with a fresh start is fine.
 
 ### Goals
 
 1. **Near-realtime multi-device sync** (Google Keep feel: edit on desktop, visible on phone in well under a second) via a self-hostable server.
-2. **Local-first**: the app stays fully functional offline and standalone (editor, outliner, FTS search, graph, attachments, undo). Sync and cloud AI are optional amplifiers.
-3. **One AI engine, two hosts**: the same Rust crates run in-process inside the Tauri app (standalone mode) and inside the server binary (connected mode). No duplicated AI/pipeline logic.
-4. **Mobile-ready**: a future Tauri mobile client is a thin host — local core + FTS offline, all AI via the server, no API keys on the device, no background polling workers.
+2. **Local-first notes**: editor, outliner, FTS search, graph, attachments, history, and an outbox remain functional offline. Sync and AI resume when the server is reachable.
+3. **One AI owner**: AI runs only in the server. Clients never contain provider SDKs, API keys, vector tables, embedding/extraction workers, or a second retrieval pipeline.
+4. **One client architecture**: desktop and Android use the same local core + FTS + sync/API client. Platform differences stay at the Tauri integration boundary.
+5. **Remotely managed server**: authenticated client settings expose server health, AI configuration, indexing progress, and operational controls without exposing stored secrets.
 
 ### Non-goals (explicitly deferred — do not build now)
 
@@ -22,35 +23,39 @@ The app is pre-release with no users and no data to migrate. Breaking changes to
 - Folder/file transport for Syncthing-style sync (the per-device append-only oplog design keeps it possible later; declare the op format unstable until then).
 - CRDT text merge inside a single block (LWW per field is the accepted resolution; see §5).
 - Web client, multi-user collaboration, hosted multi-tenant control plane.
-- BYOK AI on mobile.
-- PostgreSQL anywhere. The owner has a Postgres server available; the decision is to NOT use it. The server materializes per-user SQLite files with the same `notes-core` code as the client (FTS5, sqlite-vec, triggers). A Postgres port would fork the storage layer and destroy the code-reuse premise.
+- Client-side/BYOK AI on any platform.
+- Distribution of embedding vectors to clients.
+- PostgreSQL for the current single-user deployment. Durable notes and oplog state remain SQLite. The vector store is a replaceable server-only derived-data adapter; sqlite-vec is the initial implementation and Qdrant is a future option only after measured need.
 
 ## 2. Target architecture overview
 
 ```
-┌─────────────── desktop app (Tauri) ───────────────┐
-│ React UI                                           │
-│ tauri commands (thin)                              │
-│   notes-core   ── SQLite (state, FTS, vec, queues) │
-│   notes-ai     ── workers in-process (standalone)  │
-│   notes-sync   ── outbox, HLC, apply, WS client    │
-└──────────────────────┬─────────────────────────────┘
-                       │ WebSocket + HTTP (ops, blobs, search, chat)
+┌────────────── desktop / Android (Tauri) ──────────┐
+│ React UI                                          │
+│ thin typed Tauri commands                         │
+│   notes-core  ── SQLite (source state + FTS)      │
+│   notes-sync  ── outbox, HLC, apply, WS client   │
+│   no vectors, AI workers, provider keys, or rig   │
+└──────────────────────┬────────────────────────────┘
+                       │ typed HTTP + WebSocket protocol
 ┌──────────────────────▼─────────────────────────────┐
 │ server (axum, single binary, self-hostable)        │
 │   per-user oplog: seq assignment + WS fanout       │
-│   notes-core   ── per-user SQLite replica          │
-│   notes-ai     ── embed/extract workers, agent     │
+│   notes-core  ── per-user SQLite replica + FTS     │
+│   notes-ai    ── ai.db + VectorStore + workers     │
 │   blob store   ── content-addressed attachments    │
 │   snapshots    ── bootstrap + log compaction       │
+│   admin API    ── settings, health, index progress │
 └────────────────────────────────────────────────────┘
 ```
 
 Data classes (this taxonomy drives everything):
 
 - **Source data** — nodes, user-created edges, attachment references, blobs. The only thing that syncs as ops.
-- **Derived data** — `body_stemmed`, FTS index, wikilink/block-ref edges (parsed from content), extracted entities/edges, embeddings. Never synced as ops; recomputed deterministically (refs, FTS) or by pipelines (embeddings, extraction) on whichever side owns them. Embedding vectors may additionally be _distributed_ server→client as a cache (§8).
-- **Local-only** — undo/redo history, queues, settings, API keys, device identity. Never leaves the device.
+- **Deterministic client/server derived data** — `body_stemmed`, FTS index, and wikilink/block-ref edges. Recomputed from source data on every replica.
+- **Server-derived domain data** — extracted entities/edges. The server writes them as ordinary server-authored ops so clients receive the visible graph result, not the extraction queue or prompts.
+- **Server-only disposable AI data** — embeddings, vector generations, indexing queues, content hashes, and worker statistics. Never synced and safe to rebuild from the server replica.
+- **Device-local data** — undo/redo history, UI settings, sync credentials, and device identity. Never leaves the device.
 
 ## 3. Workspace layout (Phase 0)
 
@@ -59,15 +64,13 @@ Convert the repo to a Cargo workspace:
 ```
 crates/notes-core/    # domain + storage. From src-tauri: db.rs, sqlite.rs, stem.rs.
                       # NEW: apply-engine (§4). No tauri, no rig dependencies.
-crates/notes-ai/      # from src-tauri: embed.rs, extract.rs, agent.rs.
-                      # Depends on notes-core. Keeps the `local-models` feature.
-                      # Replace tauri AppHandle/Emitter coupling in extract.rs with an
-                      # event-callback trait so the server can host the worker too.
+crates/notes-ai/      # server-only AI runtime and ai.db persistence.
+                      # Owns sqlite-vec, VectorStore, workers, retrieval, and agent.
 crates/notes-sync/    # op format + envelope, HLC, LWW merge rules, client sync
-                      # machine (outbox, cursors, WS client), wire types shared
-                      # with the server. Depends on notes-core.
-src-tauri/            # host #1: wires everything in-process. commands.rs becomes thin.
-server/               # host #2: axum binary (§7). Depends on notes-core, notes-ai, notes-sync.
+                      # machine (outbox, cursors, WS client). Depends on notes-core.
+crates/notes-protocol/# transport DTOs for sync, search, chat, status, and admin APIs.
+src-tauri/            # desktop/mobile client host; never depends on notes-ai/llm-relay/rig.
+server/               # the only AI host; depends on all domain/server crates.
 ```
 
 Acceptance for Phase 0: app builds and behaves identically; `cargo test` and `vp check`/`vp test` pass; no functional change.
@@ -86,8 +89,8 @@ Rules:
 - Local user actions (today's `create_block`, `update_block_with_refs`, `split_block`, `move_block`, `reorder_block`, `delete_block`, `link_nodes`, page CRUD, agent write-tools, import) construct ops, call `apply`, and — when sync is configured — enqueue the op into `sync_outbox`. Local apply is synchronous and immediate: UI latency must not change.
 - `apply` is **idempotent**: an `op_id` already recorded in `applied_ops` is a no-op success.
 - `apply` is **deterministic**: given the same starting state and the same set of ops (in any delivery order of concurrent ops), the resulting SQLite state is byte-identical in the source tables. This is the core testable property (§10).
-- Derived maintenance stays inside apply: FTS triggers fire as today; applying `node_set_content` re-runs wikilink/block-ref parsing (the logic behind `update_block_with_refs`) so `refs` edges are recomputed, not synced; embed/extract queue triggers fire as today.
-- Undo/redo (`history_undo`/`history_redo`) remains local snapshot-based, but undo/redo application must itself go through ops (generate inverse ops) so undos propagate to other devices as normal edits.
+- Deterministic derived maintenance stays inside apply: FTS triggers fire as today; applying `node_set_content` re-runs wikilink/block-ref parsing so refs edges are recomputed, not synced. Client core contains no AI queue triggers.
+- Undo/redo is action-based, never snapshot-based. A local action stores forward/inverse operation templates; undo and redo materialize fresh ops with new op IDs and HLCs so the result propagates normally. Preconditions prevent an old undo from silently overwriting a newer concurrent value.
 
 ### Op envelope and kinds
 
@@ -120,7 +123,7 @@ All node references in payloads use `uuid`, never the local integer `id`. Kinds 
 
 Not ops: anything derived (refs edges, extracted edges/entities, embeddings, FTS), settings, history.
 
-### New client-side tables (schema bump in notes-core)
+### Client-side tables (notes-core)
 
 ```sql
 sync_outbox   (rowid, op_id TEXT UNIQUE, envelope TEXT, created_at)   -- pruned on server ack
@@ -131,6 +134,7 @@ sync_meta     (key TEXT PRIMARY KEY, value TEXT)  -- device_id, last_server_seq,
 ALTER TABLE nodes ADD COLUMN content_hlc TEXT;    -- covers content+content_json
 ALTER TABLE nodes ADD COLUMN title_hlc TEXT;
 ALTER TABLE nodes ADD COLUMN structure_hlc TEXT;  -- covers parent+position
+history_actions (id, action_uuid, label, forward_json, inverse_json, created_at)
 ```
 
 ## 5. Conflict resolution (fixed decisions)
@@ -170,8 +174,9 @@ Stack: **axum + tokio + rusqlite** (same pinned versions as the app where possib
 
 ```
 data_dir/
-  users/{user_id}/notes.db      # materialized replica via notes-core (FTS, vec, queues all work)
+  users/{user_id}/notes.db      # authoritative materialized source replica + FTS
   users/{user_id}/oplog.db      # envelope log with seq (separate file keeps compaction simple)
+  users/{user_id}/ai.db         # disposable queues, metadata, generations, sqlite-vec
   users/{user_id}/snapshots/
   blobs/{aa}/{sha256}
 ```
@@ -181,30 +186,32 @@ data_dir/
 - Snapshot job: every N ops (e.g. 10k) or on demand, write snapshot (reuse/extend the existing `DataArchive` export in notes-core), then ops below the snapshot floor become prunable once no device cursor is behind it.
 - v1 is single-user-capable multi-user-shaped: `user_id` in the path structure from day one, even if the only auth is one token → one user.
 
-### Phase 4 — AI on the server
+### Phase 4 — server-only AI and remote administration
 
-- Run `notes-ai` workers (embed queue, extract queue) against the replica. The `EmbedderBackend`/`RerankBackend` factory (`make_embedder`/`make_reranker`) is configured by server env — full provider set including `local-models`.
-- Endpoints: `POST /v1/search` (query string + limit → hybrid search + rerank on the replica → list of `{uuid, score}`), `POST /v1/chat` (SSE stream mirroring today's `ChatEvent` enum; the agent from `notes-ai` runs against the replica).
-- Client behavior when a server is configured: local embed/extract workers are disabled; `search_hybrid`/`search_agentic`/chat commands proxy to the server; `embed_meta` (provider id, ndims) is dictated by the server. When the server is unreachable: search degrades to local FTS + backlink boost (graceful, no error), chat reports offline.
-- Standalone (no server configured): exactly today's behavior — in-process workers, BYOK providers, `AI_LOCAL_ONLY` supported.
-- Rule to enforce in code: **AI configuration always comes from whoever owns the vector index** (server if configured, else local settings). Never let two devices write the same index with different providers.
+- Run all `notes-ai` workers against each user's server replica. The server owns provider credentials, embedding identity, vector generations, extraction, retrieval, and chat.
+- `POST /v1/search` returns hits plus requested/effective mode, execution owner, degradation reason, and indexing watermark. Clients never label an FTS fallback as semantic search.
+- `POST /v1/chat` streams typed `ChatEvent` values from `notes-protocol`.
+- Authenticated admin endpoints expose server AI settings, secret presence, provider probes, indexing policy, progress, failures, pause/resume/rebuild, and runtime statistics. Secrets are accepted write-only.
+- When the server is absent or unreachable, editing and local FTS continue. Semantic search, extraction, and chat are explicitly unavailable; there is no hidden client AI fallback.
+- `notes-ai` owns a replaceable `VectorStore`. The initial `SqliteVectorStore` lives in `ai.db`; a future Qdrant adapter is justified only by measured corpus size/latency.
 
-## 8. Embedding distribution policy (Phase 5)
+## 8. AI index lifecycle
 
-- Phone: no vectors on device. Online → server search; offline → FTS.
-- Desktop (optional per-device setting): pull vector cache from server (`GET /v1/embeddings/export?since=...`, keyed by `(content_hash, provider_id, model, ndims)`) into local `vec_nodes` for offline semantic search.
-- Standalone devices compute their own embeddings as today.
+- Queue rows contain node UUID, exact composed-input hash, embedding identity fingerprint, and source server seq. A completed provider request is committed only if those values still match transactionally.
+- Embedding identity includes provider endpoint identity, model, dimensions, distance/normalization policy, and input-format version.
+- Model/config changes build a new generation while queries continue using the active generation. The server atomically activates the new generation after completion and deletes the previous one later.
+- Client Settings show server-owned indexing progress and whether the semantic index is current with the synchronized replica.
 
 ## 9. Phased delivery plan
 
-| Phase | Deliverable                                                                                                                       | Acceptance criteria                                                                                                                                                |
-| ----- | --------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 0     | Workspace split into `notes-core` / `notes-ai` / `notes-sync` / hosts                                                             | App unchanged; all tests pass; `notes-core` has no tauri/rig deps                                                                                                  |
-| 1     | Apply-engine: all mutations are ops; schema bump (new tables, HLC columns, uuid-based refs in ops); undo emits inverse ops        | All existing frontend flows work; op round-trip unit tests; idempotency tests                                                                                      |
-| 2     | Sync machine in `notes-sync` with in-memory/loopback transport; HLC; LWW; tombstones; convergence property tests                  | Property tests green (§10); no network code yet required to be complete                                                                                            |
-| 3     | Server v1 (oplog, WS fanout, snapshot, blobs) + client integration + sync UI (status, device settings)                            | Two desktop instances converge realtime (<500 ms online); offline edits on both sides converge on reconnect; new-device bootstrap from snapshot equals full replay |
-| 4     | Server AI: workers on replica, `/search`, `/chat` SSE; client proxy mode + FTS fallback                                           | With server configured, phone-profile client does semantic search with zero local vectors and no API keys; standalone mode still fully works                       |
-| 5     | Policies & polish: vector-cache pull for desktop, compaction automation, outbox/applied_ops pruning, docs, docker-compose example | Self-host quickstart works end-to-end from README                                                                                                                  |
+| Phase | Deliverable                                                                                                                | Acceptance criteria                                                                                                                                                |
+| ----- | -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 0     | Workspace split into `notes-core` / `notes-ai` / `notes-sync` / hosts                                                      | App unchanged; all tests pass; `notes-core` has no tauri/rig deps                                                                                                  |
+| 1     | Apply-engine: all mutations are ops; schema bump (new tables, HLC columns, uuid-based refs in ops); undo emits inverse ops | All existing frontend flows work; op round-trip unit tests; idempotency tests                                                                                      |
+| 2     | Sync machine in `notes-sync` with in-memory/loopback transport; HLC; LWW; tombstones; convergence property tests           | Property tests green (§10); no network code yet required to be complete                                                                                            |
+| 3     | Server v1 (oplog, WS fanout, snapshot, blobs) + client integration + sync UI (status, device settings)                     | Two desktop instances converge realtime (<500 ms online); offline edits on both sides converge on reconnect; new-device bootstrap from snapshot equals full replay |
+| 4     | Server-only AI store/workers, `/search`, `/chat`; remove all client AI/vector code                                         | Both clients contain zero local vectors/provider keys; offline FTS remains honest and functional                                                                   |
+| 5     | Remote admin settings/status UI, index generations, compaction, monitoring, and deployment polish                          | Provider configuration and indexing lifecycle are safely manageable from the app; self-host quickstart works end-to-end                                            |
 
 Keep phases mergeable: each phase lands green on `main` behind the absence-of-config (no server configured → nothing changes for a standalone user).
 
@@ -218,19 +225,19 @@ Keep phases mergeable: each phase lands green on `main` behind the absence-of-co
 - HLC skew: device with clock hours ahead/behind still converges; HLC monotonicity maintained.
 - Snapshot bootstrap ≡ full log replay (state equality).
 - Server restart mid-stream: no seq gaps or duplicates observed by clients.
-- Existing FTS/graph/queue behavior covered by current tests must keep passing after the apply-engine refactor.
+- Existing FTS/graph behavior must keep passing. AI queue/index tests live in `notes-ai` and run only against the server-side AI store.
 
 ## 11. Known code touchpoints
 
-- `src-tauri/src/db.rs` — schema (v-bump), all mutation functions → op constructors + apply; `DataArchive` reused for snapshots.
-- `src-tauri/src/commands.rs` — becomes thin: validate → build op → apply → emit events. Events (`pages:changed` etc.) must also fire on remote-op apply so the UI live-updates during sync (this is the visible realtime feature).
-- `src-tauri/src/extract.rs` — replace direct `AppHandle`/`Emitter` use with an injected event sink trait (host provides Tauri emitter or server no-op/WS notify).
-- `src-tauri/src/embed.rs` — unchanged logic; moves to `notes-ai`; add a `remote` provider variant later (Phase 4 client) following the existing `VoyageEmbedder` reqwest pattern.
-- `src-tauri/src/settings.rs` — add server URL/token; keep secrets local-only (never in ops/snapshots).
-- Frontend: sync status indicator, server settings screen, offline search degradation notice. Existing event-driven refresh (`pages:changed`) should make remote updates appear without new UI architecture.
+- `notes-core` — no sqlite-vec, queues, extraction state, provider metadata, or JavaScript-derived integer identity. UUID is the replicated identity; integer row IDs are local implementation details.
+- `notes-ai` — server-only `ai.db`, VectorStore, typed errors, supervised workers, one retrieval pipeline.
+- `notes-sync` — one transport-independent client used by loopback tests and production HTTP/WS transport; batch apply/cursor updates are atomic.
+- `notes-protocol` — typed transport DTOs and capability/error enums, with no implementation dependencies.
+- `src-tauri` — thin local domain/sync/API adapter; settings contain server connection and UI/device preferences only.
+- Frontend — explicit sync/AI/index capabilities, narrow domain-event invalidation, remote server administration, and honest offline degradation.
 
 ## 12. Open questions (resolve with the owner before the relevant phase, not before starting)
 
-1. Auth hardening timeline (per-device tokens vs pairing flow) — fine to defer past Phase 3.
-2. Embedding model/provider default for the server era (Gemini Embedding 2 multimodal vs Voyage 4; see discussion history) — irrelevant until Phase 4; the abstraction covers both.
+1. Auth hardening timeline (per-device tokens vs pairing flow). The protocol uses token scopes (`sync`, `user`, `admin`) now even if the first deployment grants all scopes to one token.
+2. When measured vector count/latency justifies a Qdrant adapter. Do not add the service speculatively.
 3. Whether `content_json` merging ever needs to be finer than LWW-with-content — revisit only if real usage shows lost edits.
