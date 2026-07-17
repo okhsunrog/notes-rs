@@ -1,13 +1,17 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import MarkdownResponse from "./markdown-response";
 
 describe("assistant Markdown integration", () => {
   it("uses the shared notes dialect and safe link policy", () => {
+    const queryClient = new QueryClient();
     const html = renderToStaticMarkup(
-      <MarkdownResponse onOpenLink={() => undefined}>
-        {"## Result\n\nSee [[Project Aurora]], ~~old~~, and [unsafe](javascript:alert(1))."}
-      </MarkdownResponse>,
+      <QueryClientProvider client={queryClient}>
+        <MarkdownResponse onOpenLink={() => undefined}>
+          {"## Result\n\nSee [[Project Aurora]], ~~old~~, and [unsafe](javascript:alert(1))."}
+        </MarkdownResponse>
+      </QueryClientProvider>,
     );
 
     expect(html).toContain('data-markdown-context="assistant"');

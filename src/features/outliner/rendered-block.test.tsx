@@ -1,5 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Block, BlockStyle } from "@/lib/api";
 import { RenderedBlock } from "./rendered-block";
 
@@ -17,16 +18,19 @@ function block(markdown: string, style: BlockStyle = { kind: "paragraph" }): Blo
 }
 
 function render(markdown: string, style: BlockStyle = { kind: "paragraph" }, readOnly = false) {
+  const queryClient = new QueryClient();
   return renderToStaticMarkup(
-    <RenderedBlock
-      block={block(markdown, style)}
-      layout="document"
-      onOpenLink={() => undefined}
-      ordinal={3}
-      readOnly={readOnly}
-      taskBusy={false}
-      onTaskStateChange={() => undefined}
-    />,
+    <QueryClientProvider client={queryClient}>
+      <RenderedBlock
+        block={block(markdown, style)}
+        layout="document"
+        onOpenLink={() => undefined}
+        ordinal={3}
+        readOnly={readOnly}
+        taskBusy={false}
+        onTaskStateChange={() => undefined}
+      />
+    </QueryClientProvider>,
   );
 }
 

@@ -1,5 +1,9 @@
 import { Check, Circle, CircleSlash, Loader2 } from "lucide-react";
-import { MarkdownRenderer, type MarkdownOpenHandler } from "@/features/markdown";
+import {
+  MarkdownRenderer,
+  type MarkdownOpenHandler,
+  useAttachmentImageResolver,
+} from "@/features/markdown";
 import type { Block, PageLayout, TaskState } from "@/lib/api";
 import { getTaskStateOption, toggledTaskState } from "./block-style";
 
@@ -23,6 +27,7 @@ export function RenderedBlock({
   taskBusy,
   onTaskStateChange,
 }: RenderedBlockProps) {
+  const resolveImage = useAttachmentImageResolver(block.markdown);
   if (block.style.kind === "divider") return <hr className="my-4 border-border/70" />;
   if (!block.markdown && block.style.kind !== "task") {
     return <span className="text-sm text-muted-foreground/45">Start writing…</span>;
@@ -46,6 +51,7 @@ export function RenderedBlock({
       markdown={block.markdown}
       mode="inline"
       onOpenLink={onOpenLink}
+      resolveImage={resolveImage}
     />
   );
   const listContent = block.markdown ? (
@@ -108,6 +114,7 @@ export function RenderedBlock({
       }}
       markdown={block.markdown}
       onOpenLink={onOpenLink}
+      resolveImage={resolveImage}
     />
   );
 }

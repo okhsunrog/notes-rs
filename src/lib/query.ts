@@ -20,6 +20,9 @@ export const queryKeys = {
   backlinks: (uuid: string) => [...root, "backlinks", uuid] as const,
   attachmentsRoot: [...root, "attachments"] as const,
   attachments: (ownerUuid: string) => [...root, "attachments", ownerUuid] as const,
+  attachmentImagesRoot: [...root, "attachments", "images"] as const,
+  attachmentImages: (attachmentUuids: readonly string[]) =>
+    [...root, "attachments", "images", ...attachmentUuids] as const,
   history: [...root, "history"] as const,
   settings: [...root, "settings"] as const,
   syncStatus: [...root, "sync-status"] as const,
@@ -94,7 +97,10 @@ export async function applyDomainEvent(queryClient: QueryClient, event: DomainEv
       ]);
       return;
     case "attachments_changed":
-      await Promise.all(event.owner_uuids.map((uuid) => invalidate(queryKeys.attachments(uuid))));
+      await Promise.all([
+        invalidate(queryKeys.attachmentImagesRoot),
+        ...event.owner_uuids.map((uuid) => invalidate(queryKeys.attachments(uuid))),
+      ]);
       return;
     case "history_changed":
       await invalidate(queryKeys.history);

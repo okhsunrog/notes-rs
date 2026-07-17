@@ -1,3 +1,4 @@
+mod attachment_protocol;
 mod commands;
 mod settings;
 mod sync;
@@ -54,6 +55,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::create_backup,
             commands::attach_file,
             commands::list_attachments,
+            commands::resolve_attachment_images,
             commands::open_attachment,
             commands::delete_attachment,
             commands::create_page,
@@ -101,7 +103,12 @@ pub fn run() {
     export_bindings("../src/lib/bindings.ts").expect("exporting TypeScript bindings");
 
     let invoke_handler = specta_builder.invoke_handler();
-    let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+    let builder = tauri::Builder::default()
+        .register_asynchronous_uri_scheme_protocol(
+            attachment_protocol::ATTACHMENT_PROTOCOL,
+            attachment_protocol::protocol,
+        )
+        .plugin(tauri_plugin_opener::init());
 
     #[cfg(not(target_os = "android"))]
     let builder = builder.plugin(tauri_plugin_dialog::init());

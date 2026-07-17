@@ -6,14 +6,9 @@ const MAX_SOURCE_LENGTH = 8_192;
 const MAX_IMAGE_BYTES = 32 * 1024 * 1024;
 const MAX_IMAGE_DIMENSION = 8_192;
 const MAX_IMAGE_PIXELS = 25_000_000;
+const MAX_ATTACHMENT_REFERENCES = 256;
 
-export type MarkdownImageMime =
-  | "image/avif"
-  | "image/gif"
-  | "image/jpeg"
-  | "image/png"
-  | "image/svg+xml"
-  | "image/webp";
+export type MarkdownImageMime = "image/gif" | "image/jpeg" | "image/png" | "image/webp";
 
 export type MarkdownImageSource =
   | { kind: "attachment"; attachmentUuid: string; href: string }
@@ -31,7 +26,6 @@ export interface MarkdownResolvedImage {
   byteSize: number;
   height: number;
   mime: MarkdownImageMime;
-  sanitizedSvg?: true;
   src: string;
   width: number;
 }
@@ -45,11 +39,24 @@ export type ResolvedImageValidation =
   | { kind: "safe"; image: MarkdownResolvedImage }
   | {
       kind: "blocked";
-      reason: "invalid_size" | "unsafe_mime" | "unsafe_src" | "unsanitized_svg";
+      reason: "invalid_size" | "unsafe_mime" | "unsafe_src";
     };
 
 export function attachmentImageHref(uuid: string): string {
   return `${ATTACHMENT_HREF_PREFIX}${encodeURIComponent(uuid.toLowerCase())}`;
+}
+
+export function extractMarkdownAttachmentUuids(markdown: string): string[] {
+  const matches = markdown.matchAll(
+    /notes-attachment:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/gi,
+  );
+  const uuids = new Set<string>();
+  for (const match of matches) {
+    const uuid = match[1]?.toLowerCase();
+    if (uuid && UUID.test(uuid)) uuids.add(uuid);
+    if (uuids.size === MAX_ATTACHMENT_REFERENCES) break;
+  }
+  return [...uuids].sort();
 }
 
 export function classifyMarkdownImageSource(rawSource: string): MarkdownImageSource {
@@ -88,6 +95,7 @@ export function safeMarkdownImageSourceTransform(rawSource: string): string {
 
 export function validateResolvedMarkdownImage(
   image: MarkdownResolvedImage,
+  attachmentUuid: string,
 ): ResolvedImageValidation {
   if (
     !Number.isSafeInteger(image.byteSize) ||
@@ -100,41 +108,23 @@ export function validateResolvedMarkdownImage(
     return { kind: "blocked", reason: "invalid_size" };
   }
   if (!isSupportedMime(image.mime)) return { kind: "blocked", reason: "unsafe_mime" };
-  if (image.mime === "image/svg+xml" && image.sanitizedSvg !== true) {
-    return { kind: "blocked", reason: "unsanitized_svg" };
-  }
-  if (!isAuthorizedLocalImageUrl(image.src)) {
+  if (!isAuthorizedLocalImageUrl(image.src, attachmentUuid)) {
     return { kind: "blocked", reason: "unsafe_src" };
   }
   return { kind: "safe", image };
 }
 
-function isAuthorizedLocalImageUrl(src: string): boolean {
+function isAuthorizedLocalImageUrl(src: string, attachmentUuid: string): boolean {
   if (src.length > MAX_SOURCE_LENGTH || hasControlCharacter(src)) return false;
   try {
     const parsed = new URL(src);
-    if (parsed.protocol === "blob:") return isAuthorizedBlobUrl(parsed.pathname);
-    if (parsed.username || parsed.password || parsed.port) return false;
-    return (
-      (parsed.protocol === "asset:" && parsed.hostname === "localhost") ||
-      (parsed.protocol === "http:" && parsed.hostname === "asset.localhost")
-    );
-  } catch {
-    return false;
-  }
-}
-
-function isAuthorizedBlobUrl(innerSource: string): boolean {
-  if (innerSource.startsWith("null/")) return innerSource.length > "null/".length;
-  try {
-    const inner = new URL(innerSource);
-    if (inner.username || inner.password) return false;
-    if (inner.protocol === "tauri:") {
-      return inner.hostname === "localhost" && !inner.port;
-    }
-    if (inner.protocol !== "http:" && inner.protocol !== "https:") return false;
-    if (inner.hostname === "localhost") return true;
-    return inner.hostname === "tauri.localhost" && !inner.port;
+    if (parsed.username || parsed.password || parsed.port || parsed.search || parsed.hash)
+      return false;
+    const expectedPath = `/${attachmentUuid.toLowerCase()}`;
+    if (parsed.pathname !== expectedPath) return false;
+    return parsed.protocol === "notes-attachment:"
+      ? parsed.hostname === "localhost"
+      : parsed.protocol === "http:" && parsed.hostname === "notes-attachment.localhost";
   } catch {
     return false;
   }
@@ -145,14 +135,7 @@ function validDimension(value: number): boolean {
 }
 
 function isSupportedMime(value: string): value is MarkdownImageMime {
-  return [
-    "image/avif",
-    "image/gif",
-    "image/jpeg",
-    "image/png",
-    "image/svg+xml",
-    "image/webp",
-  ].includes(value);
+  return ["image/gif", "image/jpeg", "image/png", "image/webp"].includes(value);
 }
 
 function decodeTarget(encoded: string): string | null {

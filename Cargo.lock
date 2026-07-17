@@ -3483,6 +3483,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "image",
  "notes-blob",
  "notes-core",
  "notes-protocol",

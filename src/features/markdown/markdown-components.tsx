@@ -108,7 +108,7 @@ export function MarkdownImage({
   if (!resolved) {
     return <MarkdownImagePlaceholder alt={alt} reason="unavailable" />;
   }
-  const validated = validateResolvedMarkdownImage(resolved);
+  const validated = validateResolvedMarkdownImage(resolved, source.attachmentUuid);
   if (validated.kind === "blocked") {
     return <MarkdownImagePlaceholder alt={alt} reason="blocked" />;
   }

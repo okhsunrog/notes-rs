@@ -6,6 +6,8 @@ import type {
   AiProviderSettingsUpdate,
   AiRuntimeSettings,
   Attachment,
+  AttachmentImageDescriptor,
+  AttachmentImageMime,
   AttachmentOwner,
   Block,
   BlockContent,
@@ -44,6 +46,8 @@ export type {
   AiProviderSettingsUpdate,
   AiRuntimeSettings,
   Attachment,
+  AttachmentImageDescriptor,
+  AttachmentImageMime,
   AttachmentOwner,
   Block,
   BlockContent,
@@ -212,6 +216,7 @@ export const importData = checkedCommand(commands.importData);
 export const createBackup = checkedCommand(commands.createBackup);
 export const attachFile = checkedCommand(commands.attachFile);
 export const listAttachments = checkedCommand(commands.listAttachments);
+export const resolveAttachmentImages = checkedCommand(commands.resolveAttachmentImages);
 export const openAttachment = checkedCommand(commands.openAttachment);
 export const deleteAttachment = checkedCommand(commands.deleteAttachment);
 export const getHistoryStatus = checkedCommand(commands.historyStatus);

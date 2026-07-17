@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
-import type { MarkdownImageResolver } from "./image-policy";
+import type { MarkdownImageResolver, MarkdownResolvedImage } from "./image-policy";
 import { MarkdownRenderer } from "./markdown-renderer";
 
 const CONTEXT = {
@@ -96,7 +96,7 @@ describe("MarkdownRenderer", () => {
         byteSize: 24_000,
         height: 480,
         mime: "image/png",
-        src: "blob:https://tauri.localhost/local-image",
+        src: `notes-attachment://localhost/${ATTACHMENT_UUID}`,
         width: 640,
       };
     };
@@ -107,7 +107,7 @@ describe("MarkdownRenderer", () => {
 
     expect(resolvedUuid).toBe(ATTACHMENT_UUID);
     expect(html).toContain("<img");
-    expect(html).toContain('src="blob:https://tauri.localhost/local-image"');
+    expect(html).toContain(`src="notes-attachment://localhost/${ATTACHMENT_UUID}"`);
     expect(html).toContain('loading="lazy"');
     expect(html).toContain('decoding="async"');
     expect(html).toContain('width="640"');
@@ -119,13 +119,17 @@ describe("MarkdownRenderer", () => {
   });
 
   it("rejects an unsanitized SVG even when returned by the trusted resolver", () => {
-    const html = render(`![diagram](notes-attachment:${ATTACHMENT_UUID})`, () => ({
-      byteSize: 512,
-      height: 480,
-      mime: "image/svg+xml",
-      src: "asset://localhost/diagram.svg",
-      width: 640,
-    }));
+    const html = render(
+      `![diagram](notes-attachment:${ATTACHMENT_UUID})`,
+      () =>
+        ({
+          byteSize: 512,
+          height: 480,
+          mime: "image/svg+xml",
+          src: `notes-attachment://localhost/${ATTACHMENT_UUID}`,
+          width: 640,
+        }) as unknown as MarkdownResolvedImage,
+    );
 
     expect(html).not.toContain("<img");
     expect(html).toContain('data-markdown-image="blocked"');

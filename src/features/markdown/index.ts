@@ -1,6 +1,7 @@
 export {
   attachmentImageHref,
   classifyMarkdownImageSource,
+  extractMarkdownAttachmentUuids,
   safeMarkdownImageSourceTransform,
   validateResolvedMarkdownImage,
   type MarkdownImageMime,
@@ -10,6 +11,7 @@ export {
   type MarkdownResolvedImage,
   type ResolvedImageValidation,
 } from "./image-policy";
+export { useAttachmentImageResolver } from "./use-attachment-images";
 export {
   MarkdownCode,
   MarkdownImage,

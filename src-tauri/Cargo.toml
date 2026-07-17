@@ -43,6 +43,12 @@ uuid.workspace = true
 url.workspace = true
 chrono.workspace = true
 futures.workspace = true
+image = { version = "=0.25.10", default-features = false, features = [
+  "gif",
+  "jpeg",
+  "png",
+  "webp",
+] }
 sha2.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true

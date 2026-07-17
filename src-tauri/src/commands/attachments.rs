@@ -105,6 +105,23 @@ pub async fn list_attachments(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn resolve_attachment_images(
+    state: State<'_, AppState>,
+    attachment_uuids: Vec<uuid::Uuid>,
+) -> CommandResult<Vec<crate::attachment_protocol::AttachmentImageDescriptor>> {
+    if attachment_uuids.len() > crate::attachment_protocol::MAX_DESCRIPTOR_BATCH {
+        return Err(CommandError::invalid(format!(
+            "at most {} attachment images can be resolved at once",
+            crate::attachment_protocol::MAX_DESCRIPTOR_BATCH
+        )));
+    }
+    crate::attachment_protocol::resolve_descriptors(&state, attachment_uuids)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn open_attachment(
     app: AppHandle,
     state: State<'_, AppState>,

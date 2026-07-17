@@ -97,6 +97,7 @@ describe("domain event query invalidation", () => {
     const client = new QueryClient();
     client.setQueryData(queryKeys.attachments("parent-a"), []);
     client.setQueryData(queryKeys.attachments("parent-b"), []);
+    client.setQueryData(queryKeys.attachmentImages(["attachment-a"]), []);
 
     await applyDomainEvent(client, {
       kind: "attachments_changed",
@@ -105,5 +106,8 @@ describe("domain event query invalidation", () => {
 
     expect(client.getQueryState(queryKeys.attachments("parent-a"))?.isInvalidated).toBe(true);
     expect(client.getQueryState(queryKeys.attachments("parent-b"))?.isInvalidated).toBe(false);
+    expect(client.getQueryState(queryKeys.attachmentImages(["attachment-a"]))?.isInvalidated).toBe(
+      true,
+    );
   });
 });

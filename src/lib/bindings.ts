@@ -93,6 +93,7 @@ export const commands = {
 	createdAt: number,
 } | null, CommandError>(__TAURI_INVOKE("attach_file", { location })),
 	listAttachments: (location: AttachmentOwner) => typedError<Attachment[], CommandError>(__TAURI_INVOKE("list_attachments", { location })),
+	resolveAttachmentImages: (attachmentUuids: string[]) => typedError<AttachmentImageDescriptor[], CommandError>(__TAURI_INVOKE("resolve_attachment_images", { attachmentUuids })),
 	openAttachment: (uuid: string) => typedError<null, CommandError>(__TAURI_INVOKE("open_attachment", { uuid })),
 	deleteAttachment: (uuid: string) => typedError<boolean, CommandError>(__TAURI_INVOKE("delete_attachment", { uuid })),
 	createPage: (title: string) => typedError<Page, CommandError>(__TAURI_INVOKE("create_page", { title })),
@@ -196,6 +197,16 @@ export type Attachment = {
 	size: number,
 	createdAt: number,
 };
+
+export type AttachmentImageDescriptor = {
+	attachmentUuid: string,
+	byteSize: number,
+	height: number,
+	mime: AttachmentImageMime,
+	width: number,
+};
+
+export type AttachmentImageMime = "image/gif" | "image/jpeg" | "image/png" | "image/webp";
 
 export type AttachmentOwner = { kind: "page"; uuid: string } | { kind: "block"; uuid: string };
 
