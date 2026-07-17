@@ -17,6 +17,8 @@ import {
   type MarkdownImageResolver,
   validateResolvedMarkdownImage,
 } from "./image-policy";
+import { MermaidDiagram } from "./mermaid-diagram";
+import { isMermaidFenceLanguage } from "./mermaid-policy";
 import { extractMarkdownCodeLanguage, highlightMarkdownCode } from "./syntax-highlighter";
 import { classifyMarkdownUrl } from "./url-policy";
 import type { MarkdownOpenHandler, MarkdownRenderContext } from "./types";
@@ -246,6 +248,10 @@ export function MarkdownCode({
     const timer = window.setTimeout(() => setCopied(false), 1_500);
     return () => window.clearTimeout(timer);
   }, [copied]);
+
+  if (isBlock && isMermaidFenceLanguage(requestedLanguage)) {
+    return <MermaidDiagram source={code} />;
+  }
 
   if (!highlighted) return <code className={className}>{children}</code>;
 

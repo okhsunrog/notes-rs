@@ -833,6 +833,75 @@ html::after {
     color: var(--shiki-dark, var(--shiki-light, inherit));
   }
 
+  .markdown-mermaid {
+    max-width: 100%;
+    margin-block: 0.75rem;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: 0.75rem;
+    background: color-mix(in oklch, var(--card) 94%, var(--muted));
+    padding: 1rem;
+    scrollbar-width: thin;
+  }
+
+  .markdown-mermaid img {
+    display: block;
+    width: auto;
+    max-width: 100%;
+    height: auto;
+    max-height: min(72vh, 52rem);
+    margin-inline: auto;
+  }
+
+  .markdown-mermaid--fallback {
+    padding: 0;
+  }
+
+  .markdown-mermaid__status {
+    display: flex;
+    min-height: 2.25rem;
+    align-items: center;
+    gap: 0.45rem;
+    border-bottom: 1px solid var(--border);
+    padding-inline: 0.75rem;
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+  }
+
+  .markdown-mermaid__status svg {
+    width: 0.9rem;
+    height: 0.9rem;
+    flex: none;
+  }
+
+  .markdown-mermaid__spinner {
+    animation: markdown-mermaid-spin 1s linear infinite;
+  }
+
+  .markdown-mermaid--fallback pre {
+    max-width: 100%;
+    margin: 0;
+    overflow: auto;
+    padding: 0.85rem 1rem;
+    color: var(--foreground);
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+    font-size: 0.8rem;
+    line-height: 1.55;
+    white-space: pre;
+  }
+
+  @keyframes markdown-mermaid-spin {
+    to {
+      transform: rotate(1turn);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .markdown-mermaid__spinner {
+      animation: none;
+    }
+  }
+
   .markdown-image {
     display: grid;
     max-width: 100%;

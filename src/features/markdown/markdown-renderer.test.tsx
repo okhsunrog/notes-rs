@@ -312,4 +312,33 @@ describe("MarkdownRenderer", () => {
     expect(unknown).toContain("&lt;img src=x onerror=alert(1)&gt;");
     expect(unknown).not.toContain("<img");
   });
+
+  it("recognizes only fenced Mermaid and keeps its source visible while loading", () => {
+    const mermaid = render("```mermaid\nflowchart LR\nA --> B\n```");
+    const ordinary = render("```text\nflowchart LR\nA --> B\n```");
+
+    expect(mermaid).toContain('data-mermaid-state="loading"');
+    expect(mermaid).toContain('role="status"');
+    expect(mermaid).toContain("Rendering Mermaid diagram");
+    expect(mermaid).toContain("flowchart LR");
+    expect(ordinary).not.toContain("data-mermaid-state");
+    expect(ordinary).toContain('data-code-language="text"');
+  });
+
+  it("falls back to accessible visible source for an oversized Mermaid fence", () => {
+    const source = "x".repeat(16_001);
+    const html = render(`\`\`\`mermaid\n${source}\n\`\`\``);
+
+    expect(html).toContain('data-mermaid-state="oversize"');
+    expect(html).toContain('role="alert"');
+    expect(html).toContain("too large to render safely");
+    expect(html).toContain(source);
+  });
+
+  it("does not turn Mermaid-looking inline or unlabelled code into a diagram", () => {
+    const html = render("`flowchart LR`\n\n```\nflowchart LR\nA --> B\n```");
+
+    expect(html).not.toContain("data-mermaid-state");
+    expect(html).toContain("flowchart LR");
+  });
 });
