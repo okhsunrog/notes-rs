@@ -194,8 +194,8 @@ export function ContinuousDocumentEditor({
                 shiftKey: event.shiftKey,
               });
               if (!disposition) return false;
-              if (!(event.target instanceof Node)) return false;
-              const pos = view.posAtDOM(event.target);
+              const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+              if (pos === null) return false;
               const target = resolveDocumentLinkTarget(view.state, pos);
               if (!target) return false;
               event.preventDefault();

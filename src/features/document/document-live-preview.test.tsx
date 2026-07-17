@@ -403,4 +403,32 @@ describe("Document Live Preview", () => {
     });
     expect(view.state.doc.toString()).toBe(source);
   });
+
+  it("re-enables the checkbox after the pane transitions from read-only to editable", async () => {
+    const source = "plain\n- [ ] Buy milk";
+    const { container, root, props } = await mountEditor(source);
+    await act(async () =>
+      root.render(<ContinuousDocumentEditor {...props} value={source} readOnly />),
+    );
+    expect(
+      container.querySelector<HTMLInputElement>('.cm-lp-task-checkbox input[type="checkbox"]')
+        ?.disabled,
+    ).toBe(true);
+
+    // Mirrors the real writer-lease lifecycle: the pane mounts read-only, then becomes editable
+    // once usePageWriterLease resolves, without remounting the editor or touching the document.
+    await act(async () =>
+      root.render(<ContinuousDocumentEditor {...props} value={source} readOnly={false} />),
+    );
+    const checkbox = container.querySelector<HTMLInputElement>(
+      '.cm-lp-task-checkbox input[type="checkbox"]',
+    );
+    expect(checkbox?.disabled).toBe(false);
+
+    const view = editorView(container);
+    act(() => {
+      checkbox!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    expect(view.state.doc.toString()).toBe("plain\n- [x] Buy milk");
+  });
 });

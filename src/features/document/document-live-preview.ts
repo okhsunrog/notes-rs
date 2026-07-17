@@ -61,6 +61,7 @@ class TaskCheckboxWidget extends WidgetType {
     private readonly checked: boolean,
     private readonly label: string,
     private readonly markerFrom: number,
+    private readonly readOnly: boolean,
   ) {
     super();
   }
@@ -69,7 +70,8 @@ class TaskCheckboxWidget extends WidgetType {
     return (
       this.checked === other.checked &&
       this.label === other.label &&
-      this.markerFrom === other.markerFrom
+      this.markerFrom === other.markerFrom &&
+      this.readOnly === other.readOnly
     );
   }
 
@@ -80,7 +82,7 @@ class TaskCheckboxWidget extends WidgetType {
     const input = document.createElement("input");
     input.type = "checkbox";
     input.checked = this.checked;
-    input.disabled = view.state.readOnly;
+    input.disabled = this.readOnly;
     input.setAttribute(
       "aria-label",
       `Mark "${this.label || "task"}" as ${this.checked ? "not done" : "done"}`,
@@ -240,7 +242,12 @@ function syntaxDecoration(node: MarkdownSyntaxNode, state: EditorState): Decorat
     const marker = state.doc.sliceString(node.from, node.to);
     const checked = /\[[xX]\]/.test(marker);
     return Decoration.replace({
-      widget: new TaskCheckboxWidget(checked, taskLabel(state, node, parent), node.from),
+      widget: new TaskCheckboxWidget(
+        checked,
+        taskLabel(state, node, parent),
+        node.from,
+        state.readOnly,
+      ),
     });
   }
   if (notesLinkNodeRole(node.name) === "mark") return hiddenSyntax;
@@ -311,12 +318,14 @@ class DocumentLivePreviewPlugin {
     // observing the tree identity, a large document could stay partly raw until the next edit or
     // selection change even though CodeMirror had finished parsing it in the background.
     const treeChanged = syntaxTree(update.startState) !== syntaxTree(update.state);
+    const readOnlyChanged = update.startState.readOnly !== update.state.readOnly;
     if (
       !update.docChanged &&
       !update.selectionSet &&
       !update.viewportChanged &&
       !update.focusChanged &&
-      !treeChanged
+      !treeChanged &&
+      !readOnlyChanged
     ) {
       return;
     }

@@ -10,6 +10,13 @@ import { applyDocumentHistoryAction, ContinuousDocumentEditor } from "./continuo
 
 const cleanup: Array<() => void> = [];
 
+function editorView(container: HTMLElement): EditorView {
+  const editor = container.querySelector<HTMLElement>(".cm-editor");
+  const view = editor ? EditorView.findFromDOM(editor) : null;
+  if (!view) throw new Error("CodeMirror view was not mounted");
+  return view;
+}
+
 beforeAll(() => {
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -137,6 +144,11 @@ describe("ContinuousDocumentEditor", () => {
     );
     const link = container.querySelector<HTMLElement>(".cm-lp-link");
     expect(link).not.toBeNull();
+    const view = editorView(container);
+    // jsdom has no real layout engine, so posAtCoords cannot resolve real pixel coordinates here;
+    // this stands in for the browser's own coordinate-to-position mapping while still exercising
+    // the production click handler, modifier gate, and syntax-tree target resolution unmocked.
+    vi.spyOn(view, "posAtCoords").mockReturnValue(source.indexOf("Project Aurora"));
 
     act(() => {
       link!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
@@ -153,5 +165,46 @@ describe("ContinuousDocumentEditor", () => {
       disposition: "current",
       target: { kind: "page", title: "Project Aurora" },
     });
+  });
+
+  it("resolves the actual clicked position rather than the start of the line", async () => {
+    const source = "[[Project Aurora]] trailing plain text";
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const onOpenMarkdownLink = vi.fn();
+    cleanup.push(() => {
+      act(() => root.unmount());
+      container.remove();
+    });
+    await act(async () =>
+      root.render(
+        <ContinuousDocumentEditor
+          value={source}
+          readOnly={false}
+          focusRequest={0}
+          pageUuid="page-uuid"
+          onChange={() => undefined}
+          onCompositionEnd={() => undefined}
+          onBlur={() => undefined}
+          onOpenMarkdownLink={onOpenMarkdownLink}
+        />,
+      ),
+    );
+    const content = container.querySelector<HTMLElement>(".cm-content");
+    expect(content).not.toBeNull();
+    const view = editorView(container);
+    // A DOM click on plain text targets the containing .cm-line, not a decorated span. The
+    // resolver must use the actual pointer position, not fall back to the line/element start —
+    // otherwise Mod-clicking unrelated trailing text on a line that starts with a link would
+    // wrongly navigate to that link.
+    vi.spyOn(view, "posAtCoords").mockReturnValue(source.indexOf("trailing"));
+
+    act(() => {
+      content!.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true, ctrlKey: true }),
+      );
+    });
+    expect(onOpenMarkdownLink).not.toHaveBeenCalled();
   });
 });
