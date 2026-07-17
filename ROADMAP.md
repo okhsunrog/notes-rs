@@ -58,7 +58,7 @@ The 2026-07-17 audit found:
   are remote HTTPS images, two are embedded base64 PNGs, and 31 local assets are currently
   unreferenced;
 - five Excalidraw JSON files: four referenced drawings and one empty orphan. The referenced content
-  is 578 free-draw elements and one text element, so a one-time SVG conversion is practical;
+  is 578 free-draw elements and one text element, so a one-time PNG conversion is practical;
 - `:file/name-format :triple-lowbar`, eight namespace page titles, and no decoded title collision;
 - journals use strict `YYYY_MM_DD.md` filenames covering 2022-12-29 through 2026-07-17.
 
@@ -273,7 +273,8 @@ feat(core): preserve imported task and attachment semantics
 
 Implemented as `def5b97` for the typed task workflow. The stable
 `notes-attachment:<uuid>` renderer contract and blocked-by-default resolution policy landed earlier
-in F2 (`87ac7d0`); authorized blob resolution and imported attachment ownership remain D1 work.
+in F2 (`87ac7d0`). Authorized blob resolution, imported attachment ownership, and commit-safe media
+publication are now implemented by D1 (`80b0967` through `d3ccb01`).
 
 ## 7. Phase C: Pure Logseq import pipeline
 
@@ -360,10 +361,11 @@ feat(import): resolve identities references and provenance
 
 Native drawing editing/rendering is out of scope. For the current graph:
 
-- retain the original Excalidraw JSON in the import provenance/staging output;
-- convert the four referenced version-2 drawings to ordinary SVG images using a pinned one-time
+- keep the source graph untouched and bind conversion output to the exact source-manifest and
+  drawing hashes without copying private drawing JSON into the publication;
+- convert the four referenced version-2 drawings to ordinary PNG images using a pinned one-time
   conversion helper based on Excalidraw's official export API;
-- import the SVG as a normal attachment and rewrite the visible drawing reference to that image;
+- import the PNG as a normal attachment and rewrite the visible drawing reference to that image;
 - treat conversion failure as a warning with the original reference preserved;
 - do not ship the Excalidraw editor or add a permanent drawing domain to notes-rs.
 
@@ -487,9 +489,9 @@ feat(markdown): render attachments math and highlighted code
 feat(markdown): add safe Mermaid diagrams
 ```
 
-The F2 renderer boundary accepts only a backend-authorized `MarkdownImageResolver`. Supplying that
-resolver with imported attachment metadata/blob URLs belongs to D1; until then attachment syntax
-renders an intentional safe placeholder rather than exposing an arbitrary filesystem path.
+The F2 renderer boundary accepts only a backend-authorized `MarkdownImageResolver`. D1 now supplies
+verified imported attachment metadata and protocol URLs through that boundary; source paths remain
+inaccessible to the WebView.
 
 ## 11. Phase G: CodeMirror, Document, and workspace completion
 
@@ -600,7 +602,7 @@ Unless explicitly changed before execution, use these decisions:
 - support empty-workspace import and exact-manifest no-op, not arbitrary merge;
 - preserve unsupported properties/macros/logbooks as source plus diagnostics;
 - add typed task state now because otherwise the real corpus loses meaning;
-- convert the four referenced Excalidraw files once to SVG images without shipping drawing support;
+- convert the four referenced Excalidraw files once to PNG images without shipping drawing support;
 - block remote images by default;
 - prioritize parser/data fidelity over Mermaid and visual editor polish;
 - stop on the last fully green commit if time or context becomes constrained.
@@ -627,31 +629,36 @@ Planning estimates stay separate from actual duration.
 
 ### Feature ledger
 
-| ID  | Feature boundary                             | Status   | Planned elapsed | Started at                | Finished at               | Elapsed  | Agent time | Commit                                                           | Validation                                          |
-| --- | -------------------------------------------- | -------- | --------------- | ------------------------- | ------------------------- | -------- | ---------- | ---------------------------------------------------------------- | --------------------------------------------------- |
-| R0  | Roadmap, corpus, and architecture audit      | complete | 00:40           | 2026-07-17T17:14:04+03:00 | 2026-07-17T17:41:01+03:00 | 00:26:57 | >=00:26:57 | `ca35c95`                                                        | `vp check`, 17 frontend and 76 Rust tests           |
-| A1  | Background AI defaults off                   | complete | 00:25           | 2026-07-17T17:42:27+03:00 | 2026-07-17T17:44:51+03:00 | 00:02:24 | 00:02:24   | `37d82ca`, cloud-forge `c46bd2f`                                 | 19 AI and 13 server tests; scoped Clippy            |
-| A2  | `PageView` to `PageLayout`                   | complete | 01:20           | 2026-07-17T17:45:44+03:00 | 2026-07-17T17:54:47+03:00 | 00:09:03 | 00:09:03   | `6d66fb1`                                                        | 29 frontend; 89 Rust; Clippy; build                 |
-| B1  | Workspace and Journal identity               | complete | 01:30           | 2026-07-17T17:56:37+03:00 | 2026-07-17T18:24:14+03:00 | 00:27:37 | 00:32:02   | `8008f5e`                                                        | 113 Rust; 35 frontend; Clippy; build; bindings      |
-| B2  | Journal services and minimum UI              | complete | 01:15           | 2026-07-17T18:27:09+03:00 | 2026-07-17T18:53:14+03:00 | 00:26:05 | 00:46:32   | `f0698ee`                                                        | 131 Rust; 61 frontend; Clippy; bindings; WebView    |
-| B3  | Typed task workflow state                    | complete | 01:00           | 2026-07-17T18:54:16+03:00 | 2026-07-17T19:10:56+03:00 | 00:16:40 | 00:19:39   | `def5b97`                                                        | 53 core; 84 frontend; scoped Clippy; build          |
-| C1  | Logseq scanner/config/manifest               | complete | 01:15           | 2026-07-17T17:45:43+03:00 | 2026-07-17T18:25:57+03:00 | 00:40:14 | 00:22:43   | `64a612e`                                                        | 24 tests; strict Clippy; real corpus exact smoke    |
-| C2  | Logseq structural parser and fixtures        | complete | 02:00           | 2026-07-17T18:27:42+03:00 | 2026-07-17T19:01:19+03:00 | 00:33:37 | 00:32:33   | `5e33209`                                                        | 46 tests; Clippy; 1,124-file lossless smoke         |
-| C3  | Import identity/reference/provenance mapping | complete | 01:30           | 2026-07-17T19:02:09+03:00 | 2026-07-17T19:33:02+03:00 | 00:30:53 | 00:30:53   | `69e39eb`                                                        | 67 crate; 167 workspace; Clippy; corpus dry-run     |
-| D1a | Media discovery, policy, and source ranges   | complete | 01:30           | 2026-07-17T19:41:05+03:00 | 2026-07-17T20:16:34+03:00 | 00:35:29 | 00:32:32   | `7b581b5`                                                        | 75 crate tests; strict Clippy; corpus digest x2     |
-| D1b | Content-addressed blob store and lifecycle   | complete | 01:00           | 2026-07-17T20:16:58+03:00 | 2026-07-17T20:44:26+03:00 | 00:27:28 | >=00:36:27 | `80b0967`, `689dc05`, `8fccd7f`, `a3fe01f`, `18a5c62`, `0ce161c` | typed core/sync; 17 server; 6 Tauri; Android Clippy |
-| D1c | Attachment materialization and Markdown      | planned  | 01:30           | —                         | —                         | —        | —          | —                                                                | —                                                   |
-| D2  | One-time Excalidraw to SVG conversion        | planned  | 01:00           | —                         | —                         | —        | —          | —                                                                | —                                                   |
-| E1  | Atomic bulk apply and convergence            | complete | 02:00           | 2026-07-17T19:35:29+03:00 | 2026-07-17T20:21:56+03:00 | 00:46:27 | >=00:38:45 | `856e30c`, `6c36499`, `21d80e1`                                  | 67 core; 183 workspace; strict workspace Clippy     |
-| E2  | Desktop dry-run/commit UI                    | planned  | 01:30           | —                         | —                         | —        | —          | —                                                                | —                                                   |
-| E3  | Disposable full-corpus validation            | planned  | 01:00           | —                         | —                         | —        | —          | —                                                                | —                                                   |
-| F1  | Shared CommonMark/GFM semantic renderer      | complete | 02:00           | 2026-07-17T17:45:48+03:00 | 2026-07-17T18:15:21+03:00 | 00:29:33 | 00:12:23   | `bc31b52`                                                        | `vp check`; 35 tests; production build              |
-| F2  | Image policy, KaTeX, and highlighted code    | complete | 02:00           | 2026-07-17T18:27:47+03:00 | 2026-07-17T18:58:39+03:00 | 00:30:52 | 00:29:49   | `87ac7d0`                                                        | 78 frontend; build; 1.917 MB main JS                |
-| F3  | Safe Mermaid rendering                       | planned  | 01:15           | —                         | —                         | —        | —          | —                                                                | —                                                   |
-| G1  | CodeMirror active Outline block              | complete | 02:30           | 2026-07-17T19:12:31+03:00 | 2026-07-17T19:24:13+03:00 | 00:11:42 | 00:11:42   | `2a24308`                                                        | 92 frontend; live WebView; build 2.419 MB           |
-| G2  | Workspace panes and Assistant controller     | complete | 03:00           | 2026-07-17T19:24:50+03:00 | 2026-07-17T20:03:52+03:00 | 00:39:02 | >=00:39:02 | `769f2c4`                                                        | 105 frontend; build; wide/compact live WebView      |
-| G3  | PageSession and linked live Reading pane     | planned  | 02:00           | —                         | —                         | —        | —          | —                                                                | —                                                   |
-| G4  | Continuous DocumentCodec editor              | planned  | 04:00+          | —                         | —                         | —        | —          | —                                                                | —                                                   |
+| ID  | Feature boundary                             | Status   | Planned elapsed | Started at                 | Finished at               | Elapsed   | Agent time | Commit                                                                                                       | Validation                                        |
+| --- | -------------------------------------------- | -------- | --------------- | -------------------------- | ------------------------- | --------- | ---------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------- |
+| R0  | Roadmap, corpus, and architecture audit      | complete | 00:40           | 2026-07-17T17:14:04+03:00  | 2026-07-17T17:41:01+03:00 | 00:26:57  | >=00:26:57 | `ca35c95`                                                                                                    | `vp check`, 17 frontend and 76 Rust tests         |
+| A1  | Background AI defaults off                   | complete | 00:25           | 2026-07-17T17:42:27+03:00  | 2026-07-17T17:44:51+03:00 | 00:02:24  | 00:02:24   | `37d82ca`, cloud-forge `c46bd2f`                                                                             | 19 AI and 13 server tests; scoped Clippy          |
+| A2  | `PageView` to `PageLayout`                   | complete | 01:20           | 2026-07-17T17:45:44+03:00  | 2026-07-17T17:54:47+03:00 | 00:09:03  | 00:09:03   | `6d66fb1`                                                                                                    | 29 frontend; 89 Rust; Clippy; build               |
+| B1  | Workspace and Journal identity               | complete | 01:30           | 2026-07-17T17:56:37+03:00  | 2026-07-17T18:24:14+03:00 | 00:27:37  | 00:32:02   | `8008f5e`                                                                                                    | 113 Rust; 35 frontend; Clippy; build; bindings    |
+| B2  | Journal services and minimum UI              | complete | 01:15           | 2026-07-17T18:27:09+03:00  | 2026-07-17T18:53:14+03:00 | 00:26:05  | 00:46:32   | `f0698ee`                                                                                                    | 131 Rust; 61 frontend; Clippy; bindings; WebView  |
+| B3  | Typed task workflow state                    | complete | 01:00           | 2026-07-17T18:54:16+03:00  | 2026-07-17T19:10:56+03:00 | 00:16:40  | 00:19:39   | `def5b97`                                                                                                    | 53 core; 84 frontend; scoped Clippy; build        |
+| C1  | Logseq scanner/config/manifest               | complete | 01:15           | 2026-07-17T17:45:43+03:00  | 2026-07-17T18:25:57+03:00 | 00:40:14  | 00:22:43   | `64a612e`                                                                                                    | 24 tests; strict Clippy; real corpus exact smoke  |
+| C2  | Logseq structural parser and fixtures        | complete | 02:00           | 2026-07-17T18:27:42+03:00  | 2026-07-17T19:01:19+03:00 | 00:33:37  | 00:32:33   | `5e33209`                                                                                                    | 46 tests; Clippy; 1,124-file lossless smoke       |
+| C3  | Import identity/reference/provenance mapping | complete | 01:30           | 2026-07-17T19:02:09+03:00  | 2026-07-17T19:33:02+03:00 | 00:30:53  | 00:30:53   | `69e39eb`                                                                                                    | 67 crate; 167 workspace; Clippy; corpus dry-run   |
+| D1a | Media discovery, policy, and source ranges   | complete | 01:30           | 2026-07-17T19:41:05+03:00  | 2026-07-17T20:16:34+03:00 | 00:35:29  | 00:32:32   | `7b581b5`                                                                                                    | 75 crate tests; strict Clippy; corpus digest x2   |
+| D1b | Content-addressed blob store and lifecycle   | complete | 01:00           | 2026-07-17T20:16:58+03:00  | 2026-07-17T21:24:40+03:00 | 01:07:42  | >=01:02:54 | `80b0967`, `689dc05`, `8fccd7f`, `a3fe01f`, `18a5c62`, `0ce161c`, `701e0b2`, `5c92d6b`, `d1fbb87`, `43225df` | typed core/sync; archive rollback; Android build  |
+| D1c | Attachment materialization and Markdown      | complete | 01:30           | 2026-07-17T20:37:20+03:00  | 2026-07-17T21:41:13+03:00 | 01:03:53  | >=00:58:45 | `1b48727`, `e4d39d2`, `1bb4c2e`, `d3ccb01`                                                                   | 89 import tests; strict Clippy; verified media    |
+| D2  | One-time Excalidraw to PNG conversion        | complete | 01:00           | 2026-07-17T21:59:50+03:00  | 2026-07-17T22:24:17+03:00 | 00:24:27  | >=00:33:01 | `00f9640`, `3d7e81a`                                                                                         | 96 import; real corpus; 119 frontend; strict lint |
+| E1  | Atomic bulk apply and convergence            | complete | 02:00           | 2026-07-17T19:35:29+03:00  | 2026-07-17T20:21:56+03:00 | 00:46:27  | >=00:38:45 | `856e30c`, `6c36499`, `21d80e1`                                                                              | 67 core; 183 workspace; strict workspace Clippy   |
+| E2  | Desktop dry-run/commit UI                    | complete | 01:30           | 2026-07-17T21:25:21+03:00  | 2026-07-17T21:56:02+03:00 | 00:30:41  | >=00:38:38 | `d85041f`, `367192f`                                                                                         | typed RPC; 115 frontend; build; live WebView      |
+| E3  | Disposable full-corpus validation            | complete | 01:00           | 2026-07-17T21:56:02+03:00  | 2026-07-17T21:58:54+03:00 | 00:02:52  | >=00:02:52 | `f463fec`                                                                                                    | corpus import/no-op; counts, blobs, depth, mtimes |
+| E4  | Android desktop-import compile boundary      | complete | 00:30           | ~2026-07-17T22:55:00+03:00 | 2026-07-17T23:05:34+03:00 | ~00:10:34 | ~00:10:34  | `364e6e8`                                                                                                    | four-ABI Android debug build; zero Rust warnings  |
+| F1  | Shared CommonMark/GFM semantic renderer      | complete | 02:00           | 2026-07-17T17:45:48+03:00  | 2026-07-17T18:15:21+03:00 | 00:29:33  | 00:12:23   | `bc31b52`                                                                                                    | `vp check`; 35 tests; production build            |
+| F2  | Image policy, KaTeX, and highlighted code    | complete | 02:00           | 2026-07-17T18:27:47+03:00  | 2026-07-17T18:58:39+03:00 | 00:30:52  | 00:29:49   | `87ac7d0`                                                                                                    | 78 frontend; build; 1.917 MB main JS              |
+| F2b | Compact semantic flow for outline blocks     | complete | 00:30           | 2026-07-17T22:14:28+03:00  | 2026-07-17T22:27:39+03:00 | 00:13:11  | >=00:06:27 | `7d193f9`                                                                                                    | 119 frontend; production build; native shell view |
+| F2c | Logseq numbered-block presentation fidelity  | complete | 00:30           | 2026-07-17T22:33:31+03:00  | 2026-07-17T22:54:14+03:00 | 00:20:43  | >=00:03:10 | `9bf874e`                                                                                                    | 98 import; Tauri adapter; strict Clippy           |
+| F2d | Privacy-safe Logseq video macro cards        | complete | 00:30           | ~2026-07-17T22:33:00+03:00 | 2026-07-17T22:54:38+03:00 | ~00:21:38 | ~00:09:38  | `92cc888`                                                                                                    | 126 frontend; production build; strict lint       |
+| F3  | Safe Mermaid rendering                       | planned  | 01:15           | —                          | —                         | —         | —          | —                                                                                                            | —                                                 |
+| G1  | CodeMirror active Outline block              | complete | 02:30           | 2026-07-17T19:12:31+03:00  | 2026-07-17T19:24:13+03:00 | 00:11:42  | 00:11:42   | `2a24308`                                                                                                    | 92 frontend; live WebView; build 2.419 MB         |
+| G2  | Workspace panes and Assistant controller     | complete | 03:00           | 2026-07-17T19:24:50+03:00  | 2026-07-17T20:03:52+03:00 | 00:39:02  | >=00:39:02 | `769f2c4`                                                                                                    | 105 frontend; build; wide/compact live WebView    |
+| G3a | Revision-aware editor save contract          | complete | 00:45           | ~2026-07-17T22:57:00+03:00 | 2026-07-17T23:06:03+03:00 | ~00:09:03 | ~00:09:03  | `02978b4`                                                                                                    | 76 core; 126 frontend; bindings; strict Clippy    |
+| G3b | PageSession and linked live Reading pane     | complete | 02:00           | ~2026-07-17T23:06:00+03:00 | 2026-07-17T23:28:41+03:00 | ~00:22:41 | >=00:15:00 | `f4d1f96`                                                                                                    | 135 frontend; workspace Rust; bindings; live MCP  |
+| G4  | Continuous DocumentCodec editor              | planned  | 04:00+          | —                          | —                         | —         | —          | —                                                                                                            | —                                                 |
 
 The estimates are scheduling aids, not deadlines. Any row is split into smaller logical rows if it
 cannot be completed and validated as one commit.
@@ -661,53 +668,84 @@ cannot be completed and validated as one commit.
 Use this table when a feature spans multiple sessions, pauses, or parallel assignments. `Ended at`
 is recorded as soon as an interval stops; the feature-ledger totals are calculated from these rows.
 
-| Feature ID | Actor  | Started at                | Ended at                  | Active duration | Result/notes                                                                                               |
-| ---------- | ------ | ------------------------- | ------------------------- | --------------- | ---------------------------------------------------------------------------------------------------------- |
-| R0         | root   | 2026-07-17T17:14:04+03:00 | 2026-07-17T17:41:01+03:00 | 00:26:57        | Baseline verification, corpus audits, and roadmap design; parallel audit intervals were not instrumented   |
-| A1         | root   | 2026-07-17T17:42:27+03:00 | 2026-07-17T17:44:51+03:00 | 00:02:24        | Disabled unattended embeddings and entity extraction defaults; updated deployment bootstrap                |
-| A2         | root   | 2026-07-17T17:45:44+03:00 | 2026-07-17T17:54:47+03:00 | 00:09:03        | Replaced durable PageView with PageLayout and local Reading presentation; binding drift remained clean     |
-| B1         | root   | 2026-07-17T17:56:37+03:00 | 2026-07-17T18:24:14+03:00 | 00:27:37        | Workspace identity, typed Journal domain, sync/archive invariants, and regression tests                    |
-| B1         | review | 2026-07-17T18:00:45+03:00 | 2026-07-17T18:05:10+03:00 | 00:04:25        | Found workspace bootstrap, operation scoping, archive, UUID reservation, and Journal ensure races          |
-| B2         | root   | 2026-07-17T18:27:09+03:00 | 2026-07-17T18:53:14+03:00 | 00:26:05        | Integrated atomic Journal services, ephemeral missing-day UI, AI/graph filters, bindings, and commit       |
-| B2         | agent  | 2026-07-17T18:27:26+03:00 | 2026-07-17T18:36:10+03:00 | 00:08:44        | Implemented bounded Journal queries, atomic capture, O(1) append ordering, events, and backend tests       |
-| B2         | review | 2026-07-17T18:42:39+03:00 | 2026-07-17T18:51:31+03:00 | 00:08:52        | Fixed stale navigation, per-date draft reuse, cache invalidation, busy UX, and mobile autofocus races      |
-| B2         | root   | 2026-07-17T19:12:56+03:00 | 2026-07-17T19:15:47+03:00 | 00:02:51        | Live WebView proved empty-date browsing is non-mutating, first capture atomic, and next day ephemeral      |
-| B3         | agent  | 2026-07-17T18:54:16+03:00 | 2026-07-17T19:08:24+03:00 | 00:14:08        | Added typed task state across SQLite, LWW operations, history/archive, RPC, and semantic UI                |
-| B3         | root   | 2026-07-17T19:05:25+03:00 | 2026-07-17T19:10:56+03:00 | 00:05:31        | Fixed strict wire decoding, reviewed read-only/empty-task UX, ran integration gates, and committed         |
-| C1         | agent  | 2026-07-17T17:45:43+03:00 | 2026-07-17T17:59:41+03:00 | 00:13:58        | Pure scanner/config/manifest foundation and read-only real-corpus smoke                                    |
-| C1         | agent  | 2026-07-17T18:13:08+03:00 | 2026-07-17T18:20:10+03:00 | 00:07:02        | Resource limits and explicit recovery-directory exclusion hardening                                        |
-| C1         | root   | 2026-07-17T18:24:14+03:00 | 2026-07-17T18:25:57+03:00 | 00:01:43        | Reviewed scanner invariants, reran focused gates, and committed the isolated crate                         |
-| C2         | agent  | 2026-07-17T18:27:42+03:00 | 2026-07-17T18:41:27+03:00 | 00:13:45        | Added loss-aware structural AST, Journal source classification, typed constructs, fixtures, and tests      |
-| C2         | review | 2026-07-17T18:42:31+03:00 | 2026-07-17T19:00:07+03:00 | 00:17:36        | Fixed CommonMark fences, Unicode complexity, property ranges, BOM/extensions, and ran full-corpus smoke    |
-| C2         | root   | 2026-07-17T19:00:07+03:00 | 2026-07-17T19:01:19+03:00 | 00:01:12        | Reviewed source preservation, reran strict crate gates, removed fixture whitespace, and committed C2       |
-| C3         | agent  | 2026-07-17T19:02:09+03:00 | 2026-07-17T19:31:55+03:00 | 00:29:46        | Added stable identities, task/reference maps, provenance, preparation limits, and real-corpus dry-run      |
-| C3         | root   | 2026-07-17T19:31:55+03:00 | 2026-07-17T19:33:02+03:00 | 00:01:07        | Reviewed contracts, ran strict crate gates, and committed the isolated pure import boundary                |
-| F1         | agent  | 2026-07-17T17:45:48+03:00 | 2026-07-17T17:51:51+03:00 | 00:06:03        | CommonMark/GFM renderer, typed URL policy, and focused security tests                                      |
-| F1         | agent  | 2026-07-17T17:55:21+03:00 | 2026-07-17T18:00:50+03:00 | 00:05:29        | Integrated shared renderer into authored blocks, AI responses, and typed navigation                        |
-| F1         | root   | 2026-07-17T18:14:30+03:00 | 2026-07-17T18:15:21+03:00 | 00:00:51        | Security review, encoded-control hardening, full frontend gate, and commit                                 |
-| F2         | agent  | 2026-07-17T18:27:47+03:00 | 2026-07-17T18:44:12+03:00 | 00:16:25        | Added local KaTeX/Shiki, typed attachment image policy, code copy, tables, and security tests              |
-| F2         | review | 2026-07-17T18:45:13+03:00 | 2026-07-17T18:57:58+03:00 | 00:12:45        | Hardened image origins, HTML shape, Shiki workload, KaTeX aggregate limits, and package deduplication      |
-| F2         | root   | 2026-07-17T18:58:00+03:00 | 2026-07-17T18:58:39+03:00 | 00:00:39        | Reviewed security boundaries, staged isolated renderer files, and committed the green production build     |
-| G1         | agent  | 2026-07-17T19:12:31+03:00 | 2026-07-17T19:23:17+03:00 | 00:10:46        | Replaced active textarea with CM6, preserved outliner/IME behavior, added model tests, and inspected live  |
-| G1         | root   | 2026-07-17T19:23:17+03:00 | 2026-07-17T19:24:13+03:00 | 00:00:56        | Reviewed editor ownership and shortcuts, reran 92 frontend tests, accepted visible 2 MB bundle warning     |
-| G2         | agent  | 2026-07-17T19:24:50+03:00 | 2026-07-17T20:01:12+03:00 | 00:36:22        | Added typed two-pane workspace, adjacent navigation, graph pane, responsive projection, and Assistant      |
-| G2         | root   | 2026-07-17T20:01:12+03:00 | 2026-07-17T20:03:52+03:00 | 00:02:40        | Fixed compact inertness and focus ownership, ran wide/compact live checks, and committed                   |
-| D1         | audit  | 2026-07-17T19:20:23+03:00 | 2026-07-17T19:37:44+03:00 | 00:17:21        | Audited media corpus, attachment lifecycle, blob safety, and the import/materialization boundary           |
-| D1a        | agent  | 2026-07-17T19:41:05+03:00 | 2026-07-17T20:02:52+03:00 | 00:21:47        | Added typed media references, exact source mapping, deterministic policy, and real-corpus classification   |
-| D1a        | review | 2026-07-17T20:04:12+03:00 | 2026-07-17T20:08:43+03:00 | 00:04:31        | Found truncated inline-image acceptance and late global budget enforcement                                 |
-| D1a        | agent  | 2026-07-17T20:09:30+03:00 | 2026-07-17T20:15:44+03:00 | 00:06:14        | Added bounded real image decode and pre-allocation reference/diagnostic budgets                            |
-| D1b        | agent  | 2026-07-17T20:16:58+03:00 | 2026-07-17T20:20:53+03:00 | 00:03:55        | Added typed hashes, sharded streaming store, atomic no-clobber publication, fsync, and security tests      |
-| D1b        | root   | 2026-07-17T20:20:53+03:00 | 2026-07-17T20:22:23+03:00 | 00:01:30        | Reviewed crash/concurrency semantics, reran strict gates, and committed the shared blob-store foundation   |
-| D1b        | agent  | 2026-07-17T20:22:39+03:00 | 2026-07-17T20:29:28+03:00 | 00:06:49        | Replaced attachment hash strings with strict typed binary hashes across core, operations, import, and SQL  |
-| D1b        | root   | 2026-07-17T20:30:24+03:00 | 2026-07-17T20:33:23+03:00 | 00:02:59        | Hardened verified-handle reads, no-clobber durability, directory sync, and cross-platform safety tests     |
-| D1b        | agent  | 2026-07-17T20:30:56+03:00 | 2026-07-17T20:35:09+03:00 | 00:04:13        | Typed the HTTP blob protocol and retained authorization for historical add/remove operations               |
-| D1b        | agent  | 2026-07-17T20:32:00+03:00 | 2026-07-17T20:42:39+03:00 | 00:10:39        | Migrated desktop and Android pickers, archive v7, sync staging, and bootstrap to canonical BlobStore       |
-| D1b        | agent  | 2026-07-17T20:37:13+03:00 | 2026-07-17T20:40:50+03:00 | 00:03:37        | Hardened server PUT/GET/HEAD durability, verified-handle streaming, error mapping, and concurrency tests   |
-| D1b        | root   | 2026-07-17T20:40:50+03:00 | 2026-07-17T20:44:26+03:00 | 00:03:36        | Integrated host changes, bumped archive format, streamed decode, removed upload reopen race, and committed |
-| E1         | agent  | 2026-07-17T19:35:29+03:00 | 2026-07-17T20:05:05+03:00 | 00:29:36        | Added prevalidated atomic external apply, receipts, normal ops/outbox, aliases, snapshots, and tests       |
-| E1         | root   | 2026-07-17T20:05:05+03:00 | 2026-07-17T20:08:38+03:00 | 00:03:33        | Integrated sync exports and event handling, ran the full workspace gate, and committed                     |
-| E1         | agent  | 2026-07-17T20:14:50+03:00 | 2026-07-17T20:16:21+03:00 | 00:01:31        | Removed runtime timestamps from import inputs and made first apply use one transaction-owned timestamp     |
-| E1         | agent  | 2026-07-17T20:17:55+03:00 | 2026-07-17T20:20:38+03:00 | 00:02:43        | Added strict public read-only receipts so import identity survives application restarts                    |
+| Feature ID | Actor  | Started at                 | Ended at                   | Active duration | Result/notes                                                                                                   |
+| ---------- | ------ | -------------------------- | -------------------------- | --------------- | -------------------------------------------------------------------------------------------------------------- |
+| R0         | root   | 2026-07-17T17:14:04+03:00  | 2026-07-17T17:41:01+03:00  | 00:26:57        | Baseline verification, corpus audits, and roadmap design; parallel audit intervals were not instrumented       |
+| A1         | root   | 2026-07-17T17:42:27+03:00  | 2026-07-17T17:44:51+03:00  | 00:02:24        | Disabled unattended embeddings and entity extraction defaults; updated deployment bootstrap                    |
+| A2         | root   | 2026-07-17T17:45:44+03:00  | 2026-07-17T17:54:47+03:00  | 00:09:03        | Replaced durable PageView with PageLayout and local Reading presentation; binding drift remained clean         |
+| B1         | root   | 2026-07-17T17:56:37+03:00  | 2026-07-17T18:24:14+03:00  | 00:27:37        | Workspace identity, typed Journal domain, sync/archive invariants, and regression tests                        |
+| B1         | review | 2026-07-17T18:00:45+03:00  | 2026-07-17T18:05:10+03:00  | 00:04:25        | Found workspace bootstrap, operation scoping, archive, UUID reservation, and Journal ensure races              |
+| B2         | root   | 2026-07-17T18:27:09+03:00  | 2026-07-17T18:53:14+03:00  | 00:26:05        | Integrated atomic Journal services, ephemeral missing-day UI, AI/graph filters, bindings, and commit           |
+| B2         | agent  | 2026-07-17T18:27:26+03:00  | 2026-07-17T18:36:10+03:00  | 00:08:44        | Implemented bounded Journal queries, atomic capture, O(1) append ordering, events, and backend tests           |
+| B2         | review | 2026-07-17T18:42:39+03:00  | 2026-07-17T18:51:31+03:00  | 00:08:52        | Fixed stale navigation, per-date draft reuse, cache invalidation, busy UX, and mobile autofocus races          |
+| B2         | root   | 2026-07-17T19:12:56+03:00  | 2026-07-17T19:15:47+03:00  | 00:02:51        | Live WebView proved empty-date browsing is non-mutating, first capture atomic, and next day ephemeral          |
+| B3         | agent  | 2026-07-17T18:54:16+03:00  | 2026-07-17T19:08:24+03:00  | 00:14:08        | Added typed task state across SQLite, LWW operations, history/archive, RPC, and semantic UI                    |
+| B3         | root   | 2026-07-17T19:05:25+03:00  | 2026-07-17T19:10:56+03:00  | 00:05:31        | Fixed strict wire decoding, reviewed read-only/empty-task UX, ran integration gates, and committed             |
+| C1         | agent  | 2026-07-17T17:45:43+03:00  | 2026-07-17T17:59:41+03:00  | 00:13:58        | Pure scanner/config/manifest foundation and read-only real-corpus smoke                                        |
+| C1         | agent  | 2026-07-17T18:13:08+03:00  | 2026-07-17T18:20:10+03:00  | 00:07:02        | Resource limits and explicit recovery-directory exclusion hardening                                            |
+| C1         | root   | 2026-07-17T18:24:14+03:00  | 2026-07-17T18:25:57+03:00  | 00:01:43        | Reviewed scanner invariants, reran focused gates, and committed the isolated crate                             |
+| C2         | agent  | 2026-07-17T18:27:42+03:00  | 2026-07-17T18:41:27+03:00  | 00:13:45        | Added loss-aware structural AST, Journal source classification, typed constructs, fixtures, and tests          |
+| C2         | review | 2026-07-17T18:42:31+03:00  | 2026-07-17T19:00:07+03:00  | 00:17:36        | Fixed CommonMark fences, Unicode complexity, property ranges, BOM/extensions, and ran full-corpus smoke        |
+| C2         | root   | 2026-07-17T19:00:07+03:00  | 2026-07-17T19:01:19+03:00  | 00:01:12        | Reviewed source preservation, reran strict crate gates, removed fixture whitespace, and committed C2           |
+| C3         | agent  | 2026-07-17T19:02:09+03:00  | 2026-07-17T19:31:55+03:00  | 00:29:46        | Added stable identities, task/reference maps, provenance, preparation limits, and real-corpus dry-run          |
+| C3         | root   | 2026-07-17T19:31:55+03:00  | 2026-07-17T19:33:02+03:00  | 00:01:07        | Reviewed contracts, ran strict crate gates, and committed the isolated pure import boundary                    |
+| F1         | agent  | 2026-07-17T17:45:48+03:00  | 2026-07-17T17:51:51+03:00  | 00:06:03        | CommonMark/GFM renderer, typed URL policy, and focused security tests                                          |
+| F1         | agent  | 2026-07-17T17:55:21+03:00  | 2026-07-17T18:00:50+03:00  | 00:05:29        | Integrated shared renderer into authored blocks, AI responses, and typed navigation                            |
+| F1         | root   | 2026-07-17T18:14:30+03:00  | 2026-07-17T18:15:21+03:00  | 00:00:51        | Security review, encoded-control hardening, full frontend gate, and commit                                     |
+| F2         | agent  | 2026-07-17T18:27:47+03:00  | 2026-07-17T18:44:12+03:00  | 00:16:25        | Added local KaTeX/Shiki, typed attachment image policy, code copy, tables, and security tests                  |
+| F2         | review | 2026-07-17T18:45:13+03:00  | 2026-07-17T18:57:58+03:00  | 00:12:45        | Hardened image origins, HTML shape, Shiki workload, KaTeX aggregate limits, and package deduplication          |
+| F2         | root   | 2026-07-17T18:58:00+03:00  | 2026-07-17T18:58:39+03:00  | 00:00:39        | Reviewed security boundaries, staged isolated renderer files, and committed the green production build         |
+| G1         | agent  | 2026-07-17T19:12:31+03:00  | 2026-07-17T19:23:17+03:00  | 00:10:46        | Replaced active textarea with CM6, preserved outliner/IME behavior, added model tests, and inspected live      |
+| G1         | root   | 2026-07-17T19:23:17+03:00  | 2026-07-17T19:24:13+03:00  | 00:00:56        | Reviewed editor ownership and shortcuts, reran 92 frontend tests, accepted visible 2 MB bundle warning         |
+| G2         | agent  | 2026-07-17T19:24:50+03:00  | 2026-07-17T20:01:12+03:00  | 00:36:22        | Added typed two-pane workspace, adjacent navigation, graph pane, responsive projection, and Assistant          |
+| G2         | root   | 2026-07-17T20:01:12+03:00  | 2026-07-17T20:03:52+03:00  | 00:02:40        | Fixed compact inertness and focus ownership, ran wide/compact live checks, and committed                       |
+| D1         | audit  | 2026-07-17T19:20:23+03:00  | 2026-07-17T19:37:44+03:00  | 00:17:21        | Audited media corpus, attachment lifecycle, blob safety, and the import/materialization boundary               |
+| D1a        | agent  | 2026-07-17T19:41:05+03:00  | 2026-07-17T20:02:52+03:00  | 00:21:47        | Added typed media references, exact source mapping, deterministic policy, and real-corpus classification       |
+| D1a        | review | 2026-07-17T20:04:12+03:00  | 2026-07-17T20:08:43+03:00  | 00:04:31        | Found truncated inline-image acceptance and late global budget enforcement                                     |
+| D1a        | agent  | 2026-07-17T20:09:30+03:00  | 2026-07-17T20:15:44+03:00  | 00:06:14        | Added bounded real image decode and pre-allocation reference/diagnostic budgets                                |
+| D1b        | agent  | 2026-07-17T20:16:58+03:00  | 2026-07-17T20:20:53+03:00  | 00:03:55        | Added typed hashes, sharded streaming store, atomic no-clobber publication, fsync, and security tests          |
+| D1b        | root   | 2026-07-17T20:20:53+03:00  | 2026-07-17T20:22:23+03:00  | 00:01:30        | Reviewed crash/concurrency semantics, reran strict gates, and committed the shared blob-store foundation       |
+| D1b        | agent  | 2026-07-17T20:22:39+03:00  | 2026-07-17T20:29:28+03:00  | 00:06:49        | Replaced attachment hash strings with strict typed binary hashes across core, operations, import, and SQL      |
+| D1b        | root   | 2026-07-17T20:30:24+03:00  | 2026-07-17T20:33:23+03:00  | 00:02:59        | Hardened verified-handle reads, no-clobber durability, directory sync, and cross-platform safety tests         |
+| D1b        | agent  | 2026-07-17T20:30:56+03:00  | 2026-07-17T20:35:09+03:00  | 00:04:13        | Typed the HTTP blob protocol and retained authorization for historical add/remove operations                   |
+| D1b        | agent  | 2026-07-17T20:32:00+03:00  | 2026-07-17T20:42:39+03:00  | 00:10:39        | Migrated desktop and Android pickers, archive v7, sync staging, and bootstrap to canonical BlobStore           |
+| D1b        | agent  | 2026-07-17T20:37:13+03:00  | 2026-07-17T20:40:50+03:00  | 00:03:37        | Hardened server PUT/GET/HEAD durability, verified-handle streaming, error mapping, and concurrency tests       |
+| D1b        | root   | 2026-07-17T20:40:50+03:00  | 2026-07-17T20:44:26+03:00  | 00:03:36        | Integrated host changes, bumped archive format, streamed decode, removed upload reopen race, and committed     |
+| E1         | agent  | 2026-07-17T19:35:29+03:00  | 2026-07-17T20:05:05+03:00  | 00:29:36        | Added prevalidated atomic external apply, receipts, normal ops/outbox, aliases, snapshots, and tests           |
+| E1         | root   | 2026-07-17T20:05:05+03:00  | 2026-07-17T20:08:38+03:00  | 00:03:33        | Integrated sync exports and event handling, ran the full workspace gate, and committed                         |
+| E1         | agent  | 2026-07-17T20:14:50+03:00  | 2026-07-17T20:16:21+03:00  | 00:01:31        | Removed runtime timestamps from import inputs and made first apply use one transaction-owned timestamp         |
+| E1         | agent  | 2026-07-17T20:17:55+03:00  | 2026-07-17T20:20:38+03:00  | 00:02:43        | Added strict public read-only receipts so import identity survives application restarts                        |
+| D1b        | agent  | 2026-07-17T20:46:47+03:00  | 2026-07-17T20:52:45+03:00  | 00:05:58        | Enforced server byte integrity and temporary-file RAII; landed in `701e0b2`                                    |
+| D1b        | root   | ~2026-07-17T20:51:00+03:00 | 2026-07-17T21:10:38+03:00  | ~00:19:38       | Hardened portable archive transactions and rollback; landed in `5c92d6b`                                       |
+| D1c        | audit  | 2026-07-17T20:37:20+03:00  | 2026-07-17T20:39:21+03:00  | 00:02:01        | Audited duplicated Markdown reference scanners before sharing one syntax-aware boundary                        |
+| D1c        | agent  | 2026-07-17T20:40:18+03:00  | 2026-07-17T20:55:31+03:00  | 00:15:13        | Implemented the shared scanner used by import and rendering; landed in `1b48727`                               |
+| D1c        | agent  | ~2026-07-17T20:56:00+03:00 | ~2026-07-17T21:15:00+03:00 | ~00:19:00       | Connected verified attachment images to the shared Markdown protocol; landed in `1bb4c2e`                      |
+| D1c        | agent  | 2026-07-17T21:01:29+03:00  | 2026-07-17T21:11:53+03:00  | 00:10:24        | Added bounded Logseq media materialization and exact Markdown rewrites; landed in `e4d39d2`                    |
+| D1c        | review | 2026-07-17T21:15:29+03:00  | 2026-07-17T21:18:10+03:00  | 00:02:41        | Found commit-safety, source-drift, range, and dedup issues in the first materializer                           |
+| D1b        | root   | ~2026-07-17T21:17:00+03:00 | 2026-07-17T21:24:40+03:00  | ~00:07:40       | Added partial-publication rollback without deleting pre-existing blobs; landed in `43225df`                    |
+| D1c        | review | 2026-07-17T21:25:46+03:00  | 2026-07-17T21:35:12+03:00  | 00:09:26        | Final materialization review and fixes for source identity, fatal errors, and commit-safe rewrites             |
+| E2         | audit  | 2026-07-17T21:25:21+03:00  | 2026-07-17T21:34:24+03:00  | 00:09:03        | Traced the complete typed Tauri session, folder-picker, progress, commit, and receipt boundary                 |
+| E2         | agent  | 2026-07-17T21:43:30+03:00  | 2026-07-17T21:51:27+03:00  | 00:07:57        | Built the settings state machine, progress, preview, blockers, diagnostics, confirmation, and receipt UI       |
+| E2         | root   | 2026-07-17T21:51:27+03:00  | 2026-07-17T21:56:02+03:00  | 00:04:35        | Wired imported-page navigation, ran 115 frontend tests/build, and inspected the real debug WebView             |
+| E3         | root   | 2026-07-17T21:56:02+03:00  | 2026-07-17T21:58:54+03:00  | 00:02:52        | Added explicit corpus journal/attachment/depth/blob/mtime assertions and reran the ignored real-corpus test    |
+| E4         | agent  | ~2026-07-17T22:55:00+03:00 | ~2026-07-17T22:59:20+03:00 | ~00:04:20       | Split desktop import state/helpers behind narrow cfgs while retaining one typed Android command surface        |
+| E4         | root   | ~2026-07-17T23:00:00+03:00 | 2026-07-17T23:05:34+03:00  | ~00:05:34       | Reviewed target behavior and committed after a warning-free four-ABI Android debug build                       |
+| D2         | agent  | 2026-07-17T21:59:50+03:00  | 2026-07-17T22:13:37+03:00  | 00:13:47        | Built pinned isolated Excalidraw 0.12/Playwright converter, atomic PNG publication, and security tests         |
+| D2         | agent  | 2026-07-17T22:00:37+03:00  | 2026-07-17T22:15:34+03:00  | 00:14:57        | Added typed Rust publication loader and verified manifest/source/PNG materialization boundary                  |
+| D2         | root   | ~2026-07-17T22:20:00+03:00 | 2026-07-17T22:24:17+03:00  | ~00:04:17       | Fixed harmless manifest-orphan handling, proved four PNGs in real import/no-op, integrated Settings, committed |
+| F2b        | agent  | 2026-07-17T22:14:28+03:00  | 2026-07-17T22:17:33+03:00  | 00:03:05        | Preserved full Markdown AST semantics in compact outline block flow and added regression tests                 |
+| F2b        | root   | 2026-07-17T22:24:17+03:00  | 2026-07-17T22:27:39+03:00  | 00:03:22        | Reviewed DOM validity and prose density, ran 119 tests/build, captured native desktop shell, and committed     |
+| F2c        | agent  | 2026-07-17T22:33:31+03:00  | 2026-07-17T22:36:41+03:00  | 00:03:10        | Tightened property grammar, mapped exact ordered-list service properties, and added planner/parser tests       |
+| F2c        | root   | ~2026-07-17T22:51:00+03:00 | 2026-07-17T22:54:14+03:00  | ~00:03:14       | Reviewed stripping/task precedence, ran import/Tauri/Clippy gates, and committed the typed presentation        |
+| F2d        | agent  | ~2026-07-17T22:33:00+03:00 | ~2026-07-17T22:39:00+03:00 | ~00:06:00       | Implemented inert URL-intent video cards, source-aware macro transform, styling, and security tests            |
+| F2d        | review | ~2026-07-17T22:43:00+03:00 | ~2026-07-17T22:44:00+03:00 | ~00:01:00       | Fast-coder review found no defects; 23 targeted tests and full frontend lint/typecheck passed                  |
+| F2d        | root   | ~2026-07-17T22:52:00+03:00 | 2026-07-17T22:54:38+03:00  | ~00:02:38       | Reviewed URL/sanitize boundary, ran 126 frontend tests and production build, and committed                     |
+| G3a        | agent  | ~2026-07-17T22:57:00+03:00 | ~2026-07-17T23:04:00+03:00 | ~00:07:00       | Added typed HLC revisions, atomic conditional writes, Specta/RPC propagation, frontend call sites, and tests   |
+| G3a        | root   | ~2026-07-17T23:04:00+03:00 | 2026-07-17T23:06:03+03:00  | ~00:02:03       | Required no-op event suppression, reviewed transaction semantics, reran Rust/frontend gates, and committed     |
+| G3b        | agent  | ~2026-07-17T23:06:00+03:00 | ~2026-07-17T23:15:00+03:00 | ~00:09:00       | Built the window-local registry, StrictMode-safe writer lease, live title/block overlays, and Reading wiring   |
+| G3b        | review | ~2026-07-17T23:15:00+03:00 | ~2026-07-17T23:21:00+03:00 | ~00:06:00       | Found stale split data loss, authoritative-conflict, remote-delete, and awaited attachment authority races     |
+| G3b        | agent  | ~2026-07-17T23:21:00+03:00 | ~2026-07-17T23:25:00+03:00 | ~00:04:00       | Added atomic revision-guarded split through core, Specta bindings, all editor paths, and regression tests      |
+| G3b        | root   | ~2026-07-17T23:14:00+03:00 | 2026-07-17T23:28:41+03:00  | ~00:14:41       | Fixed remaining review findings; ran full Rust/frontend gates and live pre-autosave linked-pane validation     |
 
 ### Session summaries
 

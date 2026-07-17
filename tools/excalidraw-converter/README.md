@@ -37,9 +37,12 @@ converter unchanged. For notes-rs' automatic import discovery, publish to:
 <app-data>/logseq-drawing-conversions/<source-manifest-sha256>/
 ```
 
-`--drawing` is an explicit allowlist and may be repeated. The import adapter
-must pass only referenced drawings from its prepared, immutable source
-manifest. The converter never scans or writes the graph itself.
+`--drawing` is an explicit allowlist and may be repeated. Every entry must come
+from the prepared immutable source manifest. The helper lists all manifest
+drawings, including unreferenced or empty drawings, so the publication remains
+an auditable one-time conversion run. The importer consumes only exact
+references from note content and ignores other manifest-bound outputs. The
+converter never scans or writes the graph itself.
 
 The output is published atomically as one new directory:
 
