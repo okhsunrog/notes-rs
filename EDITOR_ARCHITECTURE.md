@@ -2,8 +2,9 @@
 
 Status: accepted on 2026-07-17 and partially implemented. The durable layout/presentation boundary,
 shared semantic renderer, pane workspace, marker-free `DocumentCodec`, revision-guarded atomic
-replace, continuous CodeMirror Source authoring, and linked Reading projection are implemented.
-Document Live Preview decorations and the remaining large-document/mobile gates are still pending.
+replace, continuous CodeMirror authoring, linked Reading projection, bounded notes-link dialect,
+and the Document Live Preview foundation are implemented. Rich semantic editor widgets and the
+remaining large-document/mobile gates are still pending.
 
 This decision defines how notes-rs presents and edits the same typed page/block model as an
 outliner and as a continuous Markdown document. It deliberately separates durable content from
@@ -267,11 +268,13 @@ changes remain localized.
    Reading from schema, operations, snapshots, archives, RPC, and sync.
 2. **Completed:** introduce the shared Markdown dialect and AST renderer and remove the old regex
    renderer.
-3. Complete the CodeMirror spike and define the editor and versioned `DocumentCodec` contracts.
-4. Replace the active Outline textarea while preserving current block operations and conflict UI.
-5. Implement the continuous Document session and automatic segmentation fixtures.
-6. Add pane-local Write/Read and device-local editor preferences; compose side-by-side preview
-   through the general workspace pane architecture.
+3. **Completed foundation:** complete the CodeMirror spike and define the editor and versioned
+   `DocumentCodec` contracts. Semantic widgets and real-device mobile validation remain.
+4. **Completed:** replace the active Outline textarea while preserving current block operations and
+   conflict UI.
+5. **Completed:** implement the continuous Document session and automatic segmentation fixtures.
+6. **Completed:** add pane-local Write/Read and device-local editor preferences; compose
+   side-by-side preview through the general workspace pane architecture.
 7. Delete the old regex renderer, textarea editor, and any provisional view compatibility code.
 
 Because the project is unreleased, this migration updates the clean V001 baseline and requires a

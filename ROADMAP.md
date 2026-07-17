@@ -542,6 +542,20 @@ UUIDs, and the opaque document revision before generating any operation IDs.
 
 Each is a separate green migration. CodeMirror is not introduced merely to render imported pages.
 
+G5 is also split at explicit boundaries:
+
+- **G5a — bounded notes-link dialect:** Reading and Lezer share one linear scanner for wikilinks
+  and UUID block references. Production scanning omits diagnostics, diagnostic output is capped,
+  and malformed lines have a bounded candidate stack. Ordinary Markdown links/images remain
+  opaque. Syntax which would be split differently by the semantic renderer is explicitly inert.
+- **G5b — Live Preview authoring foundation:** Write and Source are compartments of the same
+  `EditorState`; selection, history, and the mounted `EditorView` survive mode changes. Decorations
+  are viewport-bounded, source is revealed only in the focused active construct, asynchronous
+  Lezer completion refreshes the projection, and IME reconfiguration uses bounded retries.
+- **G5c — semantic editor extensions:** table/image/reference-link widgets, math, Mermaid, code and
+  task widgets, typed link navigation, stronger accessibility semantics, realistic 1-2 MB editor
+  profiling, and real Android Gboard validation remain a separate feature boundary.
+
 ## 12. First 5-6 hour autonomous execution slice
 
 The first long session prioritizes source-model correctness and executable import progress over
@@ -692,7 +706,9 @@ Planning estimates stay separate from actual duration.
 | G4b | Revisioned complete-page snapshot            | complete | 00:45           | ~2026-07-17T23:29:00+03:00 | 2026-07-17T23:38:28+03:00 | ~00:09:28 | ~00:09:28  | `f8d8569`                                                                                                    | focused Rust; strict Clippy; bindings             |
 | G4c | Atomic revision-guarded document replace     | complete | 01:30           | ~2026-07-17T23:29:00+03:00 | 2026-07-17T23:50:35+03:00 | ~00:21:35 | ~00:20:00  | `ceb142f`                                                                                                    | 11 focused; workspace Rust; convergence; Clippy   |
 | G4d | Continuous Source authoring and live Reading | complete | 02:00           | ~2026-07-17T23:43:00+03:00 | 2026-07-18T00:00:42+03:00 | ~00:17:42 | ~00:17:00  | `ca79c20`                                                                                                    | 179 frontend; build; native Wayland live WebView  |
-| G5  | Obsidian-like Document Live Preview          | planned  | 03:00+          | —                          | —                         | —         | —          | —                                                                                                            | —                                                 |
+| G5a | Bounded Reading/Lezer notes-link dialect     | complete | 01:00           | 2026-07-18T00:07:27+03:00  | 2026-07-18T00:51:22+03:00 | 00:43:55  | >=00:35:00 | `c39659b`                                                                                                    | 1.2 MB bounded scan; parity/security fixtures     |
+| G5b | Document Live Preview authoring foundation   | complete | 02:00           | 2026-07-18T00:07:27+03:00  | 2026-07-18T00:51:35+03:00 | 00:44:08  | >=00:50:00 | `df4090b`                                                                                                    | 267 frontend; build; wide/compact live WebView    |
+| G5c | Semantic widgets, navigation, mobile gates   | planned  | 02:30+          | —                          | —                         | —         | —          | —                                                                                                            | —                                                 |
 
 The estimates are scheduling aids, not deadlines. Any row is split into smaller logical rows if it
 cannot be completed and validated as one commit.
@@ -790,12 +806,18 @@ is recorded as soon as an interval stops; the feature-ledger totals are calculat
 | G4d        | agent  | ~2026-07-17T23:43:00+03:00 | ~2026-07-17T23:55:00+03:00 | ~00:12:00       | Built continuous CM6 Source authoring, PageSession document drafts, autosave/conflicts, Reading, and tests     |
 | G4d        | review | ~2026-07-17T23:48:00+03:00 | ~2026-07-17T23:57:00+03:00 | ~00:09:00       | Found cross-page undo, read-only programmatic undo, selection collapse, and early-domain-event autosave races  |
 | G4d        | root   | ~2026-07-17T23:55:00+03:00 | 2026-07-18T00:00:42+03:00  | ~00:05:42       | Fixed the final race, ran 179 tests/build, proved typed blocks and semantic Reading in native Wayland WebView  |
+| G5a        | agent  | ~2026-07-18T00:08:00+03:00 | ~2026-07-18T00:35:00+03:00 | ~00:27:00       | Built the shared scanner, typed Lezer nodes, raw mdast mapping, and initial parity/adversarial fixtures        |
+| G5b        | agent  | ~2026-07-18T00:08:00+03:00 | ~2026-07-18T00:18:00+03:00 | ~00:10:00       | Built viewport-bounded Live Preview decorations, source reveal, mode compartment, IME deferral, and tests      |
+| G5b        | agent  | ~2026-07-18T00:08:00+03:00 | ~2026-07-18T00:35:00+03:00 | ~00:27:00       | Added device-local Write/Source preference, Read controls, single-writer lease UX, and component/model tests   |
+| G5a/G5b    | review | ~2026-07-18T00:17:00+03:00 | ~2026-07-18T00:50:00+03:00 | ~00:33:00       | Found and verified async parsing, IME, dialect parity, link opacity, and adversarial mobile-memory blockers    |
+| G5a/G5b    | root   | 2026-07-18T00:07:27+03:00  | 2026-07-18T00:51:35+03:00  | 00:44:08        | Integrated, hardened, ran 267 tests/build, inspected wide/compact native UI, and made two logical commits      |
 
 ### Session summaries
 
 At the end of every autonomous session append one row. The summary references feature IDs rather
 than replacing their detailed timing.
 
-| Session     | Started at                | Finished at               | Elapsed  | Completed feature IDs | Commits   | Final gate                                | Next start                |
-| ----------- | ------------------------- | ------------------------- | -------- | --------------------- | --------- | ----------------------------------------- | ------------------------- |
-| S0 planning | 2026-07-17T17:14:04+03:00 | 2026-07-17T17:41:01+03:00 | 00:26:57 | R0                    | `ca35c95` | `vp check`, 17 frontend and 76 Rust tests | A1 background AI defaults |
+| Session           | Started at                | Finished at               | Elapsed  | Completed feature IDs | Commits             | Final gate                                       | Next start                     |
+| ----------------- | ------------------------- | ------------------------- | -------- | --------------------- | ------------------- | ------------------------------------------------ | ------------------------------ |
+| S0 planning       | 2026-07-17T17:14:04+03:00 | 2026-07-17T17:41:01+03:00 | 00:26:57 | R0                    | `ca35c95`           | `vp check`, 17 frontend and 76 Rust tests        | A1 background AI defaults      |
+| S1 implementation | 2026-07-17T17:42:27+03:00 | 2026-07-18T00:51:35+03:00 | 07:09:08 | A1-G5b                | `37d82ca`…`df4090b` | 267 frontend; workspace Rust gates; live WebView | G5c semantic editor extensions |
