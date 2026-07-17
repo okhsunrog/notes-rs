@@ -54,8 +54,8 @@ impl Default for AiConfig {
                 .expect("valid default completion URL"),
             chat_model: "google/gemini-3.1-flash-lite".into(),
             extraction_model: "google/gemini-3.1-flash-lite".into(),
-            automatic_embeddings: true,
-            entity_extraction_enabled: true,
+            automatic_embeddings: false,
+            entity_extraction_enabled: false,
             query_rewriting_enabled: true,
         }
     }
@@ -213,6 +213,15 @@ const fn default_max_blob_bytes() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_ai_config_requires_explicit_opt_in_for_paid_background_work() {
+        let ai = AiConfig::default();
+
+        assert!(!ai.automatic_embeddings);
+        assert!(!ai.entity_extraction_enabled);
+        assert!(ai.query_rewriting_enabled);
+    }
 
     #[test]
     fn rejects_path_shaped_user_ids_and_short_tokens() {

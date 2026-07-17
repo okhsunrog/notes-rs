@@ -15,8 +15,8 @@ completion_api_key = "replace-with-an-openrouter-or-compatible-key"
 completion_base_url = "https://openrouter.ai/api/v1"
 chat_model = "google/gemini-3.1-flash-lite"
 extraction_model = "google/gemini-3.1-flash-lite"
-automatic_embeddings = true
-entity_extraction_enabled = true
+automatic_embeddings = false
+entity_extraction_enabled = false
 query_rewriting_enabled = true
 
 [[users]]

@@ -622,8 +622,8 @@ Planning estimates stay separate from actual duration.
 
 | ID  | Feature boundary                              | Status   | Planned elapsed | Started at                | Finished at               | Elapsed  | Agent time | Commit                | Validation                                |
 | --- | --------------------------------------------- | -------- | --------------- | ------------------------- | ------------------------- | -------- | ---------- | --------------------- | ----------------------------------------- |
-| R0  | Roadmap, corpus, and architecture audit       | complete | 00:40           | 2026-07-17T17:14:04+03:00 | 2026-07-17T17:41:01+03:00 | 00:26:57 | >=00:26:57 | pending ledger update | `vp check`, 17 frontend and 76 Rust tests |
-| A1  | Background AI defaults off                    | planned  | 00:25           | —                         | —                         | —        | —          | —                     | —                                         |
+| R0  | Roadmap, corpus, and architecture audit       | complete | 00:40           | 2026-07-17T17:14:04+03:00 | 2026-07-17T17:41:01+03:00 | 00:26:57 | >=00:26:57 | `ca35c95`             | `vp check`, 17 frontend and 76 Rust tests |
+| A1  | Background AI defaults off                    | complete | 00:25           | 2026-07-17T17:42:27+03:00 | 2026-07-17T17:44:51+03:00 | 00:02:24 | 00:02:24   | pending ledger update | 19 AI and 13 server tests; scoped Clippy  |
 | A2  | `PageView` to `PageLayout`                    | planned  | 01:20           | —                         | —                         | —        | —          | —                     | —                                         |
 | B1  | Workspace and Journal identity                | planned  | 01:30           | —                         | —                         | —        | —          | —                     | —                                         |
 | B2  | Journal services and minimum UI               | planned  | 01:15           | —                         | —                         | —        | —          | —                     | —                                         |
@@ -655,12 +655,13 @@ is recorded as soon as an interval stops; the feature-ledger totals are calculat
 | Feature ID | Actor | Started at                | Ended at                  | Active duration | Result/notes                                                                                             |
 | ---------- | ----- | ------------------------- | ------------------------- | --------------- | -------------------------------------------------------------------------------------------------------- |
 | R0         | root  | 2026-07-17T17:14:04+03:00 | 2026-07-17T17:41:01+03:00 | 00:26:57        | Baseline verification, corpus audits, and roadmap design; parallel audit intervals were not instrumented |
+| A1         | root  | 2026-07-17T17:42:27+03:00 | 2026-07-17T17:44:51+03:00 | 00:02:24        | Disabled unattended embeddings and entity extraction defaults; updated deployment bootstrap              |
 
 ### Session summaries
 
 At the end of every autonomous session append one row. The summary references feature IDs rather
 than replacing their detailed timing.
 
-| Session     | Started at                | Finished at               | Elapsed  | Completed feature IDs | Commits               | Final gate                                | Next start                |
-| ----------- | ------------------------- | ------------------------- | -------- | --------------------- | --------------------- | ----------------------------------------- | ------------------------- |
-| S0 planning | 2026-07-17T17:14:04+03:00 | 2026-07-17T17:41:01+03:00 | 00:26:57 | R0                    | pending ledger update | `vp check`, 17 frontend and 76 Rust tests | A1 background AI defaults |
+| Session     | Started at                | Finished at               | Elapsed  | Completed feature IDs | Commits   | Final gate                                | Next start                |
+| ----------- | ------------------------- | ------------------------- | -------- | --------------------- | --------- | ----------------------------------------- | ------------------------- |
+| S0 planning | 2026-07-17T17:14:04+03:00 | 2026-07-17T17:41:01+03:00 | 00:26:57 | R0                    | `ca35c95` | `vp check`, 17 frontend and 76 Rust tests | A1 background AI defaults |

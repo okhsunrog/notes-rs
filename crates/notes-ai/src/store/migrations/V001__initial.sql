@@ -12,8 +12,8 @@ CREATE UNIQUE INDEX one_active_generation
 
 CREATE TABLE index_control (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-  automatic_embeddings INTEGER NOT NULL DEFAULT 1,
-  entity_extraction INTEGER NOT NULL DEFAULT 1,
+  automatic_embeddings INTEGER NOT NULL DEFAULT 0,
+  entity_extraction INTEGER NOT NULL DEFAULT 0,
   query_rewriting INTEGER NOT NULL DEFAULT 1
 );
 INSERT INTO index_control(singleton) VALUES (1);

@@ -116,8 +116,8 @@ pub struct AiControl {
 impl Default for AiControl {
     fn default() -> Self {
         Self {
-            automatic_embeddings: true,
-            entity_extraction: true,
+            automatic_embeddings: false,
+            entity_extraction: false,
             query_rewriting: true,
         }
     }
@@ -1187,6 +1187,23 @@ mod tests {
     #[test]
     fn ai_schema_migration_is_valid() {
         migrations().validate().expect("valid AI migrations");
+    }
+
+    #[tokio::test]
+    async fn new_store_requires_explicit_opt_in_for_paid_background_work() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = AiStore::open(directory.path().join("ai.db"), "identity".into(), 2)
+            .await
+            .expect("AI store");
+
+        assert_eq!(
+            store.control().await.expect("AI control"),
+            AiControl {
+                automatic_embeddings: false,
+                entity_extraction: false,
+                query_rewriting: true,
+            }
+        );
     }
 
     #[test]
