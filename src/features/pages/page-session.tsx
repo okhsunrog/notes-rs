@@ -8,7 +8,8 @@ import {
   useSyncExternalStore,
 } from "react";
 import type { PaneId } from "@/features/workspace/workspace-model";
-import type { ContentRevision } from "@/lib/api";
+import type { DocumentSourceMap } from "@/features/document/document-codec";
+import type { ContentRevision, DocumentRevision } from "@/lib/api";
 
 export type PersistedTextSnapshot = Readonly<{
   text: string;
@@ -34,10 +35,37 @@ export type DraftOverlay = Readonly<{
   inFlight: DraftSaveAttempt | null;
 }>;
 
+export type PersistedDocumentSnapshot = Readonly<{
+  buffer: string;
+  sourceMap: DocumentSourceMap;
+  revision: DocumentRevision;
+}>;
+
+export type DocumentDraftConflict = Readonly<{
+  remote: PersistedDocumentSnapshot;
+}>;
+
+export type DocumentSaveAttempt = Readonly<{
+  id: number;
+  draft: string;
+  baseSourceMap: DocumentSourceMap;
+  expectedRevision: DocumentRevision;
+}>;
+
+export type DocumentDraftOverlay = Readonly<{
+  draft: string;
+  baseBuffer: string;
+  baseSourceMap: DocumentSourceMap;
+  baseRevision: DocumentRevision;
+  conflict: DocumentDraftConflict | null;
+  inFlight: DocumentSaveAttempt | null;
+}>;
+
 export type PageSessionSnapshot = Readonly<{
   writerPaneId: PaneId | null;
   title: DraftOverlay | null;
   blocks: Readonly<Record<string, DraftOverlay>>;
+  document: DocumentDraftOverlay | null;
 }>;
 
 export type WriterLeaseToken = Readonly<{ readonly id: symbol }>;
@@ -60,6 +88,7 @@ const EMPTY_SESSION: PageSessionSnapshot = Object.freeze({
   writerPaneId: null,
   title: null,
   blocks: EMPTY_BLOCKS,
+  document: null,
 });
 
 /**
@@ -182,6 +211,142 @@ export class PageSessionRegistry {
 
   keepLocalBlock(pageUuid: string, blockUuid: string): void {
     this.#keepLocal(pageUuid, { kind: "block", blockUuid });
+  }
+
+  editDocument(pageUuid: string, draft: string, persisted: PersistedDocumentSnapshot): void {
+    const record = this.#record(pageUuid);
+    const current = record.snapshot.document;
+    if (!current) {
+      if (draft === persisted.buffer) return;
+      this.#setDocument(pageUuid, record, {
+        draft,
+        baseBuffer: persisted.buffer,
+        baseSourceMap: persisted.sourceMap,
+        baseRevision: persisted.revision,
+        conflict: null,
+        inFlight: null,
+      });
+      return;
+    }
+    if (current.draft === draft) return;
+    if (draft === current.baseBuffer && current.conflict === null && current.inFlight === null) {
+      this.#setDocument(pageUuid, record, null);
+      return;
+    }
+    this.#setDocument(pageUuid, record, { ...current, draft });
+  }
+
+  acceptDocumentSnapshot(pageUuid: string, persisted: PersistedDocumentSnapshot): void {
+    const record = this.#sessions.get(pageUuid);
+    const current = record?.snapshot.document;
+    if (!record || !current) return;
+    if (persisted.buffer === current.draft) {
+      this.#setDocument(pageUuid, record, null);
+      return;
+    }
+    if (current.inFlight?.draft === persisted.buffer) {
+      if (current.draft === current.inFlight.draft) {
+        this.#setDocument(pageUuid, record, null);
+        return;
+      }
+      this.#setDocument(pageUuid, record, {
+        ...current,
+        baseBuffer: persisted.buffer,
+        baseSourceMap: persisted.sourceMap,
+        baseRevision: persisted.revision,
+        conflict: null,
+        inFlight: null,
+      });
+      return;
+    }
+    if (persisted.buffer === current.baseBuffer) {
+      if (
+        persisted.revision !== current.baseRevision ||
+        persisted.sourceMap !== current.baseSourceMap
+      ) {
+        this.#setDocument(pageUuid, record, {
+          ...current,
+          baseSourceMap: persisted.sourceMap,
+          baseRevision: persisted.revision,
+        });
+      }
+      return;
+    }
+    if (
+      current.conflict?.remote.buffer === persisted.buffer &&
+      current.conflict.remote.revision === persisted.revision
+    ) {
+      return;
+    }
+    this.#setDocument(pageUuid, record, {
+      ...current,
+      conflict: { remote: persisted },
+      inFlight: null,
+    });
+  }
+
+  beginDocumentSave(pageUuid: string): DocumentSaveAttempt | null {
+    const record = this.#sessions.get(pageUuid);
+    const current = record?.snapshot.document;
+    if (!record || !current || current.conflict || current.inFlight) return null;
+    const attempt = Object.freeze({
+      id: this.#nextAttemptId++,
+      draft: current.draft,
+      baseSourceMap: current.baseSourceMap,
+      expectedRevision: current.baseRevision,
+    });
+    this.#setDocument(pageUuid, record, { ...current, inFlight: attempt });
+    return attempt;
+  }
+
+  acknowledgeDocumentSave(
+    pageUuid: string,
+    attempt: DocumentSaveAttempt,
+    persisted: PersistedDocumentSnapshot,
+  ): void {
+    const record = this.#sessions.get(pageUuid);
+    const current = record?.snapshot.document;
+    if (!record || !current || current.inFlight?.id !== attempt.id) return;
+    if (current.draft === attempt.draft || current.draft === persisted.buffer) {
+      this.#setDocument(pageUuid, record, null);
+      return;
+    }
+    this.#setDocument(pageUuid, record, {
+      ...current,
+      baseBuffer: persisted.buffer,
+      baseSourceMap: persisted.sourceMap,
+      baseRevision: persisted.revision,
+      conflict: null,
+      inFlight: null,
+    });
+  }
+
+  failDocumentSave(pageUuid: string, attempt: DocumentSaveAttempt): void {
+    const record = this.#sessions.get(pageUuid);
+    const current = record?.snapshot.document;
+    if (!record || !current || current.inFlight?.id !== attempt.id) return;
+    this.#setDocument(pageUuid, record, { ...current, inFlight: null });
+  }
+
+  useRemoteDocument(pageUuid: string): void {
+    const record = this.#sessions.get(pageUuid);
+    if (!record?.snapshot.document?.conflict) return;
+    this.#setDocument(pageUuid, record, null);
+  }
+
+  keepLocalDocument(pageUuid: string): void {
+    const record = this.#sessions.get(pageUuid);
+    const current = record?.snapshot.document;
+    if (!record || !current?.conflict) return;
+    const remote = current.conflict.remote;
+    this.#setDocument(pageUuid, record, {
+      ...current,
+      baseBuffer: remote.buffer,
+      baseSourceMap: remote.sourceMap,
+      baseRevision: remote.revision,
+      conflict: null,
+      inFlight: null,
+    });
   }
 
   discardBlock(pageUuid: string, blockUuid: string): void {
@@ -362,12 +527,21 @@ export class PageSessionRegistry {
     this.#publish(pageUuid, record, next);
   }
 
+  #setDocument(
+    pageUuid: string,
+    record: SessionRecord,
+    document: DocumentDraftOverlay | null,
+  ): void {
+    this.#publish(pageUuid, record, { ...record.snapshot, document });
+  }
+
   #publish(pageUuid: string, record: SessionRecord, snapshot: PageSessionSnapshot): void {
     if (record.snapshot === snapshot) return;
     record.snapshot = snapshot;
     if (
       snapshot.writerPaneId === null &&
       snapshot.title === null &&
+      snapshot.document === null &&
       Object.keys(snapshot.blocks).length === 0
     ) {
       this.#sessions.delete(pageUuid);
@@ -426,6 +600,15 @@ export function useBlockDraftOverlay(pageUuid: string, blockUuid: string): Draft
     (listener) => registry.subscribe(pageUuid, listener),
     () => registry.getSnapshot(pageUuid).blocks[blockUuid] ?? null,
     () => registry.getSnapshot(pageUuid).blocks[blockUuid] ?? null,
+  );
+}
+
+export function useDocumentDraftOverlay(pageUuid: string): DocumentDraftOverlay | null {
+  const registry = usePageSessionRegistry();
+  return useSyncExternalStore(
+    (listener) => registry.subscribe(pageUuid, listener),
+    () => registry.getSnapshot(pageUuid).document,
+    () => registry.getSnapshot(pageUuid).document,
   );
 }
 

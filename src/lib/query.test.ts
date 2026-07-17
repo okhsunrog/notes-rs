@@ -28,6 +28,7 @@ describe("domain event query invalidation", () => {
     client.setQueryData(queryKeys.block("block-a"), { uuid: "block-a" });
     client.setQueryData(queryKeys.block("block-b"), { uuid: "block-b" });
     client.setQueryData(queryKeys.children("parent-a"), []);
+    client.setQueryData(queryKeys.pageDocument("page-a"), { revision: "d1" });
     client.setQueryData(queryKeys.pages, []);
     client.setQueryData(queryKeys.graph(null), { items: [], edges: [] });
 
@@ -40,6 +41,7 @@ describe("domain event query invalidation", () => {
     expect(client.getQueryState(queryKeys.block("block-a"))?.isInvalidated).toBe(true);
     expect(client.getQueryState(queryKeys.block("block-b"))?.isInvalidated).toBe(false);
     expect(client.getQueryState(queryKeys.children("parent-a"))?.isInvalidated).toBe(true);
+    expect(client.getQueryState(queryKeys.pageDocument("page-a"))?.isInvalidated).toBe(true);
     expect(client.getQueryState(queryKeys.pages)?.isInvalidated).toBe(false);
     expect(client.getQueryState(queryKeys.graph(null))?.isInvalidated).toBe(false);
   });

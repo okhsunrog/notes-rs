@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { DocumentPage } from "@/features/document/document-page";
 import { Outliner } from "@/features/outliner/outliner";
 import type { MarkdownOpenHandler } from "@/features/markdown";
 import { AttachmentsCard } from "@/features/attachments/attachments-card";
@@ -87,6 +88,7 @@ export function PageView({
   const pageRef = useRef(page);
   const titleRef = useRef(title);
   const titleSaveInFlight = useRef<Promise<boolean> | null>(null);
+  const documentFlushRef = useRef<(() => Promise<boolean>) | null>(null);
   const onSavedRef = useRef(onSaved);
   const onStatusRef = useRef(onStatus);
 
@@ -172,6 +174,10 @@ export function PageView({
     autosave.schedule(() => void flush(), AUTOSAVE_MS);
   }, [autosave, canEdit, flush]);
 
+  const registerDocumentFlush = useCallback((flushDocument: (() => Promise<boolean>) | null) => {
+    documentFlushRef.current = flushDocument;
+  }, []);
+
   useEffect(() => {
     pageRef.current = page;
     sessions.acceptTitleSnapshot(page.uuid, {
@@ -204,7 +210,15 @@ export function PageView({
     if (!canEdit || layout === pageRef.current.layout || layoutBusy) return;
     setLayoutBusy(true);
     try {
-      await flush();
+      if (!(await flush())) return;
+      if (
+        pageRef.current.layout === "document" &&
+        layout !== "document" &&
+        documentFlushRef.current &&
+        !(await documentFlushRef.current())
+      ) {
+        return;
+      }
       const updated = await setPageLayout(pageRef.current.uuid, layout);
       pageRef.current = updated;
       onSavedRef.current(updated);
@@ -421,15 +435,28 @@ export function PageView({
       </div>
 
       <div className="editor-body">
-        <Outliner
-          key={page.uuid}
-          page={page}
-          initialEditingUuid={initialBlockUuid}
-          focusRequest={bodyFocusRequest}
-          onOpenMarkdownLink={onOpenMarkdownLink}
-          presentation={presentation}
-          readOnly={!canEdit}
-        />
+        {page.layout === "document" ? (
+          <DocumentPage
+            key={page.uuid}
+            pageUuid={page.uuid}
+            editing={presentation === PagePresentation.Editing}
+            canEdit={canEdit}
+            focusRequest={bodyFocusRequest}
+            onOpenMarkdownLink={onOpenMarkdownLink}
+            onStatus={onStatus}
+            onFlushReady={registerDocumentFlush}
+          />
+        ) : (
+          <Outliner
+            key={page.uuid}
+            page={page}
+            initialEditingUuid={initialBlockUuid}
+            focusRequest={bodyFocusRequest}
+            onOpenMarkdownLink={onOpenMarkdownLink}
+            presentation={presentation}
+            readOnly={!canEdit}
+          />
+        )}
       </div>
       <div className="mt-16">
         <AttachmentsCard

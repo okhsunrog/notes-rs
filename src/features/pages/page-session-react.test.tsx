@@ -4,8 +4,10 @@ import {
   PageSessionProvider,
   PageSessionRegistry,
   useBlockDraftOverlay,
+  useDocumentDraftOverlay,
   useTitleDraftOverlay,
 } from "./page-session";
+import { encodeDocument } from "@/features/document/document-codec";
 
 function ReadingProjection({
   pageUuid,
@@ -38,6 +40,11 @@ function renderReading(registry: PageSessionRegistry) {
   );
 }
 
+function DocumentReadingProjection({ pageUuid }: { pageUuid: string }) {
+  const document = useDocumentDraftOverlay(pageUuid);
+  return <article data-document-reading>{document?.draft ?? "Persisted document"}</article>;
+}
+
 describe("PageSessionProvider", () => {
   it("projects exact in-memory drafts into a newly mounted Reading surface", () => {
     const registry = new PageSessionRegistry();
@@ -57,5 +64,31 @@ describe("PageSessionProvider", () => {
     expect(firstReadingMount).toContain("Block before autosave");
     expect(firstReadingMount).not.toContain(">Persisted title<");
     expect(remountedReading).toBe(firstReadingMount);
+  });
+
+  it("projects an exact dirty document buffer into a linked Reading pane", () => {
+    const registry = new PageSessionRegistry();
+    const base = encodeDocument([
+      {
+        uuid: "block",
+        parentUuid: null,
+        style: { kind: "paragraph" },
+        markdown: "Persisted document",
+      },
+    ]);
+    registry.editDocument("page", "# In-memory\n\n**before autosave**", {
+      buffer: base.markdown,
+      sourceMap: base.sourceMap,
+      revision: "d1",
+    });
+
+    const html = renderToStaticMarkup(
+      <PageSessionProvider registry={registry}>
+        <DocumentReadingProjection pageUuid="page" />
+      </PageSessionProvider>,
+    );
+
+    expect(html).toContain("# In-memory\n\n**before autosave**");
+    expect(html).not.toContain("Persisted document");
   });
 });

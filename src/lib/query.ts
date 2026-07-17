@@ -10,6 +10,8 @@ export const queryKeys = {
   journal: (date: string) => [...root, "journals", date] as const,
   pageRoot: [...root, "page"] as const,
   page: (uuid: string) => [...root, "page", uuid] as const,
+  pageDocumentRoot: [...root, "page-document"] as const,
+  pageDocument: (uuid: string) => [...root, "page-document", uuid] as const,
   blockRoot: [...root, "block"] as const,
   block: (uuid: string) => [...root, "block", uuid] as const,
   childrenRoot: [...root, "children"] as const,
@@ -56,6 +58,7 @@ export async function applyDomainEvent(queryClient: QueryClient, event: DomainEv
       return;
     case "blocks_changed":
       await Promise.all([
+        invalidate(queryKeys.pageDocumentRoot),
         ...event.block_uuids.map((uuid) => invalidate(queryKeys.block(uuid))),
         ...event.container_uuids.map((uuid) => invalidate(queryKeys.children(uuid))),
       ]);
@@ -63,6 +66,7 @@ export async function applyDomainEvent(queryClient: QueryClient, event: DomainEv
     case "pages_deleted": {
       for (const uuid of event.page_uuids) {
         queryClient.removeQueries({ queryKey: queryKeys.page(uuid), exact: true });
+        queryClient.removeQueries({ queryKey: queryKeys.pageDocument(uuid), exact: true });
         queryClient.removeQueries({ queryKey: queryKeys.children(uuid), exact: true });
       }
       await Promise.all([
@@ -80,6 +84,7 @@ export async function applyDomainEvent(queryClient: QueryClient, event: DomainEv
         queryClient.removeQueries({ queryKey: queryKeys.children(uuid), exact: true });
       }
       await Promise.all([
+        invalidate(queryKeys.pageDocumentRoot),
         ...event.container_uuids.map((uuid) => invalidate(queryKeys.children(uuid))),
         invalidate(queryKeys.attachmentsRoot),
         invalidate(queryKeys.graphRoot),
@@ -92,6 +97,7 @@ export async function applyDomainEvent(queryClient: QueryClient, event: DomainEv
       return;
     case "structure_changed":
       await Promise.all([
+        invalidate(queryKeys.pageDocumentRoot),
         ...event.block_uuids.map((uuid) => invalidate(queryKeys.block(uuid))),
         invalidate(queryKeys.childrenRoot),
       ]);

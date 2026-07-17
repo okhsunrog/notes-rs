@@ -1,0 +1,191 @@
+import { defaultKeymap, history, historyKeymap, redo, undo } from "@codemirror/commands";
+import { markdown } from "@codemirror/lang-markdown";
+import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
+import { Annotation, Compartment, EditorState, Prec, Transaction } from "@codemirror/state";
+import { EditorView, keymap } from "@codemirror/view";
+import { useEffect, useRef } from "react";
+import { resolveDocumentHistoryKey } from "./document-editor-model";
+import type { DocumentHistoryAction } from "./document-editor-model";
+
+export type DocumentAuthoringMode = "source";
+
+type Props = {
+  value: string;
+  readOnly: boolean;
+  focusRequest: number;
+  mode?: DocumentAuthoringMode;
+  onChange: (value: string, composing: boolean) => void;
+  onCompositionEnd: (value: string) => void;
+  onBlur: () => void;
+};
+
+const externalDocumentUpdate = Annotation.define<boolean>();
+
+const documentEditorTheme = EditorView.theme({
+  "&": {
+    width: "100%",
+    minHeight: "24rem",
+    color: "var(--foreground)",
+    backgroundColor: "transparent",
+    fontSize: "0.95rem",
+  },
+  "&.cm-focused": { outline: "none" },
+  ".cm-scroller": {
+    overflow: "visible",
+    fontFamily: "inherit",
+    lineHeight: "1.75",
+  },
+  ".cm-content": {
+    minHeight: "24rem",
+    padding: "0.25rem 0 4rem",
+    caretColor: "var(--primary)",
+    fontFamily: "inherit",
+  },
+  ".cm-line": { padding: "0" },
+  ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--primary)" },
+  ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": {
+    backgroundColor: "color-mix(in oklab, var(--primary) 20%, transparent)",
+  },
+  ".cm-gutters": { display: "none" },
+});
+
+function authoringExtensions(mode: DocumentAuthoringMode) {
+  return EditorView.contentAttributes.of({ "data-document-authoring-mode": mode });
+}
+
+function editableExtensions(readOnly: boolean) {
+  return [EditorView.editable.of(!readOnly), EditorState.readOnly.of(readOnly)];
+}
+
+/** Always consumes local history keys; read-only panes never mutate their CM state. */
+export function applyDocumentHistoryAction(
+  view: EditorView,
+  action: DocumentHistoryAction,
+): boolean {
+  if (!view.state.readOnly) {
+    if (action === "undo") undo(view);
+    else redo(view);
+  }
+  return true;
+}
+
+export function ContinuousDocumentEditor({
+  value,
+  readOnly,
+  focusRequest,
+  mode = "source",
+  onChange,
+  onCompositionEnd,
+  onBlur,
+}: Props) {
+  const mountRef = useRef<HTMLDivElement>(null);
+  const viewRef = useRef<EditorView | null>(null);
+  const initialValueRef = useRef(value);
+  const callbacksRef = useRef({ onChange, onCompositionEnd, onBlur });
+  const modeCompartmentRef = useRef(new Compartment());
+  const editableCompartmentRef = useRef(new Compartment());
+  callbacksRef.current = { onChange, onCompositionEnd, onBlur };
+
+  useEffect(() => {
+    const parent = mountRef.current;
+    if (!parent) return;
+    const modeCompartment = modeCompartmentRef.current;
+    const editableCompartment = editableCompartmentRef.current;
+    const state = EditorState.create({
+      doc: initialValueRef.current,
+      extensions: [
+        markdown(),
+        syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+        history(),
+        EditorView.lineWrapping,
+        EditorView.contentAttributes.of({
+          "aria-label": "Document Markdown",
+          autocapitalize: "sentences",
+          autocomplete: "off",
+          autocorrect: "on",
+          spellcheck: "true",
+        }),
+        modeCompartment.of(authoringExtensions(mode)),
+        editableCompartment.of(editableExtensions(readOnly)),
+        Prec.highest(
+          EditorView.domEventHandlers({
+            keydown(event, view) {
+              const action = resolveDocumentHistoryKey({
+                key: event.key,
+                ctrlKey: event.ctrlKey,
+                metaKey: event.metaKey,
+                shiftKey: event.shiftKey,
+                altKey: event.altKey,
+                isComposing: event.isComposing || view.composing,
+              });
+              if (!action) return false;
+              applyDocumentHistoryAction(view, action);
+              event.preventDefault();
+              event.stopPropagation();
+              return true;
+            },
+            compositionend(_event, view) {
+              queueMicrotask(() =>
+                callbacksRef.current.onCompositionEnd(view.state.doc.toString()),
+              );
+              return false;
+            },
+            blur() {
+              callbacksRef.current.onBlur();
+              return false;
+            },
+          }),
+        ),
+        EditorView.updateListener.of((update) => {
+          if (!update.docChanged) return;
+          if (
+            update.transactions.some((transaction) =>
+              transaction.annotation(externalDocumentUpdate),
+            )
+          ) {
+            return;
+          }
+          callbacksRef.current.onChange(update.state.doc.toString(), update.view.composing);
+        }),
+        keymap.of([...defaultKeymap, ...historyKeymap]),
+        documentEditorTheme,
+      ],
+    });
+    const view = new EditorView({ state, parent });
+    viewRef.current = view;
+    return () => {
+      viewRef.current = null;
+      view.destroy();
+    };
+  }, []);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || view.composing || view.state.doc.toString() === value) return;
+    const anchor = Math.min(view.state.selection.main.anchor, value.length);
+    const head = Math.min(view.state.selection.main.head, value.length);
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: value },
+      selection: { anchor, head },
+      annotations: [externalDocumentUpdate.of(true), Transaction.addToHistory.of(false)],
+    });
+  }, [value]);
+
+  useEffect(() => {
+    viewRef.current?.dispatch({
+      effects: editableCompartmentRef.current.reconfigure(editableExtensions(readOnly)),
+    });
+  }, [readOnly]);
+
+  useEffect(() => {
+    viewRef.current?.dispatch({
+      effects: modeCompartmentRef.current.reconfigure(authoringExtensions(mode)),
+    });
+  }, [mode]);
+
+  useEffect(() => {
+    if (focusRequest > 0 && !readOnly) viewRef.current?.focus();
+  }, [focusRequest, readOnly]);
+
+  return <div ref={mountRef} className="continuous-document-editor min-h-96 w-full" />;
+}

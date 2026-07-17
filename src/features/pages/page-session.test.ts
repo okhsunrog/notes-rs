@@ -1,9 +1,21 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 import type { PaneId } from "@/features/workspace/workspace-model";
+import { encodeDocument } from "@/features/document/document-codec";
 import { PageSessionRegistry } from "./page-session";
 
 const persisted = (text: string, revision: string) => ({ text, revision });
 const paneId = (value: string) => value as PaneId;
+const document = (buffer: string, revision: string) => {
+  const encoded = encodeDocument([
+    {
+      uuid: `block-${revision}`,
+      parentUuid: null,
+      style: { kind: "paragraph" },
+      markdown: buffer,
+    },
+  ]);
+  return { buffer: encoded.markdown, sourceMap: encoded.sourceMap, revision };
+};
 
 describe("PageSessionRegistry", () => {
   it("grants one idempotent writer lease per page and ignores stale releases", () => {
@@ -142,6 +154,81 @@ describe("PageSessionRegistry", () => {
     });
   });
 
+  it("publishes the exact continuous document draft with its typed base", () => {
+    const registry = new PageSessionRegistry();
+    const base = document("Persisted", "d1");
+
+    registry.editDocument("page", "# Exact\n\n- [ ] draft", base);
+
+    expect(registry.getSnapshot("page").document).toMatchObject({
+      draft: "# Exact\n\n- [ ] draft",
+      baseBuffer: "Persisted",
+      baseRevision: "d1",
+      baseSourceMap: base.sourceMap,
+    });
+  });
+
+  it("rebases a successful document save without losing newer typing", () => {
+    const registry = new PageSessionRegistry();
+    const base = document("Base", "d1");
+    registry.editDocument("page", "First draft", base);
+    const attempt = registry.beginDocumentSave("page")!;
+
+    registry.editDocument("page", "Newer typing", base);
+    const saved = document("First draft", "d2");
+    registry.acknowledgeDocumentSave("page", attempt, saved);
+
+    expect(registry.getSnapshot("page").document).toMatchObject({
+      draft: "Newer typing",
+      baseBuffer: "First draft",
+      baseRevision: "d2",
+      baseSourceMap: saved.sourceMap,
+      inFlight: null,
+    });
+    expect(registry.beginDocumentSave("page")).toMatchObject({
+      draft: "Newer typing",
+      expectedRevision: "d2",
+      baseSourceMap: saved.sourceMap,
+    });
+  });
+
+  it("settles an in-flight save when its domain refresh arrives before the RPC response", () => {
+    const registry = new PageSessionRegistry();
+    const base = document("Base", "d1");
+    registry.editDocument("page", "Saved draft", base);
+    const attempt = registry.beginDocumentSave("page")!;
+
+    registry.acceptDocumentSnapshot("page", document("Saved draft", "d2"));
+
+    expect(registry.getSnapshot("page").document).toBeNull();
+    registry.acknowledgeDocumentSave("page", attempt, document("Saved draft", "d2"));
+    expect(registry.beginDocumentSave("page")).toBeNull();
+  });
+
+  it("turns invalidated remote document data into a conflict without overwriting the draft", () => {
+    const registry = new PageSessionRegistry();
+    registry.editDocument("page", "Mine", document("Base", "d1"));
+
+    const remote = document("Remote", "d2");
+    registry.acceptDocumentSnapshot("page", remote);
+
+    expect(registry.getSnapshot("page").document).toMatchObject({
+      draft: "Mine",
+      conflict: { remote },
+    });
+    registry.keepLocalDocument("page");
+    expect(registry.getSnapshot("page").document).toMatchObject({
+      draft: "Mine",
+      baseBuffer: "Remote",
+      baseRevision: "d2",
+      conflict: null,
+    });
+
+    registry.acceptDocumentSnapshot("page", document("Remote again", "d3"));
+    registry.useRemoteDocument("page");
+    expect(registry.getSnapshot("page").document).toBeNull();
+  });
+
   it("discards drafts and writer ownership when a remotely deleted page disappears", () => {
     const registry = new PageSessionRegistry();
     const token = registry.createWriterLeaseToken();
@@ -154,6 +241,7 @@ describe("PageSessionRegistry", () => {
       writerPaneId: null,
       title: null,
       blocks: {},
+      document: null,
     });
   });
 });
