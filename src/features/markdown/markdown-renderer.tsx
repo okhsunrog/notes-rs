@@ -60,7 +60,7 @@ const MARKDOWN_SANITIZE_SCHEMA: MarkdownSanitizeSchema = {
   },
 };
 
-export type MarkdownRenderMode = "flow" | "inline";
+export type MarkdownRenderMode = "flow" | "compact_flow" | "inline";
 
 export interface MarkdownRendererProps {
   className?: string;
@@ -97,12 +97,20 @@ export function MarkdownRenderer({
     }),
     [context, mode, onOpenLink, resolveImage],
   );
-  const rootClassName = ["markdown-renderer", className].filter(Boolean).join(" ");
+  const inline = mode === "inline";
+  const rootClassName = [
+    "markdown-renderer",
+    context.kind === "note" && !inline ? "note-prose" : undefined,
+    mode === "compact_flow" ? "note-prose--compact-flow" : undefined,
+    className,
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   const content = (
     <ReactMarkdown
       components={components}
-      disallowedElements={mode === "inline" ? INLINE_BLOCK_ELEMENTS : undefined}
+      disallowedElements={inline ? INLINE_BLOCK_ELEMENTS : undefined}
       rehypePlugins={[
         [rehypeSanitize, MARKDOWN_SANITIZE_SCHEMA],
         [
@@ -118,19 +126,19 @@ export function MarkdownRenderer({
       ]}
       remarkPlugins={[remarkGfm, remarkMath, remarkMathLimits, remarkNotesLinks]}
       skipHtml
-      unwrapDisallowed={mode === "inline"}
+      unwrapDisallowed={inline}
       urlTransform={safeMarkdownUrlTransform}
     >
       {markdown}
     </ReactMarkdown>
   );
 
-  return mode === "inline" ? (
-    <span className={rootClassName} data-markdown-context={context.kind}>
+  return inline ? (
+    <span className={rootClassName} data-markdown-context={context.kind} data-markdown-mode={mode}>
       {content}
     </span>
   ) : (
-    <div className={rootClassName} data-markdown-context={context.kind}>
+    <div className={rootClassName} data-markdown-context={context.kind} data-markdown-mode={mode}>
       {content}
     </div>
   );

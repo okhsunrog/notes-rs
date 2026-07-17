@@ -178,10 +178,32 @@ describe("MarkdownRenderer", () => {
     );
 
     expect(html).toContain('class="markdown-renderer"');
+    expect(html).toContain('data-markdown-mode="inline"');
     expect(html).toContain('class="katex"');
     expect(html).toContain("<code>code</code>");
     expect(html).not.toContain("<p>");
     expect(html).not.toContain("markdown-code-block");
+  });
+
+  it("keeps full Markdown semantics in compact flow mode", () => {
+    const html = renderToStaticMarkup(
+      <MarkdownRenderer
+        context={CONTEXT}
+        markdown={
+          "# Heading\n\n- parent\n  - child\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\n```rust\nfn main() {}\n```\n\n$$\nx^2\n$$"
+        }
+        mode="compact_flow"
+        onOpenLink={() => undefined}
+      />,
+    );
+
+    expect(html).toContain('data-markdown-mode="compact_flow"');
+    expect(html).toContain("note-prose--compact-flow");
+    expect(html).toContain("<h1>Heading</h1>");
+    expect(html.match(/<ul>/g)).toHaveLength(2);
+    expect(html).toContain('data-markdown-table-scroll="true"');
+    expect(html).toContain("markdown-code-block");
+    expect(html).toContain('class="katex-display"');
   });
 
   it("renders fenced source as inert inline code in an inline preview", () => {

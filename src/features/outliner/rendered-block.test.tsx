@@ -17,13 +17,18 @@ function block(markdown: string, style: BlockStyle = { kind: "paragraph" }): Blo
   };
 }
 
-function render(markdown: string, style: BlockStyle = { kind: "paragraph" }, readOnly = false) {
+function render(
+  markdown: string,
+  style: BlockStyle = { kind: "paragraph" },
+  readOnly = false,
+  layout: "document" | "outline" = "document",
+) {
   const queryClient = new QueryClient();
   return renderToStaticMarkup(
     <QueryClientProvider client={queryClient}>
       <RenderedBlock
         block={block(markdown, style)}
-        layout="document"
+        layout={layout}
         onOpenLink={() => undefined}
         ordinal={3}
         readOnly={readOnly}
@@ -50,6 +55,7 @@ describe("RenderedBlock Markdown integration", () => {
     expect(html).toContain("<h2");
     expect(html).toContain("<strong>Architecture</strong>");
     expect(html).toContain('data-markdown-context="note"');
+    expect(html).toContain('data-markdown-mode="inline"');
     expect(html).not.toContain("<p>");
   });
 
@@ -67,6 +73,31 @@ describe("RenderedBlock Markdown integration", () => {
 
     expect(html).toContain(">3.</span>");
     expect(html).toContain("<em>emphasis</em>");
+    expect(html).toContain('data-markdown-mode="compact_flow"');
+  });
+
+  it("preserves imported Markdown inside a bullet as compact semantic flow", () => {
+    const html = render(
+      "# Imported section\n\n- parent\n  - child\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\n```rust\nfn main() {}\n```\n\n$$\nx^2\n$$",
+      { kind: "bullet" },
+    );
+
+    expect(html).toContain('data-markdown-mode="compact_flow"');
+    expect(html).toContain("<h1>Imported section</h1>");
+    expect(html.match(/<ul>/g)).toHaveLength(2);
+    expect(html).toContain('data-markdown-table-scroll="true"');
+    expect(html).toContain("markdown-code-block");
+    expect(html).toContain('class="katex-display"');
+    expect(html).toContain('<div class="min-w-0 flex-1 break-words"><div');
+    expect(html).not.toContain('<span class="min-w-0 whitespace-pre-wrap break-words">');
+  });
+
+  it("uses compact semantic flow for an outline bullet without invalid paragraph nesting", () => {
+    const html = render("Paragraph\n\n```text\ncode\n```", { kind: "bullet" }, false, "outline");
+
+    expect(html).toContain('data-markdown-mode="compact_flow"');
+    expect(html).toContain("markdown-code-block");
+    expect(html).not.toContain("<p><div");
   });
 
   it("renders a real accessible task action with its typed state", () => {
@@ -75,6 +106,7 @@ describe("RenderedBlock Markdown integration", () => {
     expect(html).toContain('role="checkbox"');
     expect(html).toContain('aria-checked="false"');
     expect(html).toContain("Now task; change to Done");
+    expect(html).toContain('data-markdown-mode="compact_flow"');
     expect(html).not.toContain('disabled=""');
   });
 

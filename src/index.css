@@ -569,6 +569,129 @@ html::after {
     overflow-wrap: anywhere;
   }
 
+  /* Notes use the same semantic Markdown tree in document and outline views.
+     Block chrome chooses the density; prose rules never flatten the content. */
+  .note-prose > :first-child {
+    margin-top: 0;
+  }
+
+  .note-prose > :last-child {
+    margin-bottom: 0;
+  }
+
+  .note-prose p,
+  .note-prose ul,
+  .note-prose ol,
+  .note-prose blockquote,
+  .note-prose hr,
+  .note-prose .markdown-code-block,
+  .note-prose .markdown-table-scroll,
+  .note-prose .katex-display {
+    margin-block: 0.8rem;
+  }
+
+  .note-prose h1,
+  .note-prose h2,
+  .note-prose h3,
+  .note-prose h4,
+  .note-prose h5,
+  .note-prose h6 {
+    margin-block: 1.25rem 0.5rem;
+    color: var(--foreground);
+    font-weight: 650;
+    line-height: 1.25;
+    letter-spacing: -0.015em;
+  }
+
+  .note-prose h1 {
+    font-size: 1.65rem;
+  }
+
+  .note-prose h2 {
+    font-size: 1.35rem;
+  }
+
+  .note-prose h3 {
+    font-size: 1.15rem;
+  }
+
+  .note-prose h4,
+  .note-prose h5,
+  .note-prose h6 {
+    font-size: 1rem;
+  }
+
+  .note-prose ul,
+  .note-prose ol {
+    padding-left: 1.35rem;
+  }
+
+  .note-prose ul {
+    list-style: disc;
+  }
+
+  .note-prose ol {
+    list-style: decimal;
+  }
+
+  .note-prose li {
+    margin-block: 0.25rem;
+  }
+
+  .note-prose li > ul,
+  .note-prose li > ol {
+    margin-block: 0.25rem;
+  }
+
+  .note-prose li::marker {
+    color: var(--primary);
+  }
+
+  .note-prose blockquote {
+    border-left: 3px solid color-mix(in oklch, var(--primary) 70%, transparent);
+    padding-left: 0.8rem;
+    color: var(--muted-foreground);
+  }
+
+  .note-prose hr {
+    border-color: var(--border);
+  }
+
+  .note-prose strong {
+    color: var(--foreground);
+    font-weight: 650;
+  }
+
+  .note-prose a {
+    color: var(--primary);
+    text-decoration: underline;
+    text-underline-offset: 0.18em;
+  }
+
+  .note-prose--compact-flow p,
+  .note-prose--compact-flow ul,
+  .note-prose--compact-flow ol,
+  .note-prose--compact-flow blockquote,
+  .note-prose--compact-flow hr,
+  .note-prose--compact-flow .markdown-code-block,
+  .note-prose--compact-flow .markdown-table-scroll,
+  .note-prose--compact-flow .katex-display {
+    margin-block: 0.45rem;
+  }
+
+  .note-prose--compact-flow h1,
+  .note-prose--compact-flow h2,
+  .note-prose--compact-flow h3,
+  .note-prose--compact-flow h4,
+  .note-prose--compact-flow h5,
+  .note-prose--compact-flow h6 {
+    margin-block: 0.7rem 0.3rem;
+  }
+
+  .note-prose--compact-flow li {
+    margin-block: 0.1rem;
+  }
+
   .markdown-renderer :not(pre) > code {
     border: 1px solid color-mix(in oklch, var(--border) 75%, transparent);
     border-radius: 0.35rem;

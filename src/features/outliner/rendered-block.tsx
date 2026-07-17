@@ -40,7 +40,7 @@ export function RenderedBlock({
     );
   }
 
-  const markdown = (
+  const inlineMarkdown = (
     <MarkdownRenderer
       context={{
         kind: "note",
@@ -54,30 +54,44 @@ export function RenderedBlock({
       resolveImage={resolveImage}
     />
   );
+  const compactMarkdown = (
+    <MarkdownRenderer
+      context={{
+        kind: "note",
+        presentation: readOnly ? "reading" : "live_preview",
+        pageUuid: block.pageUuid,
+        blockUuid: block.uuid,
+      }}
+      markdown={block.markdown}
+      mode="compact_flow"
+      onOpenLink={onOpenLink}
+      resolveImage={resolveImage}
+    />
+  );
   const listContent = block.markdown ? (
-    markdown
+    compactMarkdown
   ) : (
     <span className="text-muted-foreground/45">Start writing…</span>
   );
 
   if (block.style.kind === "heading_1") {
-    return <h2 className="mt-5 mb-2 text-2xl font-semibold tracking-tight">{markdown}</h2>;
+    return <h2 className="mt-5 mb-2 text-2xl font-semibold tracking-tight">{inlineMarkdown}</h2>;
   }
   if (block.style.kind === "heading_2") {
-    return <h3 className="mt-4 mb-1.5 text-xl font-semibold tracking-tight">{markdown}</h3>;
+    return <h3 className="mt-4 mb-1.5 text-xl font-semibold tracking-tight">{inlineMarkdown}</h3>;
   }
   if (block.style.kind === "heading_3") {
-    return <h4 className="mt-3 mb-1 text-base font-semibold">{markdown}</h4>;
+    return <h4 className="mt-3 mb-1 text-base font-semibold">{inlineMarkdown}</h4>;
   }
   if (block.style.kind === "quote") {
     return (
       <blockquote className="border-l-2 border-primary/35 pl-4 text-sm leading-relaxed text-muted-foreground italic">
-        {markdown}
+        {inlineMarkdown}
       </blockquote>
     );
   }
   if (layout === "outline" && (block.style.kind === "bullet" || block.style.kind === "numbered")) {
-    return <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{markdown}</p>;
+    return <div className="min-w-0 break-words text-sm leading-relaxed">{compactMarkdown}</div>;
   }
   if (
     block.style.kind === "bullet" ||
@@ -98,7 +112,7 @@ export function RenderedBlock({
             {block.style.kind === "numbered" ? `${ordinal}.` : "•"}
           </span>
         )}
-        <span className="min-w-0 whitespace-pre-wrap break-words">{listContent}</span>
+        <div className="min-w-0 flex-1 break-words">{listContent}</div>
       </div>
     );
   }
