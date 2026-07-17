@@ -510,6 +510,36 @@ These are later dependent stages, not part of the import foundation:
 6. Versioned `DocumentCodec`, continuous CodeMirror buffer, block source maps, deterministic
    split/merge/identity fixtures, remote transactions, and undo ownership.
 
+G4 is deliberately split at four boundaries:
+
+- **G4a — pure codec:** canonical Markdown projection plus an immutable source map. Frontend ranges
+  use UTF-16 offsets because they are consumed by CodeMirror; byte offsets never cross this API.
+  Reconciliation returns `previousUuid | null` and never generates identity itself. No UUID or
+  metadata markers are written into user-visible Markdown.
+- **G4b — typed document snapshot:** Rust returns one ordered page tree with a validated opaque
+  `DocumentRevision`. The revision covers membership, order, parent, style, Markdown, and deletion
+  generations, rather than relying on `MAX(hlc)` or a client-computed timestamp.
+- **G4c — atomic replace intent:** one revision-guarded command accepts the desired semantic units,
+  assigns UUIDv7 only to new units, emits ordinary CRDT operations in one SQLite transaction, and
+  creates one backend history action. A stale document is a typed conflict with zero partial ops,
+  outbox rows, or history.
+- **G4d — continuous editor:** one CodeMirror `EditorState` owns the Document buffer. `PageSession`
+  exposes that exact unsaved buffer to linked Reading. Remote snapshots become explicit conflicts;
+  they never overwrite a dirty buffer. CodeMirror owns keystroke undo while focused, and the
+  backend owns committed document-action undo after the editor session is closed/reloaded.
+
+Standard Markdown intentionally cannot encode every notes-rs metadata value. While a source-map
+segment survives reconciliation it preserves metadata such as `TaskState::Doing` and non-list
+parent identity. New checkbox tasks decode as `Todo`/`Done`; an explicit Markdown syntax change may
+change style. The codec must surface ambiguity instead of hiding metadata in HTML comments.
+
+The G4c wire shape is ordered and index-based rather than stringly typed. Each desired unit carries
+`previousUuid: Uuid | null`, `parentIndex: u32 | null`, `style`, and `markdown`; a parent index must
+point to an earlier unit. Existing UUIDs must be unique and belong to the same current page. The
+backend returns the complete new snapshot so the codec can rebuild its source map with assigned
+UUIDv7 values. It validates unit count, aggregate Markdown bytes, depth, parent order, duplicate
+UUIDs, and the opaque document revision before generating any operation IDs.
+
 Each is a separate green migration. CodeMirror is not introduced merely to render imported pages.
 
 ## 12. First 5-6 hour autonomous execution slice
@@ -653,12 +683,16 @@ Planning estimates stay separate from actual duration.
 | F2b | Compact semantic flow for outline blocks     | complete | 00:30           | 2026-07-17T22:14:28+03:00  | 2026-07-17T22:27:39+03:00 | 00:13:11  | >=00:06:27 | `7d193f9`                                                                                                    | 119 frontend; production build; native shell view |
 | F2c | Logseq numbered-block presentation fidelity  | complete | 00:30           | 2026-07-17T22:33:31+03:00  | 2026-07-17T22:54:14+03:00 | 00:20:43  | >=00:03:10 | `9bf874e`                                                                                                    | 98 import; Tauri adapter; strict Clippy           |
 | F2d | Privacy-safe Logseq video macro cards        | complete | 00:30           | ~2026-07-17T22:33:00+03:00 | 2026-07-17T22:54:38+03:00 | ~00:21:38 | ~00:09:38  | `92cc888`                                                                                                    | 126 frontend; production build; strict lint       |
-| F3  | Safe Mermaid rendering                       | planned  | 01:15           | —                          | —                         | —         | —          | —                                                                                                            | —                                                 |
+| F3  | Safe Mermaid rendering                       | complete | 01:15           | ~2026-07-17T23:29:00+03:00 | 2026-07-17T23:42:07+03:00 | ~00:13:07 | ~00:12:00  | `c258647`                                                                                                    | 166 frontend; build; security policy tests        |
 | G1  | CodeMirror active Outline block              | complete | 02:30           | 2026-07-17T19:12:31+03:00  | 2026-07-17T19:24:13+03:00 | 00:11:42  | 00:11:42   | `2a24308`                                                                                                    | 92 frontend; live WebView; build 2.419 MB         |
 | G2  | Workspace panes and Assistant controller     | complete | 03:00           | 2026-07-17T19:24:50+03:00  | 2026-07-17T20:03:52+03:00 | 00:39:02  | >=00:39:02 | `769f2c4`                                                                                                    | 105 frontend; build; wide/compact live WebView    |
 | G3a | Revision-aware editor save contract          | complete | 00:45           | ~2026-07-17T22:57:00+03:00 | 2026-07-17T23:06:03+03:00 | ~00:09:03 | ~00:09:03  | `02978b4`                                                                                                    | 76 core; 126 frontend; bindings; strict Clippy    |
 | G3b | PageSession and linked live Reading pane     | complete | 02:00           | ~2026-07-17T23:06:00+03:00 | 2026-07-17T23:28:41+03:00 | ~00:22:41 | >=00:15:00 | `f4d1f96`                                                                                                    | 135 frontend; workspace Rust; bindings; live MCP  |
-| G4  | Continuous DocumentCodec editor              | planned  | 04:00+          | —                          | —                         | —         | —          | —                                                                                                            | —                                                 |
+| G4a | Marker-free DocumentCodec and source map     | complete | 01:00           | ~2026-07-17T23:29:00+03:00 | 2026-07-17T23:40:36+03:00 | ~00:11:36 | ~00:10:00  | `e10ca40`                                                                                                    | 13 codec fixtures; 165 frontend tests             |
+| G4b | Revisioned complete-page snapshot            | complete | 00:45           | ~2026-07-17T23:29:00+03:00 | 2026-07-17T23:38:28+03:00 | ~00:09:28 | ~00:09:28  | `f8d8569`                                                                                                    | focused Rust; strict Clippy; bindings             |
+| G4c | Atomic revision-guarded document replace     | complete | 01:30           | ~2026-07-17T23:29:00+03:00 | 2026-07-17T23:50:35+03:00 | ~00:21:35 | ~00:20:00  | `ceb142f`                                                                                                    | 11 focused; workspace Rust; convergence; Clippy   |
+| G4d | Continuous Source authoring and live Reading | complete | 02:00           | ~2026-07-17T23:43:00+03:00 | 2026-07-18T00:00:42+03:00 | ~00:17:42 | ~00:17:00  | `ca79c20`                                                                                                    | 179 frontend; build; native Wayland live WebView  |
+| G5  | Obsidian-like Document Live Preview          | planned  | 03:00+          | —                          | —                         | —         | —          | —                                                                                                            | —                                                 |
 
 The estimates are scheduling aids, not deadlines. Any row is split into smaller logical rows if it
 cannot be completed and validated as one commit.
@@ -746,6 +780,16 @@ is recorded as soon as an interval stops; the feature-ledger totals are calculat
 | G3b        | review | ~2026-07-17T23:15:00+03:00 | ~2026-07-17T23:21:00+03:00 | ~00:06:00       | Found stale split data loss, authoritative-conflict, remote-delete, and awaited attachment authority races     |
 | G3b        | agent  | ~2026-07-17T23:21:00+03:00 | ~2026-07-17T23:25:00+03:00 | ~00:04:00       | Added atomic revision-guarded split through core, Specta bindings, all editor paths, and regression tests      |
 | G3b        | root   | ~2026-07-17T23:14:00+03:00 | 2026-07-17T23:28:41+03:00  | ~00:14:41       | Fixed remaining review findings; ran full Rust/frontend gates and live pre-autosave linked-pane validation     |
+| G4a        | agent  | ~2026-07-17T23:29:00+03:00 | ~2026-07-17T23:40:00+03:00 | ~00:11:00       | Built the pure marker-free codec, UTF-16 source map, identity reconciliation, and split/merge fixtures         |
+| G4b        | root   | ~2026-07-17T23:29:00+03:00 | 2026-07-17T23:38:28+03:00  | ~00:09:28       | Added the typed transactionally consistent snapshot and deterministic semantic revision                        |
+| F3         | agent  | ~2026-07-17T23:29:00+03:00 | ~2026-07-17T23:41:00+03:00 | ~00:12:00       | Added lazy Mermaid, strict SVG sanitization, workload limits, cancellation, cache, themes, and security tests  |
+| F3         | root   | ~2026-07-17T23:40:00+03:00 | 2026-07-17T23:42:07+03:00  | ~00:02:07       | Reviewed the SVG/image security boundary, verified lazy chunks and committed the green renderer                |
+| G4c        | agent  | ~2026-07-17T23:29:00+03:00 | ~2026-07-17T23:49:00+03:00 | ~00:20:00       | Implemented prevalidated atomic replace, CRDT diff, UUIDv7 assignment, history, ordering, and convergence      |
+| G4c        | review | ~2026-07-17T23:40:00+03:00 | ~2026-07-17T23:49:00+03:00 | ~00:09:00       | Found non-canonical order-key no-op violation; required fractional-key and exact-retry regressions             |
+| G4c        | root   | ~2026-07-17T23:49:00+03:00 | 2026-07-17T23:50:35+03:00  | ~00:01:35       | Reviewed operation ordering and zero-mutation surfaces, reran focused tests/Clippy, and committed              |
+| G4d        | agent  | ~2026-07-17T23:43:00+03:00 | ~2026-07-17T23:55:00+03:00 | ~00:12:00       | Built continuous CM6 Source authoring, PageSession document drafts, autosave/conflicts, Reading, and tests     |
+| G4d        | review | ~2026-07-17T23:48:00+03:00 | ~2026-07-17T23:57:00+03:00 | ~00:09:00       | Found cross-page undo, read-only programmatic undo, selection collapse, and early-domain-event autosave races  |
+| G4d        | root   | ~2026-07-17T23:55:00+03:00 | 2026-07-18T00:00:42+03:00  | ~00:05:42       | Fixed the final race, ran 179 tests/build, proved typed blocks and semantic Reading in native Wayland WebView  |
 
 ### Session summaries
 

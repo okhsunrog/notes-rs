@@ -1,7 +1,9 @@
 # Editor and Page Presentation Architecture
 
-Status: accepted on 2026-07-17. The durable layout/presentation boundary and shared semantic
-renderer are implemented; editor, Document adapter, and pane work remain pending.
+Status: accepted on 2026-07-17 and partially implemented. The durable layout/presentation boundary,
+shared semantic renderer, pane workspace, marker-free `DocumentCodec`, revision-guarded atomic
+replace, continuous CodeMirror Source authoring, and linked Reading projection are implemented.
+Document Live Preview decorations and the remaining large-document/mobile gates are still pending.
 
 This decision defines how notes-rs presents and edits the same typed page/block model as an
 outliner and as a continuous Markdown document. It deliberately separates durable content from
