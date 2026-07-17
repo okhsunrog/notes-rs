@@ -1,13 +1,13 @@
 # notes-rs
 
-notes-rs is a local-first personal knowledge app for desktop and Android. Notes are addressable outline blocks connected by wikilinks, block references, backlinks, and extracted entities. React and Tauri provide the shared client; Rust, SQLite, and FTS5 keep writing and lexical search available offline; an optional self-hosted Axum server provides realtime sync and all AI functionality.
+notes-rs is a local-first personal knowledge app for desktop and Android. Typed pages contain addressable outline or document blocks connected by wikilinks, block references, and backlinks. React and Tauri provide the shared client; Rust, SQLite, and FTS5 keep writing and lexical search available offline; an optional self-hosted Axum server provides realtime sync and all AI functionality.
 
 ## What works
 
 - Hierarchical block editing with autosave, Markdown rendering, wikilink and block-reference autocomplete, persisted folding, paragraph splitting, keyboard navigation, and action-based undo/redo.
 - Local pages, graph, backlinks, attachments, import/export, timestamped recovery backups, and English/Russian FTS5 search. These features work without a server.
 - Near-realtime op-based sync over HTTP and WebSocket, with an offline outbox, HLC/LWW conflict resolution, tombstones, deterministic structural reconciliation, snapshot bootstrap, and content-addressed blobs.
-- Server-owned semantic retrieval, reranking, entity extraction, and streaming chat. The clients contain no provider keys, vector database, embedding model, or AI background workers.
+- Server-owned semantic retrieval, reranking, entity extraction, and streaming chat. Extracted entities remain disposable server-side AI data rather than client graph nodes; the clients contain no provider keys, vector database, embedding model, or AI background workers.
 - Remote AI administration in Settings: provider URLs and models, write-only API keys, capability probes, automatic-indexing and extraction switches, queue progress, failures, and reindex controls.
 - A full-workspace graph view, six color palettes with light/dark/system brightness, responsive mobile navigation, Android edge-to-edge safe areas, and configurable native or client window decorations on desktop.
 - Debug-only, localhost-bound Tauri MCP integration for live screenshots, accessibility snapshots, input, logs, and IPC inspection.
@@ -32,7 +32,7 @@ The durable source of truth is a UUID-addressed operation stream. Each client an
 
 Persisted Rust state is exposed through generated tauri-specta bindings and cached in TanStack Query. One typed domain-event adapter invalidates the narrow affected query keys. Draft text and caret state stay local to the editor instead of being mixed into the backend cache.
 
-The server keeps source notes and the oplog in SQLite. Derived embeddings, generations, indexing jobs, and extraction state live in a separate disposable `ai.db` behind a `VectorStore` interface. sqlite-vec is loaded only by the server binary. Provider settings are bootstrapped from the server TOML on first start and subsequently managed from the authenticated application Settings page; provider secrets are stored server-side with owner-only permissions and are never returned to the webview.
+The server keeps source pages, blocks, attachments, and the oplog in SQLite. Derived embeddings, generations, indexing jobs, extracted entities, and extraction state live in a separate disposable `ai.db` behind a `VectorStore` interface; they are not synced into the client graph. sqlite-vec is loaded only by the server binary. Provider settings are bootstrapped from the server TOML on first start and subsequently managed from the authenticated application Settings page; provider secrets are stored server-side with owner-only permissions and are never returned to the webview.
 
 The detailed implementation record is in [SYNC_ARCHITECTURE_PLAN.md](SYNC_ARCHITECTURE_PLAN.md).
 

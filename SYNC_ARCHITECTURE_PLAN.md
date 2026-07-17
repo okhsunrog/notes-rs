@@ -1,255 +1,357 @@
-# Sync & Backend Architecture Plan
+# Sync, Storage, and AI Architecture
 
-Status: core architecture implemented; pre-release hardening remains. Updated 2026-07-17.
-Audience: developer/maintainer. This document records the decisions and the resulting implementation. Items explicitly marked remaining are not implemented and must not be inferred from the target design.
+Status: implemented architecture and remaining pre-release work. Updated 2026-07-17.
 
-## 1. Context
+This document describes the current code, not a compatibility target for old builds. The project
+has no users or valuable production databases yet, so storage and wire formats may still change
+deliberately before the first release.
 
-notes-rs is a graph-native personal knowledge app: Tauri 2 + React clients, a Rust/Axum server, local SQLite with FTS5, and a server-owned AI subsystem with sqlite-vec, background embedding/entity-extraction workers, and an agent. Notes are an outline of blocks in a `nodes` table (stable `uuid`, local `parent_id`, fractional `position REAL`), typed `edges`, and content-addressed attachments.
+## 1. Product boundary
 
-The app is pre-release with no users and no data to migrate. Breaking changes to storage are acceptable; a schema-version bump with a fresh start is fine.
+notes-rs is a local-first personal knowledge application for desktop and Android. Both clients use
+the same React UI, Tauri adapter, Rust domain core, local SQLite database, and sync client.
 
-### Goals
+The main invariants are:
 
-1. **Near-realtime multi-device sync** (Google Keep feel: edit on desktop, visible on phone in well under a second) via a self-hostable server.
-2. **Local-first notes**: editor, outliner, FTS search, graph, attachments, history, and an outbox remain functional offline. Sync and AI resume when the server is reachable.
-3. **One AI owner**: AI runs only in the server. Clients never contain provider SDKs, API keys, vector tables, embedding/extraction workers, or a second retrieval pipeline.
-4. **One client architecture**: desktop and Android use the same local core + FTS + sync/API client. Platform differences stay at the Tauri integration boundary.
-5. **Remotely managed server**: authenticated client settings expose server health, AI configuration, indexing progress, and operational controls without exposing stored secrets.
+1. Pages and blocks are distinct domain types. There is no generic `Node`, `NodeKind`, or `nodes`
+   table.
+2. UUID is the durable identity everywhere outside SQLite implementation details. New domain and
+   operation IDs use UUIDv7; UUIDs are stored as 16-byte SQLite values and cross Rust/TypeScript
+   boundaries through native Specta UUID support.
+3. Editing, attachments, graph navigation, history, and lexical search work from the local
+   database without a server.
+4. The server owns all AI work and provider credentials. Clients never load sqlite-vec, embedding
+   models, entity tables, provider SDKs, or a second retrieval pipeline.
+5. Embeddings and extracted entities are disposable derived server data. They are never synced to
+   clients and are not part of the client graph.
+6. Every source-state mutation is represented by a versioned operation and passes through one
+   deterministic apply boundary.
 
-### Non-goals (explicitly deferred — do not build now)
+## 2. Runtime layout
 
-- E2E encryption (the op format must not preclude it: an op payload could later be an encrypted blob, so keep payload handling opaque-friendly, but implement plaintext).
-- Folder/file transport for Syncthing-style sync (the per-device append-only oplog design keeps it possible later; declare the op format unstable until then).
-- CRDT text merge inside a single block (LWW per field is the accepted resolution; see §5).
-- Web client, multi-user collaboration, hosted multi-tenant control plane.
-- Client-side/BYOK AI on any platform.
-- Distribution of embedding vectors to clients.
-- PostgreSQL for the current single-user deployment. Durable notes and oplog state remain SQLite. The vector store is a replaceable server-only derived-data adapter; sqlite-vec is the initial implementation and Qdrant is a future option only after measured need.
-
-## 2. Target architecture overview
-
-```
-┌────────────── desktop / Android (Tauri) ──────────┐
-│ React UI                                          │
-│ thin typed Tauri commands                         │
-│   notes-core  ── SQLite (source state + FTS)      │
-│   notes-sync  ── outbox, HLC, apply, WS client   │
-│   no vectors, AI workers, provider keys, or rig   │
-└──────────────────────┬────────────────────────────┘
-                       │ typed HTTP + WebSocket protocol
-┌──────────────────────▼─────────────────────────────┐
-│ server (axum, single binary, self-hostable)        │
-│   per-user oplog: seq assignment + WS fanout       │
-│   notes-core  ── per-user SQLite replica + FTS     │
-│   notes-ai    ── ai.db + VectorStore + workers     │
-│   blob store   ── content-addressed attachments    │
-│   snapshots    ── bootstrap + log compaction       │
-│   admin API    ── settings, health, index progress │
-└────────────────────────────────────────────────────┘
-```
-
-Data classes (this taxonomy drives everything):
-
-- **Source data** — nodes, user-created edges, attachment references, blobs. The only thing that syncs as ops.
-- **Deterministic client/server derived data** — `body_stemmed`, FTS index, and wikilink/block-ref edges. Recomputed from source data on every replica.
-- **Server-derived domain data** — extracted entities/edges. The server writes them as ordinary server-authored ops so clients receive the visible graph result, not the extraction queue or prompts.
-- **Server-only disposable AI data** — embeddings, vector generations, indexing queues, content hashes, and worker statistics. Never synced and safe to rebuild from the server replica.
-- **Device-local data** — undo/redo history, UI settings, sync credentials, and device identity. Never leaves the device.
-
-## 3. Workspace layout (Phase 0)
-
-Convert the repo to a Cargo workspace:
-
-```
-crates/notes-core/    # domain + storage. From src-tauri: db.rs, sqlite.rs, stem.rs.
-                      # NEW: apply-engine (§4). No tauri, no rig dependencies.
-crates/notes-ai/      # server-only AI runtime and ai.db persistence.
-                      # Owns sqlite-vec, VectorStore, workers, retrieval, and agent.
-crates/notes-sync/    # op format + envelope, HLC, LWW merge rules, client sync
-                      # machine (outbox, cursors, WS client). Depends on notes-core.
-crates/notes-protocol/# transport DTOs for sync, search, chat, status, and admin APIs.
-src-tauri/            # desktop/mobile client host; never depends on notes-ai/llm-relay/rig.
-server/               # the only AI host; depends on all domain/server crates.
+```text
+desktop / Android
+  React
+    TanStack Query backend cache
+    local editor drafts, caret, dialogs, and navigation state
+  generated tauri-specta commands and DomainEvent
+  Tauri host
+    notes-core -> local notes.db (pages, blocks, refs, FTS, history, outbox)
+    notes-sync -> transport-independent sync machine + HTTP/SSE remote API
+    src-tauri sync -> foreground WebSocket session + blob orchestration
+    no notes-ai dependency
+              |
+              | authenticated HTTP + WebSocket
+              v
+Axum server
+  per-user notes-core replica -> notes.db
+  append-only sequenced oplog  -> oplog.db
+  content-addressed blobs
+  notes-ai                     -> disposable ai.db + sqlite-vec
+  provider/index administration API
 ```
 
-Acceptance for Phase 0: app builds and behaves identically; `cargo test` and `vp check`/`vp test` pass; no functional change.
+Workspace ownership follows that boundary:
 
-## 4. Apply-engine (Phase 1) — the load-bearing refactor
+- `crates/notes-core`: typed content model, SQLite persistence, operations, HLC/LWW apply, local
+  FTS, graph derivation, archives, and action history.
+- `crates/notes-protocol`: transport-only sync, chat, search, status, and AI administration DTOs.
+- `crates/notes-sync`: transport-independent `SyncClient` plus production HTTP/SSE transport.
+- `crates/notes-ai`: server-only retrieval, reranking, extraction, agent, workers, and `ai.db`.
+- `src-tauri`: thin desktop/mobile adapter over core, sync, settings, and remote server APIs.
+- `server`: Axum host, authentication, per-user state, oplog, snapshots, blobs, and AI runtime.
 
-Every state mutation goes through a single function in `notes-core`:
+## 3. Typed content model
 
-```rust
-pub async fn apply(conn: &Connection, op: &Op, origin: Origin) -> Result<ApplyOutcome>
-// Origin: Local (user action on this device) | Remote (came from sync)
+### Pages
+
+A `Page` owns a title and an ordered tree of blocks. Its persisted `PageView` is one of:
+
+- `Outline`: block hierarchy is shown explicitly and bullets are editor chrome;
+- `Document`: the same hierarchy is presented as a continuous editable document;
+- `Reading`: the same content is rendered read-only.
+
+Changing a view never converts or duplicates content.
+
+### Blocks
+
+A `Block` belongs to exactly one page and optionally has a parent block on that page. Markdown is
+the source of truth. `BlockStyle` provides document semantics independently of outline nesting:
+
+```text
+paragraph, bullet, numbered, task,
+heading_1, heading_2, heading_3,
+quote, code, divider
 ```
 
-Rules:
+This allows short outline notes and long articles or project documentation to use the same tree.
+Outline bullets do not force every block to have Markdown list semantics.
 
-- Local user actions (today's `create_block`, `update_block_with_refs`, `split_block`, `move_block`, `reorder_block`, `delete_block`, `link_nodes`, page CRUD, agent write-tools, import) construct ops, call `apply`, and — when sync is configured — enqueue the op into `sync_outbox`. Local apply is synchronous and immediate: UI latency must not change.
-- `apply` is **idempotent**: an `op_id` already recorded in `applied_ops` is a no-op success.
-- `apply` is **deterministic**: given the same starting state and the same set of ops (in any delivery order of concurrent ops), the resulting SQLite state is byte-identical in the source tables. This is the core testable property (§10).
-- Deterministic derived maintenance stays inside apply: FTS triggers fire as today; applying `node_set_content` re-runs wikilink/block-ref parsing so refs edges are recomputed, not synced. Client core contains no AI queue triggers.
-- Undo/redo is action-based, never snapshot-based. A local action stores forward/inverse operation templates; undo and redo materialize fresh ops with new op IDs and HLCs so the result propagates normally. Preconditions prevent an old undo from silently overwriting a newer concurrent value.
+Sibling order uses `OrderKey`, a validated fixed-width 16-character uppercase hexadecimal key.
+SQLite text ordering therefore matches numeric ordering. Local structural actions renumber the
+affected sibling list with large fixed steps; operations carry the resulting keys, so replicas do
+not depend on floating-point positions or local integer IDs.
 
-### Op envelope and kinds
+### References and attachments
 
-```json
-{
-  "op_id": "uuid-v7",
-  "device_id": "uuid-v4",
-  "hlc": "0189f3a2b4c8-0003-d1e2f3a4",   // sortable: wall_ms hex - counter hex - device suffix
-  "format_version": 1,
-  "kind": "node_set_content",
-  "payload": { ... }
-}
+References are separate derived tables:
+
+- `page_links`: a source block plus normalized target title and, when resolved, target page UUID;
+- `block_refs`: a source block and target block UUID.
+
+They are rebuilt deterministically from `[[Page]]` and `((block-uuid))` Markdown whenever a block
+is applied. They are not independent sync operations. Unresolved page links and dangling block
+references remain representable and resolve when their target appears.
+
+An `Attachment` has a typed `Page(UUID)` or `Block(UUID)` owner. Metadata is source state and is
+synced through attachment operations. Bytes are addressed by SHA-256 and transferred separately
+through the blob API. A local file is deleted only after its hash/path is no longer referenced.
+
+### SQLite schema
+
+The current clean baseline is `crates/notes-core/src/db/migrations/V001__initial.sql`:
+
+```text
+pages, blocks
+page_links, block_refs, attachments
+pages_fts, blocks_fts
+history_undo, history_redo
+sync_outbox, applied_ops, tombstones
+block_structure_lww, attachment_lww
+sync_meta, local_device
 ```
 
-`seq` (u64) is assigned by the server on ingest and is NOT part of the client-created envelope.
+The `id INTEGER PRIMARY KEY` columns on `pages` and `blocks` are local FTS row IDs only. Domain
+queries, RPCs, operations, refs, graph edges, and sync never expose them.
 
-All node references in payloads use `uuid`, never the local integer `id`. Kinds and payloads:
+There is intentionally no migration from the former generic-node schema. While the project is
+unreleased, a completed breaking architecture stage may replace accumulated migrations with one
+fresh V001 baseline. Development databases must then be deleted and recreated; compatibility
+tables, views, conversion code, and reset migration counters are not retained.
 
-| kind                | payload                                                                                  |
-| ------------------- | ---------------------------------------------------------------------------------------- |
-| `node_create`       | `{uuid, node_kind, title?, content, content_json?, parent_uuid?, position?, created_at}` |
-| `node_set_content`  | `{uuid, content, content_json?}`                                                         |
-| `node_set_title`    | `{uuid, title?}`                                                                         |
-| `node_move`         | `{uuid, parent_uuid?, position}`                                                         |
-| `node_delete`       | `{uuid}` (subtree delete = one op per node, batched)                                     |
-| `edge_add`          | `{src_uuid, dst_uuid, edge_kind, weight}` — manual/agent edges only                      |
-| `edge_remove`       | `{src_uuid, dst_uuid, edge_kind}`                                                        |
-| `attachment_add`    | `{node_uuid, blob_hash, filename, mime, size}`                                           |
-| `attachment_remove` | `{node_uuid, blob_hash}`                                                                 |
+## 4. Operation and apply model
 
-Not ops: anything derived (refs edges, extracted edges/entities, embeddings, FTS), settings, history.
+The current operation format is version 2. An envelope contains:
 
-### Client-side tables (notes-core)
-
-```sql
-sync_outbox   (rowid, op_id TEXT UNIQUE, envelope TEXT, created_at)   -- pruned on server ack
-applied_ops   (op_id TEXT PRIMARY KEY, seq INTEGER)                   -- dedupe; prunable below compaction floor
-tombstones    (uuid TEXT PRIMARY KEY, deleted_hlc TEXT)
-sync_meta     (key TEXT PRIMARY KEY, value TEXT)  -- device_id, last_server_seq, server_url
--- per-field LWW clocks on nodes:
-ALTER TABLE nodes ADD COLUMN content_hlc TEXT;    -- covers content+content_json
-ALTER TABLE nodes ADD COLUMN title_hlc TEXT;
-ALTER TABLE nodes ADD COLUMN structure_hlc TEXT;  -- covers parent+position
-history_actions (id, action_uuid, label, forward_json, inverse_json, created_at)
+```text
+op_id: UUIDv7
+device_id: UUID
+hlc: hybrid logical clock
+format_version: 2
+kind + typed payload
 ```
 
-## 5. Conflict resolution (fixed decisions)
+The closed operation set is:
 
-- **HLC** (hybrid logical clock): `(wall_ms, counter, device_id)`, encoded as a lexicographically sortable string. Standard HLC update rules on send/receive; guards against clock skew.
-- **Per-field LWW**: an incoming op wins iff its `hlc` > the stored field HLC. Fields are independent: a title edit on device A and a content edit on device B to the same node both survive.
-- **Moves**: LWW on `structure_hlc`. Concurrent inserts under one parent need no resolution — fractional `position REAL` interleaves naturally. On the rare exact position tie, order by `uuid` for determinism.
-- **Delete vs edit**: tombstone wins over any later edit to that uuid (edits to tombstoned nodes are dropped). Deleting a node whose children have concurrent new ops: children are deleted too (subtree delete emits per-node ops); a concurrently _created_ child under a deleted parent is re-parented to the page root rather than lost. Document this in code; test it (§10).
-- **Cycles**: a concurrent pair of moves can create a parent cycle. After applying a remote `node_move`, run a cycle check; if a cycle exists, break it by re-parenting the node with the lower HLC move to the page root. Deterministic on all devices.
+| Domain     | Operations                                                                            |
+| ---------- | ------------------------------------------------------------------------------------- |
+| Page       | `page_create`, `page_set_title`, `page_set_view`, `page_delete`                       |
+| Block      | `block_create`, `block_set_markdown`, `block_set_style`, `block_move`, `block_delete` |
+| Attachment | `attachment_add`, `attachment_remove`                                                 |
 
-## 6. Sync protocol
+`PageCreate` carries `PageView`. `BlockCreate` carries page/parent UUIDs, `OrderKey`,
+`BlockStyle`, Markdown, and creation time. A block move carries its page, optional parent, and
+order key. Attachment operations carry a typed owner rather than a generic content ID.
 
-Transport: HTTP + WebSocket, JSON bodies (serde). Auth v1 is a static bearer-token mapping bootstrapped from the server TOML and entered in app settings. Token pairing, rotation, and scopes remain future work.
+All local and remote operations use the same apply engine. It provides:
 
-```
+- idempotency through `applied_ops` and operation UUID;
+- one global object kind per UUID, enforced both at the apply boundary and by SQLite triggers;
+- per-field HLC/LWW clocks for page title/view and block Markdown/style/structure;
+- page/block tombstones and attachment presence intents;
+- incarnation boundaries: a newer `PageCreate` cannot accidentally revive blocks or parent intents
+  from an older deleted incarnation, regardless of delivery order;
+- deterministic structure reconciliation and cycle breaking;
+- canonical reference parsing on every replica;
+- atomic batched application of remote operations and cursor advancement;
+- an offline outbox for local operations awaiting server acknowledgement.
+
+Undo and redo store forward and inverse operation templates, not database snapshots. Replaying a
+history action creates fresh operation IDs and HLC values, so undo/redo is sync-visible and does not
+force a full AI reindex. History is device-local and is cleared by whole-workspace archive import.
+
+## 5. Snapshots and sync protocol
+
+`SyncSnapshot` is also typed and UUID-first. It contains pages, blocks, block-structure intents,
+typed page/block tombstones, attachment intents, format version, and server sequence. There is no
+generic-node compatibility payload. Import validates UUID uniqueness and kind separation, page and
+parent ownership, structure-intent coherence, attachment identity/ownership, and live-versus-
+tombstone exclusivity before replacing any local state.
+
+The server exposes:
+
+```text
 GET  /v1/health
-GET  /v1/snapshot                      → latest snapshot archive + its seq
-GET  /v1/ops?since={seq}&limit={n}     → ordered ops after seq (catch-up)
-POST /v1/ops                           → batch of envelopes; returns assigned seqs
-WS   /v1/sync                          → bidirectional: client sends envelopes,
-                                          server pushes {seq, envelope} to all of the
-                                          user's live connections (including echo;
-                                          clients dedupe by op_id)
-PUT  /v1/blobs/{sha256}                → content-addressed upload (idempotent)
-GET  /v1/blobs/{sha256}                → download; HEAD to probe
+GET  /v1/info
+GET  /v1/ops?since={seq}&limit={n}
+POST /v1/ops
+GET  /v1/snapshot
+POST /v1/bootstrap
+WS   /v1/sync
+PUT  /v1/blobs/{sha256}
+GET  /v1/blobs/{sha256}
+HEAD /v1/blobs/{sha256}
 ```
 
-Client loop (in `notes-sync`): on connect → `GET /ops?since=last_server_seq` catch-up → apply each (Remote) → stream via WS; outbox drains through WS (or POST fallback); on ack, prune outbox and advance `last_server_seq`. Offline: outbox accumulates; UI shows sync state. New device bootstrap: `GET /snapshot`, import via notes-core, then catch up from snapshot seq.
+`SyncClient` is transport-independent and is used by both loopback tests and the production
+client. A sync pass catches up from the current sequence, uploads referenced blobs, pushes an
+outbox batch, acknowledges assigned sequences, then catches up again. Remote batches and their
+cursor update commit in one SQLite transaction.
 
-Blobs: `attachment_add` op carries only the hash; the blob uploads lazily in the background. Receivers download on first access (or eagerly on desktop policy). Attachment files on disk move to content-addressed names.
+The WebSocket path provides near-realtime fanout while the app is running. HTTP catch-up and the
+outbox provide recovery after disconnects. Mobile background sync is intentionally not planned;
+Android synchronizes while the application is active and catches up on the next launch.
 
-Realtime target: op visible on a second online device < 500 ms after local apply on typical home internet.
+On a new replica:
 
-## 7. Server (Phase 3)
+- non-empty local + empty server bootstraps the server;
+- empty local + non-empty server imports the server snapshot and blobs;
+- two different non-empty workspaces are rejected rather than merged implicitly.
 
-Stack: **axum + tokio + rusqlite** (same pinned versions as the app where possible), one static musl binary, bootstrap TOML plus remotely persisted AI settings. The server does not read product configuration from environment variables. TLS is the reverse-proxy's job. Storage layout:
+The server assigns a gapless per-user `seq` in its oplog and materializes the same operations into
+its own notes-core replica. Server replay resumes from the materialized replica cursor rather than
+reapplying the log from zero.
 
+## 6. Local-first client behavior
+
+Desktop and Android always keep local source state and FTS. Without a configured or reachable
+server, these capabilities continue to work:
+
+- create, edit, move, style, and delete pages/blocks;
+- Outline, Document, and Reading views;
+- normalized page-title search and local FTS5 block search;
+- deterministic wikilinks, block refs, backlinks, and the page/block graph;
+- attachments already present on the device;
+- action undo/redo, archives, import/export, and recovery backups.
+
+Sync status is explicit (`disabled`, `connecting`, `syncing`, `online`, `offline`, or `error`).
+Semantic search and chat return an explicit unavailable error when no server is configured; they
+do not silently fall back to another AI implementation.
+
+Persisted Rust state is cached by TanStack Query. A generated, typed `DomainEvent` invalidates page,
+block, child-tree, graph, backlink, attachment, history, sync, settings, and server-AI query keys.
+Editor drafts and caret state remain local to editor components so backend refreshes do not turn
+every keystroke into global UI state.
+
+## 7. Server-owned AI
+
+Only the Axum server depends on `notes-ai`. For each configured user it opens a separate disposable
+`ai.db` containing:
+
+- embedding generations and their identity metadata;
+- embedding and extraction jobs with source hashes and server sequence watermarks;
+- generation-to-vector mappings and dynamically created sqlite-vec tables;
+- extracted entities and extraction edges;
+- runtime switches for automatic embeddings, entity extraction, and query rewriting.
+
+The embedding identity includes endpoint, model, dimensions, and input format. A provider/model or
+dimension change creates a new generation instead of mixing incompatible vectors. Worker writes
+verify the exact queued source hash transactionally, so a stale provider response cannot remove a
+newer job or become the current vector.
+
+Extracted entities are AI-derived server data. They may inform server-side AI behavior, but they
+are not page/block operations, are not present in `notes.db`, are not sent to clients, and do not
+currently appear in the client graph.
+
+The authenticated AI API is:
+
+```text
+GET /v1/ai/status
+PUT /v1/ai/status
+PUT /v1/ai/provider
+POST /v1/ai/provider/probe
+POST /v1/ai/reindex
+POST /v1/search
+POST /v1/chat
 ```
-data_dir/
-  users/{user_id}/notes.db      # authoritative materialized source replica + FTS
-  users/{user_id}/oplog.db      # envelope log with seq (separate file keeps compaction simple)
-  users/{user_id}/ai.db         # disposable queues, metadata, generations, sqlite-vec
-  users/{user_id}/snapshots/
-  blobs/{aa}/{sha256}
+
+Settings can inspect generation state, indexed/source document counts, pending and failed jobs,
+toggle automatic indexing/extraction/query rewriting, update provider URLs/models, submit
+write-only secrets, probe provider capabilities, and request a rebuild. Provider secrets remain
+server-side and are never returned to the webview.
+
+The current deployment uses OpenRouter embeddings and reranking. Completion supports OpenAI Chat
+Completions-compatible and Anthropic Messages-compatible servers with custom base URLs through the
+shared protocol/relay layer.
+
+## 8. Configuration and deployment
+
+Client product configuration lives in the application settings path. It contains the sync server
+URL, sync token, and native/borderless window preference; appearance preferences are device-local
+UI state. There is no `.env` product-configuration path. `TAURI_DEV_HOST` remains the one build-time
+input required by Tauri/Vite for device development.
+
+The server starts from a TOML bootstrap containing listen/storage settings, the static token-to-user
+mapping, and initial AI provider configuration. Provider/runtime AI settings are subsequently
+manageable through the authenticated app UI. TLS and public routing are owned by the existing
+reverse proxy. Deployment produces a static musl binary rather than a container image.
+
+## 9. Implemented status
+
+| Area                                                                   | State                                       |
+| ---------------------------------------------------------------------- | ------------------------------------------- |
+| Typed `pages` / `blocks` baseline with no generic nodes                | Complete                                    |
+| Outline, Document, Reading and typed block styles                      | Complete                                    |
+| UUIDv7 operations, HLC/LWW apply, tombstones, deterministic structure  | Complete                                    |
+| Action-based inverse-operation undo/redo                               | Complete                                    |
+| Local FTS, refs, backlinks, graph, attachments, archives               | Complete                                    |
+| Transport-independent batched sync client                              | Complete                                    |
+| Axum oplog, HTTP/WS fanout, bootstrap snapshots, blob transfer         | Complete for pre-release use                |
+| Desktop and Android shared thin-client architecture                    | Complete; real-device UI validation remains |
+| Server-only vector generations, extraction, retrieval, reranking, chat | Complete                                    |
+| Remote AI settings, probes, progress, toggles, and reindex             | Complete                                    |
+| tauri-specta UUID/enums/commands/domain events and binding drift CI    | Complete                                    |
+| Static musl packaging and `cloud-forge` deployment path                | Complete                                    |
+
+## 10. Validation
+
+The workspace tests cover migration from an empty database, typed-storage invariants, UUID-only
+contracts, FTS and reference derivation, inverse-operation history, archive round trips, sync
+idempotency, batched cursor advancement, snapshots, attachment validation, server restart/replay,
+network sync, and randomized replica convergence.
+
+Required validation for architecture changes is:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
+cargo test --workspace --locked --all-features
+vp check
+vp test
+vp build
 ```
 
-- Seq assignment: per-user single-writer task (actor holding the user's connections + db handles); seq = last+1, monotonic, gapless.
-- On ingest the server both appends to oplog and applies to its replica (same `apply`, Origin::Remote). The replica is what makes Phase 4 AI trivial.
-- Snapshot job: every N ops (e.g. 10k) or on demand, write snapshot (reuse/extend the existing `DataArchive` export in notes-core), then ops below the snapshot floor become prunable once no device cursor is behind it.
-- v1 is single-user-capable multi-user-shaped: `user_id` in the path structure from day one, even if the only auth is one token → one user.
+CI also exports `src/lib/bindings.ts` from Rust and fails on binding drift.
 
-### Phase 4 — server-only AI and remote administration
+## 11. Remaining work
 
-- Run all `notes-ai` workers against each user's server replica. The server owns provider credentials, embedding identity, vector generations, extraction, retrieval, and chat.
-- `POST /v1/search` runs the server's single hybrid-and-rerank retrieval pipeline. Local FTS is a separate client-owned command, and an unavailable server produces an explicit unavailable state rather than a hidden fallback. Per-request requested/effective-mode metadata is not yet part of the response and remains follow-up work.
-- `POST /v1/chat` streams typed `ChatEvent` values from `notes-protocol`.
-- Authenticated admin endpoints expose server AI settings, secret presence, provider probes, indexing policy, progress, failures, pause/resume/rebuild, and runtime statistics. Secrets are accepted write-only.
-- When the server is absent or unreachable, editing and local FTS continue. Semantic search, extraction, and chat are explicitly unavailable; there is no hidden client AI fallback.
-- `notes-ai` owns a replaceable `VectorStore`. The initial `SqliteVectorStore` lives in `ai.db`; a future Qdrant adapter is justified only by measured corpus size/latency.
+Architecture and correctness:
 
-## 8. AI index lifecycle
+1. Add a durable device registry, cursor retirement, and a proven compaction floor before deleting
+   old oplog or `applied_ops` history.
+2. Replace static bootstrap tokens with paired, scoped, revocable per-device credentials.
+3. Keep the previous provider runtime and active vector generation serving queries until a
+   replacement generation is fully built and activated.
+4. Revisit JavaScript-facing 64-bit counters before any value can approach the safe-integer limit.
 
-- Queue rows contain node UUID, exact composed-input hash, embedding identity fingerprint, and source server seq. A completed provider request is committed only if those values still match transactionally.
-- Embedding identity includes provider endpoint identity, model, dimensions, distance/normalization policy, and input-format version.
-- Model/config changes create a distinct generation keyed by provider identity, model, dimensions, and input format. The server atomically activates a completed generation and retires the previous one. Keeping the previous provider runtime serving queries throughout a new generation build remains follow-up work; the UI exposes the building state instead of claiming the new semantic index is ready.
-- Client Settings show server-owned indexing progress and whether the semantic index is current with the synchronized replica.
+Product and corpus support:
 
-## 9. Phased delivery plan
+1. Add server-side retrieval chunking for large blocks/documents. The current index unit is one
+   page or block UUID, which is sufficient for the demo but not ideal for long articles.
+2. Add Markdown-vault, Obsidian, and Logseq import, including page properties, block UUIDs, nesting,
+   and assets; no legacy notes-rs database importer is planned.
+3. Add daily notes, templates, properties, saved queries, and an extension model.
+4. Add drag-and-drop movement, cross-block selection, transclusion, richer Markdown authoring,
+   graph filters/layouts, and measured larger-corpus performance work.
+5. Add signed production packages and end-to-end UI/accessibility coverage on desktop and real
+   Android hardware.
 
-| Phase | Deliverable                                                                            | State                                                                                                                                             |
-| ----- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0     | Workspace split into `notes-core` / `notes-ai` / `notes-sync` / hosts                  | Complete: workspace-wide build, lint, tests, and binding-drift checks run in CI.                                                                  |
-| 1     | Apply-engine, HLC columns, UUID op references, and inverse-operation undo              | Complete: mutations share the apply boundary; idempotency, conflict, undo, and persistence tests pass.                                            |
-| 2     | Transport-independent sync machine, HLC/LWW/tombstones, and convergence tests          | Complete: loopback and HTTP use the same `SyncClient`; remote batches apply and advance cursors atomically.                                       |
-| 3     | Oplog server, WebSocket fanout, snapshots, blobs, client integration, and sync status  | Complete for pre-release use: realtime/offline catch-up, replay, snapshot bootstrap, and blob tests pass. Safe cursor-aware log deletion remains. |
-| 4     | Server-only AI store/workers, `/search`, `/chat`, and removal of client AI/vector code | Complete: desktop and Android contain no sqlite-vec, provider credentials, or local AI worker path.                                               |
-| 5     | Remote provider/index administration, monitoring, compaction, and deployment polish    | Partial: remote settings/probes/progress/reindex and musl/Ansible deployment are complete; compaction and credential hardening remain.            |
+## 12. Explicit non-goals
 
-The absence-of-config behavior remains intentional: without a server, local editing and FTS work and network/AI capabilities are explicitly unavailable.
-
-## 10. Testing strategy
-
-- **Convergence property test** (proptest): generate random op sequences from N simulated devices with random interleavings/duplications/reorderings of _concurrent_ ops (causal order per device preserved); assert all replicas reach identical source-table state, including the server replica.
-- Idempotent redelivery; echo delivery (own op back from server).
-- Tombstone cases: delete vs concurrent edit; delete parent vs concurrent create-child; resurrection must not happen.
-- Concurrent sibling inserts at equal positions → deterministic order (uuid tiebreak).
-- Concurrent moves creating a cycle → deterministic break (§5).
-- HLC skew: device with clock hours ahead/behind still converges; HLC monotonicity maintained.
-- Snapshot bootstrap ≡ full log replay (state equality).
-- Server restart mid-stream: no seq gaps or duplicates observed by clients.
-- Existing FTS/graph behavior must keep passing. AI queue/index tests live in `notes-ai` and run only against the server-side AI store.
-
-## 11. Known code touchpoints
-
-- `notes-core` — no sqlite-vec, queues, extraction state, provider metadata, or JavaScript-derived integer identity. UUID is the replicated identity; integer row IDs are local implementation details.
-- `notes-ai` — server-only `ai.db`, VectorStore, typed errors, supervised workers, one retrieval pipeline.
-- `notes-sync` — one transport-independent client used by loopback tests and production HTTP/WS transport; batch apply/cursor updates are atomic.
-- `notes-protocol` — typed transport DTOs and capability/error enums, with no implementation dependencies.
-- `src-tauri` — thin local domain/sync/API adapter; settings contain server connection and UI/device preferences only.
-- Frontend — explicit sync/AI/index capabilities, narrow domain-event invalidation, remote server administration, and honest offline degradation.
-
-## 12. Remaining architecture work
-
-1. **Device registry and cursor-aware compaction.** Snapshots are generated and tested, but oplog/applied-op deletion is intentionally disabled. Add durable device cursors, retirement semantics, and a compaction floor before deleting any history.
-2. **Credential hardening.** Replace the bootstrap static-token map with paired, scoped, revocable per-device credentials. No token-scope contract exists yet.
-3. **Generation handover.** Retain the old embedder/runtime alongside its active vector generation until the replacement reaches activation, then retire both together.
-4. **Search execution metadata.** Return a typed search response containing execution owner, requested/effective mode, degradation reason, and source/index watermark when the UI needs finer diagnostics than the existing server/offline distinction and index status.
-5. **Measured vector-store evolution.** Add a Qdrant adapter only if real vector count or latency justifies it.
-6. **Content merge granularity.** Revisit LWW-with-content only if real use demonstrates unacceptable lost edits.
-
-## 13. Review items incorporated during implementation
-
-- Full-database undo snapshots were replaced by forward/inverse operation actions, so undo no longer reimports the workspace or requeues every embedding.
-- Loopback and production HTTP sync share one transport-independent `SyncClient`; catch-up applies sequenced batches and advances the cursor in one transaction, and server replay resumes from the materialized cursor.
-- Core, transport, command, and worker failures use typed categories instead of substring classification. SQLite work runs on dedicated connection threads rather than parking Tokio's blocking pool behind a connection mutex.
-- Retrieval and reranking share one policy pipeline. Provider workers are notify-driven, cancellable, and protect embedding writes with the exact source hash inside the write transaction.
-- Tauri commands are split by domain, generated bindings cover commands/events/channels/UUIDs/enums, and frontend backend-state caching is centralized in TanStack Query with narrow typed invalidation.
-- Stable integer-ID collision detection, shared blob validation, explicit database exports, git-pinned `llm-relay`, workspace-wide CI, atomic note creation, title-only operations, and debounced-title flush cancellation are in place.
+- client-side or BYOK AI;
+- syncing embedding vectors, AI queues, or extracted entities to devices;
+- running sqlite-vec or an embedding model on Android/desktop;
+- Android background synchronization;
+- PostgreSQL or Qdrant before measured SQLite/sqlite-vec limits justify them;
+- compatibility migrations for unreleased generic-node databases;
+- E2E encryption, a web client, and multi-user collaboration in the current milestone.
