@@ -39,21 +39,31 @@ export async function applyDomainEvent(queryClient: QueryClient, event: DomainEv
   const invalidate = (queryKey: readonly unknown[]) => queryClient.invalidateQueries({ queryKey });
 
   switch (event.kind) {
-    case "node_changed":
-    case "node_deleted": {
-      if (event.kind === "node_deleted") {
-        for (const uuid of event.node_uuids) {
-          queryClient.removeQueries({ queryKey: queryKeys.node(uuid), exact: true });
-        }
+    case "node_changed": {
+      const derived = [] as Promise<unknown>[];
+      if (event.node_kinds.includes("page")) derived.push(invalidate(queryKeys.pages));
+      if (event.node_kinds.includes("entity")) derived.push(invalidate(queryKeys.entities));
+      if (event.node_kinds.includes("attachment")) {
+        derived.push(invalidate(queryKeys.attachmentsRoot));
       }
       await Promise.all([
         ...event.node_uuids.map((uuid) => invalidate(queryKeys.node(uuid))),
         ...event.parent_uuids.map((uuid) => invalidate(queryKeys.children(uuid))),
+        ...derived,
+      ]);
+      return;
+    }
+    case "node_deleted": {
+      for (const uuid of event.node_uuids) {
+        queryClient.removeQueries({ queryKey: queryKeys.node(uuid), exact: true });
+      }
+      await Promise.all([
+        ...event.parent_uuids.map((uuid) => invalidate(queryKeys.children(uuid))),
         invalidate(queryKeys.pages),
         invalidate(queryKeys.entities),
+        invalidate(queryKeys.attachmentsRoot),
         invalidate(queryKeys.graphRoot),
         invalidate(queryKeys.backlinksRoot),
-        invalidate(queryKeys.attachmentsRoot),
       ]);
       return;
     }

@@ -23,7 +23,7 @@ macro_rules! string_enum {
             $($variant:ident => $value:literal),+ $(,)?
         }
     ) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, specta::Type)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, specta::Type)]
         $(#[$meta])*
         pub enum $name {
             $($variant),+

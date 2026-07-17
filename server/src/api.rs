@@ -264,6 +264,14 @@ async fn search(
     Extension(user): Extension<AuthenticatedUser>,
     Json(request): Json<SearchRequest>,
 ) -> Result<Json<Vec<SearchHit>>, ApiError> {
+    if request.query.trim().is_empty() || request.query.chars().count() > 4_096 {
+        return Err(ApiError::bad_request(
+            "query must contain 1 to 4096 characters",
+        ));
+    }
+    if !(1..=100).contains(&request.limit) {
+        return Err(ApiError::bad_request("limit must be between 1 and 100"));
+    }
     let ai = state
         .ai
         .as_ref()
@@ -271,14 +279,7 @@ async fn search(
     ai.search(&user.0.id, request.query, request.limit)
         .await
         .map(Json)
-        .map_err(|error| {
-            let message = error.to_string();
-            if message.contains("must contain") || message.contains("must be between") {
-                ApiError::bad_request(message)
-            } else {
-                ApiError::internal(error)
-            }
-        })
+        .map_err(ApiError::internal)
 }
 
 async fn chat(
@@ -414,13 +415,17 @@ async fn bootstrap(
         .bootstrap(request.snapshot)
         .await
         .map(Json)
-        .map_err(|error| {
-            if error.to_string().contains("not empty") {
-                ApiError::conflict("server workspace has already been initialized")
-            } else {
-                ApiError::bad_request(error.to_string())
-            }
-        })
+        .map_err(
+            |error| match error.downcast_ref::<notes_core::CoreError>() {
+                Some(notes_core::CoreError::Conflict(_)) => {
+                    ApiError::conflict("server workspace has already been initialized")
+                }
+                Some(notes_core::CoreError::InvalidInput(message)) => {
+                    ApiError::bad_request(message.clone())
+                }
+                _ => ApiError::internal(error),
+            },
+        )
 }
 
 async fn sync_socket(

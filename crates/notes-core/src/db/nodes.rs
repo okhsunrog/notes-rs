@@ -41,7 +41,9 @@ pub async fn update_node(
     content: String,
     content_json: Option<String>,
 ) -> Result<()> {
-    let current = get_node(conn, id).await?.context("node not found")?;
+    let current = get_node(conn, id)
+        .await?
+        .ok_or_else(|| crate::CoreError::not_found("node not found"))?;
     let mut kinds = Vec::with_capacity(2);
     if current.title != title {
         kinds.push(OpKind::NodeSetTitle(NodeSetTitle {
@@ -68,7 +70,7 @@ pub async fn rename_page(
     let page = get_node_by_uuid(conn, uuid)
         .await?
         .filter(|node| node.kind == NodeKind::Page)
-        .context("page not found")?;
+        .ok_or_else(|| crate::CoreError::not_found("page not found"))?;
     if page.title != title {
         apply_local(
             conn,
@@ -138,7 +140,6 @@ pub async fn create_note(conn: &Connection) -> Result<CreatedNote> {
 #[serde(rename_all = "camelCase")]
 pub struct BlockContent {
     pub content: String,
-    pub wikilink_titles: Vec<String>,
     pub block_uuids: Vec<String>,
 }
 
@@ -146,11 +147,14 @@ pub async fn update_block_with_refs(
     conn: &Connection,
     id: i64,
     block: BlockContent,
-) -> Result<(Node, u32)> {
+) -> Result<(Node, u32, bool)> {
     let node = get_node(conn, id)
         .await?
         .filter(|node| node.kind == NodeKind::Block)
         .context("atomic block save requires a block node")?;
+    let previous_refs = crate::operation::parse_refs(&node.content);
+    let next_refs = crate::operation::parse_refs(&block.content);
+    let graph_changed = previous_refs != next_refs;
     apply_local(
         conn,
         vec![OpKind::NodeSetContent(NodeSetContent {
@@ -164,18 +168,18 @@ pub async fn update_block_with_refs(
     let updated = get_node_by_uuid(conn, node.uuid)
         .await?
         .context("updated block disappeared")?;
-    Ok((updated, broken))
+    Ok((updated, broken, graph_changed))
 }
 
 pub async fn set_block_content(
     conn: &Connection,
     uuid: uuid::Uuid,
     block: BlockContent,
-) -> Result<(Node, u32)> {
+) -> Result<(Node, u32, bool)> {
     let id = get_node_by_uuid(conn, uuid)
         .await?
         .filter(|node| node.kind == NodeKind::Block)
-        .context("block was not found")?
+        .ok_or_else(|| crate::CoreError::not_found("block was not found"))?
         .id;
     update_block_with_refs(conn, id, block).await
 }
@@ -189,11 +193,11 @@ pub async fn split_block(
     parts: Vec<BlockContent>,
 ) -> Result<Vec<Node>> {
     if parts.is_empty() {
-        anyhow::bail!("split requires at least one part");
+        return Err(crate::CoreError::invalid("split requires at least one part").into());
     }
     let (source_uuid, parent_uuid, mut siblings) = conn
-        .call(
-            move |database| -> rusqlite::Result<(uuid::Uuid, uuid::Uuid, Vec<uuid::Uuid>)> {
+        .call_domain(
+            move |database| -> crate::CoreResult<(uuid::Uuid, uuid::Uuid, Vec<uuid::Uuid>)> {
                 let (source_uuid, parent_id, kind): (uuid::Uuid, i64, NodeKind) = database
                     .query_row(
                         "SELECT uuid, parent_id, kind FROM nodes WHERE id = ?1",
@@ -201,9 +205,7 @@ pub async fn split_block(
                         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )?;
                 if kind != NodeKind::Block {
-                    return Err(rusqlite::Error::InvalidParameterName(
-                        "only a block can be split".into(),
-                    ));
+                    return Err(crate::CoreError::invalid("only a block can be split"));
                 }
                 let parent_uuid = database.query_row(
                     "SELECT uuid FROM nodes WHERE id = ?1",
@@ -389,7 +391,12 @@ pub async fn list_block_children(conn: &Connection, parent_id: i64) -> Result<Ve
     Ok(rows)
 }
 
-pub async fn delete_page(conn: &Connection, id: i64) -> Result<Option<Vec<Node>>> {
+pub struct DeletedPage {
+    pub node_uuids: Vec<uuid::Uuid>,
+    pub attachments: Vec<Node>,
+}
+
+pub async fn delete_page(conn: &Connection, id: i64) -> Result<Option<DeletedPage>> {
     let Some((uuids, attachments)) = conn
         .call(
             move |database| -> rusqlite::Result<Option<(Vec<uuid::Uuid>, Vec<Node>)>> {
@@ -451,17 +458,21 @@ pub async fn delete_page(conn: &Connection, id: i64) -> Result<Option<Vec<Node>>
         .collect::<Vec<_>>();
     kinds.extend(
         uuids
-            .into_iter()
+            .iter()
+            .copied()
             .map(|uuid| OpKind::NodeDelete(NodeDelete { uuid })),
     );
     apply_local_action(conn, "delete page", kinds).await?;
-    Ok(Some(attachments))
+    Ok(Some(DeletedPage {
+        node_uuids: uuids,
+        attachments,
+    }))
 }
 
 pub async fn create_page(conn: &Connection, title: String) -> Result<Node> {
     let title = title.trim().to_owned();
     if title.is_empty() {
-        anyhow::bail!("title is required");
+        return Err(crate::CoreError::invalid("title is required").into());
     }
     if let Some(existing) = get_page_by_title(conn, title.clone()).await? {
         return Ok(existing);

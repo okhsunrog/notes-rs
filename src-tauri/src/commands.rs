@@ -97,49 +97,31 @@ pub struct CommandError {
 }
 
 impl CommandError {
-    fn from_message(message: String) -> Self {
-        let normalized = message.to_ascii_lowercase();
-        let code = if normalized.contains("not found")
-            || normalized.contains("disappeared")
-            || normalized.contains("no containing")
-        {
-            CommandErrorCode::NotFound
-        } else if normalized.contains("must ")
-            || normalized.contains("requires ")
-            || normalized.contains("required")
-            || normalized.contains("invalid")
-            || normalized.contains("empty")
-            || normalized.contains("limited to")
-        {
-            CommandErrorCode::InvalidInput
-        } else if normalized.contains("cannot")
-            || normalized.contains("already")
-            || normalized.contains("conflict")
-            || normalized.contains("descendant")
-        {
-            CommandErrorCode::Conflict
-        } else if normalized.contains("timeout")
-            || normalized.contains("network")
-            || normalized.contains("provider")
-            || normalized.contains("unavailable")
-        {
-            CommandErrorCode::Unavailable
-        } else {
-            CommandErrorCode::Internal
-        };
-        Self { code, message }
+    fn new(code: CommandErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    fn invalid(message: impl Into<String>) -> Self {
+        Self::new(CommandErrorCode::InvalidInput, message)
+    }
+
+    fn conflict(message: impl Into<String>) -> Self {
+        Self::new(CommandErrorCode::Conflict, message)
     }
 }
 
 impl From<String> for CommandError {
     fn from(message: String) -> Self {
-        Self::from_message(message)
+        Self::invalid(message)
     }
 }
 
 impl From<&str> for CommandError {
     fn from(message: &str) -> Self {
-        Self::from_message(message.to_owned())
+        Self::invalid(message)
     }
 }
 
@@ -166,6 +148,7 @@ pub enum DomainEvent {
     NodeChanged {
         node_uuids: Vec<uuid::Uuid>,
         parent_uuids: Vec<uuid::Uuid>,
+        node_kinds: Vec<NodeKind>,
     },
     NodeDeleted {
         node_uuids: Vec<uuid::Uuid>,
@@ -219,6 +202,12 @@ async fn emit_nodes_changed(
         DomainEvent::NodeChanged {
             node_uuids: nodes.iter().map(|node| node.uuid).collect(),
             parent_uuids: node_uuids_for_ids(connection, parent_ids).await,
+            node_kinds: nodes
+                .iter()
+                .map(|node| node.kind)
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect(),
         },
     );
 }
@@ -239,8 +228,38 @@ pub enum StartupStatus {
     Error { message: String },
 }
 
-fn err<E: std::fmt::Display>(error: E) -> CommandError {
-    CommandError::from_message(error.to_string())
+fn err<E: std::fmt::Display + 'static>(error: E) -> CommandError {
+    let any = &error as &dyn std::any::Any;
+    if let Some(error) = any.downcast_ref::<anyhow::Error>() {
+        let message = format!("{error:#}");
+        if let Some(error) = error.downcast_ref::<notes_core::CoreError>() {
+            let code = match error {
+                notes_core::CoreError::InvalidInput(_) => CommandErrorCode::InvalidInput,
+                notes_core::CoreError::NotFound(_) => CommandErrorCode::NotFound,
+                notes_core::CoreError::Conflict(_) | notes_core::CoreError::SyncConflict(_) => {
+                    CommandErrorCode::Conflict
+                }
+                notes_core::CoreError::Database(_) => CommandErrorCode::Internal,
+            };
+            return CommandError::new(code, message);
+        }
+        if notes_sync::is_transport_failure(error) {
+            return CommandError::new(CommandErrorCode::Unavailable, message);
+        }
+        return CommandError::new(CommandErrorCode::Internal, message);
+    }
+    if let Some(error) = any.downcast_ref::<notes_core::CoreError>() {
+        let code = match error {
+            notes_core::CoreError::InvalidInput(_) => CommandErrorCode::InvalidInput,
+            notes_core::CoreError::NotFound(_) => CommandErrorCode::NotFound,
+            notes_core::CoreError::Conflict(_) | notes_core::CoreError::SyncConflict(_) => {
+                CommandErrorCode::Conflict
+            }
+            notes_core::CoreError::Database(_) => CommandErrorCode::Internal,
+        };
+        return CommandError::new(code, error.to_string());
+    }
+    CommandError::new(CommandErrorCode::Internal, error.to_string())
 }
 
 #[tauri::command]
@@ -367,7 +386,7 @@ pub async fn update_node(
     let node = db::get_node(&state.conn, id)
         .await
         .map_err(err)?
-        .ok_or_else(|| "updated node disappeared".to_string())?;
+        .ok_or_else(|| CommandError::new(CommandErrorCode::Internal, "updated node disappeared"))?;
     emit_nodes_changed(&app, &state.conn, std::slice::from_ref(&node), []).await;
     Ok(())
 }
@@ -413,11 +432,19 @@ pub async fn set_block_content(
     uuid: uuid::Uuid,
     block: db::BlockContent,
 ) -> CommandResult<(Node, u32)> {
-    let result = db::set_block_content(&state.conn, uuid, block)
+    let (node, broken_refs, graph_changed) = db::set_block_content(&state.conn, uuid, block)
         .await
         .map_err(err)?;
-    emit_nodes_changed(&app, &state.conn, std::slice::from_ref(&result.0), []).await;
-    Ok(result)
+    emit_nodes_changed(&app, &state.conn, std::slice::from_ref(&node), []).await;
+    if graph_changed {
+        emit_domain(
+            &app,
+            DomainEvent::GraphChanged {
+                node_uuids: vec![node.uuid],
+            },
+        );
+    }
+    Ok((node, broken_refs))
 }
 
 #[tauri::command]
@@ -430,6 +457,12 @@ pub async fn split_block(
 ) -> CommandResult<Vec<Node>> {
     let nodes = db::split_block(&state.conn, id, parts).await.map_err(err)?;
     emit_nodes_changed(&app, &state.conn, &nodes, []).await;
+    emit_domain(
+        &app,
+        DomainEvent::GraphChanged {
+            node_uuids: nodes.iter().map(|node| node.uuid).collect(),
+        },
+    );
     emit_domain(&app, DomainEvent::HistoryChanged);
     Ok(nodes)
 }
@@ -501,29 +534,23 @@ pub async fn delete_page(
     state: State<'_, AppState>,
     id: i64,
 ) -> CommandResult<bool> {
-    let deleted_uuids = db::read_subtree(&state.conn, id, u32::MAX)
-        .await
-        .map_err(err)?
-        .into_iter()
-        .map(|node| node.uuid)
-        .collect::<Vec<_>>();
     write_backup(&app, &state.conn, "before-delete")
         .await
         .map_err(err)?;
-    let attachments = db::delete_page(&state.conn, id).await.map_err(err)?;
-    if attachments.is_some() {
+    let deleted = db::delete_page(&state.conn, id).await.map_err(err)?;
+    if let Some(deleted) = &deleted {
         // Retain attachment payloads so structural Undo can restore their
         // database nodes. Explicit attachment deletion removes the file.
         emit_domain(
             &app,
             DomainEvent::NodeDeleted {
-                node_uuids: deleted_uuids,
+                node_uuids: deleted.node_uuids.clone(),
                 parent_uuids: Vec::new(),
             },
         );
         emit_domain(&app, DomainEvent::HistoryChanged);
     }
-    Ok(attachments.is_some())
+    Ok(deleted.is_some())
 }
 
 #[tauri::command]
@@ -758,15 +785,15 @@ pub async fn attach_file(
         let source = source.into_path().map_err(err)?;
         let metadata = source.metadata().map_err(err)?;
         if !metadata.is_file() {
-            return Err("attachments must be regular files".into());
+            return Err(CommandError::invalid("attachments must be regular files"));
         }
         if metadata.len() > 100 * 1024 * 1024 {
-            return Err("attachments are limited to 100 MiB".into());
+            return Err(CommandError::invalid("attachments are limited to 100 MiB"));
         }
         let title = source
             .file_name()
             .and_then(|name| name.to_str())
-            .ok_or_else(|| "attachment filename is not valid UTF-8".to_string())?
+            .ok_or_else(|| CommandError::invalid("attachment filename is not valid UTF-8"))?
             .to_string();
         let bytes = std::fs::read(&source).map_err(err)?;
         (title, "application/octet-stream".to_string(), bytes)
@@ -787,7 +814,7 @@ pub async fn attach_file(
         };
         let size = api.get_len(&uri).await.map_err(err)?;
         if size > 100 * 1024 * 1024 {
-            return Err("attachments are limited to 100 MiB".into());
+            return Err(CommandError::invalid("attachments are limited to 100 MiB"));
         }
         let title = api.get_name(&uri).await.map_err(err)?;
         let mime_type = api
@@ -807,7 +834,16 @@ pub async fn attach_file(
     std::fs::create_dir_all(destination.parent().expect("attachment has parent")).map_err(err)?;
     std::fs::write(&destination, bytes).map_err(err)?;
     match db::create_attachment(&state.conn, parent_id, blob_hash, title, mime_type, size).await {
-        Ok(node) => Ok(Some(node)),
+        Ok(node) => {
+            emit_nodes_changed(&app, &state.conn, std::slice::from_ref(&node), [parent_id]).await;
+            emit_domain(
+                &app,
+                DomainEvent::GraphChanged {
+                    node_uuids: node_uuids_for_ids(&state.conn, [parent_id]).await,
+                },
+            );
+            Ok(Some(node))
+        }
         Err(error) => {
             let _ = std::fs::remove_file(destination);
             Err(err(error))
@@ -837,7 +873,7 @@ pub async fn open_attachment(
         .await
         .map_err(err)?
         .filter(|node| node.kind == NodeKind::Attachment)
-        .ok_or_else(|| "attachment not found".to_string())?;
+        .ok_or_else(|| CommandError::new(CommandErrorCode::NotFound, "attachment not found"))?;
     let path = safe_app_data_path(&app, &node.content).map_err(err)?;
     app.opener()
         .open_path(path.to_string_lossy(), None::<&str>)
@@ -865,6 +901,19 @@ pub async fn delete_attachment(
     if !still_referenced && path.exists() {
         std::fs::remove_file(&path).map_err(err)?;
     }
+    emit_domain(
+        &app,
+        DomainEvent::NodeDeleted {
+            node_uuids: vec![node.uuid],
+            parent_uuids: Vec::new(),
+        },
+    );
+    emit_domain(
+        &app,
+        DomainEvent::GraphChanged {
+            node_uuids: vec![node.uuid],
+        },
+    );
     Ok(true)
 }
 
@@ -1085,27 +1134,6 @@ pub async fn delete_block(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn replace_block_refs(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    block_id: i64,
-    wikilink_titles: Vec<String>,
-    block_uuids: Vec<String>,
-) -> CommandResult<u32> {
-    let broken = db::replace_block_refs(&state.conn, block_id, wikilink_titles, block_uuids)
-        .await
-        .map_err(err)?;
-    emit_domain(
-        &app,
-        DomainEvent::GraphChanged {
-            node_uuids: node_uuids_for_ids(&state.conn, [block_id]).await,
-        },
-    );
-    Ok(broken)
-}
-
-#[tauri::command]
-#[specta::specta]
 pub async fn get_page_by_title(
     state: State<'_, AppState>,
     title: String,
@@ -1145,7 +1173,7 @@ pub async fn create_page(
 ) -> CommandResult<Node> {
     let title = title.trim().to_string();
     if title.is_empty() {
-        return Err("title is required".into());
+        return Err(CommandError::invalid("title is required"));
     }
     let page = db::create_page(&state.conn, title).await.map_err(err)?;
     emit_nodes_changed(&app, &state.conn, std::slice::from_ref(&page), []).await;
@@ -1271,10 +1299,12 @@ async fn remote_search(
 
 fn validate_search_request(query: &str, limit: u32) -> CommandResult<u32> {
     if query.trim().is_empty() || query.chars().count() > 4_096 {
-        return Err("query must contain 1 to 4096 characters".into());
+        return Err(CommandError::invalid(
+            "query must contain 1 to 4096 characters",
+        ));
     }
     if !(1..=100).contains(&limit) {
-        return Err("limit must be between 1 and 100".into());
+        return Err(CommandError::invalid("limit must be between 1 and 100"));
     }
     Ok(limit)
 }
@@ -1298,7 +1328,9 @@ pub async fn chat_stream(
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if active.insert(request_id, cancellation.clone()).is_some() {
-            return Err("a chat request with this ID is already active".into());
+            return Err(CommandError::conflict(
+                "a chat request with this ID is already active",
+            ));
         }
     }
     let remote = state.remote_ai.as_ref().ok_or_else(|| CommandError {
@@ -1347,19 +1379,31 @@ mod tests {
     #[test]
     fn command_errors_expose_stable_categories() {
         assert!(matches!(
-            CommandError::from("title is required").code,
+            err(anyhow::Error::from(notes_core::CoreError::invalid(
+                "title is required"
+            )))
+            .code,
             CommandErrorCode::InvalidInput
         ));
         assert!(matches!(
-            CommandError::from("block was not found").code,
+            err(anyhow::Error::from(notes_core::CoreError::not_found(
+                "block was not found"
+            )))
+            .code,
             CommandErrorCode::NotFound
         ));
         assert!(matches!(
-            CommandError::from("request is already active").code,
+            err(anyhow::Error::from(notes_core::CoreError::conflict(
+                "request is already active"
+            )))
+            .code,
             CommandErrorCode::Conflict
         ));
         assert!(matches!(
-            CommandError::from("provider unavailable").code,
+            err(anyhow::Error::from(
+                notes_sync::TransportError::Unauthorized
+            ))
+            .code,
             CommandErrorCode::Unavailable
         ));
     }

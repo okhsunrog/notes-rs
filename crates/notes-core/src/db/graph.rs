@@ -30,38 +30,6 @@ pub async fn link_nodes(
 /// This is the "re-emit and cleanup on every save" approach from the plan —
 /// inefficient but correct. Returns the number of broken block-ref UUIDs so
 /// the frontend can surface them later if desired.
-pub async fn replace_block_refs(
-    conn: &Connection,
-    block_id: i64,
-    wikilink_titles: Vec<String>,
-    block_uuids: Vec<String>,
-) -> Result<u32> {
-    let broken = conn
-        .call(move |c| -> rusqlite::Result<u32> {
-            let tx = c.transaction()?;
-            let broken = replace_block_refs_tx(&tx, block_id, &wikilink_titles, &block_uuids)?;
-            tx.commit()?;
-            Ok(broken)
-        })
-        .await?;
-    Ok(broken)
-}
-
-pub(crate) fn replace_block_refs_tx(
-    tx: &rusqlite::Transaction<'_>,
-    block_id: i64,
-    wikilink_titles: &[String],
-    block_uuids: &[String],
-) -> rusqlite::Result<u32> {
-    replace_block_refs_tx_at(
-        tx,
-        block_id,
-        wikilink_titles,
-        block_uuids,
-        chrono::Utc::now().timestamp(),
-    )
-}
-
 pub(crate) fn replace_block_refs_tx_at(
     tx: &rusqlite::Transaction<'_>,
     block_id: i64,
@@ -91,7 +59,7 @@ pub(crate) fn replace_block_refs_tx_at(
             Some(id) => id,
             None => {
                 let uuid = page_uuid(title);
-                let id = stable_node_id(&uuid);
+                let id = stable_node_id(tx, &uuid)?;
                 tx.execute(
                     "INSERT INTO nodes (id, uuid, kind, title, content, content_json,
                                         body_stemmed, parent_id, position,
@@ -148,7 +116,10 @@ pub(crate) fn page_uuid(title: &str) -> uuid::Uuid {
     )
 }
 
-pub(crate) fn stable_node_id(uuid: &uuid::Uuid) -> i64 {
+pub(crate) fn stable_node_id(
+    transaction: &rusqlite::Transaction<'_>,
+    uuid: &uuid::Uuid,
+) -> rusqlite::Result<i64> {
     let mut high = [0_u8; 8];
     let mut low = [0_u8; 8];
     high.copy_from_slice(&uuid.as_bytes()[..8]);
@@ -156,7 +127,18 @@ pub(crate) fn stable_node_id(uuid: &uuid::Uuid) -> i64 {
     // Tauri sends IDs through JavaScript, so keep them inside Number's exact
     // integer range while retaining 53 bits of UUID-derived entropy.
     let value = (u64::from_be_bytes(high) ^ u64::from_be_bytes(low)) & ((1_u64 << 53) - 1);
-    value.max(1) as i64
+    let id = value.max(1) as i64;
+    let occupied = transaction
+        .query_row("SELECT uuid FROM nodes WHERE id = ?1", [id], |row| {
+            row.get::<_, uuid::Uuid>(0)
+        })
+        .optional()?;
+    if occupied.is_some_and(|occupied| occupied != *uuid) {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "UUID-derived node ID collision for {uuid} at local ID {id}"
+        )));
+    }
+    Ok(id)
 }
 
 pub async fn neighbors(conn: &Connection, node_id: i64, depth: u32) -> Result<Vec<Node>> {

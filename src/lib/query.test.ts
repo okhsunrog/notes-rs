@@ -15,13 +15,14 @@ describe("domain event query invalidation", () => {
       kind: "node_changed",
       node_uuids: ["node-a"],
       parent_uuids: ["parent-a"],
+      node_kinds: ["block"],
     });
 
     expect(client.getQueryState(queryKeys.node("node-a"))?.isInvalidated).toBe(true);
     expect(client.getQueryState(queryKeys.node("node-b"))?.isInvalidated).toBe(false);
     expect(client.getQueryState(queryKeys.children("parent-a"))?.isInvalidated).toBe(true);
-    expect(client.getQueryState(queryKeys.pages)?.isInvalidated).toBe(true);
-    expect(client.getQueryState(queryKeys.graph(null))?.isInvalidated).toBe(true);
+    expect(client.getQueryState(queryKeys.pages)?.isInvalidated).toBe(false);
+    expect(client.getQueryState(queryKeys.graph(null))?.isInvalidated).toBe(false);
   });
 
   it("removes deleted node snapshots", async () => {

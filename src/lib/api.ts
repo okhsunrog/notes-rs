@@ -153,16 +153,6 @@ export const moveBlockUp = checkedCommand(commands.moveBlockUp);
 export const moveBlockDown = checkedCommand(commands.moveBlockDown);
 export const deleteBlock = checkedCommand(commands.deleteBlock);
 
-export function replaceBlockRefs(args: {
-  blockId: number;
-  wikilinkTitles: string[];
-  blockUuids: string[];
-}) {
-  return unwrapCommand(
-    commands.replaceBlockRefs(args.blockId, args.wikilinkTitles, args.blockUuids),
-  );
-}
-
 export const getOrCreatePageByTitle = checkedCommand(commands.getOrCreatePageByTitle);
 export const getPageByTitle = checkedCommand(commands.getPageByTitle);
 export const getNodeByUuid = checkedCommand(commands.getNodeByUuid);

@@ -40,8 +40,8 @@ const AC_DEBOUNCE_MS = 120;
 const LONG_BLOCK_CHARS = 600;
 
 function blockContent(content: string): BlockContent {
-  const { wikilinks, blockRefs } = parseRefs(content);
-  return { content, wikilinkTitles: wikilinks, blockUuids: blockRefs };
+  const { blockRefs } = parseRefs(content);
+  return { content, blockUuids: blockRefs };
 }
 
 export function BlockNode({ block, parent, depth }: Props) {

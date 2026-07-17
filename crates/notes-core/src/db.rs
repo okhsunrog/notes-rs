@@ -259,12 +259,10 @@ mod tests {
         let parts = vec![
             BlockContent {
                 content: "first [[Linked]]".into(),
-                wikilink_titles: vec!["Linked".into()],
                 block_uuids: Vec::new(),
             },
             BlockContent {
                 content: "second".into(),
-                wikilink_titles: Vec::new(),
                 block_uuids: Vec::new(),
             },
         ];
@@ -387,9 +385,6 @@ mod tests {
         )
         .await
         .expect("create block");
-        replace_block_refs(&connection, block.id, vec!["Linked".into()], Vec::new())
-            .await
-            .expect("create reference");
         let archive = export_archive(&connection).await.expect("export archive");
 
         delete_page(&connection, page.id)
@@ -595,8 +590,8 @@ mod tests {
             .await
             .expect("delete page")
             .expect("page existed");
-        assert_eq!(removed.len(), 1);
-        assert_eq!(removed[0].id, attachment.id);
+        assert_eq!(removed.attachments.len(), 1);
+        assert_eq!(removed.attachments[0].id, attachment.id);
         assert!(
             get_node(&connection, attachment.id)
                 .await

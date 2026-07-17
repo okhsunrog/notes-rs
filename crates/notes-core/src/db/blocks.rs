@@ -67,21 +67,19 @@ pub async fn move_block(
     new_position: Option<f64>,
 ) -> Result<Node> {
     let (uuid, parent_uuid, position) = conn
-        .call(
-            move |database| -> rusqlite::Result<(uuid::Uuid, Option<uuid::Uuid>, f64)> {
+        .call_domain(
+            move |database| -> crate::CoreResult<(uuid::Uuid, Option<uuid::Uuid>, f64)> {
                 let (uuid, kind): (uuid::Uuid, NodeKind) = database.query_row(
                     "SELECT uuid, kind FROM nodes WHERE id = ?1",
                     [id],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )?;
                 if kind != NodeKind::Block {
-                    return Err(rusqlite::Error::InvalidParameterName(
-                        "only block nodes can be moved".into(),
-                    ));
+                    return Err(crate::CoreError::invalid("only block nodes can be moved"));
                 }
                 if new_parent_id == Some(id) {
-                    return Err(rusqlite::Error::InvalidParameterName(
-                        "a block cannot be its own parent".into(),
+                    return Err(crate::CoreError::conflict(
+                        "a block cannot be its own parent",
                     ));
                 }
                 let parent_uuid = new_parent_id
@@ -97,15 +95,15 @@ pub async fn move_block(
                             |row| row.get(0),
                         )?;
                         if creates_cycle {
-                            return Err(rusqlite::Error::InvalidParameterName(
-                                "a block cannot be moved under one of its descendants".into(),
+                            return Err(crate::CoreError::conflict(
+                                "a block cannot be moved under one of its descendants",
                             ));
                         }
-                        database.query_row(
+                        Ok(database.query_row(
                             "SELECT uuid FROM nodes WHERE id = ?1 AND kind IN ('page', 'block')",
                             [parent_id],
                             |row| row.get::<_, uuid::Uuid>(0),
-                        )
+                        )?)
                     })
                     .transpose()?;
                 let position = match new_position {
@@ -197,7 +195,7 @@ pub async fn indent_block(conn: &Connection, uuid: uuid::Uuid) -> Result<Node> {
     let node = get_node_by_uuid(conn, uuid)
         .await?
         .filter(|node| node.kind == NodeKind::Block)
-        .context("block was not found")?;
+        .ok_or_else(|| crate::CoreError::not_found("block was not found"))?;
     let parent_id = node.parent_id.context("block has no parent")?;
     let siblings = list_block_children(conn, parent_id).await?;
     let index = siblings
@@ -214,7 +212,7 @@ pub async fn outdent_block(conn: &Connection, uuid: uuid::Uuid) -> Result<Node> 
     let node = get_node_by_uuid(conn, uuid)
         .await?
         .filter(|node| node.kind == NodeKind::Block)
-        .context("block was not found")?;
+        .ok_or_else(|| crate::CoreError::not_found("block was not found"))?;
     let parent = get_node(
         conn,
         node.parent_id
@@ -247,7 +245,7 @@ pub async fn move_block_in_direction(
     let id = get_node_by_uuid(conn, uuid)
         .await?
         .filter(|node| node.kind == NodeKind::Block)
-        .context("block was not found")?
+        .ok_or_else(|| crate::CoreError::not_found("block was not found"))?
         .id;
     reorder_block(conn, id, direction).await
 }
@@ -347,7 +345,7 @@ pub async fn get_nodes_by_uuids(conn: &Connection, uuids: Vec<uuid::Uuid>) -> Re
 pub async fn get_or_create_page_by_title(conn: &Connection, title: String) -> Result<Node> {
     let trimmed = title.trim().to_string();
     if trimmed.is_empty() {
-        anyhow::bail!("page title is empty");
+        return Err(crate::CoreError::invalid("page title is empty").into());
     }
     let found = conn
         .call({

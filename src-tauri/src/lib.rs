@@ -62,7 +62,6 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::move_block_up,
             commands::move_block_down,
             commands::delete_block,
-            commands::replace_block_refs,
             commands::get_or_create_page_by_title,
             commands::get_page_by_title,
             commands::get_node_by_uuid,

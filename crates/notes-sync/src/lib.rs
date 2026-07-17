@@ -7,7 +7,7 @@ mod machine;
 mod transport;
 
 pub use machine::{LoopbackServer, SyncClient, SyncStats, SyncTransport};
-pub use transport::{HttpTransport, SyncSocket};
+pub use transport::{HttpTransport, SyncSocket, TransportError, is_transport_failure};
 
 pub use notes_core::Hlc;
 pub use notes_core::operation::FORMAT_VERSION;

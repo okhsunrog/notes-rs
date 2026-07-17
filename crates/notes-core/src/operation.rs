@@ -1,7 +1,7 @@
 //! Versioned, UUID-addressed source operations and the single apply boundary.
 
-use crate::{Connection, Hlc, NodeKind, db};
-use anyhow::{Context, Result, bail};
+use crate::{Connection, CoreError, CoreResult, Hlc, NodeKind, db};
+use anyhow::{Context, Result};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
@@ -281,7 +281,7 @@ pub async fn apply_sequenced_batch(
     for (_, operation) in &operations {
         validate(operation)?;
     }
-    conn.call(move |database| {
+    conn.call_domain(move |database| -> CoreResult<Vec<ApplyOutcome>> {
         let transaction = database.transaction()?;
         let mut cursor = transaction
             .query_row(
@@ -304,7 +304,7 @@ pub async fn apply_sequenced_batch(
         let mut outcomes = Vec::with_capacity(operations.len());
         for (seq, operation) in operations {
             if seq > cursor.saturating_add(1) {
-                return Err(rusqlite::Error::InvalidParameterName(format!(
+                return Err(CoreError::sync_conflict(format!(
                     "sync sequence gap: expected {}, received {seq}",
                     cursor.saturating_add(1)
                 )));
@@ -319,7 +319,7 @@ pub async fn apply_sequenced_batch(
             if let Some(Some(existing_seq)) = existing
                 && existing_seq as u64 != seq
             {
-                return Err(rusqlite::Error::InvalidParameterName(format!(
+                return Err(CoreError::sync_conflict(format!(
                     "operation {} was assigned conflicting server sequences {existing_seq} and {seq}",
                     operation.op_id
                 )));
@@ -474,10 +474,11 @@ pub async fn export_sync_snapshot(conn: &Connection, seq: u64) -> Result<SyncSna
 
 pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> Result<()> {
     if snapshot.format_version != FORMAT_VERSION {
-        bail!(
+        return Err(CoreError::invalid(format!(
             "unsupported snapshot format version {}",
             snapshot.format_version
-        );
+        ))
+        .into());
     }
     let mut clocks = snapshot
         .nodes
@@ -510,7 +511,7 @@ pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> 
              DELETE FROM sync_outbox;",
         )?;
         for node in &snapshot.nodes {
-            let id = db::stable_node_id(&node.uuid);
+            let id = db::stable_node_id(&transaction, &node.uuid)?;
             let body = crate::stem::stem(&format!(
                 "{}\n{}",
                 node.title.as_deref().unwrap_or(""),
@@ -553,7 +554,7 @@ pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> 
             .iter()
             .filter(|node| node.kind == NodeKind::Block)
         {
-            let id = db::stable_node_id(&node.uuid);
+            let id = db::stable_node_id(&transaction, &node.uuid)?;
             let (wikilinks, block_refs) = parse_refs(&node.content);
             db::replace_block_refs_tx_at(
                 &transaction,
@@ -691,28 +692,30 @@ pub async fn apply_batch(
     .await
 }
 
-fn validate(operation: &Op) -> Result<()> {
+fn validate(operation: &Op) -> CoreResult<()> {
     if operation.format_version != FORMAT_VERSION {
-        bail!(
+        return Err(CoreError::invalid(format!(
             "unsupported operation format version {}",
             operation.format_version
-        );
+        )));
     }
     if operation.hlc.device_id() != operation.device_id {
-        bail!("hybrid logical clock device suffix does not match device_id");
+        return Err(CoreError::invalid(
+            "hybrid logical clock device suffix does not match device_id",
+        ));
     }
     match &operation.kind {
         OpKind::NodeCreate(_) | OpKind::NodeSetContent(_) | OpKind::NodeSetTitle(_) => {}
         OpKind::NodeMove(payload) => {
             if !payload.position.is_finite() {
-                bail!("node position must be finite");
+                return Err(CoreError::invalid("node position must be finite"));
             }
         }
         OpKind::NodeDelete(_) => {}
         OpKind::EdgeAdd(payload) => {
             require_edge(&payload.src_uuid, &payload.dst_uuid, &payload.edge_kind)?;
             if !payload.weight.is_finite() {
-                bail!("edge weight must be finite");
+                return Err(CoreError::invalid("edge weight must be finite"));
             }
         }
         OpKind::EdgeRemove(payload) => {
@@ -725,7 +728,9 @@ fn validate(operation: &Op) -> Result<()> {
                 || !matches!(components.next(), Some(std::path::Component::Normal(_)))
                 || components.next().is_some()
             {
-                bail!("attachment filename must be one safe path component");
+                return Err(CoreError::invalid(
+                    "attachment filename must be one safe path component",
+                ));
             }
         }
         OpKind::AttachmentRemove(payload) => {
@@ -735,20 +740,24 @@ fn validate(operation: &Op) -> Result<()> {
     Ok(())
 }
 
-fn validate_blob_hash(hash: &str) -> Result<()> {
+fn validate_blob_hash(hash: &str) -> CoreResult<()> {
     if hash.len() != 64
         || !hash
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
     {
-        bail!("attachment blob hash must be 64 lowercase hexadecimal characters");
+        return Err(CoreError::invalid(
+            "attachment blob hash must be 64 lowercase hexadecimal characters",
+        ));
     }
     Ok(())
 }
 
-fn require_edge(src: &uuid::Uuid, dst: &uuid::Uuid, kind: &str) -> Result<()> {
+fn require_edge(src: &uuid::Uuid, dst: &uuid::Uuid, kind: &str) -> CoreResult<()> {
     if src == dst || kind.trim().is_empty() {
-        bail!("edge requires distinct nodes and a kind");
+        return Err(CoreError::invalid(
+            "edge requires distinct nodes and a kind",
+        ));
     }
     Ok(())
 }
@@ -853,7 +862,7 @@ fn apply_one(
                 ],
             )?;
             if changed > 0 {
-                reconcile_node_structure(transaction)?;
+                reconcile_node_structure(transaction, &payload.uuid)?;
                 transaction.execute(
                     "UPDATE nodes SET updated_at = ?2 WHERE uuid = ?1",
                     rusqlite::params![payload.uuid, timestamp],
@@ -914,7 +923,7 @@ fn apply_one(
                        root_uuid = COALESCE(excluded.root_uuid, tombstones.root_uuid)",
                     rusqlite::params![payload.uuid, operation.hlc, root_uuid],
                 )?;
-                reconcile_node_structure(transaction)?;
+                reconcile_node_structure(transaction, &payload.uuid)?;
             }
             Ok(vec![payload.uuid])
         }
@@ -968,7 +977,7 @@ fn apply_node_create(
         transaction.execute("DELETE FROM tombstones WHERE uuid = ?1", [&payload.uuid])?;
     }
     let parent_id = resolve_parent(transaction, payload.parent_uuid.as_ref())?;
-    let node_id = db::stable_node_id(&payload.uuid);
+    let node_id = db::stable_node_id(transaction, &payload.uuid)?;
     let body = crate::stem::stem(&format!(
         "{}\n{}",
         payload.title.as_deref().unwrap_or(""),
@@ -1036,7 +1045,7 @@ fn apply_node_create(
                 operation.hlc,
             ],
         )?;
-        reconcile_node_structure(transaction)?;
+        reconcile_node_structure(transaction, &payload.uuid)?;
     }
     if payload.node_kind == NodeKind::Block {
         let id = transaction.query_row(
@@ -1267,7 +1276,7 @@ fn reconcile_attachment(
         )
         .optional()?;
     let attachment_uuid = attachment_uuid(node_uuid, blob_hash);
-    let attachment_id = db::stable_node_id(&attachment_uuid);
+    let attachment_id = db::stable_node_id(transaction, &attachment_uuid)?;
     let Some((present, filename, mime, size, hlc)) = intent else {
         return Ok(());
     };
@@ -1388,14 +1397,29 @@ fn containing_page_uuid(
         .optional()
 }
 
-fn reconcile_node_structure(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+fn reconcile_node_structure(
+    transaction: &rusqlite::Transaction<'_>,
+    changed_uuid: &uuid::Uuid,
+) -> rusqlite::Result<()> {
     let intents = {
         let mut statement = transaction.prepare(
-            "SELECT node_uuid, parent_uuid, position, hlc
-               FROM node_structure_lww ORDER BY node_uuid",
+            "WITH RECURSIVE component(uuid) AS (
+               VALUES (?1)
+               UNION
+               SELECT intent.parent_uuid FROM node_structure_lww intent
+                 JOIN component ON intent.node_uuid = component.uuid
+                WHERE intent.parent_uuid IS NOT NULL
+               UNION
+               SELECT intent.node_uuid FROM node_structure_lww intent
+                 JOIN component ON intent.parent_uuid = component.uuid
+             )
+             SELECT node_uuid, parent_uuid, position, hlc
+               FROM node_structure_lww
+              WHERE node_uuid IN (SELECT uuid FROM component)
+              ORDER BY node_uuid",
         )?;
         statement
-            .query_map([], |row| {
+            .query_map([changed_uuid], |row| {
                 Ok((
                     row.get::<_, uuid::Uuid>(0)?,
                     row.get::<_, Option<uuid::Uuid>>(1)?,
@@ -1406,8 +1430,9 @@ fn reconcile_node_structure(transaction: &rusqlite::Transaction<'_>) -> rusqlite
             .collect::<Result<Vec<_>, _>>()?
     };
 
-    // Re-materialize every winning intent first. Cycle breaking happens only
-    // in parent_id, so a later delivery can always reproduce the same graph.
+    // Re-materialize the connected intent component. Cycle breaking happens
+    // only in parent_id, so a later change in this component can reproduce all
+    // winning intents without scanning unrelated workspaces.
     for (node_uuid, parent_uuid, position, hlc) in &intents {
         let parent_id = resolve_parent(transaction, parent_uuid.as_ref())?;
         transaction.execute(
@@ -1428,11 +1453,23 @@ fn reconcile_node_structure(transaction: &rusqlite::Transaction<'_>) -> rusqlite
     loop {
         let nodes = {
             let mut statement = transaction.prepare(
-                "SELECT id, uuid, parent_id, COALESCE(structure_hlc, '')
-                   FROM nodes WHERE kind = 'block' ORDER BY uuid",
+                "WITH RECURSIVE component(uuid) AS (
+                   VALUES (?1)
+                   UNION
+                   SELECT intent.parent_uuid FROM node_structure_lww intent
+                     JOIN component ON intent.node_uuid = component.uuid
+                    WHERE intent.parent_uuid IS NOT NULL
+                   UNION
+                   SELECT intent.node_uuid FROM node_structure_lww intent
+                     JOIN component ON intent.parent_uuid = component.uuid
+                 )
+                 SELECT id, uuid, parent_id, COALESCE(structure_hlc, '')
+                   FROM nodes
+                  WHERE kind = 'block' AND uuid IN (SELECT uuid FROM component)
+                  ORDER BY uuid",
             )?;
             statement
-                .query_map([], |row| {
+                .query_map([changed_uuid], |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
                         row.get::<_, uuid::Uuid>(1)?,
@@ -1579,7 +1616,7 @@ fn operation_timestamp(operation: &Op) -> i64 {
     operation.hlc.timestamp_seconds()
 }
 
-fn parse_refs(content: &str) -> (Vec<String>, Vec<String>) {
+pub(crate) fn parse_refs(content: &str) -> (Vec<String>, Vec<String>) {
     (
         delimited(content, "[[", "]]"),
         delimited(content, "((", "))"),
@@ -1657,6 +1694,43 @@ mod tests {
                 created_at: (wall_ms / 1_000) as i64,
             }),
         )
+    }
+
+    #[tokio::test]
+    async fn uuid_derived_local_id_collision_fails_without_losing_a_node() {
+        let (_directory, connection) = database().await;
+        let first_uuid = uuid::Uuid::from_u128(1);
+        let colliding_uuid = uuid::Uuid::from_u128(1_u128 << 64);
+        let first = create_node_op(1, 1_000, &first_uuid, "page", Some("First"), None, None);
+        let second = create_node_op(
+            1,
+            1_001,
+            &colliding_uuid,
+            "page",
+            Some("Second"),
+            None,
+            None,
+        );
+
+        apply(&connection, &first, Origin::Remote)
+            .await
+            .expect("first node");
+        let error = apply(&connection, &second, Origin::Remote)
+            .await
+            .expect_err("colliding local ID must be rejected");
+        assert!(error.to_string().contains("node ID collision"));
+        assert!(
+            db::get_node_by_uuid(&connection, first_uuid)
+                .await
+                .expect("first node query")
+                .is_some()
+        );
+        assert!(
+            db::get_node_by_uuid(&connection, colliding_uuid)
+                .await
+                .expect("colliding node query")
+                .is_none()
+        );
     }
 
     #[tokio::test]

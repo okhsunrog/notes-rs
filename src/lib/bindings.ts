@@ -98,7 +98,6 @@ export const commands = {
 	moveBlockUp: (uuid: string) => typedError<Node, CommandError>(__TAURI_INVOKE("move_block_up", { uuid })),
 	moveBlockDown: (uuid: string) => typedError<Node, CommandError>(__TAURI_INVOKE("move_block_down", { uuid })),
 	deleteBlock: (id: number) => typedError<boolean, CommandError>(__TAURI_INVOKE("delete_block", { id })),
-	replaceBlockRefs: (blockId: number, wikilinkTitles: string[], blockUuids: string[]) => typedError<number, CommandError>(__TAURI_INVOKE("replace_block_refs", { blockId, wikilinkTitles, blockUuids })),
 	getOrCreatePageByTitle: (title: string) => typedError<Node, CommandError>(__TAURI_INVOKE("get_or_create_page_by_title", { title })),
 	getPageByTitle: (title: string) => typedError<{
 	id: number,
@@ -162,7 +161,6 @@ export type AiRuntimeSettings = {
 
 export type BlockContent = {
 	content: string,
-	wikilinkTitles: string[],
 	blockUuids: string[],
 };
 
@@ -187,7 +185,7 @@ export type CreatedNote = {
  *  Payloads carry affected IDs when a command can identify them; whole-workspace
  *  replacements (import/sync) deliberately request a full cache refresh.
  */
-export type DomainEvent = { kind: "node_changed"; node_uuids: string[]; parent_uuids: string[] } | { kind: "node_deleted"; node_uuids: string[]; parent_uuids: string[] } | { kind: "graph_changed"; node_uuids: string[] } | { kind: "history_changed" } | { kind: "settings_changed" } | { kind: "sync_status_changed" } | { kind: "server_ai_changed" } | { kind: "workspace_changed" };
+export type DomainEvent = { kind: "node_changed"; node_uuids: string[]; parent_uuids: string[]; node_kinds: NodeKind[] } | { kind: "node_deleted"; node_uuids: string[]; parent_uuids: string[] } | { kind: "graph_changed"; node_uuids: string[] } | { kind: "history_changed" } | { kind: "settings_changed" } | { kind: "sync_status_changed" } | { kind: "server_ai_changed" } | { kind: "workspace_changed" };
 
 export type DomainEventMessage = DomainEvent;
 

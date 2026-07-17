@@ -23,6 +23,32 @@ use url::Url;
 
 pub type SyncSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+#[derive(Debug, thiserror::Error)]
+pub enum TransportError {
+    #[error("sync authentication failed")]
+    Unauthorized,
+    #[error("sync conflict: {0}")]
+    Conflict(String),
+    #[error("sync server returned HTTP {status}: {message}")]
+    Http { status: u16, message: String },
+}
+
+impl TransportError {
+    pub fn is_permanent(&self) -> bool {
+        match self {
+            Self::Unauthorized | Self::Conflict(_) => true,
+            Self::Http { status, .. } => !matches!(*status, 408 | 429 | 500..=599),
+        }
+    }
+}
+
+pub fn is_transport_failure(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<TransportError>().is_some()
+        || error
+            .chain()
+            .any(|cause| cause.downcast_ref::<reqwest::Error>().is_some())
+}
+
 #[derive(Clone)]
 pub struct HttpTransport {
     client: reqwest::Client,
@@ -390,9 +416,13 @@ async fn require_success(response: reqwest::Response) -> Result<reqwest::Respons
         .unwrap_or_else(|_| "response body unavailable".into());
     let message = body.chars().take(500).collect::<String>();
     match status {
-        StatusCode::UNAUTHORIZED => bail!("sync authentication failed"),
-        StatusCode::CONFLICT => bail!("sync conflict: {message}"),
-        _ => bail!("sync server returned HTTP {status}: {message}"),
+        StatusCode::UNAUTHORIZED => Err(TransportError::Unauthorized.into()),
+        StatusCode::CONFLICT => Err(TransportError::Conflict(message).into()),
+        _ => Err(TransportError::Http {
+            status: status.as_u16(),
+            message,
+        }
+        .into()),
     }
 }
 

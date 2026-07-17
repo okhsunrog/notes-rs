@@ -38,7 +38,9 @@ pub async fn export_archive(conn: &Connection) -> Result<DataArchive> {
 
 pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<()> {
     if archive.format != "notes-rs" || archive.version != 1 {
-        anyhow::bail!("unsupported notes-rs archive format or version");
+        return Err(
+            crate::CoreError::invalid("unsupported notes-rs archive format or version").into(),
+        );
     }
     let current = export_archive(conn).await?;
     let kinds = archive_transition_kinds(&current, &archive)?;

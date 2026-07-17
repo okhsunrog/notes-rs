@@ -237,7 +237,10 @@ async fn bootstrap_replica(
         bail!("bootstrap snapshot sequence must be zero");
     }
     if oplog.latest_seq().await? != 0 {
-        bail!("server workspace is not empty");
+        return Err(notes_core::CoreError::conflict(
+            "server workspace has already been initialized",
+        )
+        .into());
     }
     let current = export_sync_snapshot(notes, 0).await?;
     if !current.nodes.is_empty()
@@ -245,7 +248,10 @@ async fn bootstrap_replica(
         || !current.edges.is_empty()
         || !current.attachments.is_empty()
     {
-        bail!("server workspace is not empty");
+        return Err(notes_core::CoreError::conflict(
+            "server workspace has already been initialized",
+        )
+        .into());
     }
     snapshot.seq = 0;
     import_sync_snapshot(notes, snapshot).await?;

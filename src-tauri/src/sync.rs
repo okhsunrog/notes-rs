@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use notes_core::{Connection, acknowledge_server_ops, apply_sequenced_batch, export_sync_snapshot};
 use notes_protocol::{ClientMessage, SequencedOp, ServerMessage};
-use notes_sync::{HttpTransport, SyncClient, SyncSnapshot, SyncTransport};
+use notes_sync::{HttpTransport, SyncClient, SyncSnapshot, SyncTransport, TransportError};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -12,6 +12,27 @@ use tauri::AppHandle;
 use tokio_tungstenite::tungstenite::Message;
 
 const SYNC_BATCH_SIZE: u32 = 256;
+
+#[derive(Debug, thiserror::Error)]
+enum SyncSessionError {
+    #[error(
+        "local and server workspace contain different data; export one workspace and reset the other before enabling sync"
+    )]
+    WorkspaceConflict,
+    #[error("sync server rejected the session: {0}")]
+    ServerConflict(String),
+}
+
+fn is_permanent_failure(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<TransportError>()
+        .is_some_and(TransportError::is_permanent)
+        || error.downcast_ref::<SyncSessionError>().is_some()
+        || matches!(
+            error.downcast_ref::<notes_core::CoreError>(),
+            Some(notes_core::CoreError::Conflict(_) | notes_core::CoreError::SyncConflict(_))
+        )
+}
 
 struct DesktopTransport<'a> {
     http: &'a HttpTransport,
@@ -147,9 +168,7 @@ pub fn spawn_worker(
                 .err()
                 .map(|error| error.to_string())
                 .unwrap_or_else(|| "sync connection closed".into());
-            let permanent = message.contains("authentication failed")
-                || message.contains("sync conflict")
-                || message.contains("workspace contains different data");
+            let permanent = result.as_ref().is_err_and(is_permanent_failure);
             set_connection_state(
                 &app,
                 &status,
@@ -264,9 +283,7 @@ async fn initialize_replica(
         (false, false) => {
             local.seq = server.seq;
             if local != server {
-                bail!(
-                    "local and server workspace contains different data; export one workspace and reset the other before enabling sync"
-                );
+                return Err(SyncSessionError::WorkspaceConflict.into());
             }
             notes_core::import_sync_snapshot(connection, server.clone()).await?;
             download_snapshot_blobs(transport, data_dir, &server).await?;
@@ -325,6 +342,9 @@ async fn handle_server_message(
             Ok(())
         }
         ServerMessage::Pong => Ok(()),
+        ServerMessage::Error { code, message } if code == "conflict" => {
+            Err(SyncSessionError::ServerConflict(message).into())
+        }
         ServerMessage::Error { code, message } => bail!("sync server error {code}: {message}"),
     }
 }
