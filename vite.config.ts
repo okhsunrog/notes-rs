@@ -43,26 +43,9 @@ export default defineConfig({
   },
 
   build: {
-    rolldownOptions: {
-      output: {
-        codeSplitting: {
-          groups: [
-            {
-              name: "react",
-              test: /node_modules[\\/](react|react-dom|scheduler)[\\/]/,
-            },
-            {
-              name: "ui",
-              test: /node_modules[\\/](@radix-ui|radix-ui|lucide-react|react-resizable-panels|sonner)[\\/]/,
-            },
-            {
-              name: "platform",
-              test: /node_modules[\\/](@tanstack|@tauri-apps)[\\/]/,
-            },
-          ],
-        },
-      },
-    },
+    // Tauri serves bundled assets from local storage rather than over a network. Keep Vite's
+    // natural lazy chunks, but do not warn about a moderately sized eagerly loaded application.
+    chunkSizeWarningLimit: 2_000,
   },
 
   lint: {
