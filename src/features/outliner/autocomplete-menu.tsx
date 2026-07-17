@@ -1,4 +1,5 @@
 import { Loader2 } from "lucide-react";
+import { pageDisplayTitle } from "@/features/journal/journal-date";
 import type { Block, Page } from "@/lib/api";
 
 export type AutocompleteItem = {
@@ -11,7 +12,7 @@ export type AutocompleteItem = {
 };
 
 export function pageToItem(page: Page): AutocompleteItem {
-  return { uuid: page.uuid, label: page.title ?? "Untitled" };
+  return { uuid: page.uuid, label: pageDisplayTitle(page) };
 }
 
 export function blockToItem(block: Block): AutocompleteItem {

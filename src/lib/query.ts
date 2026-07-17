@@ -6,6 +6,8 @@ const root = ["backend"] as const;
 export const queryKeys = {
   root,
   pages: [...root, "pages"] as const,
+  journals: [...root, "journals"] as const,
+  journal: (date: string) => [...root, "journals", date] as const,
   pageRoot: [...root, "page"] as const,
   page: (uuid: string) => [...root, "page", uuid] as const,
   blockRoot: [...root, "block"] as const,
@@ -43,6 +45,7 @@ export async function applyDomainEvent(queryClient: QueryClient, event: DomainEv
     case "pages_changed":
       await Promise.all([
         invalidate(queryKeys.pages),
+        invalidate(queryKeys.journals),
         invalidate(queryKeys.graphRoot),
         invalidate(queryKeys.backlinksRoot),
         ...event.page_uuids.map((uuid) => invalidate(queryKeys.page(uuid))),
@@ -61,6 +64,7 @@ export async function applyDomainEvent(queryClient: QueryClient, event: DomainEv
       }
       await Promise.all([
         invalidate(queryKeys.pages),
+        invalidate(queryKeys.journals),
         invalidate(queryKeys.attachmentsRoot),
         invalidate(queryKeys.graphRoot),
         invalidate(queryKeys.backlinksRoot),

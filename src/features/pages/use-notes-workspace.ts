@@ -3,16 +3,24 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { MarkdownOpenRequest } from "@/features/markdown";
 import {
+  pageDisplayTitle,
+  parseJournalDate,
+  todayJournalDate,
+} from "@/features/journal/journal-date";
+import {
+  appendToJournal,
   createNote,
   deletePage,
   getBlock,
   getContainingPage,
   getHistoryStatus,
+  getJournal,
   getPage,
   getPageByTitle,
   redo,
   undo,
   type Content,
+  type JournalDate,
   type Page,
   type SearchHit,
 } from "@/lib/api";
@@ -28,11 +36,15 @@ export function useNotesWorkspace(
   const queryClient = useQueryClient();
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [activePageUuid, setActivePageUuid] = useState<string | null>(null);
+  const [pendingJournalDate, setPendingJournalDate] = useState<JournalDate | null>(null);
   const [newNote, setNewNote] = useState<{ pageUuid: string; blockUuid: string | null } | null>(
     null,
   );
   const [creatingNote, setCreatingNote] = useState(false);
+  const [journalBusy, setJournalBusy] = useState(false);
   const creatingNoteRef = useRef(false);
+  const journalBusyRef = useRef(false);
+  const navigationEpochRef = useRef(0);
 
   const historyQuery = useQuery({
     queryKey: queryKeys.history,
@@ -55,6 +67,7 @@ export function useNotesWorkspace(
 
   const createNewNote = useCallback(async () => {
     if (creatingNoteRef.current) return;
+    const navigationEpoch = ++navigationEpochRef.current;
     creatingNoteRef.current = true;
     setCreatingNote(true);
     try {
@@ -62,7 +75,9 @@ export function useNotesWorkspace(
       queryClient.setQueryData(queryKeys.page(note.page.uuid), note.page);
       queryClient.setQueryData(queryKeys.children(note.page.uuid), [note.initialBlock]);
       await queryClient.invalidateQueries({ queryKey: queryKeys.pages });
+      if (navigationEpoch !== navigationEpochRef.current) return;
       setNewNote({ pageUuid: note.page.uuid, blockUuid: note.initialBlock.uuid });
+      setPendingJournalDate(null);
       setActivePageUuid(note.page.uuid);
       setHits([]);
       onStatus("New note ready — name it, then press Enter to write.");
@@ -77,10 +92,12 @@ export function useNotesWorkspace(
 
   const moveHistory = useCallback(
     async (direction: "undo" | "redo") => {
+      const navigationEpoch = ++navigationEpochRef.current;
       try {
         const changed = direction === "undo" ? await undo() : await redo();
-        if (changed) {
+        if (changed && navigationEpoch === navigationEpochRef.current) {
           setActivePageUuid(null);
+          setPendingJournalDate(null);
           setHits([]);
           onStatus(direction === "undo" ? "Undid structural change." : "Redid structural change.");
           await queryClient.invalidateQueries({ queryKey: queryKeys.root });
@@ -90,6 +107,93 @@ export function useNotesWorkspace(
       }
     },
     [onStatus, queryClient],
+  );
+
+  const openJournal = useCallback(
+    async (date: JournalDate) => {
+      if (journalBusyRef.current) return;
+      const navigationEpoch = ++navigationEpochRef.current;
+      journalBusyRef.current = true;
+      setJournalBusy(true);
+      try {
+        const page = await queryClient.fetchQuery({
+          queryKey: queryKeys.journal(date),
+          queryFn: () => getJournal(date),
+        });
+        if (navigationEpoch !== navigationEpochRef.current) return;
+        setNewNote(null);
+        if (page) {
+          queryClient.setQueryData(queryKeys.page(page.uuid), page);
+          setPendingJournalDate(null);
+          setActivePageUuid(page.uuid);
+        } else {
+          setActivePageUuid(null);
+          setPendingJournalDate(date);
+        }
+        setHits([]);
+        showEditor();
+      } catch (error) {
+        if (navigationEpoch === navigationEpochRef.current) {
+          onStatus(`journal error: ${String(error)}`);
+        }
+      } finally {
+        journalBusyRef.current = false;
+        setJournalBusy(false);
+      }
+    },
+    [onStatus, queryClient, showEditor],
+  );
+
+  const captureJournal = useCallback(
+    async (date: JournalDate, markdown: string, openAfterCapture = false) => {
+      if (journalBusyRef.current) return false;
+      const navigationEpoch = openAfterCapture ? ++navigationEpochRef.current : null;
+      journalBusyRef.current = true;
+      setJournalBusy(true);
+      try {
+        const block = await appendToJournal(date, { markdown }, "paragraph");
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: queryKeys.children(block.pageUuid) }),
+          queryClient.invalidateQueries({ queryKey: queryKeys.journals }),
+          queryClient.invalidateQueries({ queryKey: queryKeys.history }),
+        ]);
+        if (openAfterCapture) {
+          if (navigationEpoch !== navigationEpochRef.current) {
+            onStatus(`Captured in journal ${date}.`);
+            return true;
+          }
+          const page = await queryClient.fetchQuery({
+            queryKey: queryKeys.journal(date),
+            queryFn: () => getJournal(date),
+          });
+          if (!page) throw new Error("captured journal page was not found");
+          if (navigationEpoch !== navigationEpochRef.current) {
+            onStatus(`Captured in journal ${date}.`);
+            return true;
+          }
+          queryClient.setQueryData(queryKeys.page(page.uuid), page);
+          setPendingJournalDate(null);
+          setNewNote({ pageUuid: page.uuid, blockUuid: block.uuid });
+          setActivePageUuid(page.uuid);
+          setHits([]);
+          showEditor();
+        }
+        onStatus(`Captured in journal ${date}.`);
+        return true;
+      } catch (error) {
+        onStatus(`capture error: ${String(error)}`);
+        return false;
+      } finally {
+        journalBusyRef.current = false;
+        setJournalBusy(false);
+      }
+    },
+    [onStatus, queryClient, showEditor],
+  );
+
+  const quickCapture = useCallback(
+    (markdown: string) => captureJournal(todayJournalDate(), markdown),
+    [captureJournal],
   );
 
   const applyUpdated = useCallback(
@@ -109,21 +213,26 @@ export function useNotesWorkspace(
 
   const openContent = useCallback(
     async (content: Content) => {
+      const navigationEpoch = ++navigationEpochRef.current;
       try {
         const page =
           content.kind === "page" ? content.record : await getContainingPage(content.record.uuid);
+        if (navigationEpoch !== navigationEpochRef.current) return;
         if (!page) {
           onStatus(`No containing page found for ${content.record.uuid}`);
           return;
         }
         queryClient.setQueryData(queryKeys.page(page.uuid), page);
+        setPendingJournalDate(null);
         setActivePageUuid(page.uuid);
         showEditor();
         if (content.kind === "block") {
-          onStatus(`Opened ${page.title ?? "page"} containing the selected block.`);
+          onStatus(`Opened ${pageDisplayTitle(page)} containing the selected block.`);
         }
       } catch (error) {
-        onStatus(`open error: ${String(error)}`);
+        if (navigationEpoch === navigationEpochRef.current) {
+          onStatus(`open error: ${String(error)}`);
+        }
       }
     },
     [onStatus, queryClient, showEditor],
@@ -148,14 +257,22 @@ export function useNotesWorkspace(
           return;
         }
 
-        const content: Content | null =
-          target.kind === "page"
-            ? await getPageByTitle(target.title).then((page) =>
-                page ? { kind: "page", record: page } : null,
-              )
-            : await getBlock(target.uuid).then((block) =>
-                block ? { kind: "block", record: block } : null,
-              );
+        let content: Content | null;
+        if (target.kind === "page") {
+          const journalDate = parseJournalDate(target.title);
+          if (journalDate) {
+            await openJournal(journalDate);
+            if (disposition === "adjacent") {
+              onStatus("Split view is not available yet; opened the link in the current pane.");
+            }
+            return;
+          }
+          const page = await getPageByTitle(target.title);
+          content = page ? { kind: "page", record: page } : null;
+        } else {
+          const block = await getBlock(target.uuid);
+          content = block ? { kind: "block", record: block } : null;
+        }
         if (!content) {
           onStatus(
             target.kind === "page"
@@ -173,23 +290,26 @@ export function useNotesWorkspace(
         onStatus(`link error: ${String(error)}`);
       }
     },
-    [onStatus, openContent],
+    [onStatus, openContent, openJournal],
   );
 
   const removePage = useCallback(
     async (page: Page) => {
       if (
         !(await confirm({
-          title: "Delete note?",
-          description: `“${page.title ?? "Untitled"}” and all of its blocks will be removed. A recovery backup is created first.`,
-          confirmLabel: "Delete note",
+          title: page.kind.kind === "journal" ? "Delete journal day?" : "Delete note?",
+          description: `“${pageDisplayTitle(page)}” and all of its blocks will be removed. A recovery backup is created first.`,
+          confirmLabel: page.kind.kind === "journal" ? "Delete journal day" : "Delete note",
           destructive: true,
         }))
       )
         return;
+      const navigationEpoch = ++navigationEpochRef.current;
       try {
         if (await deletePage(page.uuid)) {
+          if (navigationEpoch !== navigationEpochRef.current) return;
           setActivePageUuid(null);
+          setPendingJournalDate(null);
           queryClient.removeQueries({ queryKey: queryKeys.page(page.uuid), exact: true });
           setHits((current) =>
             current.filter(
@@ -207,7 +327,9 @@ export function useNotesWorkspace(
 
   const selectPage = useCallback(
     (page: Page) => {
+      navigationEpochRef.current += 1;
       setNewNote(null);
+      setPendingJournalDate(null);
       queryClient.setQueryData(queryKeys.page(page.uuid), page);
       setActivePageUuid(page.uuid);
       showEditor();
@@ -216,7 +338,9 @@ export function useNotesWorkspace(
   );
 
   const resetWorkspace = useCallback(() => {
+    navigationEpochRef.current += 1;
     setActivePageUuid(null);
+    setPendingJournalDate(null);
     setHits([]);
     void queryClient.invalidateQueries({ queryKey: queryKeys.root });
   }, [queryClient]);
@@ -225,19 +349,28 @@ export function useNotesWorkspace(
     activePage,
     activePageUuid,
     applyUpdated,
-    closePage: () => setActivePageUuid(null),
+    captureJournal,
+    closePage: () => {
+      navigationEpochRef.current += 1;
+      setActivePageUuid(null);
+      setPendingJournalDate(null);
+    },
     createNewNote,
     creatingNote,
     history: historyQuery.data ?? { undoCount: 0, redoCount: 0 },
     hits,
     moveHistory,
+    journalBusy,
     newNote,
     openMarkdownLink,
+    openJournal,
     openContent,
+    pendingJournalDate,
     removePage,
     resetWorkspace,
     selectPage,
     setHits,
+    quickCapture,
   };
 }
 

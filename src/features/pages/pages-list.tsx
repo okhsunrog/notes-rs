@@ -3,30 +3,53 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { FileText, Plus, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { listPages, type Page } from "@/lib/api";
+import { JournalNavigation } from "@/features/journal/journal-navigation";
+import { JournalQuickCapture } from "@/features/journal/journal-quick-capture";
+import { RecentJournals } from "@/features/journal/recent-journals";
+import { pageDisplayTitle } from "@/features/journal/journal-date";
+import { listJournals, listPages, type JournalDate, type Page } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { queryKeys } from "@/lib/query";
 
 type Props = {
   selectedUuid: string | null;
+  activeJournalDate: JournalDate | null;
   onSelect: (page: Page) => void;
   onCreate: () => void | Promise<void>;
+  onOpenJournal: (date: JournalDate) => void | Promise<void>;
+  onQuickCapture: (markdown: string) => boolean | Promise<boolean>;
+  journalBusy: boolean;
   onStatus: (s: string) => void;
 };
 
-export function PagesList({ selectedUuid, onSelect, onCreate, onStatus }: Props) {
+export function PagesList({
+  selectedUuid,
+  activeJournalDate,
+  onSelect,
+  onCreate,
+  onOpenJournal,
+  onQuickCapture,
+  journalBusy,
+  onStatus,
+}: Props) {
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState(false);
   const queryClient = useQueryClient();
   const pagesQuery = useQuery({
     queryKey: queryKeys.pages,
-    queryFn: () => listPages(),
+    queryFn: () => listPages({ filter: "notes" }),
+  });
+  const journalsQuery = useQuery({
+    queryKey: queryKeys.journals,
+    queryFn: () => listJournals({ limit: 7 }),
   });
   const pages = pagesQuery.data ?? [];
+  const recentJournals = journalsQuery.data ?? [];
 
   useEffect(() => {
     if (pagesQuery.error) onStatus(`error: ${String(pagesQuery.error)}`);
-  }, [onStatus, pagesQuery.error]);
+    if (journalsQuery.error) onStatus(`journal error: ${String(journalsQuery.error)}`);
+  }, [journalsQuery.error, onStatus, pagesQuery.error]);
 
   async function create() {
     if (busy) return;
@@ -42,9 +65,8 @@ export function PagesList({ selectedUuid, onSelect, onCreate, onStatus }: Props)
   }
 
   const visiblePages = pages.filter((page) =>
-    (page.title ?? "Untitled").toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
+    pageDisplayTitle(page).toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
   );
-
   return (
     <div className="flex h-full min-h-[22rem] flex-col gap-3">
       <Button
@@ -61,6 +83,19 @@ export function PagesList({ selectedUuid, onSelect, onCreate, onStatus }: Props)
           Ctrl N
         </kbd>
       </Button>
+
+      <JournalNavigation
+        activeDate={activeJournalDate}
+        busy={journalBusy}
+        onOpenDate={onOpenJournal}
+      />
+      <RecentJournals
+        pages={recentJournals}
+        activeUuid={selectedUuid}
+        busy={journalBusy}
+        onOpen={onSelect}
+      />
+      <JournalQuickCapture busy={journalBusy} onCapture={onQuickCapture} />
 
       <div className="relative">
         <Search className="pointer-events-none absolute top-1/2 left-3 size-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -112,7 +147,7 @@ export function PagesList({ selectedUuid, onSelect, onCreate, onStatus }: Props)
               </span>
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-[13px] font-medium">
-                  {p.title ?? "Untitled"}
+                  {pageDisplayTitle(p)}
                 </span>
                 <span className="mt-0.5 block text-[10px] text-muted-foreground">
                   {formatRelativeDate(p.updatedAt)}

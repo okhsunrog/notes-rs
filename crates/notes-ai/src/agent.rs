@@ -3,7 +3,7 @@ use anyhow::Context;
 use futures::StreamExt;
 use llm_relay::RigClient;
 use notes_core::db::{self, Content, Page, SearchHit};
-use notes_core::{BlockStyle, Connection};
+use notes_core::{BlockStyle, Connection, PageListFilter};
 use notes_protocol::{ChatEvent, ChatTurn};
 use rig::agent::MultiTurnStreamItem;
 use rig::client::CompletionClient;
@@ -409,7 +409,7 @@ impl Tool for ListPages {
                 "limit must be between 1 and 200".into(),
             ));
         }
-        db::list_pages(&self.conn, args.limit)
+        db::list_pages_filtered(&self.conn, PageListFilter::All, args.limit)
             .await
             .map_err(into_tool_err)
     }
@@ -981,5 +981,30 @@ mod tests {
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].content.uuid(), uuid::Uuid::from_u128(2));
         assert!(hits[0].score < crate::retrieval::RELEVANCE_FLOOR);
+    }
+
+    #[tokio::test]
+    async fn page_inventory_includes_journal_pages() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let connection = db::open(directory.path().join("notes.db"))
+            .await
+            .expect("open database");
+        db::create_page(&connection, "Project".into())
+            .await
+            .expect("create note");
+        db::ensure_journal(
+            &connection,
+            "2026-07-17".parse().expect("valid journal date"),
+        )
+        .await
+        .expect("create journal");
+
+        let pages = ListPages { conn: connection }
+            .call(ListPagesArgs { limit: 10 })
+            .await
+            .expect("list pages through agent tool");
+
+        assert_eq!(pages.len(), 2);
+        assert!(pages.iter().any(|page| page.kind.is_journal()));
     }
 }

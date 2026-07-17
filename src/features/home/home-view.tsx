@@ -1,18 +1,30 @@
-import { ArrowRight, FilePlus2, Link2, Search, Sparkles } from "lucide-react";
+import { ArrowRight, CalendarDays, FilePlus2, Link2, Search, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { todayJournalDate } from "@/features/journal/journal-date";
 import { SearchCard } from "@/features/search/search-card";
-import type { Content, SearchHit } from "@/lib/api";
+import type { Content, JournalDate, SearchHit } from "@/lib/api";
 
 type Props = {
   creating: boolean;
+  journalBusy: boolean;
   hits: SearchHit[];
   setHits: React.Dispatch<React.SetStateAction<SearchHit[]>>;
   onCreate: () => void | Promise<void>;
+  onOpenJournal: (date: JournalDate) => void | Promise<void>;
   onOpenContent: (content: Content) => void | Promise<void>;
   onStatus: (status: string) => void;
 };
 
-export function HomeView({ creating, hits, setHits, onCreate, onOpenContent, onStatus }: Props) {
+export function HomeView({
+  creating,
+  journalBusy,
+  hits,
+  setHits,
+  onCreate,
+  onOpenJournal,
+  onOpenContent,
+  onStatus,
+}: Props) {
   return (
     <div className="mx-auto flex min-h-full max-w-4xl flex-col justify-center px-8 py-16 sm:px-12">
       <div className="max-w-2xl">
@@ -29,16 +41,28 @@ export function HomeView({ creating, hits, setHits, onCreate, onOpenContent, onS
           Capture an idea, link it to what you already know, and let your workspace reveal the
           connections.
         </p>
-        <Button
-          size="lg"
-          disabled={creating}
-          onClick={() => void onCreate()}
-          className="brand-button mt-8 h-12 rounded-xl px-5 shadow-lg shadow-primary/20"
-        >
-          <FilePlus2 className="size-4" />
-          Create a new note
-          <ArrowRight className="ml-2 size-4" />
-        </Button>
+        <div className="mt-8 flex flex-wrap gap-2.5">
+          <Button
+            size="lg"
+            disabled={creating}
+            onClick={() => void onCreate()}
+            className="brand-button h-12 rounded-xl px-5 shadow-lg shadow-primary/20"
+          >
+            <FilePlus2 className="size-4" />
+            Create a new note
+            <ArrowRight className="ml-2 size-4" />
+          </Button>
+          <Button
+            size="lg"
+            variant="outline"
+            disabled={creating || journalBusy}
+            onClick={() => void onOpenJournal(todayJournalDate())}
+            className="h-12 rounded-xl border-primary/20 bg-card/65 px-5 shadow-sm"
+          >
+            <CalendarDays className="size-4 text-primary" />
+            Open today
+          </Button>
+        </div>
         <p className="mt-3 text-xs text-muted-foreground">
           Tip: press <kbd className="rounded border bg-card px-1.5 py-0.5">Ctrl N</kbd> anywhere.
         </p>

@@ -27,6 +27,8 @@ mod data;
 pub use data::*;
 mod lifecycle;
 pub use lifecycle::*;
+mod journals;
+pub use journals::*;
 mod pages;
 pub use pages::*;
 mod outliner;

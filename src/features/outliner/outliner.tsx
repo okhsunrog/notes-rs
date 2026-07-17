@@ -32,6 +32,8 @@ export function Outliner({
         parentUuid={null}
         depth={0}
         focusFirstBlockRequest={initialEditingUuid === null ? focusRequest : 0}
+        emptyTitle={page.kind.kind === "journal" ? "Nothing captured for this day yet." : undefined}
+        emptyActionLabel={page.kind.kind === "journal" ? "Start writing" : undefined}
       />
     </OutlinerProvider>
   );

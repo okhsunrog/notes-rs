@@ -20,10 +20,12 @@ import type {
   GraphSnapshot,
   HistoryStatus,
   JournalDate,
+  JournalListLimit,
   ObjectKind,
   Page,
   PageKind,
   PageLayout,
+  PageListFilter,
   SearchHit,
   SecretKey,
   SearchMode,
@@ -54,10 +56,12 @@ export type {
   GraphSnapshot,
   HistoryStatus,
   JournalDate,
+  JournalListLimit,
   ObjectKind,
   Page,
   PageKind,
   PageLayout,
+  PageListFilter,
   SearchHit,
   SecretKey,
   SearchMode,
@@ -152,7 +156,10 @@ export function contentPageUuid(content: Content) {
 }
 
 export function contentText(content: Content) {
-  return content.kind === "page" ? (content.record.title ?? "") : content.record.markdown;
+  if (content.kind === "block") return content.record.markdown;
+  return content.record.kind.kind === "journal"
+    ? content.record.kind.date
+    : (content.record.title ?? "");
 }
 
 export const setBlockContent = checkedCommand(commands.setBlockContent);
@@ -160,6 +167,9 @@ export const setBlockStyle = checkedCommand(commands.setBlockStyle);
 export const renamePage = checkedCommand(commands.renamePage);
 export const setPageLayout = checkedCommand(commands.setPageLayout);
 export const createNote = checkedCommand(commands.createNote);
+export const ensureJournal = checkedCommand(commands.ensureJournal);
+export const getJournal = checkedCommand(commands.getJournal);
+export const appendToJournal = checkedCommand(commands.appendToJournal);
 export const splitBlock = checkedCommand(commands.splitBlock);
 export const isReady = commands.isReady;
 export const getStartupStatus = commands.startupStatus;
@@ -178,7 +188,18 @@ export const saveServerAiSettings = checkedCommand(commands.saveServerAiSettings
 export const saveServerAiProvider = checkedCommand(commands.saveServerAiProvider);
 export const probeServerAiProvider = checkedCommand(commands.probeServerAiProvider);
 export const reindexServerAi = checkedCommand(commands.reindexServerAi);
-export const listPages = (limit = 200) => unwrapCommand(commands.listPages(limit));
+export function listPages(options: { filter?: PageListFilter; limit?: number } = {}) {
+  return unwrapCommand(commands.listPages(options.filter ?? null, options.limit ?? null));
+}
+
+export function listJournals(
+  options: {
+    beforeDate?: JournalDate;
+    limit?: JournalListLimit;
+  } = {},
+) {
+  return unwrapCommand(commands.listJournals(options.beforeDate ?? null, options.limit ?? null));
+}
 export const createPage = checkedCommand(commands.createPage);
 export const deletePage = checkedCommand(commands.deletePage);
 export const findBacklinks = checkedCommand(commands.findBacklinks);

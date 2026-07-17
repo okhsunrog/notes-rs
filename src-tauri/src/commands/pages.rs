@@ -60,11 +60,16 @@ pub async fn create_page(
 #[specta::specta]
 pub async fn list_pages(
     state: State<'_, AppState>,
+    filter: Option<notes_core::PageListFilter>,
     limit: Option<u32>,
 ) -> CommandResult<Vec<db::Page>> {
-    db::list_pages(&state.conn, limit.unwrap_or(200))
-        .await
-        .map_err(err)
+    db::list_pages_filtered(
+        &state.conn,
+        filter.unwrap_or_default(),
+        limit.unwrap_or(200),
+    )
+    .await
+    .map_err(err)
 }
 
 #[tauri::command]

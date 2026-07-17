@@ -6,6 +6,8 @@ describe("domain event query invalidation", () => {
   it("invalidates a changed page and title-derived views", async () => {
     const client = new QueryClient();
     client.setQueryData(queryKeys.pages, []);
+    client.setQueryData(queryKeys.journals, []);
+    client.setQueryData(queryKeys.journal("2026-07-17"), { uuid: "page-a" });
     client.setQueryData(queryKeys.page("page-a"), { uuid: "page-a" });
     client.setQueryData(queryKeys.graph(null), { items: [], edges: [] });
 
@@ -15,6 +17,8 @@ describe("domain event query invalidation", () => {
     });
 
     expect(client.getQueryState(queryKeys.pages)?.isInvalidated).toBe(true);
+    expect(client.getQueryState(queryKeys.journals)?.isInvalidated).toBe(true);
+    expect(client.getQueryState(queryKeys.journal("2026-07-17"))?.isInvalidated).toBe(true);
     expect(client.getQueryState(queryKeys.page("page-a"))?.isInvalidated).toBe(true);
     expect(client.getQueryState(queryKeys.graph(null))?.isInvalidated).toBe(true);
   });

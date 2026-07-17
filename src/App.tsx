@@ -16,6 +16,8 @@ import { queryKeys } from "@/lib/query";
 import { useAppShortcuts } from "@/app/use-app-shortcuts";
 import { useStartupState } from "@/app/use-startup-state";
 import { useNotesWorkspace } from "@/features/pages/use-notes-workspace";
+import type { JournalDate } from "@/lib/api";
+import { EmptyJournalView } from "@/features/journal/empty-journal-view";
 
 const SettingsPage = lazy(() =>
   import("@/features/settings/settings-page").then((module) => ({
@@ -52,6 +54,13 @@ function App() {
     async (content: Content) => {
       setGraphOpen(false);
       await workspace.openContent(content);
+    },
+    [workspace],
+  );
+  const openJournal = useCallback(
+    async (date: JournalDate) => {
+      setGraphOpen(false);
+      await workspace.openJournal(date);
     },
     [workspace],
   );
@@ -216,7 +225,16 @@ function App() {
         sidebar={
           <PagesList
             selectedUuid={workspace.activePageUuid}
+            activeJournalDate={
+              workspace.pendingJournalDate ??
+              (workspace.activePage?.kind.kind === "journal"
+                ? workspace.activePage.kind.date
+                : null)
+            }
             onCreate={createNewNote}
+            onOpenJournal={openJournal}
+            onQuickCapture={workspace.quickCapture}
+            journalBusy={workspace.journalBusy}
             onSelect={workspace.selectPage}
             onStatus={setStatus}
           />
@@ -237,13 +255,26 @@ function App() {
               onClose={workspace.closePage}
               onDelete={workspace.removePage}
               onOpenMarkdownLink={workspace.openMarkdownLink}
+              onOpenJournalDate={openJournal}
+              journalBusy={workspace.journalBusy}
+            />
+          ) : workspace.pendingJournalDate ? (
+            <EmptyJournalView
+              key={workspace.pendingJournalDate}
+              date={workspace.pendingJournalDate}
+              busy={workspace.journalBusy}
+              onCapture={workspace.captureJournal}
+              onClose={workspace.closePage}
+              onOpenDate={openJournal}
             />
           ) : (
             <HomeView
               creating={workspace.creatingNote}
+              journalBusy={workspace.journalBusy}
               hits={workspace.hits}
               setHits={workspace.setHits}
               onCreate={createNewNote}
+              onOpenJournal={openJournal}
               onOpenContent={openContent}
               onStatus={setStatus}
             />

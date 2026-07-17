@@ -12,10 +12,19 @@ type Props = {
   parentUuid: string | null;
   depth: number;
   focusFirstBlockRequest?: number;
+  emptyTitle?: string;
+  emptyActionLabel?: string;
 };
 
 /** Renders one ordered sibling list and loads it from the backend cache. */
-export function BlockChildren({ pageUuid, parentUuid, depth, focusFirstBlockRequest = 0 }: Props) {
+export function BlockChildren({
+  pageUuid,
+  parentUuid,
+  depth,
+  focusFirstBlockRequest = 0,
+  emptyTitle = "No blocks yet on this page.",
+  emptyActionLabel = "Add first block",
+}: Props) {
   const store = useOutliner();
   const queryClient = useQueryClient();
   const handledFocusRequest = useRef(0);
@@ -70,7 +79,7 @@ export function BlockChildren({ pageUuid, parentUuid, depth, focusFirstBlockRequ
     if (depth === 0) {
       return (
         <div className="rounded-md border border-dashed bg-card/30 p-6 text-center text-sm text-muted-foreground">
-          <p>No blocks yet on this page.</p>
+          <p>{emptyTitle}</p>
           {!store.readOnly && (
             <button
               type="button"
@@ -78,7 +87,7 @@ export function BlockChildren({ pageUuid, parentUuid, depth, focusFirstBlockRequ
               className="mt-3 inline-flex items-center gap-1 rounded-md border bg-background px-2 py-1 text-xs text-foreground hover:bg-accent"
             >
               <Plus className="size-3" />
-              Add first block
+              {emptyActionLabel}
             </button>
           )}
         </div>

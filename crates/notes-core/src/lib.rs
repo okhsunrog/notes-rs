@@ -12,7 +12,7 @@ pub use error::{CoreError, CoreResult};
 pub use hlc::Hlc;
 pub use model::{
     AttachmentOwner, BlockStyle, JournalDate, ObjectKind, OrderKey, PageKind, PageLayout,
-    ReorderDirection, journal_page_uuid,
+    PageListFilter, ReorderDirection, journal_page_uuid,
 };
 pub use operation::{
     ApplyOutcome, AttachmentAdd, AttachmentRemove, BlockCreate, BlockDelete, BlockMove,

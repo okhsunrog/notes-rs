@@ -1,4 +1,5 @@
 use super::*;
+use crate::PageListFilter;
 use crate::operation::{
     BlockCreate, BlockDelete, PageCreate, PageDelete, PageSetLayout, PageSetTitle,
 };
@@ -28,9 +29,26 @@ pub async fn get_page_by_title(conn: &Connection, title: String) -> Result<Optio
 }
 
 pub async fn list_pages(conn: &Connection, limit: u32) -> Result<Vec<Page>> {
+    list_pages_filtered(conn, PageListFilter::Notes, limit).await
+}
+
+pub async fn list_pages_filtered(
+    conn: &Connection,
+    filter: PageListFilter,
+    limit: u32,
+) -> Result<Vec<Page>> {
     conn.call(move |database| {
-        let sql =
-            format!("SELECT {PAGE_COLUMNS} FROM pages ORDER BY updated_at DESC, uuid LIMIT ?1");
+        let predicate = match filter {
+            PageListFilter::Notes => "WHERE page_identity.page_kind = 'note'",
+            PageListFilter::Journals => "WHERE page_identity.page_kind = 'journal'",
+            PageListFilter::All => "",
+        };
+        let sql = format!(
+            "SELECT {PAGE_COLUMNS} FROM pages
+               JOIN page_identities AS page_identity ON page_identity.page_uuid = pages.uuid
+               {predicate}
+              ORDER BY pages.updated_at DESC, pages.uuid LIMIT ?1"
+        );
         database
             .prepare(&sql)?
             .query_map([limit], row_to_page)?

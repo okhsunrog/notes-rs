@@ -154,7 +154,10 @@ pub async fn graph_snapshot(
             Content::Page(page) => GraphItem {
                 uuid: page.uuid,
                 kind: ObjectKind::Page,
-                label: page.title.unwrap_or_else(|| "Untitled".into()),
+                label: match page.kind {
+                    PageKind::Note => page.title.unwrap_or_else(|| "Untitled".into()),
+                    PageKind::Journal { date } => date.to_string(),
+                },
             },
             Content::Block(block) => GraphItem {
                 uuid: block.uuid,

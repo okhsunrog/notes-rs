@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, RefreshCw, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ChatCard } from "@/features/chat/chat-card";
+import { pageDisplayTitle } from "@/features/journal/journal-date";
 import type { MarkdownOpenHandler } from "@/features/markdown";
 import {
   contentText,
@@ -74,7 +75,7 @@ export function GraphWorkspace({
         <div>
           <h2 className="text-sm font-semibold">Knowledge graph</h2>
           <p className="text-xs text-muted-foreground">
-            {page ? `Focused around ${page.title ?? "Untitled"}` : "All pages and blocks"}
+            {page ? `Focused around ${pageDisplayTitle(page)}` : "All pages and blocks"}
           </p>
         </div>
         <Button
@@ -123,7 +124,7 @@ export function GraphWorkspace({
           </h3>
           <p className="mt-1 text-xs text-muted-foreground">
             {page
-              ? `Incoming links to ${page.title ?? "this note"}`
+              ? `Incoming links to ${pageDisplayTitle(page)}`
               : "Open a note before entering the graph to inspect its backlinks."}
           </p>
           {page && backlinks.length === 0 && (

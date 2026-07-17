@@ -1,7 +1,7 @@
 # Journal Domain, UI, and Import Architecture
 
-Status: accepted on 2026-07-17. Journal/workspace identity is implemented; application services,
-product surfaces, and Logseq conversion remain in progress.
+Status: accepted on 2026-07-17. Journal/workspace identity, application services, and the minimum
+daily navigation/capture surfaces are implemented; Logseq conversion remains in progress.
 
 This decision defines daily journals as first-class notes-rs domain content and defines the
 loss-aware conversion boundary for the existing Logseq graph. It intentionally adopts the useful
@@ -268,8 +268,10 @@ commit, and stable rerun provenance.
    `journal_pages`, and the clean-baseline/snapshot/archive/operation changes.
 2. **Completed:** add deterministic journal identity and convergence tests before UI creation
    paths.
-3. Add `ensure/get/list/append` journal services and generated typed commands/events.
-4. Add Today, calendar navigation, ordinary day editing, Quick Capture, and page-kind filters.
+3. **Completed:** add `ensure/get/list/append` journal services and generated typed
+   commands/events.
+4. **Completed:** add Today/date navigation, an ephemeral missing-day editor, ordinary persisted
+   day editing, Quick Capture, and typed page-kind filters.
 5. Add the staged Logseq parser, provenance map, dry-run report, and atomic import.
 6. Add the optional virtualized timeline, templates, temporal search filters, and graph controls.
 

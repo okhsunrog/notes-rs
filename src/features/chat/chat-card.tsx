@@ -3,6 +3,7 @@ import { Channel } from "@tauri-apps/api/core";
 import { ArrowUp, CheckCircle2, PencilLine, Sparkles, Square, Trash2, Wrench } from "lucide-react";
 import { useConfirmation } from "@/app/confirmation";
 import { Button } from "@/components/ui/button";
+import { pageDisplayTitle } from "@/features/journal/journal-date";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import type { MarkdownOpenHandler } from "@/features/markdown";
 import { cancelChat, chatStream, type ChatEvent, type ChatTurn, type Page } from "@/lib/api";
@@ -136,7 +137,7 @@ export function ChatCard({
     <div className="flex h-full min-h-0 flex-col">
       <div className="mb-1 flex items-center justify-between gap-2 px-1 text-[10px] text-muted-foreground">
         <span className="truncate">
-          {page ? `Context: ${page.title || "Untitled note"}` : "No active note context"}
+          {page ? `Context: ${pageDisplayTitle(page)}` : "No active note context"}
         </span>
         {chatLog.length > 0 && (
           <Button

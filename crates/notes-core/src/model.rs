@@ -175,6 +175,19 @@ impl PageKind {
     }
 }
 
+/// A typed projection over the page catalog. Normal note navigation uses
+/// `Notes`; explicit callers may request Journals or the complete catalog.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, specta::Type,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PageListFilter {
+    #[default]
+    Notes,
+    Journals,
+    All,
+}
+
 pub fn journal_page_uuid(workspace_uuid: uuid::Uuid, date: &JournalDate) -> uuid::Uuid {
     uuid::Uuid::new_v5(&workspace_uuid, date.as_str().as_bytes())
 }

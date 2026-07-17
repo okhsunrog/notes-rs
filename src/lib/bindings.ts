@@ -31,6 +31,17 @@ export const commands = {
 	renamePage: (uuid: string, title: string | null) => typedError<Page, CommandError>(__TAURI_INVOKE("rename_page", { uuid, title })),
 	setPageLayout: (uuid: string, layout: PageLayout) => typedError<Page, CommandError>(__TAURI_INVOKE("set_page_layout", { uuid, layout })),
 	createNote: () => typedError<CreatedNote, CommandError>(__TAURI_INVOKE("create_note")),
+	ensureJournal: (date: JournalDate) => typedError<Page, CommandError>(__TAURI_INVOKE("ensure_journal", { date })),
+	getJournal: (date: JournalDate) => typedError<{
+	uuid: string,
+	kind: PageKind,
+	title: string | null,
+	layout: PageLayout,
+	createdAt: number,
+	updatedAt: number,
+} | null, CommandError>(__TAURI_INVOKE("get_journal", { date })),
+	listJournals: (beforeDate: string | null, limit: number | null) => typedError<Page[], CommandError>(__TAURI_INVOKE("list_journals", { beforeDate, limit })),
+	appendToJournal: (date: JournalDate, content: BlockContent, style: BlockStyle) => typedError<Block, CommandError>(__TAURI_INVOKE("append_to_journal", { date, content, style })),
 	getPage: (uuid: string) => typedError<{
 	uuid: string,
 	kind: PageKind,
@@ -64,7 +75,7 @@ export const commands = {
 	searchNotes: (mode: SearchMode, query: string, limit: number) => typedError<SearchHit[], CommandError>(__TAURI_INVOKE("search_notes", { mode, query, limit })),
 	chatStream: (history: ChatTurn[], message: string, allowWrites: boolean, activeContentUuid: string | null, requestId: string, onEvent: Channel<ChatEvent>) => typedError<string, CommandError>(__TAURI_INVOKE("chat_stream", { history, message, allowWrites, activeContentUuid, requestId, onEvent })),
 	cancelChat: (requestId: string) => __TAURI_INVOKE<boolean>("cancel_chat", { requestId }),
-	listPages: (limit: number | null) => typedError<Page[], CommandError>(__TAURI_INVOKE("list_pages", { limit })),
+	listPages: (filter: "notes" | "journals" | "all" | null, limit: number | null) => typedError<Page[], CommandError>(__TAURI_INVOKE("list_pages", { filter, limit })),
 	deletePage: (uuid: string) => typedError<boolean, CommandError>(__TAURI_INVOKE("delete_page", { uuid })),
 	findBacklinks: (uuid: string) => typedError<Content[], CommandError>(__TAURI_INVOKE("find_backlinks", { uuid })),
 	graphSnapshot: (focusUuid: string | null) => typedError<GraphSnapshot, CommandError>(__TAURI_INVOKE("graph_snapshot", { focusUuid })),
@@ -268,6 +279,13 @@ export type HistoryStatus = {
  */
 export type JournalDate = string;
 
+/**
+ *  Bounded reverse-chronological Journal page size.
+ *  The upper bound keeps desktop and mobile callers from accidentally loading
+ *  an unbounded multi-year timeline in one RPC.
+ */
+export type JournalListLimit = number;
+
 export type MobileSystemInfo = {
 	deviceName: string,
 	safeArea: SafeAreaInsets,
@@ -297,6 +315,12 @@ export type PageKind = { kind: "note" } | { kind: "journal"; date: JournalDate }
  *  presentation state and deliberately does not cross this boundary.
  */
 export type PageLayout = "outline" | "document";
+
+/**
+ *  A typed projection over the page catalog. Normal note navigation uses
+ *  `Notes`; explicit callers may request Journals or the complete catalog.
+ */
+export type PageListFilter = "notes" | "journals" | "all";
 
 export type SafeAreaInsets = {
 	top: number | null,

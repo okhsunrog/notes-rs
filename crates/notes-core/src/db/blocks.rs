@@ -8,6 +8,19 @@ pub struct BlockContent {
     pub markdown: String,
 }
 
+pub(crate) fn next_append_order_key(last: Option<&OrderKey>) -> crate::CoreResult<OrderKey> {
+    let Some(last) = last else {
+        return Ok(OrderKey::first());
+    };
+    let next = last.after();
+    if next == *last {
+        return Err(crate::CoreError::conflict(
+            "sibling order-key space is exhausted",
+        ));
+    }
+    Ok(next)
+}
+
 pub async fn get_block(conn: &Connection, uuid: uuid::Uuid) -> Result<Option<Block>> {
     conn.call(move |database| {
         let sql = format!("SELECT {BLOCK_COLUMNS} FROM blocks WHERE uuid = ?1");
@@ -94,25 +107,33 @@ pub async fn create_block(
     };
     let uuid = uuid::Uuid::now_v7();
     let now = chrono::Utc::now().timestamp();
-    let mut ordered = siblings.iter().map(|block| block.uuid).collect::<Vec<_>>();
-    ordered.insert(insertion, uuid);
+    let appending = insertion == siblings.len();
+    let order_key = if appending {
+        next_append_order_key(siblings.last().map(|block| &block.order_key))?
+    } else {
+        OrderKey::from_ordinal(insertion + 1)
+    };
     let mut kinds = vec![OpKind::BlockCreate(BlockCreate {
         uuid,
         page_uuid,
         parent_uuid,
-        order_key: OrderKey::from_ordinal(insertion + 1),
+        order_key,
         style,
         markdown,
         created_at: now,
     })];
-    kinds.extend(ordered.into_iter().enumerate().map(|(index, block_uuid)| {
-        OpKind::BlockMove(BlockMove {
-            uuid: block_uuid,
-            page_uuid,
-            parent_uuid,
-            order_key: OrderKey::from_ordinal(index + 1),
-        })
-    }));
+    if !appending {
+        let mut ordered = siblings.iter().map(|block| block.uuid).collect::<Vec<_>>();
+        ordered.insert(insertion, uuid);
+        kinds.extend(ordered.into_iter().enumerate().map(|(index, block_uuid)| {
+            OpKind::BlockMove(BlockMove {
+                uuid: block_uuid,
+                page_uuid,
+                parent_uuid,
+                order_key: OrderKey::from_ordinal(index + 1),
+            })
+        }));
+    }
     apply_local_action(conn, "create block", kinds).await?;
     get_block(conn, uuid)
         .await?
