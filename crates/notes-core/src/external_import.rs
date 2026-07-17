@@ -210,25 +210,23 @@ pub enum ExternalImportPageKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExternalImportBlock {
     pub id: ExternalBlockId,
     pub parent_id: Option<ExternalBlockId>,
     pub order_key: OrderKey,
     pub style: BlockStyle,
     pub markdown: String,
-    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExternalImportPage {
     pub id: ExternalPageId,
     pub kind: ExternalImportPageKind,
     pub layout: PageLayout,
     pub aliases: Vec<PageAlias>,
     pub blocks: Vec<ExternalImportBlock>,
-    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -306,7 +304,7 @@ impl ValidatedBatch {
         })
     }
 
-    fn kinds(&self) -> Vec<OpKind> {
+    fn kinds(&self, commit_timestamp: i64) -> Vec<OpKind> {
         let capacity = self
             .batch
             .pages
@@ -329,7 +327,7 @@ impl ValidatedBatch {
                 kind,
                 title,
                 layout: page.layout,
-                created_at: page.created_at,
+                created_at: commit_timestamp,
             }));
         }
         for page in &self.batch.pages {
@@ -350,7 +348,7 @@ impl ValidatedBatch {
                     order_key: block.order_key.clone(),
                     style: block.style,
                     markdown: block.markdown.clone(),
-                    created_at: block.created_at,
+                    created_at: commit_timestamp,
                 }));
             }
         }
@@ -411,7 +409,8 @@ pub async fn apply_external_import(
         }
 
         ensure_workspace_empty(&transaction)?;
-        let kinds = validated.kinds();
+        let commit_timestamp = chrono::Utc::now().timestamp();
+        let kinds = validated.kinds(commit_timestamp);
         for kind in &kinds {
             operation::validate_kind(kind)?;
         }
@@ -432,7 +431,7 @@ pub async fn apply_external_import(
                 identity.workspace_uuid,
                 identity.import_namespace_uuid,
                 validated.provenance_json,
-                chrono::Utc::now().timestamp(),
+                commit_timestamp,
             ],
         )?;
         let outcome = ExternalImportOutcome::Applied {
@@ -717,7 +716,6 @@ mod tests {
                 order_key: OrderKey::from_ordinal(index + 1),
                 style: BlockStyle::Bullet,
                 markdown: format!("block {index}"),
-                created_at: index as i64,
             })
             .collect();
         ExternalImportBatch {
@@ -739,7 +737,6 @@ mod tests {
                 layout: PageLayout::Outline,
                 aliases: vec![PageAlias::new("Imported.md").unwrap()],
                 blocks,
-                created_at: 1,
             }],
         }
     }
@@ -881,6 +878,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(counts, (expected_ops as i64, 0, 0));
+        let timestamps = connection
+            .call(|database| {
+                database.query_row(
+                    "SELECT
+                       (SELECT created_at FROM pages LIMIT 1),
+                       (SELECT MIN(created_at) FROM blocks),
+                       (SELECT MAX(created_at) FROM blocks),
+                       (SELECT imported_at FROM external_import_receipts LIMIT 1)",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(timestamps.0, timestamps.1);
+        assert_eq!(timestamps.0, timestamps.2);
+        assert_eq!(timestamps.0, timestamps.3);
+    }
+
+    #[tokio::test]
+    async fn caller_supplied_creation_timestamps_are_rejected_by_serde() {
+        let (_file, connection) = database().await;
+        let input = batch(&connection, 1).await;
+        let mut page_timestamp = serde_json::to_value(&input).unwrap();
+        page_timestamp["pages"][0]["createdAt"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<ExternalImportBatch>(page_timestamp).is_err());
+
+        let mut block_timestamp = serde_json::to_value(&input).unwrap();
+        block_timestamp["pages"][0]["blocks"][0]["createdAt"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<ExternalImportBatch>(block_timestamp).is_err());
     }
 
     #[tokio::test]
