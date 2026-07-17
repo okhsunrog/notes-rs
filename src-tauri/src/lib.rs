@@ -106,7 +106,7 @@ pub fn run() {
 
     let specta_builder = specta_builder();
 
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, not(mobile)))]
     export_bindings("../src/lib/bindings.ts").expect("exporting TypeScript bindings");
 
     let invoke_handler = specta_builder.invoke_handler();
