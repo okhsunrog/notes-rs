@@ -1,0 +1,2 @@
+- Import planning is pure and deterministic.
+	- Unknown config forms are never evaluated.

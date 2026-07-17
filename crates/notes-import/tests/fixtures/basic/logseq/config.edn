@@ -1,0 +1,14 @@
+{
+ :pages-directory "content/pages"
+ :journals-directory "daily"
+ :assets-directory "media"
+ :file/name-format :triple-lowbar
+
+ ;; The importer must structurally skip, and never evaluate, unknown forms.
+ :default-queries
+ [{:title "Recent"
+   :query [:find (pull ?block [*])
+           :where [?block :block/page ?page]]}]
+ :query/result-transforms (fn [result] (sort-by :block/name result))
+ :nested-decoy {:pages-directory "must-not-be-read"}
+}

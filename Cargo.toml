@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "crates/notes-core",
   "crates/notes-ai",
+  "crates/notes-import",
   "crates/notes-protocol",
   "crates/notes-sync",
   "plugins/tauri-plugin-mobile-system",
