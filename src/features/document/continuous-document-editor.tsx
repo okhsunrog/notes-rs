@@ -4,9 +4,14 @@ import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language"
 import { Annotation, Compartment, EditorState, Prec, Transaction } from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
 import { useEffect, useRef } from "react";
+import type { MarkdownOpenHandler } from "@/features/markdown";
 import { documentAuthoringExtensions, type DocumentAuthoringMode } from "./document-live-preview";
 import { resolveDocumentHistoryKey } from "./document-editor-model";
 import type { DocumentHistoryAction } from "./document-editor-model";
+import {
+  resolveDocumentLinkOpenDisposition,
+  resolveDocumentLinkTarget,
+} from "./document-link-navigation";
 import { notesLinkMarkdownExtension } from "./notes-link-markdown-extension";
 
 export type { DocumentAuthoringMode } from "./document-live-preview";
@@ -16,9 +21,11 @@ type Props = {
   readOnly: boolean;
   focusRequest: number;
   mode?: DocumentAuthoringMode;
+  pageUuid?: string;
   onChange: (value: string, composing: boolean) => void;
   onCompositionEnd: (value: string) => void;
   onBlur: () => void;
+  onOpenMarkdownLink?: MarkdownOpenHandler;
 };
 
 const externalDocumentUpdate = Annotation.define<boolean>();
@@ -73,20 +80,22 @@ export function ContinuousDocumentEditor({
   readOnly,
   focusRequest,
   mode = "live_preview",
+  pageUuid,
   onChange,
   onCompositionEnd,
   onBlur,
+  onOpenMarkdownLink,
 }: Props) {
   const mountRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const initialValueRef = useRef(value);
-  const callbacksRef = useRef({ onChange, onCompositionEnd, onBlur });
+  const callbacksRef = useRef({ onChange, onCompositionEnd, onBlur, onOpenMarkdownLink, pageUuid });
   const modeCompartmentRef = useRef(new Compartment());
   const editableCompartmentRef = useRef(new Compartment());
   const pendingModeRef = useRef(mode);
   const appliedModeRef = useRef(mode);
   const applyPendingModeRef = useRef<() => void>(() => undefined);
-  callbacksRef.current = { onChange, onCompositionEnd, onBlur };
+  callbacksRef.current = { onChange, onCompositionEnd, onBlur, onOpenMarkdownLink, pageUuid };
   pendingModeRef.current = mode;
 
   useEffect(() => {
@@ -174,6 +183,28 @@ export function ContinuousDocumentEditor({
               callbacksRef.current.onBlur();
               scheduleModeAfterComposition();
               return false;
+            },
+            click(event, view) {
+              const { onOpenMarkdownLink, pageUuid: contextPageUuid } = callbacksRef.current;
+              if (!onOpenMarkdownLink || !contextPageUuid) return false;
+              const disposition = resolveDocumentLinkOpenDisposition({
+                button: event.button,
+                ctrlKey: event.ctrlKey,
+                metaKey: event.metaKey,
+                shiftKey: event.shiftKey,
+              });
+              if (!disposition) return false;
+              if (!(event.target instanceof Node)) return false;
+              const pos = view.posAtDOM(event.target);
+              const target = resolveDocumentLinkTarget(view.state, pos);
+              if (!target) return false;
+              event.preventDefault();
+              void onOpenMarkdownLink({
+                context: { kind: "note", presentation: "live_preview", pageUuid: contextPageUuid },
+                disposition,
+                target,
+              });
+              return true;
             },
           }),
         ),

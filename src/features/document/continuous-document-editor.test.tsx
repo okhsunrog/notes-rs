@@ -110,4 +110,48 @@ describe("ContinuousDocumentEditor", () => {
     expect(secondEditor?.textContent).toContain("Document B");
     expect(secondEditor?.textContent).not.toContain("Document A");
   });
+
+  it("navigates a notes-rs link on Mod-click and leaves a plain click as caret placement", async () => {
+    const source = "See [[Project Aurora]] today";
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const onOpenMarkdownLink = vi.fn();
+    cleanup.push(() => {
+      act(() => root.unmount());
+      container.remove();
+    });
+    await act(async () =>
+      root.render(
+        <ContinuousDocumentEditor
+          value={source}
+          readOnly={false}
+          focusRequest={0}
+          pageUuid="page-uuid"
+          onChange={() => undefined}
+          onCompositionEnd={() => undefined}
+          onBlur={() => undefined}
+          onOpenMarkdownLink={onOpenMarkdownLink}
+        />,
+      ),
+    );
+    const link = container.querySelector<HTMLElement>(".cm-lp-link");
+    expect(link).not.toBeNull();
+
+    act(() => {
+      link!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    expect(onOpenMarkdownLink).not.toHaveBeenCalled();
+
+    act(() => {
+      link!.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true, ctrlKey: true }),
+      );
+    });
+    expect(onOpenMarkdownLink).toHaveBeenCalledWith({
+      context: { kind: "note", presentation: "live_preview", pageUuid: "page-uuid" },
+      disposition: "current",
+      target: { kind: "page", title: "Project Aurora" },
+    });
+  });
 });

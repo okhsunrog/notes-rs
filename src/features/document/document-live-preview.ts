@@ -6,6 +6,7 @@ import {
   EditorView,
   ViewPlugin,
   type ViewUpdate,
+  WidgetType,
 } from "@codemirror/view";
 import {
   NOTES_LINK_CONTAINER_NODE_NAMES,
@@ -51,10 +52,59 @@ const listMarker = Decoration.mark({
   class: "cm-lp-list-marker",
   attributes: { "data-live-preview-marker": "list" },
 });
-const taskMarker = Decoration.mark({
-  class: "cm-lp-task-marker",
-  attributes: { "data-live-preview-marker": "task" },
-});
+
+const MAX_TASK_LABEL_LENGTH = 160;
+
+/** A native, keyboard-operable checkbox that replaces the raw `[ ]`/`[x]` marker outside the caret. */
+class TaskCheckboxWidget extends WidgetType {
+  constructor(
+    private readonly checked: boolean,
+    private readonly label: string,
+    private readonly markerFrom: number,
+  ) {
+    super();
+  }
+
+  override eq(other: TaskCheckboxWidget): boolean {
+    return (
+      this.checked === other.checked &&
+      this.label === other.label &&
+      this.markerFrom === other.markerFrom
+    );
+  }
+
+  override toDOM(view: EditorView): HTMLElement {
+    const wrapper = document.createElement("span");
+    wrapper.className = "cm-lp-task-checkbox";
+    wrapper.setAttribute("data-live-preview-marker", "task");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = this.checked;
+    input.disabled = view.state.readOnly;
+    input.setAttribute(
+      "aria-label",
+      `Mark "${this.label || "task"}" as ${this.checked ? "not done" : "done"}`,
+    );
+    input.addEventListener("click", (event) => {
+      event.preventDefault();
+      if (view.state.readOnly) return;
+      const insert = this.checked ? " " : "x";
+      view.dispatch({ changes: { from: this.markerFrom + 1, to: this.markerFrom + 2, insert } });
+      view.focus();
+    });
+    wrapper.append(input);
+    return wrapper;
+  }
+}
+
+function taskLabel(
+  state: EditorState,
+  marker: MarkdownSyntaxNode,
+  task: MarkdownSyntaxNode,
+): string {
+  const raw = state.doc.sliceString(marker.to, task.to).trim();
+  return raw.length > MAX_TASK_LABEL_LENGTH ? `${raw.slice(0, MAX_TASK_LABEL_LENGTH)}…` : raw;
+}
 
 const semanticMarks = {
   blockquote: Decoration.mark({ class: "cm-lp-blockquote" }),
@@ -167,7 +217,7 @@ function semanticDecoration(node: MarkdownSyntaxNode): Decoration | null {
   return null;
 }
 
-function syntaxDecoration(node: MarkdownSyntaxNode): Decoration | null {
+function syntaxDecoration(node: MarkdownSyntaxNode, state: EditorState): Decoration | null {
   const parent = node.parent;
   if (!parent) return null;
   if (node.name === "HeaderMark" && HEADING_NODE.test(parent.name)) return hiddenSyntax;
@@ -186,7 +236,13 @@ function syntaxDecoration(node: MarkdownSyntaxNode): Decoration | null {
   }
   if (node.name === "CodeInfo" && parent.name === "FencedCode") return hiddenSyntax;
   if (node.name === "ListMark" && parent.name === "ListItem") return listMarker;
-  if (node.name === "TaskMarker" && parent.name === "Task") return taskMarker;
+  if (node.name === "TaskMarker" && parent.name === "Task") {
+    const marker = state.doc.sliceString(node.from, node.to);
+    const checked = /\[[xX]\]/.test(marker);
+    return Decoration.replace({
+      widget: new TaskCheckboxWidget(checked, taskLabel(state, node, parent), node.from),
+    });
+  }
   if (notesLinkNodeRole(node.name) === "mark") return hiddenSyntax;
   if (node.name === "LinkMark") {
     if (parent.name === "Autolink") return hiddenSyntax;
@@ -228,7 +284,7 @@ export function buildDocumentLivePreviewDecorations(
           }
         }
 
-        const syntax = syntaxDecoration(node);
+        const syntax = syntaxDecoration(node, state);
         if (syntax && node.from >= visibleRange.from && node.to <= visibleRange.to) {
           decorations.push(syntax.range(node.from, node.to));
         }
@@ -320,9 +376,17 @@ const documentLivePreviewTheme = EditorView.baseTheme({
     color: "var(--primary)",
     fontWeight: "700",
   },
-  ".cm-lp-task-marker": {
-    color: "var(--primary)",
-    fontWeight: "700",
+  ".cm-lp-task-checkbox": {
+    display: "inline-flex",
+    verticalAlign: "middle",
+    margin: "0 0.4em 0.15em 0",
+  },
+  ".cm-lp-task-checkbox input": {
+    cursor: "pointer",
+    accentColor: "var(--primary)",
+  },
+  ".cm-lp-task-checkbox input:disabled": {
+    cursor: "default",
   },
 });
 

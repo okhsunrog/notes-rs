@@ -319,4 +319,88 @@ describe("Document Live Preview", () => {
       vi.useRealTimers();
     }
   });
+
+  it("renders an accessible checkbox widget for a task outside the caret", async () => {
+    const source = "plain\n- [ ] Buy milk\n- [x] Done thing";
+    const { container } = await mountEditor(source);
+
+    const checkboxes = [
+      ...container.querySelectorAll<HTMLInputElement>(
+        '.cm-lp-task-checkbox input[type="checkbox"]',
+      ),
+    ];
+    expect(checkboxes).toHaveLength(2);
+    expect(checkboxes[0].checked).toBe(false);
+    expect(checkboxes[0].getAttribute("aria-label")).toBe('Mark "Buy milk" as done');
+    expect(checkboxes[1].checked).toBe(true);
+    expect(checkboxes[1].getAttribute("aria-label")).toBe('Mark "Done thing" as not done');
+    expect(container.querySelector(".cm-content")?.textContent).not.toContain("[ ]");
+  });
+
+  it("reveals the raw task marker as editable text under the caret", async () => {
+    const source = "plain\n- [ ] Buy milk";
+    const { container, view } = await mountEditor(source);
+    act(() => {
+      view.focus();
+      view.dispatch({ selection: { anchor: source.indexOf("Buy") } });
+    });
+
+    expect(container.querySelector(".cm-lp-task-checkbox")).toBeNull();
+    expect(container.querySelector(".cm-content")?.textContent).toContain("[ ] Buy milk");
+  });
+
+  it("toggles a task's checkbox by editing the marker character", async () => {
+    const source = "plain\n- [ ] Buy milk";
+    const { container, view } = await mountEditor(source);
+    const checkbox = container.querySelector<HTMLInputElement>(
+      '.cm-lp-task-checkbox input[type="checkbox"]',
+    );
+    expect(checkbox).not.toBeNull();
+
+    act(() => {
+      checkbox!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    expect(view.state.doc.toString()).toBe("plain\n- [x] Buy milk");
+
+    const toggledBack = container.querySelector<HTMLInputElement>(
+      '.cm-lp-task-checkbox input[type="checkbox"]',
+    );
+    act(() => {
+      toggledBack!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    expect(view.state.doc.toString()).toBe("plain\n- [ ] Buy milk");
+  });
+
+  it("disables the checkbox and refuses to toggle a read-only document", async () => {
+    const source = "plain\n- [ ] Buy milk";
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    cleanup.push(() => {
+      act(() => root.unmount());
+      container.remove();
+    });
+    await act(async () =>
+      root.render(
+        <ContinuousDocumentEditor
+          value={source}
+          readOnly
+          focusRequest={0}
+          onChange={() => undefined}
+          onCompositionEnd={() => undefined}
+          onBlur={() => undefined}
+        />,
+      ),
+    );
+    const checkbox = container.querySelector<HTMLInputElement>(
+      '.cm-lp-task-checkbox input[type="checkbox"]',
+    );
+    expect(checkbox?.disabled).toBe(true);
+
+    const view = editorView(container);
+    act(() => {
+      checkbox!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    expect(view.state.doc.toString()).toBe(source);
+  });
 });

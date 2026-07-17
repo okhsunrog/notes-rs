@@ -267,6 +267,7 @@ function LoadedDocumentPage({
           readOnly={!canEdit}
           focusRequest={focusRequest}
           mode={authoringMode}
+          pageUuid={pageUuid}
           onChange={updateDraft}
           onCompositionEnd={(value) => {
             updateDraft(value, false);
@@ -274,6 +275,7 @@ function LoadedDocumentPage({
           onBlur={() => {
             if (canEdit) void flush();
           }}
+          onOpenMarkdownLink={onOpenMarkdownLink}
         />
       </div>
     </section>
