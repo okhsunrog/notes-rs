@@ -1,20 +1,22 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::{self, Cursor, Read};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use data_url::DataUrl;
 use data_url::forgiving_base64::DecodeError;
+use image::{ImageFormat, ImageReader, Limits as ImageLimits};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
+    DrawingConversionEntry, DrawingConversionPublication, DrawingConversionStatus,
     ImportBlockSource, ImportInlineImageMime, ImportMarkdownRange, ImportMediaKind,
     ImportMediaOwner, ImportMediaReference, ImportMediaResolution, PreparedImport, Sha256Digest,
-    SourceRange,
+    SourceKind, SourceRange,
 };
 
 const ATTACHMENT_SCHEME: &str = "notes-attachment:";
@@ -33,6 +35,9 @@ pub struct MediaMaterializationLimits {
     pub max_blobs: u64,
     pub max_attachments: u64,
     pub max_rewrites: u64,
+    pub max_drawing_image_width: u32,
+    pub max_drawing_image_height: u32,
+    pub max_drawing_image_pixels: u64,
 }
 
 impl Default for MediaMaterializationLimits {
@@ -43,6 +48,9 @@ impl Default for MediaMaterializationLimits {
             max_blobs: 100_000,
             max_attachments: 250_000,
             max_rewrites: 2_000_000,
+            max_drawing_image_width: 8_192,
+            max_drawing_image_height: 8_192,
+            max_drawing_image_pixels: 25_000_000,
         }
     }
 }
@@ -106,6 +114,23 @@ pub enum MediaMaterializationIssue {
     InvalidInlineData,
     ConflictingRewrite,
     DeferredExcalidrawConversion,
+    DrawingBundleManifestMismatch,
+    DrawingBundleUnexpectedSource,
+    DrawingPublicationOverlapsSource,
+    DrawingConversionMissing,
+    DrawingConversionSourceMismatch,
+    DrawingConversionSkippedEmpty,
+    DrawingConversionFailed,
+    DrawingArtifactPathEscape,
+    DrawingArtifactSymlinkNotAllowed,
+    DrawingArtifactNotFound,
+    DrawingArtifactNotRegularFile,
+    DrawingArtifactUnreadable,
+    DrawingArtifactChanged,
+    DrawingArtifactInvalidPng,
+    DrawingArtifactDimensionsMismatch,
+    DrawingArtifactDimensionLimit,
+    DrawingArtifactPixelLimit,
 }
 
 /// A non-fatal failure. The corresponding source token remains unchanged.
@@ -117,6 +142,7 @@ pub struct MediaMaterializationDiagnostic {
     pub source_range: SourceRange,
     pub issue: MediaMaterializationIssue,
     pub message: &'static str,
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -236,12 +262,18 @@ struct MarkdownOwnerIndex<'prepared> {
     preamble_blocks: HashMap<Uuid, Uuid>,
 }
 
+struct DrawingMaterializationContext<'conversion> {
+    publication: &'conversion DrawingConversionPublication,
+    entries: HashMap<&'conversion str, &'conversion DrawingConversionEntry>,
+    unavailable_issue: Option<MediaMaterializationIssue>,
+}
+
 /// Materializes classified local and inline media using conservative defaults.
 pub fn materialize_source_media(
     prepared: &PreparedImport,
     source_root: impl AsRef<Path>,
 ) -> Result<MediaMaterializationPlan, MaterializeMediaError> {
-    materialize_source_media_with_limits(prepared, source_root, &Default::default())
+    materialize_source_media_internal(prepared, source_root.as_ref(), None, &Default::default())
 }
 
 /// Re-reads only media that `PreparedImport` already classified as local or
@@ -252,27 +284,59 @@ pub fn materialize_source_media_with_limits(
     source_root: impl AsRef<Path>,
     limits: &MediaMaterializationLimits,
 ) -> Result<MediaMaterializationPlan, MaterializeMediaError> {
+    materialize_source_media_internal(prepared, source_root.as_ref(), None, limits)
+}
+
+/// Materializes ordinary media and consumes only successfully verified PNG
+/// artifacts from a separately published drawing conversion bundle.
+pub fn materialize_source_media_with_drawing_conversions(
+    prepared: &PreparedImport,
+    source_root: impl AsRef<Path>,
+    conversions: &DrawingConversionPublication,
+) -> Result<MediaMaterializationPlan, MaterializeMediaError> {
+    materialize_source_media_internal(
+        prepared,
+        source_root.as_ref(),
+        Some(conversions),
+        &Default::default(),
+    )
+}
+
+pub fn materialize_source_media_with_drawing_conversions_and_limits(
+    prepared: &PreparedImport,
+    source_root: impl AsRef<Path>,
+    conversions: &DrawingConversionPublication,
+    limits: &MediaMaterializationLimits,
+) -> Result<MediaMaterializationPlan, MaterializeMediaError> {
+    materialize_source_media_internal(prepared, source_root.as_ref(), Some(conversions), limits)
+}
+
+fn materialize_source_media_internal(
+    prepared: &PreparedImport,
+    source_root: &Path,
+    conversions: Option<&DrawingConversionPublication>,
+    limits: &MediaMaterializationLimits,
+) -> Result<MediaMaterializationPlan, MaterializeMediaError> {
     validate_limits(limits)?;
-    let source_root = validate_root(source_root.as_ref())?;
+    let source_root = validate_root(source_root)?;
     let owners = MarkdownOwnerIndex::new(prepared)?;
+    let drawing_context = conversions
+        .map(|publication| DrawingMaterializationContext::new(prepared, &source_root, publication));
     let mut state = MaterializationState::default();
 
     for (index, reference) in prepared.media_references.iter().enumerate() {
         let reference_index = index as u64;
         if reference.kind == ImportMediaKind::LegacyExcalidraw {
-            preserve(
-                &mut state,
+            materialize_drawing_reference(
+                prepared,
+                &owners,
+                &source_root,
+                drawing_context.as_ref(),
+                limits,
                 reference_index,
                 reference,
-                PreservedMediaReason::DeferredConversion,
-            );
-            state.diagnostics.push(MediaMaterializationDiagnostic {
-                reference_index,
-                source_document_path: reference.relative_path.clone(),
-                source_range: reference.source_range,
-                issue: MediaMaterializationIssue::DeferredExcalidrawConversion,
-                message: issue_message(MediaMaterializationIssue::DeferredExcalidrawConversion),
-            });
+                &mut state,
+            )?;
             continue;
         }
         let result = match &reference.resolution {
@@ -419,12 +483,351 @@ impl<'prepared> MarkdownOwnerIndex<'prepared> {
     }
 }
 
+impl<'conversion> DrawingMaterializationContext<'conversion> {
+    fn new(
+        prepared: &PreparedImport,
+        source_root: &Path,
+        publication: &'conversion DrawingConversionPublication,
+    ) -> Self {
+        let unavailable_issue = if publication.bundle().source_root.manifest_sha256
+            != prepared.provenance.source_manifest.sha256()
+        {
+            Some(MediaMaterializationIssue::DrawingBundleManifestMismatch)
+        } else if publication.bundle().drawings.iter().any(|entry| {
+            !prepared
+                .provenance
+                .source_manifest
+                .entries()
+                .iter()
+                .any(|manifest_entry| {
+                    manifest_entry.kind == SourceKind::Drawing
+                        && manifest_entry.relative_path == entry.source.relative_path
+                        && manifest_entry.size_bytes == entry.source.size_bytes
+                        && manifest_entry.sha256 == entry.source.sha256
+                })
+        }) {
+            Some(MediaMaterializationIssue::DrawingBundleUnexpectedSource)
+        } else if publication.root().starts_with(source_root)
+            || source_root.starts_with(publication.root())
+        {
+            Some(MediaMaterializationIssue::DrawingPublicationOverlapsSource)
+        } else {
+            None
+        };
+        let entries = publication
+            .bundle()
+            .drawings
+            .iter()
+            .map(|entry| (entry.source.relative_path.as_str(), entry))
+            .collect();
+        Self {
+            publication,
+            entries,
+            unavailable_issue,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_drawing_reference(
+    prepared: &PreparedImport,
+    owners: &MarkdownOwnerIndex<'_>,
+    source_root: &Path,
+    context: Option<&DrawingMaterializationContext<'_>>,
+    limits: &MediaMaterializationLimits,
+    reference_index: u64,
+    reference: &ImportMediaReference,
+    state: &mut MaterializationState,
+) -> Result<(), MaterializeMediaError> {
+    let Some(context) = context else {
+        preserve_with_diagnostic(
+            state,
+            reference_index,
+            reference,
+            MediaMaterializationIssue::DeferredExcalidrawConversion,
+            None,
+        );
+        return Ok(());
+    };
+    if let Some(issue) = context.unavailable_issue {
+        preserve_with_diagnostic(state, reference_index, reference, issue, None);
+        return Ok(());
+    }
+    let ImportMediaResolution::LocalManifest {
+        relative_path,
+        size_bytes,
+        sha256,
+    } = &reference.resolution
+    else {
+        preserve_with_diagnostic(
+            state,
+            reference_index,
+            reference,
+            MediaMaterializationIssue::DrawingConversionSourceMismatch,
+            None,
+        );
+        return Ok(());
+    };
+    let Some(entry) = context.entries.get(relative_path.as_str()).copied() else {
+        preserve_with_diagnostic(
+            state,
+            reference_index,
+            reference,
+            MediaMaterializationIssue::DrawingConversionMissing,
+            None,
+        );
+        return Ok(());
+    };
+    let manifest_matches =
+        prepared
+            .provenance
+            .source_manifest
+            .entries()
+            .iter()
+            .any(|manifest_entry| {
+                manifest_entry.kind == SourceKind::Drawing
+                    && manifest_entry.relative_path == *relative_path
+                    && manifest_entry.size_bytes == *size_bytes
+                    && manifest_entry.sha256 == *sha256
+            });
+    if !manifest_matches
+        || entry.source.relative_path != *relative_path
+        || entry.source.size_bytes != *size_bytes
+        || entry.source.sha256 != *sha256
+        || verify_local_evidence(source_root, relative_path, *size_bytes, *sha256).is_err()
+    {
+        preserve_with_diagnostic(
+            state,
+            reference_index,
+            reference,
+            MediaMaterializationIssue::DrawingConversionSourceMismatch,
+            None,
+        );
+        return Ok(());
+    }
+
+    let output = match (entry.status, &entry.output, &entry.error) {
+        (DrawingConversionStatus::Converted, Some(output), None) => output,
+        (DrawingConversionStatus::SkippedEmpty, None, None) => {
+            preserve_with_diagnostic(
+                state,
+                reference_index,
+                reference,
+                MediaMaterializationIssue::DrawingConversionSkippedEmpty,
+                None,
+            );
+            return Ok(());
+        }
+        (DrawingConversionStatus::Failed, None, Some(error)) => {
+            preserve_with_diagnostic(
+                state,
+                reference_index,
+                reference,
+                MediaMaterializationIssue::DrawingConversionFailed,
+                Some(format!("{}: {}", error.code.as_str(), error.message)),
+            );
+            return Ok(());
+        }
+        _ => unreachable!("drawing publication loader validates status payloads"),
+    };
+
+    if let Err(issue) =
+        preflight_reference(reference, output.sha256, output.size_bytes, limits, state)
+    {
+        preserve_with_diagnostic(state, reference_index, reference, issue, None);
+        return Ok(());
+    }
+    let existing = state
+        .blobs
+        .get(&output.sha256)
+        .map(|blob| Arc::clone(&blob.bytes));
+    let media = match materialize_drawing_output(context.publication, output, limits, existing) {
+        Ok(media) => media,
+        Err(issue) => {
+            preserve_with_diagnostic(state, reference_index, reference, issue, None);
+            return Ok(());
+        }
+    };
+    add_materialized_reference(owners, reference_index, reference, media, state)
+        .map_err(|issue| reference_error(reference_index, reference, issue))
+}
+
+fn preserve_with_diagnostic(
+    state: &mut MaterializationState,
+    reference_index: u64,
+    reference: &ImportMediaReference,
+    issue: MediaMaterializationIssue,
+    detail: Option<String>,
+) {
+    preserve(
+        state,
+        reference_index,
+        reference,
+        PreservedMediaReason::DeferredConversion,
+    );
+    state.diagnostics.push(MediaMaterializationDiagnostic {
+        reference_index,
+        source_document_path: reference.relative_path.clone(),
+        source_range: reference.source_range,
+        issue,
+        message: issue_message(issue),
+        detail,
+    });
+}
+
+fn verify_local_evidence(
+    root: &Path,
+    relative_path: &str,
+    expected_size: u64,
+    expected_sha256: Sha256Digest,
+) -> Result<(), MediaMaterializationIssue> {
+    let components = safe_relative_components(relative_path)?;
+    let mut candidate = root.to_owned();
+    for component in components {
+        candidate.push(component);
+        let metadata = fs::symlink_metadata(&candidate).map_err(map_source_io)?;
+        if metadata.file_type().is_symlink() {
+            return Err(MediaMaterializationIssue::SymlinkNotAllowed);
+        }
+    }
+    let canonical = fs::canonicalize(&candidate).map_err(map_source_io)?;
+    if !canonical.starts_with(root) {
+        return Err(MediaMaterializationIssue::PathEscape);
+    }
+    let metadata = fs::metadata(&canonical).map_err(map_source_io)?;
+    if !metadata.is_file() {
+        return Err(MediaMaterializationIssue::SourceNotRegularFile);
+    }
+    if metadata.len() != expected_size {
+        return Err(MediaMaterializationIssue::SourceChanged);
+    }
+    let mut file = File::open(&canonical).map_err(map_source_io)?;
+    verify_open_file_beneath_root(&file, root)?;
+    let mut hasher = Sha256::new();
+    let mut actual_size = 0_u64;
+    let mut buffer = [0_u8; COPY_BUFFER_BYTES];
+    loop {
+        let read = file.read(&mut buffer).map_err(map_source_io)?;
+        if read == 0 {
+            break;
+        }
+        actual_size = actual_size
+            .checked_add(read as u64)
+            .ok_or(MediaMaterializationIssue::SourceChanged)?;
+        if actual_size > expected_size {
+            return Err(MediaMaterializationIssue::SourceChanged);
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let final_metadata = file.metadata().map_err(map_source_io)?;
+    let actual_sha256 = Sha256Digest::from_bytes(hasher.finalize().into());
+    if actual_size != expected_size
+        || actual_sha256 != expected_sha256
+        || !final_metadata.is_file()
+        || final_metadata.len() != expected_size
+    {
+        return Err(MediaMaterializationIssue::SourceChanged);
+    }
+    Ok(())
+}
+
+fn materialize_drawing_output(
+    publication: &DrawingConversionPublication,
+    output: &crate::DrawingConversionOutput,
+    limits: &MediaMaterializationLimits,
+    existing_blob: Option<Arc<[u8]>>,
+) -> Result<CanonicalMedia, MediaMaterializationIssue> {
+    let root_metadata = fs::symlink_metadata(publication.root())
+        .map_err(|error| map_drawing_artifact_issue(map_source_io(error)))?;
+    if root_metadata.file_type().is_symlink() {
+        return Err(MediaMaterializationIssue::DrawingArtifactSymlinkNotAllowed);
+    }
+    if !root_metadata.is_dir() {
+        return Err(MediaMaterializationIssue::DrawingArtifactNotRegularFile);
+    }
+    let media = read_local(
+        publication.root(),
+        &output.relative_path,
+        output.size_bytes,
+        output.sha256,
+        ImportMediaKind::MarkdownImage,
+        limits,
+        existing_blob,
+    )
+    .map_err(map_drawing_artifact_issue)?;
+    if media.mime != "image/png" {
+        return Err(MediaMaterializationIssue::DrawingArtifactInvalidPng);
+    }
+    validate_drawing_png(&media.bytes, output.width, output.height, limits)?;
+    Ok(media)
+}
+
+fn validate_drawing_png(
+    bytes: &[u8],
+    expected_width: u32,
+    expected_height: u32,
+    limits: &MediaMaterializationLimits,
+) -> Result<(), MediaMaterializationIssue> {
+    let (width, height) = ImageReader::with_format(Cursor::new(bytes), ImageFormat::Png)
+        .into_dimensions()
+        .map_err(|_| MediaMaterializationIssue::DrawingArtifactInvalidPng)?;
+    if width != expected_width || height != expected_height || width == 0 || height == 0 {
+        return Err(MediaMaterializationIssue::DrawingArtifactDimensionsMismatch);
+    }
+    if width > limits.max_drawing_image_width || height > limits.max_drawing_image_height {
+        return Err(MediaMaterializationIssue::DrawingArtifactDimensionLimit);
+    }
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .ok_or(MediaMaterializationIssue::DrawingArtifactPixelLimit)?;
+    if pixels > limits.max_drawing_image_pixels {
+        return Err(MediaMaterializationIssue::DrawingArtifactPixelLimit);
+    }
+    let mut reader = ImageReader::with_format(Cursor::new(bytes), ImageFormat::Png);
+    let mut decode_limits = ImageLimits::default();
+    decode_limits.max_image_width = Some(limits.max_drawing_image_width);
+    decode_limits.max_image_height = Some(limits.max_drawing_image_height);
+    decode_limits.max_alloc = Some(limits.max_drawing_image_pixels.saturating_mul(16));
+    reader.limits(decode_limits);
+    reader
+        .decode()
+        .map(|_| ())
+        .map_err(|_| MediaMaterializationIssue::DrawingArtifactInvalidPng)
+}
+
+fn map_drawing_artifact_issue(issue: MediaMaterializationIssue) -> MediaMaterializationIssue {
+    match issue {
+        MediaMaterializationIssue::PathEscape => {
+            MediaMaterializationIssue::DrawingArtifactPathEscape
+        }
+        MediaMaterializationIssue::SymlinkNotAllowed => {
+            MediaMaterializationIssue::DrawingArtifactSymlinkNotAllowed
+        }
+        MediaMaterializationIssue::SourceNotFound => {
+            MediaMaterializationIssue::DrawingArtifactNotFound
+        }
+        MediaMaterializationIssue::SourceNotRegularFile => {
+            MediaMaterializationIssue::DrawingArtifactNotRegularFile
+        }
+        MediaMaterializationIssue::SourceUnreadable => {
+            MediaMaterializationIssue::DrawingArtifactUnreadable
+        }
+        MediaMaterializationIssue::SourceChanged => {
+            MediaMaterializationIssue::DrawingArtifactChanged
+        }
+        other => other,
+    }
+}
+
 fn validate_limits(limits: &MediaMaterializationLimits) -> Result<(), MaterializeMediaError> {
     if limits.max_blob_bytes == 0
         || limits.max_total_blob_bytes == 0
         || limits.max_blobs == 0
         || limits.max_attachments == 0
         || limits.max_rewrites == 0
+        || limits.max_drawing_image_width == 0
+        || limits.max_drawing_image_height == 0
+        || limits.max_drawing_image_pixels == 0
     {
         return Err(MaterializeMediaError::InvalidLimits);
     }
@@ -831,7 +1234,17 @@ fn replacement_markdown(
             ));
         }
         ImportMediaKind::LegacyExcalidraw => {
-            escape_markdown_label(filename.strip_suffix(".excalidraw").unwrap_or(filename))
+            let source_filename = match &reference.resolution {
+                ImportMediaResolution::LocalManifest { relative_path, .. } => relative_path
+                    .rsplit_once('/')
+                    .map_or(relative_path.as_str(), |(_, filename)| filename),
+                _ => filename,
+            };
+            escape_markdown_label(
+                source_filename
+                    .strip_suffix(".excalidraw")
+                    .unwrap_or(source_filename),
+            )
         }
     };
     Some(format!("![{alt}]({attachment_uri})"))
@@ -1032,6 +1445,57 @@ fn issue_message(issue: MediaMaterializationIssue) -> &'static str {
         }
         MediaMaterializationIssue::DeferredExcalidrawConversion => {
             "legacy Excalidraw reference was preserved until image conversion is available"
+        }
+        MediaMaterializationIssue::DrawingBundleManifestMismatch => {
+            "drawing conversion bundle belongs to a different source manifest"
+        }
+        MediaMaterializationIssue::DrawingBundleUnexpectedSource => {
+            "drawing conversion bundle contains a source that was not explicitly referenced"
+        }
+        MediaMaterializationIssue::DrawingPublicationOverlapsSource => {
+            "drawing conversion artifacts must be published outside the source graph"
+        }
+        MediaMaterializationIssue::DrawingConversionMissing => {
+            "drawing conversion bundle has no result for this source drawing"
+        }
+        MediaMaterializationIssue::DrawingConversionSourceMismatch => {
+            "drawing conversion result does not match the prepared source drawing"
+        }
+        MediaMaterializationIssue::DrawingConversionSkippedEmpty => {
+            "empty Excalidraw drawing was preserved without an image conversion"
+        }
+        MediaMaterializationIssue::DrawingConversionFailed => {
+            "Excalidraw conversion failed and the original drawing reference was preserved"
+        }
+        MediaMaterializationIssue::DrawingArtifactPathEscape => {
+            "drawing conversion artifact path escaped its publication root"
+        }
+        MediaMaterializationIssue::DrawingArtifactSymlinkNotAllowed => {
+            "symbolic links are not allowed in drawing conversion artifacts"
+        }
+        MediaMaterializationIssue::DrawingArtifactNotFound => {
+            "drawing conversion artifact disappeared before materialization"
+        }
+        MediaMaterializationIssue::DrawingArtifactNotRegularFile => {
+            "drawing conversion artifact is not a regular file"
+        }
+        MediaMaterializationIssue::DrawingArtifactUnreadable => {
+            "drawing conversion artifact could not be read"
+        }
+        MediaMaterializationIssue::DrawingArtifactChanged => {
+            "drawing conversion artifact bytes do not match the conversion bundle"
+        }
+        MediaMaterializationIssue::DrawingArtifactInvalidPng => {
+            "drawing conversion artifact is not a decodable PNG image"
+        }
+        MediaMaterializationIssue::DrawingArtifactDimensionsMismatch => {
+            "drawing conversion artifact dimensions do not match the conversion bundle"
+        }
+        MediaMaterializationIssue::DrawingArtifactDimensionLimit => {
+            "drawing conversion artifact exceeds the image dimension limit"
+        }
+        MediaMaterializationIssue::DrawingArtifactPixelLimit => {
+            "drawing conversion artifact exceeds the decoded pixel limit"
         }
     }
 }

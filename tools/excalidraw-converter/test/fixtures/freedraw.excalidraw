@@ -1,0 +1,41 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "notes-rs sanitized test fixture",
+  "elements": [
+    {
+      "id": "freeA001",
+      "type": "freedraw",
+      "x": 20,
+      "y": 30,
+      "width": 140,
+      "height": 60,
+      "angle": 0,
+      "strokeColor": "#1971c2",
+      "backgroundColor": "transparent",
+      "fillStyle": "hachure",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 1,
+      "opacity": 100,
+      "groupIds": [],
+      "strokeSharpness": "round",
+      "seed": 101,
+      "version": 1,
+      "versionNonce": 201,
+      "isDeleted": false,
+      "boundElements": null,
+      "updated": 1,
+      "link": null,
+      "locked": false,
+      "points": [[0, 0], [30, 40], [80, 10], [140, 60]],
+      "lastCommittedPoint": null,
+      "simulatePressure": true,
+      "pressures": []
+    }
+  ],
+  "appState": {
+    "viewBackgroundColor": "#f8f9fa"
+  },
+  "files": {}
+}

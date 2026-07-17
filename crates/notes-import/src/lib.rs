@@ -6,6 +6,7 @@
 
 mod config;
 mod diagnostic;
+mod drawings;
 mod manifest;
 mod materialize;
 mod media;
@@ -22,13 +23,24 @@ pub use config::{
 pub use diagnostic::{
     DiagnosticCode, DiagnosticSeverity, ImportDiagnostic, SourcePosition, SourceRange,
 };
+pub use drawings::{
+    DRAWING_CONVERSION_BUNDLE_FILENAME, DRAWING_CONVERSION_SCHEMA_VERSION,
+    DrawingConversionBrowserName, DrawingConversionBundle, DrawingConversionEntry,
+    DrawingConversionFailure, DrawingConversionFailureCode, DrawingConversionMime,
+    DrawingConversionOutput, DrawingConversionPublication, DrawingConversionSource,
+    DrawingConversionSourceRoot, DrawingConversionSourceRootKind, DrawingConversionStatus,
+    DrawingConverterIdentity, LoadDrawingConversionError, LoadDrawingConversionErrorCode,
+    load_drawing_conversion_publication, load_drawing_conversion_publication_with_limit,
+};
 pub use manifest::{DocumentFormat, GraphManifest, ManifestEntry, Sha256Digest, SourceKind};
 pub use materialize::{
     MaterializeMediaError, MaterializeMediaErrorCode, MaterializedMediaAttachment,
     MaterializedMediaBlob, MediaMaterializationDiagnostic, MediaMaterializationIssue,
     MediaMaterializationLimits, MediaMaterializationPlan, MediaRewrite, PreservedMediaReason,
-    PreservedMediaReference, materialize_source_media, materialize_source_media_with_limits,
-    materialized_attachment_uuid,
+    PreservedMediaReference, materialize_source_media,
+    materialize_source_media_with_drawing_conversions,
+    materialize_source_media_with_drawing_conversions_and_limits,
+    materialize_source_media_with_limits, materialized_attachment_uuid,
 };
 pub use parser::{
     LogseqParseError, LogseqParseErrorCode, decode_logseq_page_title, parse_logseq_markdown,

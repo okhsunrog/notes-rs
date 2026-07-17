@@ -1,0 +1,43 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "notes-rs sanitized test fixture",
+  "elements": [
+    {
+      "id": "textA001",
+      "type": "text",
+      "x": 10,
+      "y": 10,
+      "width": 186,
+      "height": 25,
+      "angle": 0,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "transparent",
+      "fillStyle": "hachure",
+      "strokeWidth": 1,
+      "strokeStyle": "solid",
+      "roughness": 1,
+      "opacity": 100,
+      "groupIds": [],
+      "strokeSharpness": "sharp",
+      "seed": 102,
+      "version": 1,
+      "versionNonce": 202,
+      "isDeleted": false,
+      "boundElements": null,
+      "updated": 1,
+      "link": null,
+      "locked": false,
+      "fontSize": 20,
+      "fontFamily": 1,
+      "text": "Synthetic fixture",
+      "baseline": 18,
+      "textAlign": "left",
+      "verticalAlign": "top",
+      "containerId": null,
+      "originalText": "Synthetic fixture"
+    }
+  ],
+  "appState": {},
+  "files": {}
+}
