@@ -2,6 +2,7 @@ use crate::{SyncSnapshot, SyncTransport};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use futures::StreamExt;
+use notes_core::BlobHash;
 use notes_core::db::SearchHit;
 use notes_protocol::{
     AcceptedOps, AiIndexStatus, AiProviderProbeResult, AiProviderSettingsUpdate, AiRuntimeSettings,
@@ -263,8 +264,7 @@ impl HttpTransport {
         Ok(socket)
     }
 
-    pub async fn upload_blob(&self, hash: &str, path: &Path) -> Result<()> {
-        notes_core::validate_blob_hash(hash)?;
+    pub async fn upload_blob(&self, hash: BlobHash, path: &Path) -> Result<()> {
         let file = tokio::fs::File::open(path)
             .await
             .with_context(|| format!("opening attachment {}", path.display()))?;
@@ -279,8 +279,7 @@ impl HttpTransport {
         Ok(())
     }
 
-    pub async fn download_blob(&self, hash: &str, path: &Path, maximum: u64) -> Result<()> {
-        notes_core::validate_blob_hash(hash)?;
+    pub async fn download_blob(&self, hash: BlobHash, path: &Path, maximum: u64) -> Result<()> {
         let response = self
             .client
             .get(self.endpoint(&format!("v1/blobs/{hash}"))?)
@@ -314,7 +313,7 @@ impl HttpTransport {
         }
         file.flush().await?;
         drop(file);
-        let actual = format!("{:x}", digest.finalize());
+        let actual = BlobHash::from_bytes(digest.finalize().into());
         if actual != hash {
             let _ = tokio::fs::remove_file(&temporary).await;
             bail!("downloaded attachment hash does not match its operation");

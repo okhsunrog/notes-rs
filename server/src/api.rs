@@ -11,6 +11,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use futures::{SinkExt, StreamExt};
+use notes_core::BlobHash;
 use notes_core::db::SearchHit;
 use notes_protocol::{
     AcceptedOps, AiIndexStatus, AiProviderProbeResult, AiProviderSettingsUpdate, AiRuntimeSettings,
@@ -596,10 +597,10 @@ async fn send_server_error(
 
 async fn put_blob(
     State(state): State<AppState>,
-    Path(hash): Path<String>,
+    Path(raw_hash): Path<String>,
     body: Body,
 ) -> Result<StatusCode, ApiError> {
-    validate_blob_hash(&hash)?;
+    let hash = parse_blob_hash(&raw_hash)?;
     let target = blob_path(&state.data_dir, &hash);
     if tokio::fs::try_exists(&target)
         .await
@@ -639,7 +640,11 @@ async fn put_blob(
     }
 }
 
-async fn write_blob(path: &FilePath, body: Body, maximum: u64) -> Result<(String, u64), ApiError> {
+async fn write_blob(
+    path: &FilePath,
+    body: Body,
+    maximum: u64,
+) -> Result<(BlobHash, u64), ApiError> {
     let mut file = tokio::fs::File::create(path)
         .await
         .map_err(|error| ApiError::internal(error.into()))?;
@@ -664,22 +669,24 @@ async fn write_blob(path: &FilePath, body: Body, maximum: u64) -> Result<(String
     file.flush()
         .await
         .map_err(|error| ApiError::internal(error.into()))?;
-    Ok((format!("{:x}", digest.finalize()), size))
+    Ok((BlobHash::from_bytes(digest.finalize().into()), size))
 }
 
 async fn head_blob(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    Path(hash): Path<String>,
+    Path(raw_hash): Path<String>,
 ) -> Result<Response, ApiError> {
+    let hash = parse_blob_hash(&raw_hash)?;
     blob_response_headers(&state, &user.0, &hash).await
 }
 
 async fn get_blob(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    Path(hash): Path<String>,
+    Path(raw_hash): Path<String>,
 ) -> Result<Response, ApiError> {
+    let hash = parse_blob_hash(&raw_hash)?;
     let mut response = blob_response_headers(&state, &user.0, &hash).await?;
     let file = tokio::fs::File::open(blob_path(&state.data_dir, &hash))
         .await
@@ -691,9 +698,8 @@ async fn get_blob(
 async fn blob_response_headers(
     state: &AppState,
     user: &UserState,
-    hash: &str,
+    hash: &BlobHash,
 ) -> Result<Response, ApiError> {
-    validate_blob_hash(hash)?;
     if !user_references_blob(user, hash).await? {
         return Err(ApiError::not_found("blob not found"));
     }
@@ -718,16 +724,16 @@ async fn blob_response_headers(
     Ok(response)
 }
 
-async fn user_references_blob(user: &UserState, hash: &str) -> Result<bool, ApiError> {
-    let hash = hash.to_owned();
+async fn user_references_blob(user: &UserState, hash: &BlobHash) -> Result<bool, ApiError> {
+    let hash = *hash;
     user.notes
         .call(move |database| {
             database.query_row(
                 "SELECT EXISTS(
                    SELECT 1 FROM attachment_lww
-                    WHERE blob_hash = ?1 AND present = 1
+                    WHERE blob_hash = ?1
                  )",
-                [hash],
+                [hash.as_bytes().as_slice()],
                 |row| row.get(0),
             )
         })
@@ -735,12 +741,14 @@ async fn user_references_blob(user: &UserState, hash: &str) -> Result<bool, ApiE
         .map_err(ApiError::internal)
 }
 
-fn validate_blob_hash(hash: &str) -> Result<(), ApiError> {
-    notes_core::validate_blob_hash(hash).map_err(|error| ApiError::bad_request(error.to_string()))
+fn parse_blob_hash(hash: &str) -> Result<BlobHash, ApiError> {
+    hash.parse::<BlobHash>()
+        .map_err(|error| ApiError::bad_request(error.to_string()))
 }
 
-fn blob_path(data_dir: &FilePath, hash: &str) -> PathBuf {
-    data_dir.join("blobs").join(&hash[..2]).join(hash)
+fn blob_path(data_dir: &FilePath, hash: &BlobHash) -> PathBuf {
+    let canonical = hash.to_string();
+    data_dir.join("blobs").join(&canonical[..2]).join(canonical)
 }
 
 const fn default_ops_limit() -> usize {
@@ -754,10 +762,11 @@ mod tests {
     use axum::http::Request;
     use http_body_util::BodyExt;
     use notes_core::{AttachmentOwner, Hlc, Op, OpKind, PageLayout};
-    use notes_sync::{AttachmentAdd, PageCreate};
+    use notes_sync::{AttachmentAdd, AttachmentRemove, PageCreate};
     use tower::ServiceExt;
 
     const TOKEN: &str = "test-token-with-at-least-thirty-two-characters";
+    const OTHER_TOKEN: &str = "other-token-with-at-least-thirty-two-chars";
     const TEST_WORKSPACE_UUID: uuid::Uuid = uuid::Uuid::from_u128(0xC0DE);
 
     async fn test_app() -> (tempfile::TempDir, Router) {
@@ -769,10 +778,16 @@ mod tests {
             snapshot_every_ops: 2,
             max_blob_bytes: 1024,
             ai: None,
-            users: vec![UserConfig {
-                id: "owner".into(),
-                tokens: vec![TOKEN.into()],
-            }],
+            users: vec![
+                UserConfig {
+                    id: "owner".into(),
+                    tokens: vec![TOKEN.into()],
+                },
+                UserConfig {
+                    id: "other".into(),
+                    tokens: vec![OTHER_TOKEN.into()],
+                },
+            ],
         };
         let state = crate::build_state(&config).await.expect("server state");
         for user in state.registry.users() {
@@ -816,7 +831,14 @@ mod tests {
     }
 
     fn authorized(request: axum::http::request::Builder) -> axum::http::request::Builder {
-        request.header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+        authorized_as(request, TOKEN)
+    }
+
+    fn authorized_as(
+        request: axum::http::request::Builder,
+        token: &str,
+    ) -> axum::http::request::Builder {
+        request.header(AUTHORIZATION, format!("Bearer {token}"))
     }
 
     #[tokio::test]
@@ -1058,18 +1080,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshots_and_streams_only_referenced_content_addressed_blobs() {
+    async fn historical_blob_access_survives_remove_but_remains_user_scoped() {
         let (_directory, app) = test_app().await;
         let page_uuid = uuid::Uuid::from_u128(100);
         let contents = b"portable attachment";
-        let hash = format!("{:x}", Sha256::digest(contents));
+        let hash = BlobHash::from_bytes(Sha256::digest(contents).into());
         let operations = vec![
             page_operation(page_uuid),
             operation(
                 2,
                 OpKind::AttachmentAdd(AttachmentAdd {
                     owner: AttachmentOwner::Page(page_uuid),
-                    blob_hash: hash.clone(),
+                    blob_hash: hash,
                     filename: "attachment.txt".into(),
                     mime: "text/plain".into(),
                     size: contents.len() as u64,
@@ -1105,6 +1127,31 @@ mod tests {
             .expect("upload response");
         assert_eq!(upload.status(), StatusCode::CREATED);
 
+        let uppercase = hash.to_string().to_uppercase();
+        let uppercase_upload = app
+            .clone()
+            .oneshot(
+                authorized(Request::builder())
+                    .method("PUT")
+                    .uri(format!("/v1/blobs/{uppercase}"))
+                    .body(Body::from(contents.as_slice()))
+                    .expect("request"),
+            )
+            .await
+            .expect("uppercase upload response");
+        assert_eq!(uppercase_upload.status(), StatusCode::BAD_REQUEST);
+        let uppercase_download = app
+            .clone()
+            .oneshot(
+                authorized(Request::builder())
+                    .uri(format!("/v1/blobs/{uppercase}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("uppercase download response");
+        assert_eq!(uppercase_download.status(), StatusCode::BAD_REQUEST);
+
         let download = app
             .clone()
             .oneshot(
@@ -1126,6 +1173,83 @@ mod tests {
             contents.as_slice()
         );
 
+        let unrelated_contents = b"unrelated blob";
+        let unrelated_hash = BlobHash::from_bytes(Sha256::digest(unrelated_contents).into());
+        let unrelated_upload = app
+            .clone()
+            .oneshot(
+                authorized(Request::builder())
+                    .method("PUT")
+                    .uri(format!("/v1/blobs/{unrelated_hash}"))
+                    .body(Body::from(unrelated_contents.as_slice()))
+                    .expect("request"),
+            )
+            .await
+            .expect("unrelated upload response");
+        assert_eq!(unrelated_upload.status(), StatusCode::CREATED);
+        let unrelated_download = app
+            .clone()
+            .oneshot(
+                authorized(Request::builder())
+                    .uri(format!("/v1/blobs/{unrelated_hash}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("unrelated download response");
+        assert_eq!(unrelated_download.status(), StatusCode::NOT_FOUND);
+
+        let remove = operation(
+            3,
+            OpKind::AttachmentRemove(AttachmentRemove {
+                owner: AttachmentOwner::Page(page_uuid),
+                blob_hash: hash,
+            }),
+        );
+        let removed = app
+            .clone()
+            .oneshot(
+                authorized(Request::builder())
+                    .method("POST")
+                    .uri("/v1/ops")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&PushOps { ops: vec![remove] })
+                            .expect("remove request JSON"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("remove response");
+        assert_eq!(removed.status(), StatusCode::OK);
+
+        for method in ["GET", "HEAD"] {
+            let historical = app
+                .clone()
+                .oneshot(
+                    authorized(Request::builder())
+                        .method(method)
+                        .uri(format!("/v1/blobs/{hash}"))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("historical blob response");
+            assert_eq!(historical.status(), StatusCode::OK);
+        }
+
+        let other_user = app
+            .clone()
+            .oneshot(
+                authorized_as(Request::builder(), OTHER_TOKEN)
+                    .uri(format!("/v1/blobs/{hash}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("other user response");
+        assert_eq!(other_user.status(), StatusCode::NOT_FOUND);
+
         let snapshot = app
             .oneshot(
                 authorized(Request::builder())
@@ -1142,9 +1266,11 @@ mod tests {
             .expect("snapshot body")
             .to_bytes();
         let snapshot: notes_sync::SyncSnapshot = serde_json::from_slice(&body).expect("snapshot");
-        assert_eq!(snapshot.seq, 2);
+        assert_eq!(snapshot.seq, 3);
         assert_eq!(snapshot.pages.len(), 1);
         assert!(snapshot.blocks.is_empty());
         assert_eq!(snapshot.attachments.len(), 1);
+        assert!(!snapshot.attachments[0].present);
+        assert_eq!(snapshot.attachments[0].blob_hash, hash);
     }
 }
