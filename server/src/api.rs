@@ -432,6 +432,7 @@ async fn get_ops(
 }
 
 async fn push_ops(
+    State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Json(request): Json<PushOps>,
 ) -> Result<Json<AcceptedOps>, ApiError> {
@@ -440,6 +441,7 @@ async fn push_ops(
             "a sync batch cannot contain more than 256 operations",
         ));
     }
+    validate_operation_blobs(&state, &request.ops).await?;
     let ops = user
         .0
         .ingest(request.ops)
@@ -459,9 +461,11 @@ async fn get_snapshot(
 }
 
 async fn bootstrap(
+    State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Json(request): Json<BootstrapRequest>,
 ) -> Result<Json<notes_sync::SyncSnapshot>, ApiError> {
+    validate_snapshot_blobs(&state, &request.snapshot).await?;
     user.0
         .bootstrap(request.snapshot)
         .await
@@ -730,6 +734,101 @@ fn parse_blob_hash(hash: &str) -> Result<BlobHash, ApiError> {
         .map_err(|error| ApiError::bad_request(error.to_string()))
 }
 
+async fn validate_operation_blobs(
+    state: &AppState,
+    operations: &[notes_core::Op],
+) -> Result<(), ApiError> {
+    let mut declared = std::collections::BTreeMap::new();
+    for operation in operations {
+        if let notes_core::OpKind::AttachmentAdd(attachment) = &operation.kind {
+            record_declared_blob(&mut declared, attachment.blob_hash, attachment.size)?;
+        }
+    }
+    for (hash, size) in declared {
+        validate_declared_blob(state, hash, size).await?;
+    }
+    Ok(())
+}
+
+async fn validate_snapshot_blobs(
+    state: &AppState,
+    snapshot: &notes_sync::SyncSnapshot,
+) -> Result<(), ApiError> {
+    let mut declared = std::collections::BTreeMap::new();
+    for attachment in snapshot
+        .attachments
+        .iter()
+        .filter(|attachment| attachment.present)
+    {
+        let size = attachment
+            .size
+            .ok_or_else(|| ApiError::bad_request("present attachment is missing its size"))?;
+        record_declared_blob(&mut declared, attachment.blob_hash, size)?;
+    }
+    for (hash, size) in declared {
+        validate_declared_blob(state, hash, size).await?;
+    }
+    Ok(())
+}
+
+fn record_declared_blob(
+    declared: &mut std::collections::BTreeMap<BlobHash, u64>,
+    hash: BlobHash,
+    size: u64,
+) -> Result<(), ApiError> {
+    if let Some(previous) = declared.insert(hash, size)
+        && previous != size
+    {
+        return Err(ApiError::conflict(format!(
+            "attachment metadata declares inconsistent sizes for blob {hash}"
+        )));
+    }
+    Ok(())
+}
+
+async fn validate_declared_blob(
+    state: &AppState,
+    hash: BlobHash,
+    declared_size: u64,
+) -> Result<(), ApiError> {
+    if declared_size > state.max_blob_bytes {
+        return Err(ApiError::bad_request(format!(
+            "attachment blob {hash} declares a size above the configured limit"
+        )));
+    }
+    let store = BlobStore::new(state.data_dir.clone());
+    let maximum = state.max_blob_bytes;
+    let verified = tokio::task::spawn_blocking(move || store.open_verified(hash, maximum))
+        .await
+        .map_err(|error| ApiError::internal(error.into()))?
+        .map_err(|error| map_declared_blob_error(hash, error))?;
+    if verified.blob.size != declared_size {
+        return Err(ApiError::conflict(format!(
+            "attachment blob {hash} has size {}, but metadata declares {declared_size}",
+            verified.blob.size
+        )));
+    }
+    Ok(())
+}
+
+fn map_declared_blob_error(hash: BlobHash, error: BlobStoreError) -> ApiError {
+    match error {
+        BlobStoreError::NotFound { .. }
+        | BlobStoreError::CorruptBlob { .. }
+        | BlobStoreError::ExistingSizeMismatch { .. }
+        | BlobStoreError::UnsafeFilesystemEntry { .. }
+        | BlobStoreError::TooLarge { .. }
+        | BlobStoreError::StoredBlobTooLarge { .. }
+        | BlobStoreError::HashMismatch { .. } => {
+            ApiError::conflict(format!("attachment blob {hash} is not available"))
+        }
+        BlobStoreError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+            ApiError::conflict(format!("attachment blob {hash} is not available"))
+        }
+        other => ApiError::internal(other.into()),
+    }
+}
+
 fn map_blob_install_error(error: BlobStoreError) -> ApiError {
     match error {
         BlobStoreError::HashMismatch { .. } => {
@@ -887,6 +986,26 @@ mod tests {
             .await
             .expect("reference response");
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    async fn upload_test_blob(app: &Router, contents: &'static [u8]) -> BlobHash {
+        let hash = BlobHash::digest(contents);
+        let response = app
+            .clone()
+            .oneshot(
+                authorized(Request::builder())
+                    .method("PUT")
+                    .uri(format!("/v1/blobs/{hash}"))
+                    .body(Body::from(contents))
+                    .expect("blob upload request"),
+            )
+            .await
+            .expect("blob upload response");
+        assert!(matches!(
+            response.status(),
+            StatusCode::CREATED | StatusCode::NO_CONTENT
+        ));
+        hash
     }
 
     fn assert_no_blob_temporaries(directory: &tempfile::TempDir, hash: BlobHash) {
@@ -1170,6 +1289,203 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mixed_push_with_missing_blob_is_rejected_without_mutation() {
+        let (_directory, app) = test_app().await;
+        let page_uuid = uuid::Uuid::from_u128(0xA110);
+        let valid_contents = b"installed push attachment";
+        let valid_hash = upload_test_blob(&app, valid_contents).await;
+        let missing_hash = BlobHash::digest(b"missing push attachment");
+        let response = app
+            .clone()
+            .oneshot(
+                authorized(Request::builder())
+                    .method("POST")
+                    .uri("/v1/ops")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&PushOps {
+                            ops: vec![
+                                page_operation(page_uuid),
+                                operation(
+                                    2,
+                                    OpKind::AttachmentAdd(AttachmentAdd {
+                                        owner: AttachmentOwner::Page(page_uuid),
+                                        blob_hash: valid_hash,
+                                        filename: "valid.bin".into(),
+                                        mime: "application/octet-stream".into(),
+                                        size: valid_contents.len() as u64,
+                                    }),
+                                ),
+                                operation(
+                                    3,
+                                    OpKind::AttachmentAdd(AttachmentAdd {
+                                        owner: AttachmentOwner::Page(page_uuid),
+                                        blob_hash: missing_hash,
+                                        filename: "missing.bin".into(),
+                                        mime: "application/octet-stream".into(),
+                                        size: 23,
+                                    }),
+                                ),
+                            ],
+                        })
+                        .expect("mixed push JSON"),
+                    ))
+                    .expect("mixed push request"),
+            )
+            .await
+            .expect("mixed push response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            typed_error(response).await.error.code,
+            ApiErrorCode::Conflict
+        );
+
+        let ops = app
+            .clone()
+            .oneshot(
+                authorized(Request::builder())
+                    .uri("/v1/ops?since=0&limit=10")
+                    .body(Body::empty())
+                    .expect("ops request"),
+            )
+            .await
+            .expect("ops response")
+            .into_body()
+            .collect()
+            .await
+            .expect("ops body")
+            .to_bytes();
+        let ops: OpsBatch = serde_json::from_slice(&ops).expect("ops JSON");
+        assert!(
+            ops.ops.is_empty(),
+            "rejected batch must not append to oplog"
+        );
+
+        let snapshot = app
+            .oneshot(
+                authorized(Request::builder())
+                    .uri("/v1/snapshot")
+                    .body(Body::empty())
+                    .expect("snapshot request"),
+            )
+            .await
+            .expect("snapshot response")
+            .into_body()
+            .collect()
+            .await
+            .expect("snapshot body")
+            .to_bytes();
+        let snapshot: notes_sync::SyncSnapshot =
+            serde_json::from_slice(&snapshot).expect("snapshot JSON");
+        assert!(snapshot.pages.is_empty());
+        assert!(snapshot.attachments.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mixed_bootstrap_with_size_mismatch_is_rejected_without_mutation() {
+        let (_directory, app) = test_app().await;
+        let valid_contents = b"installed bootstrap attachment";
+        let valid_hash = upload_test_blob(&app, valid_contents).await;
+        let mismatched_contents = b"mismatched bootstrap attachment";
+        let mismatched_hash = upload_test_blob(&app, mismatched_contents).await;
+        let page_uuid = uuid::Uuid::from_u128(0xB007);
+        let device_id = uuid::Uuid::from_u128(1);
+        let hlc = Hlc::new(1, 0, device_id);
+        let snapshot = app
+            .clone()
+            .oneshot(
+                authorized(Request::builder())
+                    .uri("/v1/snapshot")
+                    .body(Body::empty())
+                    .expect("source snapshot request"),
+            )
+            .await
+            .expect("source snapshot response")
+            .into_body()
+            .collect()
+            .await
+            .expect("source snapshot body")
+            .to_bytes();
+        let mut snapshot: notes_sync::SyncSnapshot =
+            serde_json::from_slice(&snapshot).expect("source snapshot JSON");
+        snapshot
+            .page_identities
+            .push(notes_core::SnapshotPageIdentity {
+                uuid: page_uuid,
+                kind: notes_core::PageKind::Note,
+            });
+        snapshot.pages.push(notes_core::SnapshotPage {
+            uuid: page_uuid,
+            kind: notes_core::PageKind::Note,
+            title: Some("Bootstrap page".into()),
+            layout: PageLayout::Outline,
+            title_hlc: Some(hlc.clone()),
+            layout_hlc: Some(hlc.clone()),
+            existence_hlc: hlc.clone(),
+            created_at: 1,
+            updated_at: 1,
+        });
+        snapshot.attachments.extend([
+            notes_core::SnapshotAttachment {
+                owner: AttachmentOwner::Page(page_uuid),
+                blob_hash: valid_hash,
+                attachment_uuid: uuid::Uuid::from_u128(0xA1),
+                hlc: hlc.clone(),
+                present: true,
+                filename: Some("valid.bin".into()),
+                mime: Some("application/octet-stream".into()),
+                size: Some(valid_contents.len() as u64),
+            },
+            notes_core::SnapshotAttachment {
+                owner: AttachmentOwner::Page(page_uuid),
+                blob_hash: mismatched_hash,
+                attachment_uuid: uuid::Uuid::from_u128(0xA2),
+                hlc,
+                present: true,
+                filename: Some("missing.bin".into()),
+                mime: Some("application/octet-stream".into()),
+                size: Some(mismatched_contents.len() as u64 + 1),
+            },
+        ]);
+
+        let response = app
+            .clone()
+            .oneshot(
+                authorized(Request::builder())
+                    .method("POST")
+                    .uri("/v1/bootstrap")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&BootstrapRequest { snapshot })
+                            .expect("mixed bootstrap JSON"),
+                    ))
+                    .expect("mixed bootstrap request"),
+            )
+            .await
+            .expect("mixed bootstrap response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let snapshot = app
+            .oneshot(
+                authorized(Request::builder())
+                    .uri("/v1/snapshot")
+                    .body(Body::empty())
+                    .expect("post-rejection snapshot request"),
+            )
+            .await
+            .expect("post-rejection snapshot response")
+            .into_body()
+            .collect()
+            .await
+            .expect("post-rejection snapshot body")
+            .to_bytes();
+        let snapshot: notes_sync::SyncSnapshot =
+            serde_json::from_slice(&snapshot).expect("post-rejection snapshot JSON");
+        assert!(snapshot.pages.is_empty());
+        assert!(snapshot.attachments.is_empty());
+    }
+
+    #[tokio::test]
     async fn concurrent_identical_puts_publish_once_and_clean_all_temporaries() {
         let (directory, app) = test_app().await;
         let contents = b"concurrent durable blob";
@@ -1231,6 +1547,9 @@ mod tests {
         let contents = b"expected attachment bytes";
         let corrupt = vec![b'x'; contents.len()];
         let hash = BlobHash::digest(contents);
+        BlobStore::new(directory.path())
+            .install_reader(contents.as_slice(), hash, 1_024)
+            .expect("install referenced blob");
         reference_blob(
             &app,
             uuid::Uuid::from_u128(0xB10B),
@@ -1292,13 +1611,17 @@ mod tests {
     #[tokio::test]
     async fn oversized_stored_blob_is_rejected_by_get_and_head() {
         let (directory, app) = test_app().await;
+        let original = b"small referenced blob";
         let contents = vec![0x5a; 1_025];
-        let hash = BlobHash::digest(&contents);
+        let hash = BlobHash::digest(original);
+        BlobStore::new(directory.path())
+            .install_reader(original.as_slice(), hash, 1_024)
+            .expect("install referenced blob");
         reference_blob(
             &app,
             uuid::Uuid::from_u128(0xB10C),
             hash,
-            contents.len() as u64,
+            original.len() as u64,
         )
         .await;
         let path = BlobStore::new(directory.path()).path_for(hash);
@@ -1337,6 +1660,18 @@ mod tests {
         let page_uuid = uuid::Uuid::from_u128(100);
         let contents = b"portable attachment";
         let hash = BlobHash::digest(contents);
+        let upload = app
+            .clone()
+            .oneshot(
+                authorized(Request::builder())
+                    .method("PUT")
+                    .uri(format!("/v1/blobs/{hash}"))
+                    .body(Body::from(contents.as_slice()))
+                    .expect("request"),
+            )
+            .await
+            .expect("upload response");
+        assert_eq!(upload.status(), StatusCode::CREATED);
         let operations = vec![
             page_operation(page_uuid),
             operation(
@@ -1365,19 +1700,6 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
-
-        let upload = app
-            .clone()
-            .oneshot(
-                authorized(Request::builder())
-                    .method("PUT")
-                    .uri(format!("/v1/blobs/{hash}"))
-                    .body(Body::from(contents.as_slice()))
-                    .expect("request"),
-            )
-            .await
-            .expect("upload response");
-        assert_eq!(upload.status(), StatusCode::CREATED);
 
         let uppercase = hash.to_string().to_uppercase();
         let uppercase_upload = app

@@ -307,8 +307,7 @@ impl HttpTransport {
             .parent()
             .context("attachment destination has no parent")?;
         tokio::fs::create_dir_all(parent).await?;
-        let temporary = parent.join(format!(".{}.tmp", uuid::Uuid::now_v7()));
-        let mut file = tokio::fs::File::create(&temporary).await?;
+        let (mut file, temporary) = create_download_temporary(parent.to_path_buf()).await?;
         let mut digest = Sha256::new();
         let mut size = 0_u64;
         let mut body = response.bytes_stream();
@@ -318,7 +317,6 @@ impl HttpTransport {
                 .checked_add(chunk.len() as u64)
                 .context("attachment size overflow")?;
             if size > maximum {
-                let _ = tokio::fs::remove_file(&temporary).await;
                 bail!("remote attachment exceeds the {maximum} byte limit");
             }
             digest.update(&chunk);
@@ -328,13 +326,21 @@ impl HttpTransport {
         drop(file);
         let actual = BlobHash::from_bytes(digest.finalize().into());
         if actual != hash {
-            let _ = tokio::fs::remove_file(&temporary).await;
             bail!("downloaded attachment hash does not match its operation");
         }
         if tokio::fs::try_exists(path).await? {
-            tokio::fs::remove_file(&temporary).await?;
+            drop(temporary);
         } else {
-            tokio::fs::rename(&temporary, path).await?;
+            let destination = path.to_path_buf();
+            match tokio::task::spawn_blocking(move || temporary.persist_noclobber(destination))
+                .await?
+            {
+                Ok(()) => {}
+                Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    drop(error.path);
+                }
+                Err(error) => return Err(error.error.into()),
+            }
         }
         Ok(())
     }
@@ -389,6 +395,19 @@ impl HttpTransport {
             .join(path)
             .with_context(|| format!("joining sync endpoint {path}"))
     }
+}
+
+async fn create_download_temporary(
+    parent: std::path::PathBuf,
+) -> Result<(tokio::fs::File, tempfile::TempPath)> {
+    let (file, temporary) = tokio::task::spawn_blocking(move || {
+        let temporary = tempfile::Builder::new()
+            .prefix(".download-")
+            .tempfile_in(parent)?;
+        Ok::<_, std::io::Error>(temporary.into_parts())
+    })
+    .await??;
+    Ok((tokio::fs::File::from_std(file), temporary))
 }
 
 #[async_trait]
@@ -530,5 +549,32 @@ mod tests {
         };
         assert_eq!(code, None);
         assert_eq!(message.chars().count(), 500);
+    }
+
+    #[tokio::test]
+    async fn download_temporary_is_removed_when_task_is_cancelled() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let parent = directory.path().to_path_buf();
+        let (path_tx, path_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let (_file, temporary) = create_download_temporary(parent)
+                .await
+                .expect("create download temporary");
+            path_tx
+                .send(temporary.to_path_buf())
+                .expect("send temporary path");
+            std::future::pending::<()>().await;
+            drop(temporary);
+        });
+        let path = path_rx.await.expect("receive temporary path");
+        assert!(path.exists());
+
+        task.abort();
+        let _ = task.await;
+
+        assert!(
+            !path.exists(),
+            "cancelled download must remove its temporary"
+        );
     }
 }
