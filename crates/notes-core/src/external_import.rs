@@ -264,6 +264,20 @@ pub struct ExternalImportReceipt {
     pub imported_at: i64,
 }
 
+/// Returns the durable receipt for one external-import format, if that format
+/// has been committed in this workspace.
+///
+/// The receipt is local provenance rather than synced note content. Callers
+/// use its identity context to resume a deterministic dry run after restart;
+/// this query never creates or mutates import state.
+pub async fn external_import_receipt(
+    conn: &Connection,
+    format: ExternalImportFormat,
+) -> Result<Option<ExternalImportReceipt>> {
+    conn.call_domain(move |database| stored_receipt(database, format))
+        .await
+}
+
 struct ValidatedBatch {
     batch: ExternalImportBatch,
     plan_digest: ExternalImportDigest,
@@ -449,10 +463,10 @@ pub async fn apply_external_import(
 }
 
 fn stored_receipt(
-    transaction: &rusqlite::Transaction<'_>,
+    database: &rusqlite::Connection,
     format: ExternalImportFormat,
 ) -> CoreResult<Option<ExternalImportReceipt>> {
-    let row = transaction
+    let row = database
         .query_row(
             "SELECT receipt_uuid, manifest_digest, plan_digest, planner_version,
                     identity_workspace_uuid, import_namespace_uuid, provenance_json, imported_at
@@ -483,9 +497,30 @@ fn stored_receipt(
             provenance_json,
             imported_at,
         )| {
-            let provenance = serde_json::from_str(&provenance_json).map_err(|error| {
-                CoreError::invalid(format!("stored import provenance is invalid JSON: {error}"))
-            })?;
+            if receipt_uuid.is_nil() {
+                return Err(CoreError::invalid(
+                    "stored external import receipt UUID cannot be nil",
+                ));
+            }
+            if planner_version == 0 {
+                return Err(CoreError::invalid(
+                    "stored external import planner version must be greater than zero",
+                ));
+            }
+            if identity_workspace_uuid.is_nil() || import_namespace_uuid.is_nil() {
+                return Err(CoreError::invalid(
+                    "stored external import identity UUIDs cannot be nil",
+                ));
+            }
+            let provenance: serde_json::Value =
+                serde_json::from_str(&provenance_json).map_err(|error| {
+                    CoreError::invalid(format!("stored import provenance is invalid JSON: {error}"))
+                })?;
+            if !provenance.is_object() {
+                return Err(CoreError::invalid(
+                    "stored external import provenance must be a JSON object",
+                ));
+            }
             Ok(ExternalImportReceipt {
                 receipt_uuid,
                 format,
@@ -739,6 +774,99 @@ mod tests {
                 blocks,
             }],
         }
+    }
+
+    #[tokio::test]
+    async fn receipt_query_returns_none_before_an_import() {
+        let (_file, connection) = database().await;
+
+        assert_eq!(
+            external_import_receipt(&connection, ExternalImportFormat::Logseq)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn receipt_query_returns_the_committed_typed_identity_and_digests() {
+        let (_file, connection) = database().await;
+        let input = batch(&connection, 2).await;
+        let expected_plan_digest = ValidatedBatch::new(input.clone()).unwrap().plan_digest;
+        let expected_provenance = input.provenance.clone();
+        let outcome = apply_external_import(&connection, input).await.unwrap();
+        let receipt_uuid = match outcome {
+            ExternalImportOutcome::Applied { receipt_uuid, .. } => receipt_uuid,
+            ExternalImportOutcome::ExactNoOp { .. } => panic!("first import must be applied"),
+        };
+
+        let receipt = external_import_receipt(&connection, ExternalImportFormat::Logseq)
+            .await
+            .unwrap()
+            .expect("committed receipt");
+        assert_eq!(receipt.receipt_uuid, receipt_uuid);
+        assert_eq!(receipt.format, ExternalImportFormat::Logseq);
+        assert_eq!(receipt.manifest_digest, expected_provenance.manifest_digest);
+        assert_eq!(receipt.plan_digest, expected_plan_digest);
+        assert_eq!(receipt.planner_version, expected_provenance.planner_version);
+        assert_eq!(receipt.identity, expected_provenance.identity);
+        assert_eq!(receipt.provenance, expected_provenance.payload);
+        assert!(receipt.imported_at > 0);
+    }
+
+    #[tokio::test]
+    async fn receipt_query_rejects_corrupt_digest_and_identity_storage() {
+        let (_digest_file, digest_connection) = database().await;
+        let digest_input = batch(&digest_connection, 1).await;
+        apply_external_import(&digest_connection, digest_input)
+            .await
+            .unwrap();
+        digest_connection
+            .call(|database| {
+                database.execute_batch("PRAGMA ignore_check_constraints = ON;")?;
+                database.execute(
+                    "UPDATE external_import_receipts SET manifest_digest = X'00'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let digest_error =
+            external_import_receipt(&digest_connection, ExternalImportFormat::Logseq)
+                .await
+                .expect_err("invalid digest must be rejected");
+        assert!(matches!(
+            digest_error.downcast_ref::<CoreError>(),
+            Some(CoreError::InvalidInput(_))
+        ));
+        assert!(digest_error.to_string().contains("32 bytes"));
+
+        let (_identity_file, identity_connection) = database().await;
+        let identity_input = batch(&identity_connection, 1).await;
+        apply_external_import(&identity_connection, identity_input)
+            .await
+            .unwrap();
+        identity_connection
+            .call(|database| {
+                database.execute_batch("PRAGMA ignore_check_constraints = ON;")?;
+                database.execute(
+                    "UPDATE external_import_receipts SET import_namespace_uuid = zeroblob(16)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let identity_error =
+            external_import_receipt(&identity_connection, ExternalImportFormat::Logseq)
+                .await
+                .expect_err("nil identity UUID must be rejected");
+        assert!(matches!(
+            identity_error.downcast_ref::<CoreError>(),
+            Some(CoreError::InvalidInput(_))
+        ));
+        assert!(identity_error.to_string().contains("cannot be nil"));
     }
 
     #[tokio::test]
@@ -1007,6 +1135,10 @@ mod tests {
         let (_source_file, source) = database().await;
         let input = batch(&source, 3).await;
         apply_external_import(&source, input.clone()).await.unwrap();
+        let source_receipt = external_import_receipt(&source, ExternalImportFormat::Logseq)
+            .await
+            .unwrap()
+            .expect("source receipt");
         let archive = db::export_archive(&source).await.unwrap();
         assert_eq!(archive.external_import_receipts.len(), 1);
 
@@ -1028,6 +1160,12 @@ mod tests {
             .await
             .unwrap();
         db::import_archive(&destination, archive).await.unwrap();
+        assert_eq!(
+            external_import_receipt(&destination, ExternalImportFormat::Logseq)
+                .await
+                .unwrap(),
+            Some(source_receipt)
+        );
         assert_eq!(
             db::get_page_by_title(&destination, "Imported.md".into())
                 .await

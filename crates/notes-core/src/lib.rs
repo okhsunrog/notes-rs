@@ -14,7 +14,7 @@ pub use external_import::{
     ExternalBlockId, ExternalImportBatch, ExternalImportBlock, ExternalImportDigest,
     ExternalImportFormat, ExternalImportIdentityContext, ExternalImportOutcome, ExternalImportPage,
     ExternalImportPageKind, ExternalImportProvenance, ExternalImportReceipt, ExternalPageId,
-    apply_external_import,
+    apply_external_import, external_import_receipt,
 };
 pub use hlc::Hlc;
 pub use model::{
