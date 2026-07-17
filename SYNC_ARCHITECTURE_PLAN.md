@@ -6,6 +6,11 @@ This document describes the current code, not a compatibility target for old bui
 has no users or valuable production databases yet, so storage and wire formats may still change
 deliberately before the first release.
 
+The accepted editor and page-presentation target is recorded separately in
+[`EDITOR_ARCHITECTURE.md`](EDITOR_ARCHITECTURE.md). Its migration is explicitly marked pending;
+where that decision differs from the current `PageView` implementation, the editor record is the
+target contract and this document continues to describe the code that exists today.
+
 ## 1. Product boundary
 
 notes-rs is a local-first personal knowledge application for desktop and Android. Both clients use
@@ -73,10 +78,15 @@ A `Page` owns a title and an ordered tree of blocks. Its persisted `PageView` is
 
 Changing a view never converts or duplicates content.
 
+This is a provisional pre-release representation. The accepted editor architecture replaces it
+with persisted `PageLayout = Outline | Document`; Reading and Split become pane-local Document
+states and never enter operations or sync. See [`EDITOR_ARCHITECTURE.md`](EDITOR_ARCHITECTURE.md).
+
 ### Blocks
 
-A `Block` belongs to exactly one page and optionally has a parent block on that page. Markdown is
-the source of truth. `BlockStyle` provides document semantics independently of outline nesting:
+A `Block` belongs to exactly one page and optionally has a parent block on that page. The typed
+page/block tree is durable source state: `BlockStyle` provides block-level document semantics and
+the `markdown` field contains the block's textual body independently of outline nesting:
 
 ```text
 paragraph, bullet, numbered, task,
@@ -85,7 +95,9 @@ quote, code, divider
 ```
 
 This allows short outline notes and long articles or project documentation to use the same tree.
-Outline bullets do not force every block to have Markdown list semantics.
+Outline bullets do not force every block to have Markdown list semantics. Plain Markdown
+import/export is a normalized portable representation; archives and sync snapshots are the lossless
+representation of UUIDs, parentage, styles, and operation state.
 
 Sibling order uses `OrderKey`, a validated fixed-width 16-character uppercase hexadecimal key.
 SQLite text ordering therefore matches numeric ordering. Local structural actions renumber the
@@ -291,7 +303,8 @@ reverse proxy. Deployment produces a static musl binary rather than a container 
 | Area                                                                   | State                                       |
 | ---------------------------------------------------------------------- | ------------------------------------------- |
 | Typed `pages` / `blocks` baseline with no generic nodes                | Complete                                    |
-| Outline, Document, Reading and typed block styles                      | Complete                                    |
+| Typed block styles and provisional three-way page view                 | Complete as a prototype                     |
+| Accepted continuous editor and pane-local view architecture            | Design complete; implementation pending     |
 | UUIDv7 operations, HLC/LWW apply, tombstones, deterministic structure  | Complete                                    |
 | Action-based inverse-operation undo/redo                               | Complete                                    |
 | Local FTS, refs, backlinks, graph, attachments, archives               | Complete                                    |
@@ -336,14 +349,16 @@ Architecture and correctness:
 
 Product and corpus support:
 
-1. Add server-side retrieval chunking for large blocks/documents. The current index unit is one
+1. Implement the accepted editor architecture: durable `PageLayout`, pane-local Document views,
+   shared Markdown AST rendering, CodeMirror 6 Live Preview, and a continuous Document adapter.
+2. Add server-side retrieval chunking for large blocks/documents. The current index unit is one
    page or block UUID, which is sufficient for the demo but not ideal for long articles.
-2. Add Markdown-vault, Obsidian, and Logseq import, including page properties, block UUIDs, nesting,
+3. Add Markdown-vault, Obsidian, and Logseq import, including page properties, block UUIDs, nesting,
    and assets; no legacy notes-rs database importer is planned.
-3. Add daily notes, templates, properties, saved queries, and an extension model.
-4. Add drag-and-drop movement, cross-block selection, transclusion, richer Markdown authoring,
+4. Add daily notes, templates, properties, saved queries, and an extension model.
+5. Add drag-and-drop movement, cross-block selection, transclusion, richer Markdown authoring,
    graph filters/layouts, and measured larger-corpus performance work.
-5. Add signed production packages and end-to-end UI/accessibility coverage on desktop and real
+6. Add signed production packages and end-to-end UI/accessibility coverage on desktop and real
    Android hardware.
 
 ## 12. Explicit non-goals
