@@ -3,6 +3,10 @@ import { Button } from "@/components/ui/button";
 import { todayJournalDate } from "@/features/journal/journal-date";
 import { SearchCard } from "@/features/search/search-card";
 import type { Content, JournalDate, SearchHit } from "@/lib/api";
+import {
+  dispositionFromShiftKey,
+  type OpenDisposition,
+} from "@/features/workspace/workspace-model";
 
 type Props = {
   creating: boolean;
@@ -10,8 +14,8 @@ type Props = {
   hits: SearchHit[];
   setHits: React.Dispatch<React.SetStateAction<SearchHit[]>>;
   onCreate: () => void | Promise<void>;
-  onOpenJournal: (date: JournalDate) => void | Promise<void>;
-  onOpenContent: (content: Content) => void | Promise<void>;
+  onOpenJournal: (date: JournalDate, disposition?: OpenDisposition) => void | Promise<void>;
+  onOpenContent: (content: Content, disposition?: OpenDisposition) => void | Promise<void>;
   onStatus: (status: string) => void;
 };
 
@@ -56,7 +60,9 @@ export function HomeView({
             size="lg"
             variant="outline"
             disabled={creating || journalBusy}
-            onClick={() => void onOpenJournal(todayJournalDate())}
+            onClick={(event) =>
+              void onOpenJournal(todayJournalDate(), dispositionFromShiftKey(event.shiftKey))
+            }
             className="h-12 rounded-xl border-primary/20 bg-card/65 px-5 shadow-sm"
           >
             <CalendarDays className="size-4 text-primary" />

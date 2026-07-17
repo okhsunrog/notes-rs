@@ -1,6 +1,6 @@
 import { type Page } from "@/lib/api";
 import type { MarkdownOpenHandler } from "@/features/markdown";
-import type { PagePresentation } from "@/features/pages/page-presentation";
+import { PagePresentation } from "@/features/pages/page-presentation";
 import { BlockChildren } from "./block-tree";
 import { OutlinerProvider } from "./outliner-store";
 
@@ -17,7 +17,7 @@ export function Outliner({
   initialEditingUuid = null,
   focusRequest = 0,
   onOpenMarkdownLink,
-  presentation = "editing",
+  presentation = PagePresentation.Editing,
 }: Props) {
   return (
     <OutlinerProvider
@@ -25,7 +25,7 @@ export function Outliner({
       initialEditingRequest={focusRequest}
       layout={page.layout}
       onOpenMarkdownLink={onOpenMarkdownLink}
-      readOnly={presentation === "reading"}
+      readOnly={presentation === PagePresentation.Reading}
     >
       <BlockChildren
         pageUuid={page.uuid}

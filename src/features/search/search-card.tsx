@@ -18,12 +18,16 @@ import {
   type SearchHit,
   type SearchMode,
 } from "@/lib/api";
+import {
+  dispositionFromShiftKey,
+  type OpenDisposition,
+} from "@/features/workspace/workspace-model";
 
 type Props = {
   variant?: "card" | "inline" | "dialog";
   hits: SearchHit[];
   setHits: React.Dispatch<React.SetStateAction<SearchHit[]>>;
-  onOpenContent: (content: Content) => void | Promise<void>;
+  onOpenContent: (content: Content, disposition?: OpenDisposition) => void | Promise<void>;
   onStatus: (s: string) => void;
 };
 
@@ -85,7 +89,9 @@ export function SearchCard({ variant = "card", hits, setHits, onOpenContent, onS
               <button
                 key={contentUuid(h.content)}
                 type="button"
-                onClick={() => void onOpenContent(h.content)}
+                onClick={(event) =>
+                  void onOpenContent(h.content, dispositionFromShiftKey(event.shiftKey))
+                }
                 className="w-full rounded-md border bg-card p-3 text-left text-sm transition hover:bg-accent"
               >
                 <div className="flex items-center gap-2">

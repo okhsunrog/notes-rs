@@ -1,50 +1,26 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { Channel } from "@tauri-apps/api/core";
+import { lazy, Suspense, useEffect, useRef } from "react";
 import { ArrowUp, CheckCircle2, PencilLine, Sparkles, Square, Trash2, Wrench } from "lucide-react";
-import { useConfirmation } from "@/app/confirmation";
 import { Button } from "@/components/ui/button";
 import { pageDisplayTitle } from "@/features/journal/journal-date";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import type { MarkdownOpenHandler } from "@/features/markdown";
-import { cancelChat, chatStream, type ChatEvent, type ChatTurn, type Page } from "@/lib/api";
-
-const CHAT_STORAGE_KEY = "notes-rs.chat.v1";
+import type { Page } from "@/lib/api";
+import type { AssistantController } from "./use-assistant-controller";
 const MarkdownResponse = lazy(() => import("@/features/chat/markdown-response"));
-
-function loadStoredChat(): ChatTurn[] {
-  try {
-    const value = JSON.parse(localStorage.getItem(CHAT_STORAGE_KEY) ?? "[]");
-    return Array.isArray(value) ? value.slice(-50) : [];
-  } catch {
-    return [];
-  }
-}
-
-function boundedHistory(turns: ChatTurn[]) {
-  const result: Array<{ role: "user" | "assistant"; text: string }> = [];
-  let characters = 0;
-  for (const turn of [...turns].reverse()) {
-    const size = turn.text.length;
-    if (result.length >= 24 || characters + size > 32_000) break;
-    result.push({ role: turn.role, text: turn.text });
-    characters += size;
-  }
-  return result.reverse();
-}
 
 export function ChatCard({
   page,
   onOpenMarkdownLink,
+  controller,
 }: {
   page: Page | null;
   onOpenMarkdownLink: MarkdownOpenHandler;
+  controller: AssistantController;
 }) {
-  const confirm = useConfirmation();
-  const [chatInput, setChatInput] = useState("");
-  const [chatLog, setChatLog] = useState<ChatTurn[]>(loadStoredChat);
-  const [chatBusy, setChatBusy] = useState(false);
-  const [allowWrites, setAllowWrites] = useState(false);
-  const activeRequest = useRef<string | null>(null);
+  const chatInput = controller.state.input;
+  const chatLog = controller.state.turns;
+  const chatBusy = controller.state.busy;
+  const allowWrites = controller.state.allowWrites;
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
 
@@ -59,78 +35,9 @@ export function ChatCard({
     endRef.current?.scrollIntoView({ block: "end", behavior: chatBusy ? "smooth" : "auto" });
   }, [chatLog, chatBusy]);
 
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(chatLog.slice(-50)));
-    }, 200);
-    return () => window.clearTimeout(timer);
-  }, [chatLog]);
-
-  async function sendChat(e: React.FormEvent) {
+  function sendChat(e: React.FormEvent) {
     e.preventDefault();
-    if (!chatInput.trim() || chatBusy) return;
-    const message = chatInput;
-    setChatInput("");
-    const history = boundedHistory(chatLog);
-    setChatLog((l) => [
-      ...l,
-      { role: "user", text: message },
-      { role: "assistant", text: "", tools: [] },
-    ]);
-    setChatBusy(true);
-    const requestId = crypto.randomUUID();
-    activeRequest.current = requestId;
-
-    const channel = new Channel<ChatEvent>();
-    channel.onmessage = (ev) => {
-      setChatLog((l) => {
-        const next = [...l];
-        const last = { ...next[next.length - 1] };
-        if (last.role !== "assistant") return l;
-        switch (ev.kind) {
-          case "text_delta":
-            last.text += ev.text;
-            break;
-          case "tool_start":
-            last.tools = [...(last.tools ?? []), { id: ev.id, name: ev.name, args: ev.args }];
-            break;
-          case "tool_end":
-            last.tools = (last.tools ?? []).map((t) =>
-              t.id === ev.id ? { ...t, result: ev.result } : t,
-            );
-            break;
-          case "usage":
-            last.usage = {
-              inputTokens: ev.inputTokens,
-              outputTokens: ev.outputTokens,
-              totalTokens: ev.totalTokens,
-            };
-            break;
-          case "error":
-            last.text = `error: ${ev.message}`;
-            break;
-          case "cancelled":
-            last.text = `${last.text}\n\n_Stopped._`;
-            break;
-        }
-        next[next.length - 1] = last;
-        return next;
-      });
-    };
-
-    try {
-      await chatStream(history, message, allowWrites, page?.uuid ?? null, requestId, channel);
-    } catch (err) {
-      setChatLog((l) => {
-        const next = [...l];
-        next[next.length - 1] = { role: "assistant", text: `error: ${String(err)}` };
-        return next;
-      });
-    } finally {
-      setChatBusy(false);
-      setAllowWrites(false);
-      activeRequest.current = null;
-    }
+    void controller.send(page?.uuid ?? null);
   }
 
   return (
@@ -147,8 +54,7 @@ export function ChatCard({
             disabled={chatBusy}
             aria-label="Clear conversation"
             onClick={() => {
-              setChatLog([]);
-              localStorage.removeItem(CHAT_STORAGE_KEY);
+              controller.clear();
             }}
           >
             <Trash2 className="size-3.5" />
@@ -174,7 +80,7 @@ export function ChatCard({
                 <button
                   key={prompt}
                   type="button"
-                  onClick={() => setChatInput(prompt)}
+                  onClick={() => controller.setInput(prompt)}
                   className="rounded-xl border border-border/60 bg-card/55 px-3 py-2 text-left text-[11px] text-muted-foreground transition hover:border-primary/25 hover:bg-primary/5 hover:text-foreground"
                 >
                   {prompt}
@@ -253,7 +159,7 @@ export function ChatCard({
           rows={3}
           placeholder="Ask about your notes…"
           value={chatInput}
-          onChange={(event) => setChatInput(event.currentTarget.value)}
+          onChange={(event) => controller.setInput(event.currentTarget.value)}
           disabled={chatBusy}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
@@ -272,21 +178,7 @@ export function ChatCard({
             aria-pressed={allowWrites}
             disabled={chatBusy}
             title="Allow create/link tools for the next request only"
-            onClick={async () => {
-              if (allowWrites) {
-                setAllowWrites(false);
-                return;
-              }
-              if (
-                await confirm({
-                  title: "Allow AI writes?",
-                  description:
-                    "For the next request, the assistant may create notes and links. Every change is recorded in Undo history.",
-                  confirmLabel: "Allow once",
-                })
-              )
-                setAllowWrites(true);
-            }}
+            onClick={() => void controller.toggleAllowWrites()}
             className="h-8 rounded-xl px-2.5"
           >
             <PencilLine className="size-3.5" />
@@ -298,13 +190,7 @@ export function ChatCard({
             size="icon-sm"
             aria-label={chatBusy ? "Stop response" : "Send message"}
             disabled={!chatBusy && !chatInput.trim()}
-            onClick={
-              chatBusy
-                ? () => {
-                    if (activeRequest.current) void cancelChat(activeRequest.current);
-                  }
-                : undefined
-            }
+            onClick={chatBusy ? controller.cancel : undefined}
             className="ml-auto size-9 rounded-xl"
           >
             {chatBusy ? (

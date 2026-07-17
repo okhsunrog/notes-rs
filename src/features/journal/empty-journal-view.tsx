@@ -4,13 +4,17 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import type { JournalDate } from "@/lib/api";
 import { formatJournalDate, shiftJournalDate } from "./journal-date";
+import {
+  dispositionFromShiftKey,
+  type OpenDisposition,
+} from "@/features/workspace/workspace-model";
 
 type Props = {
   date: JournalDate;
   busy: boolean;
   onCapture: (date: JournalDate, markdown: string, openAfterCapture?: boolean) => Promise<boolean>;
   onClose: () => void;
-  onOpenDate: (date: JournalDate) => void | Promise<void>;
+  onOpenDate: (date: JournalDate, disposition?: OpenDisposition) => void | Promise<void>;
 };
 
 /** A read-only projection for a date that does not exist in durable source state yet. */
@@ -51,7 +55,9 @@ export function EmptyJournalView({ date, busy, onCapture, onClose, onOpenDate }:
             size="icon-xs"
             aria-label="Open previous journal day"
             disabled={busy}
-            onClick={() => void onOpenDate(shiftJournalDate(date, -1))}
+            onClick={(event) =>
+              void onOpenDate(shiftJournalDate(date, -1), dispositionFromShiftKey(event.shiftKey))
+            }
           >
             <ChevronLeft className="size-3.5" />
           </Button>
@@ -61,7 +67,9 @@ export function EmptyJournalView({ date, busy, onCapture, onClose, onOpenDate }:
             size="icon-xs"
             aria-label="Open next journal day"
             disabled={busy}
-            onClick={() => void onOpenDate(shiftJournalDate(date, 1))}
+            onClick={(event) =>
+              void onOpenDate(shiftJournalDate(date, 1), dispositionFromShiftKey(event.shiftKey))
+            }
           >
             <ChevronRight className="size-3.5" />
           </Button>

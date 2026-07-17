@@ -1,14 +1,22 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Cloud, CloudOff, GitFork, Loader2, Redo2, Search, Settings, Undo2 } from "lucide-react";
+import {
+  Bot,
+  Cloud,
+  CloudOff,
+  GitFork,
+  Loader2,
+  Redo2,
+  Search,
+  Settings,
+  Undo2,
+} from "lucide-react";
 import { AppLayout } from "@/app/layout";
 import { WindowControls } from "@/app/window-controls";
 import { Toaster } from "@/components/ui/sonner";
-import { GraphWorkspace, KnowledgePanel } from "@/features/graph/knowledge-panel";
-import { HomeView } from "@/features/home/home-view";
+import { KnowledgePanel } from "@/features/graph/knowledge-panel";
 import { SearchCard } from "@/features/search/search-card";
 import { PagesList } from "@/features/pages/pages-list";
-import { PageView } from "@/features/pages/page-view";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { getSyncStatus, loadSettings, type Content, type WindowDecorationMode } from "@/lib/api";
@@ -17,7 +25,15 @@ import { useAppShortcuts } from "@/app/use-app-shortcuts";
 import { useStartupState } from "@/app/use-startup-state";
 import { useNotesWorkspace } from "@/features/pages/use-notes-workspace";
 import type { JournalDate } from "@/lib/api";
-import { EmptyJournalView } from "@/features/journal/empty-journal-view";
+import { useAssistantController } from "@/features/chat/use-assistant-controller";
+import { Workbench } from "@/features/workspace/workbench";
+import {
+  DockVisibility,
+  PaneContentKind,
+  currentDisposition,
+  graphTarget,
+  type OpenDisposition,
+} from "@/features/workspace/workspace-model";
 
 const SettingsPage = lazy(() =>
   import("@/features/settings/settings-page").then((module) => ({
@@ -31,10 +47,11 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [windowDecorationMode, setWindowDecorationMode] = useState<WindowDecorationMode>("native");
   const [searchOpen, setSearchOpen] = useState(false);
-  const [graphOpen, setGraphOpen] = useState(false);
   const [editorRequest, setEditorRequest] = useState(0);
   const showEditor = useCallback(() => setEditorRequest((request) => request + 1), []);
   const workspace = useNotesWorkspace(ready, setStatus, showEditor);
+  const assistant = useAssistantController();
+  const graphOpen = workspace.activePane.content.kind === PaneContentKind.Graph;
 
   const settingsQuery = useQuery({
     queryKey: queryKeys.settings,
@@ -46,21 +63,18 @@ function App() {
     enabled: ready,
   });
   const createNewNote = useCallback(async () => {
-    setGraphOpen(false);
     await workspace.createNewNote();
   }, [workspace]);
 
   const openContent = useCallback(
-    async (content: Content) => {
-      setGraphOpen(false);
-      await workspace.openContent(content);
+    async (content: Content, disposition?: OpenDisposition) => {
+      await workspace.openContent(content, disposition);
     },
     [workspace],
   );
   const openJournal = useCallback(
-    async (date: JournalDate) => {
-      setGraphOpen(false);
-      await workspace.openJournal(date);
+    async (date: JournalDate, disposition?: OpenDisposition) => {
+      await workspace.openJournal(date, disposition);
     },
     [workspace],
   );
@@ -177,11 +191,40 @@ function App() {
               size="sm"
               aria-label={graphOpen ? "Close knowledge graph" : "Open knowledge graph"}
               aria-pressed={graphOpen}
-              onClick={() => setGraphOpen((open) => !open)}
+              onClick={() => {
+                if (graphOpen) {
+                  workspace.goPaneBack(workspace.activePane.id);
+                } else {
+                  workspace.openTarget(graphTarget(workspace.activePageUuid), currentDisposition);
+                }
+              }}
               className="hidden h-8 gap-1.5 rounded-xl px-2.5 sm:flex"
             >
               <GitFork className="size-3.5" />
               <span className="text-xs">Graph</span>
+            </Button>
+            <Button
+              data-assistant-toggle
+              variant="ghost"
+              size="sm"
+              aria-label={
+                workspace.windowWorkspace.assistantDock.visibility === DockVisibility.Hidden
+                  ? "Show Assistant"
+                  : "Hide Assistant"
+              }
+              aria-expanded={
+                workspace.windowWorkspace.assistantDock.visibility !== DockVisibility.Hidden
+              }
+              aria-controls="assistant-dock-content"
+              onClick={() =>
+                workspace.setDockVisibility(
+                  workspace.windowWorkspace.assistantDock.visibility === DockVisibility.Hidden
+                    ? DockVisibility.Open
+                    : DockVisibility.Hidden,
+                )
+              }
+            >
+              <Bot className="size-4" />
             </Button>
             <Button
               variant="ghost"
@@ -239,62 +282,43 @@ function App() {
             onStatus={setStatus}
           />
         }
-        center={
-          workspace.activePage ? (
-            <PageView
-              key={workspace.activePage.uuid}
-              page={workspace.activePage}
-              initialBlockUuid={
-                workspace.newNote?.pageUuid === workspace.activePage.uuid
-                  ? workspace.newNote.blockUuid
-                  : null
-              }
-              autoFocusTitle={workspace.newNote?.pageUuid === workspace.activePage.uuid}
-              onSaved={workspace.applyUpdated}
-              onStatus={setStatus}
-              onClose={workspace.closePage}
-              onDelete={workspace.removePage}
-              onOpenMarkdownLink={workspace.openMarkdownLink}
-              onOpenJournalDate={openJournal}
-              journalBusy={workspace.journalBusy}
-            />
-          ) : workspace.pendingJournalDate ? (
-            <EmptyJournalView
-              key={workspace.pendingJournalDate}
-              date={workspace.pendingJournalDate}
-              busy={workspace.journalBusy}
-              onCapture={workspace.captureJournal}
-              onClose={workspace.closePage}
-              onOpenDate={openJournal}
-            />
-          ) : (
-            <HomeView
-              creating={workspace.creatingNote}
-              journalBusy={workspace.journalBusy}
-              hits={workspace.hits}
-              setHits={workspace.setHits}
-              onCreate={createNewNote}
-              onOpenJournal={openJournal}
-              onOpenContent={openContent}
-              onStatus={setStatus}
-            />
-          )
+        workbench={
+          <Workbench
+            state={workspace.windowWorkspace}
+            creatingNote={workspace.creatingNote}
+            journalBusy={workspace.journalBusy}
+            newNote={workspace.newNote}
+            hits={workspace.hits}
+            setHits={workspace.setHits}
+            onStatus={setStatus}
+            onCreate={createNewNote}
+            onOpenContent={openContent}
+            onOpenJournal={openJournal}
+            onCaptureJournal={workspace.captureJournal}
+            onSaved={workspace.applyUpdated}
+            onDelete={workspace.removePage}
+            onOpenMarkdownLink={workspace.openMarkdownLink}
+            onFocusPane={workspace.focusPane}
+            onShowCompactPane={workspace.showCompactPane}
+            onClosePane={workspace.closePane}
+            onPaneBack={workspace.goPaneBack}
+            onPaneForward={workspace.goPaneForward}
+            onResizeSplit={(splitId, ratio) => workspace.resizeSplit(splitId, ratio)}
+            onPresentationChange={workspace.setPagePresentation}
+          />
         }
-        right={
+        assistant={
           <KnowledgePanel
             page={workspace.activePage}
             onOpenMarkdownLink={workspace.openMarkdownLink}
+            controller={assistant}
           />
         }
-        fullWorkspace={
-          graphOpen ? (
-            <GraphWorkspace
-              page={workspace.activePage}
-              onOpenContent={openContent}
-              onClose={() => setGraphOpen(false)}
-            />
-          ) : undefined
-        }
+        assistantVisibility={workspace.windowWorkspace.assistantDock.visibility}
+        assistantWidth={workspace.windowWorkspace.assistantDock.width}
+        assistantBusy={assistant.state.busy}
+        onAssistantVisibilityChange={workspace.setDockVisibility}
+        onAssistantWidthChange={workspace.setDockWidth}
       />
       <Dialog open={searchOpen} onOpenChange={setSearchOpen}>
         <DialogContent className="search-dialog top-[18%] max-w-2xl translate-y-0 rounded-2xl border-border/60 bg-background/95 p-3 shadow-2xl backdrop-blur-xl">
@@ -306,8 +330,8 @@ function App() {
             variant="dialog"
             hits={workspace.hits}
             setHits={workspace.setHits}
-            onOpenContent={async (content) => {
-              await openContent(content);
+            onOpenContent={async (content, disposition) => {
+              await openContent(content, disposition);
               setSearchOpen(false);
             }}
             onStatus={setStatus}

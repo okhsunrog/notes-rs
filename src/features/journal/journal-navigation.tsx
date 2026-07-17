@@ -2,11 +2,15 @@ import { CalendarDays, ChevronLeft, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { JournalDate } from "@/lib/api";
 import { shiftJournalDate, todayJournalDate } from "./journal-date";
+import {
+  dispositionFromShiftKey,
+  type OpenDisposition,
+} from "@/features/workspace/workspace-model";
 
 type Props = {
   activeDate: JournalDate | null;
   busy: boolean;
-  onOpenDate: (date: JournalDate) => void | Promise<void>;
+  onOpenDate: (date: JournalDate, disposition?: OpenDisposition) => void | Promise<void>;
 };
 
 export function JournalNavigation({ activeDate, busy, onOpenDate }: Props) {
@@ -29,7 +33,12 @@ export function JournalNavigation({ activeDate, busy, onOpenDate }: Props) {
             size="icon-xs"
             disabled={busy}
             aria-label="Open previous journal day"
-            onClick={() => void onOpenDate(shiftJournalDate(navigationDate, -1))}
+            onClick={(event) =>
+              void onOpenDate(
+                shiftJournalDate(navigationDate, -1),
+                dispositionFromShiftKey(event.shiftKey),
+              )
+            }
           >
             <ChevronLeft className="size-3.5" />
           </Button>
@@ -39,7 +48,12 @@ export function JournalNavigation({ activeDate, busy, onOpenDate }: Props) {
             size="icon-xs"
             disabled={busy}
             aria-label="Open next journal day"
-            onClick={() => void onOpenDate(shiftJournalDate(navigationDate, 1))}
+            onClick={(event) =>
+              void onOpenDate(
+                shiftJournalDate(navigationDate, 1),
+                dispositionFromShiftKey(event.shiftKey),
+              )
+            }
           >
             <ChevronRight className="size-3.5" />
           </Button>
@@ -51,7 +65,7 @@ export function JournalNavigation({ activeDate, busy, onOpenDate }: Props) {
           type="button"
           variant={activeDate === today ? "secondary" : "outline"}
           disabled={busy}
-          onClick={() => void onOpenDate(today)}
+          onClick={(event) => void onOpenDate(today, dispositionFromShiftKey(event.shiftKey))}
           className="h-9 justify-start rounded-xl border-border/60 bg-card/45 px-2.5"
         >
           <span className="flex size-6 items-center justify-center rounded-lg bg-primary/10 text-primary">

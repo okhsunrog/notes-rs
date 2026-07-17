@@ -10,13 +10,17 @@ import { pageDisplayTitle } from "@/features/journal/journal-date";
 import { listJournals, listPages, type JournalDate, type Page } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { queryKeys } from "@/lib/query";
+import {
+  dispositionFromShiftKey,
+  type OpenDisposition,
+} from "@/features/workspace/workspace-model";
 
 type Props = {
   selectedUuid: string | null;
   activeJournalDate: JournalDate | null;
-  onSelect: (page: Page) => void;
+  onSelect: (page: Page, disposition?: OpenDisposition) => void;
   onCreate: () => void | Promise<void>;
-  onOpenJournal: (date: JournalDate) => void | Promise<void>;
+  onOpenJournal: (date: JournalDate, disposition?: OpenDisposition) => void | Promise<void>;
   onQuickCapture: (markdown: string) => boolean | Promise<boolean>;
   journalBusy: boolean;
   onStatus: (s: string) => void;
@@ -130,7 +134,7 @@ export function PagesList({
           <li key={p.uuid}>
             <button
               type="button"
-              onClick={() => onSelect(p)}
+              onClick={(event) => onSelect(p, dispositionFromShiftKey(event.shiftKey))}
               className={cn(
                 "group flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition hover:bg-sidebar-accent",
                 selectedUuid === p.uuid &&

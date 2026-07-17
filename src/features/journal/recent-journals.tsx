@@ -2,12 +2,16 @@ import { CalendarClock } from "lucide-react";
 import { pageDisplayTitle } from "./journal-date";
 import type { Page } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import {
+  dispositionFromShiftKey,
+  type OpenDisposition,
+} from "@/features/workspace/workspace-model";
 
 type Props = {
   pages: Page[];
   activeUuid: string | null;
   busy: boolean;
-  onOpen: (page: Page) => void | Promise<void>;
+  onOpen: (page: Page, disposition?: OpenDisposition) => void | Promise<void>;
 };
 
 export function RecentJournals({ pages, activeUuid, busy, onOpen }: Props) {
@@ -20,7 +24,7 @@ export function RecentJournals({ pages, activeUuid, busy, onOpen }: Props) {
           key={page.uuid}
           type="button"
           disabled={busy}
-          onClick={() => void onOpen(page)}
+          onClick={(event) => void onOpen(page, dispositionFromShiftKey(event.shiftKey))}
           className={cn(
             "flex shrink-0 items-center gap-1.5 rounded-lg border border-transparent bg-sidebar-accent/45 px-2 py-1 text-[10px] text-muted-foreground transition hover:bg-sidebar-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-50",
             activeUuid === page.uuid && "border-primary/20 bg-primary/8 text-primary",

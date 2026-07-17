@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { MarkdownOpenRequest } from "@/features/markdown";
@@ -26,6 +26,23 @@ import {
 } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
 import { useConfirmation } from "@/app/confirmation";
+import {
+  DockVisibility,
+  PaneContentKind,
+  adjacentDisposition,
+  createInitialWorkspaceState,
+  currentDisposition,
+  getActivePane,
+  homeTarget,
+  journalDayTarget,
+  pageTarget,
+  workspaceReducer,
+  type OpenDisposition,
+  type OpenTarget,
+  type PaneId,
+  type SplitId,
+} from "@/features/workspace/workspace-model";
+import { PagePresentation } from "./page-presentation";
 
 export function useNotesWorkspace(
   ready: boolean,
@@ -35,8 +52,11 @@ export function useNotesWorkspace(
   const confirm = useConfirmation();
   const queryClient = useQueryClient();
   const [hits, setHits] = useState<SearchHit[]>([]);
-  const [activePageUuid, setActivePageUuid] = useState<string | null>(null);
-  const [pendingJournalDate, setPendingJournalDate] = useState<JournalDate | null>(null);
+  const [windowWorkspace, dispatchWorkspace] = useReducer(
+    workspaceReducer,
+    undefined,
+    createInitialWorkspaceState,
+  );
   const [newNote, setNewNote] = useState<{ pageUuid: string; blockUuid: string | null } | null>(
     null,
   );
@@ -45,6 +65,16 @@ export function useNotesWorkspace(
   const creatingNoteRef = useRef(false);
   const journalBusyRef = useRef(false);
   const navigationEpochRef = useRef(0);
+  const activePane = getActivePane(windowWorkspace);
+  const activeContent = activePane.content;
+  const activePageUuid =
+    activeContent.kind === PaneContentKind.Page
+      ? activeContent.pageUuid
+      : activeContent.kind === PaneContentKind.Graph
+        ? activeContent.focusPageUuid
+        : null;
+  const pendingJournalDate =
+    activeContent.kind === PaneContentKind.JournalDay ? activeContent.date : null;
 
   const historyQuery = useQuery({
     queryKey: queryKeys.history,
@@ -58,9 +88,13 @@ export function useNotesWorkspace(
   });
   const activePage = activePageQuery.data ?? null;
 
+  const openTarget = useCallback((target: OpenTarget, disposition: OpenDisposition) => {
+    dispatchWorkspace({ type: "open_target", target, disposition });
+  }, []);
+
   useEffect(() => {
     if (activePageUuid !== null && activePageQuery.isSuccess && activePageQuery.data === null) {
-      setActivePageUuid(null);
+      dispatchWorkspace({ type: "forget_page", pageUuid: activePageUuid });
       setNewNote(null);
     }
   }, [activePageQuery.data, activePageQuery.isSuccess, activePageUuid]);
@@ -77,8 +111,10 @@ export function useNotesWorkspace(
       await queryClient.invalidateQueries({ queryKey: queryKeys.pages });
       if (navigationEpoch !== navigationEpochRef.current) return;
       setNewNote({ pageUuid: note.page.uuid, blockUuid: note.initialBlock.uuid });
-      setPendingJournalDate(null);
-      setActivePageUuid(note.page.uuid);
+      openTarget(
+        pageTarget(note.page.uuid, { blockUuid: note.initialBlock.uuid }),
+        currentDisposition,
+      );
       setHits([]);
       onStatus("New note ready — name it, then press Enter to write.");
       showEditor();
@@ -88,7 +124,7 @@ export function useNotesWorkspace(
       creatingNoteRef.current = false;
       setCreatingNote(false);
     }
-  }, [onStatus, queryClient, showEditor]);
+  }, [onStatus, openTarget, queryClient, showEditor]);
 
   const moveHistory = useCallback(
     async (direction: "undo" | "redo") => {
@@ -96,8 +132,7 @@ export function useNotesWorkspace(
       try {
         const changed = direction === "undo" ? await undo() : await redo();
         if (changed && navigationEpoch === navigationEpochRef.current) {
-          setActivePageUuid(null);
-          setPendingJournalDate(null);
+          dispatchWorkspace({ type: "reset" });
           setHits([]);
           onStatus(direction === "undo" ? "Undid structural change." : "Redid structural change.");
           await queryClient.invalidateQueries({ queryKey: queryKeys.root });
@@ -110,7 +145,7 @@ export function useNotesWorkspace(
   );
 
   const openJournal = useCallback(
-    async (date: JournalDate) => {
+    async (date: JournalDate, disposition: OpenDisposition = currentDisposition) => {
       if (journalBusyRef.current) return;
       const navigationEpoch = ++navigationEpochRef.current;
       journalBusyRef.current = true;
@@ -124,11 +159,9 @@ export function useNotesWorkspace(
         setNewNote(null);
         if (page) {
           queryClient.setQueryData(queryKeys.page(page.uuid), page);
-          setPendingJournalDate(null);
-          setActivePageUuid(page.uuid);
+          openTarget(pageTarget(page.uuid), disposition);
         } else {
-          setActivePageUuid(null);
-          setPendingJournalDate(date);
+          openTarget(journalDayTarget(date), disposition);
         }
         setHits([]);
         showEditor();
@@ -141,7 +174,7 @@ export function useNotesWorkspace(
         setJournalBusy(false);
       }
     },
-    [onStatus, queryClient, showEditor],
+    [onStatus, openTarget, queryClient, showEditor],
   );
 
   const captureJournal = useCallback(
@@ -172,9 +205,8 @@ export function useNotesWorkspace(
             return true;
           }
           queryClient.setQueryData(queryKeys.page(page.uuid), page);
-          setPendingJournalDate(null);
           setNewNote({ pageUuid: page.uuid, blockUuid: block.uuid });
-          setActivePageUuid(page.uuid);
+          openTarget(pageTarget(page.uuid, { blockUuid: block.uuid }), currentDisposition);
           setHits([]);
           showEditor();
         }
@@ -188,7 +220,7 @@ export function useNotesWorkspace(
         setJournalBusy(false);
       }
     },
-    [onStatus, queryClient, showEditor],
+    [onStatus, openTarget, queryClient, showEditor],
   );
 
   const quickCapture = useCallback(
@@ -212,7 +244,7 @@ export function useNotesWorkspace(
   );
 
   const openContent = useCallback(
-    async (content: Content) => {
+    async (content: Content, disposition: OpenDisposition = currentDisposition) => {
       const navigationEpoch = ++navigationEpochRef.current;
       try {
         const page =
@@ -223,8 +255,12 @@ export function useNotesWorkspace(
           return;
         }
         queryClient.setQueryData(queryKeys.page(page.uuid), page);
-        setPendingJournalDate(null);
-        setActivePageUuid(page.uuid);
+        openTarget(
+          pageTarget(page.uuid, {
+            blockUuid: content.kind === "block" ? content.record.uuid : null,
+          }),
+          disposition,
+        );
         showEditor();
         if (content.kind === "block") {
           onStatus(`Opened ${pageDisplayTitle(page)} containing the selected block.`);
@@ -235,12 +271,13 @@ export function useNotesWorkspace(
         }
       }
     },
-    [onStatus, queryClient, showEditor],
+    [onStatus, openTarget, queryClient, showEditor],
   );
 
   const openMarkdownLink = useCallback(
     async (request: MarkdownOpenRequest) => {
       const { disposition, target } = request;
+      const openDisposition = disposition === "adjacent" ? adjacentDisposition : currentDisposition;
       try {
         if (target.kind === "external") {
           await openUrl(target.href);
@@ -261,10 +298,7 @@ export function useNotesWorkspace(
         if (target.kind === "page") {
           const journalDate = parseJournalDate(target.title);
           if (journalDate) {
-            await openJournal(journalDate);
-            if (disposition === "adjacent") {
-              onStatus("Split view is not available yet; opened the link in the current pane.");
-            }
+            await openJournal(journalDate, openDisposition);
             return;
           }
           const page = await getPageByTitle(target.title);
@@ -282,10 +316,7 @@ export function useNotesWorkspace(
           return;
         }
 
-        await openContent(content);
-        if (disposition === "adjacent") {
-          onStatus("Split view is not available yet; opened the link in the current pane.");
-        }
+        await openContent(content, openDisposition);
       } catch (error) {
         onStatus(`link error: ${String(error)}`);
       }
@@ -308,8 +339,7 @@ export function useNotesWorkspace(
       try {
         if (await deletePage(page.uuid)) {
           if (navigationEpoch !== navigationEpochRef.current) return;
-          setActivePageUuid(null);
-          setPendingJournalDate(null);
+          dispatchWorkspace({ type: "forget_page", pageUuid: page.uuid });
           queryClient.removeQueries({ queryKey: queryKeys.page(page.uuid), exact: true });
           setHits((current) =>
             current.filter(
@@ -326,34 +356,32 @@ export function useNotesWorkspace(
   );
 
   const selectPage = useCallback(
-    (page: Page) => {
+    (page: Page, disposition: OpenDisposition = currentDisposition) => {
       navigationEpochRef.current += 1;
       setNewNote(null);
-      setPendingJournalDate(null);
       queryClient.setQueryData(queryKeys.page(page.uuid), page);
-      setActivePageUuid(page.uuid);
+      openTarget(pageTarget(page.uuid), disposition);
       showEditor();
     },
-    [queryClient, showEditor],
+    [openTarget, queryClient, showEditor],
   );
 
   const resetWorkspace = useCallback(() => {
     navigationEpochRef.current += 1;
-    setActivePageUuid(null);
-    setPendingJournalDate(null);
+    dispatchWorkspace({ type: "reset" });
     setHits([]);
     void queryClient.invalidateQueries({ queryKey: queryKeys.root });
   }, [queryClient]);
 
   return {
     activePage,
+    activePane,
     activePageUuid,
     applyUpdated,
     captureJournal,
     closePage: () => {
       navigationEpochRef.current += 1;
-      setActivePageUuid(null);
-      setPendingJournalDate(null);
+      openTarget(homeTarget, currentDisposition);
     },
     createNewNote,
     creatingNote,
@@ -371,6 +399,20 @@ export function useNotesWorkspace(
     selectPage,
     setHits,
     quickCapture,
+    windowWorkspace,
+    closePane: (paneId: PaneId) => dispatchWorkspace({ type: "close_pane", paneId }),
+    focusPane: (paneId: PaneId) => dispatchWorkspace({ type: "focus_pane", paneId }),
+    showCompactPane: (paneId: PaneId) => dispatchWorkspace({ type: "show_compact_pane", paneId }),
+    goPaneBack: (paneId: PaneId) => dispatchWorkspace({ type: "go_back", paneId }),
+    goPaneForward: (paneId: PaneId) => dispatchWorkspace({ type: "go_forward", paneId }),
+    setPagePresentation: (paneId: PaneId, presentation: PagePresentation) =>
+      dispatchWorkspace({ type: "set_page_presentation", paneId, presentation }),
+    setDockVisibility: (visibility: DockVisibility) =>
+      dispatchWorkspace({ type: "set_dock_visibility", visibility }),
+    setDockWidth: (width: number) => dispatchWorkspace({ type: "set_dock_width", width }),
+    resizeSplit: (splitId: SplitId, ratio: number) =>
+      dispatchWorkspace({ type: "resize_split", splitId, ratio }),
+    openTarget,
   };
 }
 

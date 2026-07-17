@@ -18,7 +18,11 @@ import { AttachmentsCard } from "@/features/attachments/attachments-card";
 import { pageDisplayTitle, shiftJournalDate } from "@/features/journal/journal-date";
 import { renamePage, setPageLayout, type JournalDate, type Page, type PageLayout } from "@/lib/api";
 import { DebouncedAction } from "@/lib/debounced-action";
-import type { PagePresentation } from "./page-presentation";
+import { PagePresentation } from "./page-presentation";
+import {
+  dispositionFromShiftKey,
+  type OpenDisposition,
+} from "@/features/workspace/workspace-model";
 
 type Props = {
   page: Page;
@@ -27,10 +31,12 @@ type Props = {
   onClose: () => void;
   onDelete: (page: Page) => void | Promise<void>;
   onOpenMarkdownLink: MarkdownOpenHandler;
-  onOpenJournalDate: (date: JournalDate) => void | Promise<void>;
+  onOpenJournalDate: (date: JournalDate, disposition?: OpenDisposition) => void | Promise<void>;
   journalBusy: boolean;
   initialBlockUuid?: string | null;
   autoFocusTitle?: boolean;
+  presentation: PagePresentation;
+  onPresentationChange: (presentation: PagePresentation) => void;
 };
 
 type SaveState = "idle" | "dirty" | "saving" | "saved" | "error";
@@ -48,11 +54,12 @@ export function PageView({
   journalBusy,
   initialBlockUuid = null,
   autoFocusTitle = false,
+  presentation,
+  onPresentationChange,
 }: Props) {
   const [title, setTitle] = useState(page.title ?? "");
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [layoutBusy, setLayoutBusy] = useState(false);
-  const [presentation, setPresentation] = useState<PagePresentation>("editing");
   const [bodyFocusRequest, setBodyFocusRequest] = useState(0);
 
   const autosave = useRef(new DebouncedAction()).current;
@@ -102,12 +109,10 @@ export function PageView({
     pageRef.current = page;
     setTitle(page.title ?? "");
     setSaveState("idle");
-    if (page.layout === "outline") setPresentation("editing");
   }, [autosave, page]);
 
   useEffect(() => {
     setBodyFocusRequest(0);
-    setPresentation("editing");
   }, [page.uuid]);
 
   useEffect(() => {
@@ -118,14 +123,18 @@ export function PageView({
   }, [autoFocusTitle, page.uuid]);
 
   const changeLayout = async (layout: PageLayout) => {
-    if (layout === pageRef.current.layout || layoutBusy) return;
+    if (
+      presentation === PagePresentation.Reading ||
+      layout === pageRef.current.layout ||
+      layoutBusy
+    )
+      return;
     setLayoutBusy(true);
     try {
       await flush();
       const updated = await setPageLayout(pageRef.current.uuid, layout);
       pageRef.current = updated;
       onSavedRef.current(updated);
-      if (layout === "outline") setPresentation("editing");
     } catch (error) {
       onStatusRef.current(`layout error: ${String(error)}`);
     } finally {
@@ -175,13 +184,13 @@ export function PageView({
           <Input
             ref={titleInput}
             value={title}
-            readOnly={presentation === "reading"}
+            readOnly={presentation === PagePresentation.Reading}
             onBlur={() => void flush()}
             onKeyDown={(event) => {
               if (event.nativeEvent.isComposing) return;
               if (event.key === "Enter") {
                 event.preventDefault();
-                if (presentation === "reading") return;
+                if (presentation === PagePresentation.Reading) return;
                 const input = event.currentTarget;
                 void (async () => {
                   if (!(await flush())) return;
@@ -222,7 +231,12 @@ export function PageView({
               variant="ghost"
               size="xs"
               disabled={journalBusy}
-              onClick={() => void onOpenJournalDate(shiftJournalDate(journalDate, -1))}
+              onClick={(event) =>
+                void onOpenJournalDate(
+                  shiftJournalDate(journalDate, -1),
+                  dispositionFromShiftKey(event.shiftKey),
+                )
+              }
               className="rounded-md px-2 text-[10px]"
             >
               Previous day
@@ -232,7 +246,12 @@ export function PageView({
               variant="ghost"
               size="xs"
               disabled={journalBusy}
-              onClick={() => void onOpenJournalDate(shiftJournalDate(journalDate, 1))}
+              onClick={(event) =>
+                void onOpenJournalDate(
+                  shiftJournalDate(journalDate, 1),
+                  dispositionFromShiftKey(event.shiftKey),
+                )
+              }
               className="rounded-md px-2 text-[10px]"
             >
               Next day
@@ -250,7 +269,7 @@ export function PageView({
               type="button"
               variant={page.layout === value ? "secondary" : "ghost"}
               size="xs"
-              disabled={layoutBusy}
+              disabled={layoutBusy || presentation === PagePresentation.Reading}
               aria-pressed={page.layout === value}
               onClick={() => void changeLayout(value)}
               className="rounded-md px-2 text-[10px]"
@@ -273,7 +292,7 @@ export function PageView({
                 variant={presentation === value ? "secondary" : "ghost"}
                 size="xs"
                 aria-pressed={presentation === value}
-                onClick={() => setPresentation(value)}
+                onClick={() => onPresentationChange(value)}
                 className="rounded-md px-2 text-[10px]"
               >
                 <Icon className="size-3" />
@@ -287,6 +306,7 @@ export function PageView({
           size="xs"
           className="ml-auto rounded-lg text-muted-foreground opacity-60 hover:text-destructive hover:opacity-100"
           aria-label="Delete page"
+          disabled={presentation === PagePresentation.Reading}
           onClick={() => void onDelete(page)}
         >
           <Trash2 className="size-4" />
@@ -324,8 +344,8 @@ const DOCUMENT_PRESENTATIONS: Array<{
   label: string;
   icon: typeof FileText;
 }> = [
-  { value: "editing", label: "Write", icon: FileText },
-  { value: "reading", label: "Read", icon: BookOpen },
+  { value: PagePresentation.Editing, label: "Write", icon: FileText },
+  { value: PagePresentation.Reading, label: "Read", icon: BookOpen },
 ];
 
 function SaveIndicator({ state }: { state: SaveState }) {

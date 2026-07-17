@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, RefreshCw, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ChatCard } from "@/features/chat/chat-card";
+import type { AssistantController } from "@/features/chat/use-assistant-controller";
 import { pageDisplayTitle } from "@/features/journal/journal-date";
 import type { MarkdownOpenHandler } from "@/features/markdown";
 import {
@@ -18,18 +19,23 @@ import {
   type Page,
 } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
+import {
+  dispositionFromShiftKey,
+  type OpenDisposition,
+} from "@/features/workspace/workspace-model";
 
 type PanelProps = {
   page: Page | null;
   onOpenMarkdownLink: MarkdownOpenHandler;
+  controller: AssistantController;
 };
 
 type GraphProps = {
   page: Page | null;
-  onOpenContent: (content: Content) => void | Promise<void>;
+  onOpenContent: (content: Content, disposition?: OpenDisposition) => void | Promise<void>;
 };
 
-export function KnowledgePanel({ page, onOpenMarkdownLink }: PanelProps) {
+export function KnowledgePanel({ page, onOpenMarkdownLink, controller }: PanelProps) {
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
       <div className="flex shrink-0 items-center gap-2 px-1 pt-1">
@@ -42,7 +48,7 @@ export function KnowledgePanel({ page, onOpenMarkdownLink }: PanelProps) {
         </div>
       </div>
       <div className="min-h-0 flex-1 pt-1">
-        <ChatCard page={page} onOpenMarkdownLink={onOpenMarkdownLink} />
+        <ChatCard page={page} onOpenMarkdownLink={onOpenMarkdownLink} controller={controller} />
       </div>
     </div>
   );
@@ -98,13 +104,13 @@ export function GraphWorkspace({
           <GraphView
             snapshot={snapshot}
             focusUuid={page?.uuid ?? null}
-            onOpenItem={async (item) => {
+            onOpenItem={async (item, disposition) => {
               if (item.kind === "page") {
                 const record = await getPage(item.uuid);
-                if (record) await onOpenContent({ kind: "page", record });
+                if (record) await onOpenContent({ kind: "page", record }, disposition);
               } else {
                 const record = await getBlock(item.uuid);
-                if (record) await onOpenContent({ kind: "block", record });
+                if (record) await onOpenContent({ kind: "block", record }, disposition);
               }
             }}
           />
@@ -135,7 +141,9 @@ export function GraphWorkspace({
               <li key={contentUuid(backlink)}>
                 <button
                   type="button"
-                  onClick={() => void onOpenContent(backlink)}
+                  onClick={(event) =>
+                    void onOpenContent(backlink, dispositionFromShiftKey(event.shiftKey))
+                  }
                   className="w-full rounded-xl border border-border/60 bg-card/55 px-3 py-2.5 text-left text-xs transition hover:border-primary/25 hover:bg-primary/5"
                 >
                   <span className="font-medium">
@@ -159,7 +167,7 @@ function GraphView({
 }: {
   snapshot: GraphSnapshot;
   focusUuid: string | null;
-  onOpenItem: (item: GraphItem) => void | Promise<void>;
+  onOpenItem: (item: GraphItem, disposition: OpenDisposition) => void | Promise<void>;
 }) {
   const positioned = useMemo(() => {
     const count = snapshot.items.length;
@@ -215,9 +223,11 @@ function GraphView({
           role="button"
           tabIndex={0}
           aria-label={item.label}
-          onClick={() => void onOpenItem(item)}
+          onClick={(event) => void onOpenItem(item, dispositionFromShiftKey(event.shiftKey))}
           onKeyDown={(event) => {
-            if (event.key === "Enter" || event.key === " ") void onOpenItem(item);
+            if (event.key === "Enter" || event.key === " ") {
+              void onOpenItem(item, dispositionFromShiftKey(event.shiftKey));
+            }
           }}
           className="cursor-pointer outline-none"
         >
