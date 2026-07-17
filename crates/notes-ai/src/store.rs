@@ -373,6 +373,7 @@ impl AiStore {
                         rusqlite::params![generation_id, node_uuid],
                     )?;
                 }
+                activate_generation_if_complete(&transaction, generation_id, source_nodes)?;
                 transaction.commit()?;
                 Ok(())
             })
@@ -764,28 +765,7 @@ impl AiStore {
                         rusqlite::params![generation_id, node_uuid, input_hash],
                     )?;
                 }
-                let pending = transaction.query_row(
-                    "SELECT COUNT(*) FROM embedding_jobs WHERE generation_id = ?1",
-                    [generation_id],
-                    |row| row.get::<_, i64>(0).map(|value| value as u64),
-                )?;
-                let indexed = transaction.query_row(
-                    "SELECT COUNT(*) FROM generation_vectors WHERE generation_id = ?1",
-                    [generation_id],
-                    |row| row.get::<_, i64>(0).map(|value| value as u64),
-                )?;
-                if pending == 0 && indexed == source_nodes {
-                    transaction.execute(
-                        "UPDATE index_generations SET status = 'retired'
-                         WHERE status = 'active' AND id != ?1",
-                        [generation_id],
-                    )?;
-                    transaction.execute(
-                        "UPDATE index_generations
-                         SET status = 'active', activated_at = unixepoch() WHERE id = ?1",
-                        [generation_id],
-                    )?;
-                }
+                activate_generation_if_complete(&transaction, generation_id, source_nodes)?;
                 transaction.commit()
             })
             .await
@@ -855,6 +835,37 @@ impl AiStore {
             })
             .await
     }
+}
+
+fn activate_generation_if_complete(
+    transaction: &rusqlite::Transaction<'_>,
+    generation_id: uuid::Uuid,
+    source_nodes: u64,
+) -> rusqlite::Result<()> {
+    let pending = transaction.query_row(
+        "SELECT COUNT(*) FROM embedding_jobs WHERE generation_id = ?1",
+        [generation_id],
+        |row| row.get::<_, i64>(0).map(|value| value as u64),
+    )?;
+    let indexed = transaction.query_row(
+        "SELECT COUNT(*) FROM generation_vectors WHERE generation_id = ?1",
+        [generation_id],
+        |row| row.get::<_, i64>(0).map(|value| value as u64),
+    )?;
+    if pending != 0 || indexed != source_nodes {
+        return Ok(());
+    }
+    transaction.execute(
+        "UPDATE index_generations SET status = 'retired'
+         WHERE status = 'active' AND id != ?1",
+        [generation_id],
+    )?;
+    transaction.execute(
+        "UPDATE index_generations
+         SET status = 'active', activated_at = unixepoch() WHERE id = ?1",
+        [generation_id],
+    )?;
+    Ok(())
 }
 
 #[async_trait]
@@ -1161,6 +1172,23 @@ mod tests {
         let status = store.status(source_nodes).await.expect("reset status");
         assert_eq!(status.generation_status, GenerationStatus::Building);
         assert_eq!(status.indexed, 0);
+    }
+
+    #[tokio::test]
+    async fn empty_generation_activates_after_reconciliation() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let notes = notes_core::db::open(directory.path().join("notes.db"))
+            .await
+            .expect("notes database");
+        let store = AiStore::open(directory.path().join("ai.db"), "identity".into(), 2)
+            .await
+            .expect("AI store");
+
+        let source_nodes = store.reconcile(&notes, 0).await.expect("reconcile");
+        let status = store.status(source_nodes).await.expect("status");
+
+        assert_eq!(source_nodes, 0);
+        assert_eq!(status.generation_status, GenerationStatus::Active);
     }
 
     #[tokio::test]
