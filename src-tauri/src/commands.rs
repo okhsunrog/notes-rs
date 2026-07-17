@@ -355,6 +355,14 @@ pub fn save_settings(
 
 #[tauri::command]
 #[specta::specta]
+pub fn reset_settings(app: AppHandle) -> CommandResult<crate::settings::SettingsSnapshot> {
+    let settings = crate::settings::reset(&app).map_err(err)?;
+    emit_domain(&app, DomainEvent::SettingsChanged);
+    Ok(settings)
+}
+
+#[tauri::command]
+#[specta::specta]
 pub fn restart_app(app: AppHandle) {
     app.restart()
 }

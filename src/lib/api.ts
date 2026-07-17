@@ -103,6 +103,7 @@ export const getMobileSystemInfo = checkedCommand(commands.mobileSystemInfo);
 export const setSystemBarsStyle = checkedCommand(commands.setSystemBarsStyle);
 export const loadSettings = checkedCommand(commands.loadSettings);
 export const saveSettings = checkedCommand(commands.saveSettings);
+export const resetSettings = checkedCommand(commands.resetSettings);
 
 export const restartApp = commands.restartApp;
 export const chatStream = checkedCommand(commands.chatStream);

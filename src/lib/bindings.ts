@@ -21,6 +21,7 @@ export const commands = {
 	reindexServerAi: () => typedError<AiIndexStatus, CommandError>(__TAURI_INVOKE("reindex_server_ai")),
 	loadSettings: () => typedError<SettingsSnapshot, CommandError>(__TAURI_INVOKE("load_settings")),
 	saveSettings: (update: SettingsUpdate) => typedError<SettingsSnapshot, CommandError>(__TAURI_INVOKE("save_settings", { update })),
+	resetSettings: () => typedError<SettingsSnapshot, CommandError>(__TAURI_INVOKE("reset_settings")),
 	restartApp: () => __TAURI_INVOKE<void>("restart_app"),
 	historyStatus: () => typedError<[number, number], CommandError>(__TAURI_INVOKE("history_status")),
 	undo: () => typedError<boolean, CommandError>(__TAURI_INVOKE("undo")),

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, ExternalLink, File, Loader2, Paperclip, Trash2 } from "lucide-react";
+import { useConfirmation } from "@/app/confirmation";
 import { Button } from "@/components/ui/button";
 import {
   attachFile,
@@ -20,6 +21,7 @@ export function AttachmentsCard({
   parentUuid: string;
   onStatus: (message: string) => void;
 }) {
+  const confirm = useConfirmation();
   const queryClient = useQueryClient();
   const [busy, setBusy] = useState(false);
   const [expanded, setExpanded] = useState(false);
@@ -58,9 +60,12 @@ export function AttachmentsCard({
 
   async function remove(attachment: Node) {
     if (
-      !window.confirm(
-        `Remove attachment “${attachment.title ?? "file"}”? A backup will be created first.`,
-      )
+      !(await confirm({
+        title: "Remove attachment?",
+        description: `“${attachment.title ?? "File"}” will be detached from this note. A recovery backup is created first.`,
+        confirmLabel: "Remove attachment",
+        destructive: true,
+      }))
     )
       return;
     try {

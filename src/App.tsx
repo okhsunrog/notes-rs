@@ -33,7 +33,9 @@ function App() {
   );
   const [searchOpen, setSearchOpen] = useState(false);
   const [graphOpen, setGraphOpen] = useState(false);
-  const workspace = useNotesWorkspace(ready, setStatus);
+  const [editorRequest, setEditorRequest] = useState(0);
+  const showEditor = useCallback(() => setEditorRequest((request) => request + 1), []);
+  const workspace = useNotesWorkspace(ready, setStatus, showEditor);
 
   const settingsQuery = useQuery({
     queryKey: queryKeys.settings,
@@ -109,7 +111,7 @@ function App() {
             <h1 className="font-semibold text-destructive">notes-rs could not start</h1>
             <p className="mt-2 text-sm break-words text-muted-foreground">{startupError}</p>
             <p className="mt-3 text-xs text-muted-foreground">
-              Update the provider configuration, then restart the app.
+              Open Settings to reset invalid device configuration, then restart the app.
             </p>
             <Button className="mt-4" onClick={() => setSettingsOpen(true)}>
               <Settings className="size-4" />
@@ -130,6 +132,7 @@ function App() {
     <>
       <AppLayout
         status={status}
+        editorRequest={editorRequest}
         headerActions={
           <>
             {syncQuery.data?.state !== "disabled" && (

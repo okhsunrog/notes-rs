@@ -180,6 +180,14 @@ pub fn save(app: &AppHandle, update: SettingsUpdate) -> Result<SettingsSnapshot>
     snapshot(stored, path)
 }
 
+pub fn reset(app: &AppHandle) -> Result<SettingsSnapshot> {
+    let stored = StoredSettings::default();
+    let path = config_path(app)?;
+    write_settings(&path, &stored)?;
+    apply_window_decorations(app, &stored.window_decoration_mode)?;
+    snapshot(stored, path)
+}
+
 #[cfg(not(mobile))]
 pub fn apply_saved_window_preferences(app: &AppHandle) -> Result<()> {
     let settings = load_stored(app)?;

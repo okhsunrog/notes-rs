@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Channel } from "@tauri-apps/api/core";
 import { ArrowUp, CheckCircle2, PencilLine, Sparkles, Square, Trash2, Wrench } from "lucide-react";
+import { useConfirmation } from "@/app/confirmation";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cancelChat, chatStream, type ChatEvent, type ChatTurn, type Node } from "@/lib/api";
@@ -30,6 +31,7 @@ function boundedHistory(turns: ChatTurn[]) {
 }
 
 export function ChatCard({ node }: { node: Node | null }) {
+  const confirm = useConfirmation();
   const [chatInput, setChatInput] = useState("");
   const [chatLog, setChatLog] = useState<ChatTurn[]>(loadStoredChat);
   const [chatBusy, setChatBusy] = useState(false);
@@ -262,15 +264,18 @@ export function ChatCard({ node }: { node: Node | null }) {
             aria-pressed={allowWrites}
             disabled={chatBusy}
             title="Allow create/link tools for the next request only"
-            onClick={() => {
+            onClick={async () => {
               if (allowWrites) {
                 setAllowWrites(false);
                 return;
               }
               if (
-                window.confirm(
-                  "Allow the AI to create notes and links during the next request? The changes will be added to Undo history.",
-                )
+                await confirm({
+                  title: "Allow AI writes?",
+                  description:
+                    "For the next request, the assistant may create notes and links. Every change is recorded in Undo history.",
+                  confirmLabel: "Allow once",
+                })
               )
                 setAllowWrites(true);
             }}

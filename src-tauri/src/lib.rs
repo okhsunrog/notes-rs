@@ -19,6 +19,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::reindex_server_ai,
             commands::load_settings,
             commands::save_settings,
+            commands::reset_settings,
             commands::restart_app,
             commands::history_status,
             commands::undo,
@@ -118,30 +119,53 @@ pub fn run() {
             let data_dir = app.path().app_data_dir().expect("resolving app data dir");
             std::fs::create_dir_all(&data_dir).expect("creating data dir");
 
+            let startup = Arc::new(RwLock::new(commands::StartupStatus::Starting {
+                message: "Loading device settings…".into(),
+            }));
+            handle.manage(commands::Startup {
+                status: startup.clone(),
+            });
+            let sync_runtime = sync::SyncRuntime::disabled();
+            let sync_status = sync_runtime.status.clone();
+            app.manage(sync_runtime);
+
             #[cfg(not(mobile))]
             if let Err(error) = settings::apply_saved_window_preferences(&handle) {
                 tracing::warn!(%error, "failed to apply saved window preferences");
             }
 
             let db_path = data_dir.join("notes.db");
-            let configured_settings = settings::runtime(&handle)?;
-            let sync_credentials = configured_settings.sync_credentials()?;
+            let configured_settings = match settings::runtime(&handle) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    report_startup_error(&handle, &startup, error);
+                    return Ok(());
+                }
+            };
+            let sync_credentials = match configured_settings.sync_credentials() {
+                Ok(credentials) => credentials,
+                Err(error) => {
+                    report_startup_error(&handle, &startup, error);
+                    return Ok(());
+                }
+            };
             let remote_ai = sync_credentials
                 .as_ref()
                 .map(|(server_url, token)| {
                     notes_sync::HttpTransport::new(server_url.clone(), token.clone())
                 })
-                .transpose()?;
-            let sync_runtime = sync::SyncRuntime::disabled();
-            let sync_status = sync_runtime.status.clone();
-            app.manage(sync_runtime);
-
-            let startup = Arc::new(RwLock::new(commands::StartupStatus::Starting {
-                message: "Opening local notes database…".into(),
-            }));
-            handle.manage(commands::Startup {
-                status: startup.clone(),
-            });
+                .transpose();
+            let remote_ai = match remote_ai {
+                Ok(remote) => remote,
+                Err(error) => {
+                    report_startup_error(&handle, &startup, error);
+                    return Ok(());
+                }
+            };
+            *startup.write().unwrap_or_else(|error| error.into_inner()) =
+                commands::StartupStatus::Starting {
+                    message: "Opening local notes database…".into(),
+                };
 
             tauri::async_runtime::spawn(async move {
                 match db::open(&db_path).await {
@@ -185,6 +209,19 @@ pub fn run() {
         .invoke_handler(invoke_handler)
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn report_startup_error(
+    handle: &tauri::AppHandle,
+    startup: &Arc<RwLock<commands::StartupStatus>>,
+    error: anyhow::Error,
+) {
+    let message = format!("{error:#}");
+    tracing::error!(%message, "notes-rs startup failed");
+    *startup.write().unwrap_or_else(|error| error.into_inner()) = commands::StartupStatus::Error {
+        message: message.clone(),
+    };
+    let _ = handle.emit("app:startup-error", message);
 }
 
 #[cfg(not(target_os = "android"))]

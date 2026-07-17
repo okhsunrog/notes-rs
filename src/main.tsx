@@ -4,6 +4,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "next-themes";
 import App from "./App";
 import { AppearanceProvider } from "@/app/appearance";
+import { ConfirmationProvider } from "@/app/confirmation";
 import { ErrorBoundary } from "@/app/error-boundary";
 import { disableViewportZoom } from "@/app/viewport-zoom";
 import "./index.css";
@@ -19,9 +20,11 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
       <QueryClientProvider client={queryClient}>
         <AppearanceProvider>
-          <ErrorBoundary>
-            <App />
-          </ErrorBoundary>
+          <ConfirmationProvider>
+            <ErrorBoundary>
+              <App />
+            </ErrorBoundary>
+          </ConfirmationProvider>
         </AppearanceProvider>
       </QueryClientProvider>
     </ThemeProvider>

@@ -12,8 +12,14 @@ import {
   type SearchHit,
 } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
+import { useConfirmation } from "@/app/confirmation";
 
-export function useNotesWorkspace(ready: boolean, onStatus: (message: string) => void) {
+export function useNotesWorkspace(
+  ready: boolean,
+  onStatus: (message: string) => void,
+  showEditor: () => void,
+) {
+  const confirm = useConfirmation();
   const queryClient = useQueryClient();
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [activePageUuid, setActivePageUuid] = useState<string | null>(null);
@@ -46,14 +52,14 @@ export function useNotesWorkspace(ready: boolean, onStatus: (message: string) =>
       setActivePageUuid(note.page.uuid);
       setHits([]);
       onStatus("New note ready — name it, then press Enter to write.");
-      window.dispatchEvent(new Event("notes-rs:show-main"));
+      showEditor();
     } catch (error) {
       onStatus(`create error: ${String(error)}`);
     } finally {
       creatingNoteRef.current = false;
       setCreatingNote(false);
     }
-  }, [onStatus, queryClient]);
+  }, [onStatus, queryClient, showEditor]);
 
   const moveHistory = useCallback(
     async (direction: "undo" | "redo") => {
@@ -93,7 +99,7 @@ export function useNotesWorkspace(ready: boolean, onStatus: (message: string) =>
         }
         queryClient.setQueryData(queryKeys.node(page.uuid), page);
         setActivePageUuid(page.uuid);
-        window.dispatchEvent(new Event("notes-rs:show-main"));
+        showEditor();
         if (page.uuid !== node.uuid) {
           onStatus(`Opened ${page.title ?? "page"} containing #${node.id}`);
         }
@@ -101,15 +107,18 @@ export function useNotesWorkspace(ready: boolean, onStatus: (message: string) =>
         onStatus(`open error: ${String(error)}`);
       }
     },
-    [onStatus, queryClient],
+    [onStatus, queryClient, showEditor],
   );
 
   const removePage = useCallback(
     async (node: Node) => {
       if (
-        !window.confirm(
-          `Delete “${node.title ?? "untitled"}” and all of its blocks? A backup will be created first.`,
-        )
+        !(await confirm({
+          title: "Delete note?",
+          description: `“${node.title ?? "Untitled"}” and all of its blocks will be removed. A recovery backup is created first.`,
+          confirmLabel: "Delete note",
+          destructive: true,
+        }))
       )
         return;
       try {
@@ -123,7 +132,7 @@ export function useNotesWorkspace(ready: boolean, onStatus: (message: string) =>
         onStatus(`delete error: ${String(error)}`);
       }
     },
-    [onStatus, queryClient],
+    [confirm, onStatus, queryClient],
   );
 
   const selectPage = useCallback(
@@ -131,9 +140,9 @@ export function useNotesWorkspace(ready: boolean, onStatus: (message: string) =>
       setNewNote(null);
       queryClient.setQueryData(queryKeys.node(page.uuid), page);
       setActivePageUuid(page.uuid);
-      window.dispatchEvent(new Event("notes-rs:show-main"));
+      showEditor();
     },
-    [queryClient],
+    [queryClient, showEditor],
   );
 
   const resetWorkspace = useCallback(() => {

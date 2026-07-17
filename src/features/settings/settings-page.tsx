@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { WindowControls } from "@/app/window-controls";
 import { PALETTES, useAppearance } from "@/app/appearance";
+import { useConfirmation } from "@/app/confirmation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -24,6 +25,7 @@ import {
   getSyncStatus,
   importData,
   loadSettings,
+  resetSettings,
   restartApp,
   saveSettings,
   syncPull,
@@ -51,6 +53,7 @@ export function SettingsPage({
   dataAvailable,
   onDataChanged,
 }: Props) {
+  const confirm = useConfirmation();
   const { theme, setTheme } = useTheme();
   const { palette, setPalette } = useAppearance();
   const queryClient = useQueryClient();
@@ -101,9 +104,13 @@ export function SettingsPage({
     if (!dataAvailable) return;
     if (
       action === "import" &&
-      !window.confirm(
-        "Replace the current database with the selected archive? A backup will be created first.",
-      )
+      !(await confirm({
+        title: "Import archive?",
+        description:
+          "The selected archive will replace the current local workspace. A recovery backup is created first.",
+        confirmLabel: "Choose archive",
+        destructive: true,
+      }))
     )
       return;
     setBusy(true);
@@ -142,9 +149,13 @@ export function SettingsPage({
     if (!dataAvailable || !current) return;
     if (
       direction === "pull" &&
-      !window.confirm(
-        "Replace local data from the sync snapshot? A local backup will be created first.",
-      )
+      !(await confirm({
+        title: "Pull folder snapshot?",
+        description:
+          "The folder snapshot will replace the current local workspace. A recovery backup is created first.",
+        confirmLabel: "Pull and replace",
+        destructive: true,
+      }))
     )
       return;
     setBusy(true);
@@ -163,11 +174,56 @@ export function SettingsPage({
     }
   }
 
+  async function resetInvalidSettings() {
+    if (
+      !(await confirm({
+        title: "Reset device settings?",
+        description:
+          "The invalid settings file will be replaced with current defaults. Local notes are not affected, but server credentials must be entered again.",
+        confirmLabel: "Reset settings",
+        destructive: true,
+      }))
+    )
+      return;
+    setBusy(true);
+    try {
+      const restored = await resetSettings();
+      setSettings(restored);
+      setError("");
+      setMessage("Device settings reset. Restart the app after configuring the server.");
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (!settings) {
     return (
       <div className="app-shell flex h-full items-center justify-center text-foreground">
         {error ? (
-          <p className="text-sm text-destructive">{error}</p>
+          <div className="mx-5 max-w-lg rounded-2xl border border-destructive/30 bg-card/90 p-6 shadow-xl">
+            <h1 className="font-semibold">Device settings could not be loaded</h1>
+            <p className="mt-2 text-sm break-words text-destructive">{error}</p>
+            <div className="mt-5 flex flex-wrap gap-2">
+              <Button type="button" variant="outline" onClick={onBack}>
+                <ArrowLeft className="size-4" /> Back
+              </Button>
+              <Button
+                type="button"
+                variant="destructive"
+                disabled={busy}
+                onClick={() => void resetInvalidSettings()}
+              >
+                {busy ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <RotateCcw className="size-4" />
+                )}
+                Reset device settings
+              </Button>
+            </div>
+          </div>
         ) : (
           <Loader2 className="animate-spin" />
         )}

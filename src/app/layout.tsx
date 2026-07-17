@@ -9,22 +9,30 @@ type Props = {
   center: ReactNode;
   right: ReactNode;
   fullWorkspace?: ReactNode;
+  editorRequest: number;
 };
 
-export function AppLayout({ status, headerActions, sidebar, center, right, fullWorkspace }: Props) {
+export function AppLayout({
+  status,
+  headerActions,
+  sidebar,
+  center,
+  right,
+  fullWorkspace,
+  editorRequest,
+}: Props) {
   const [compact, setCompact] = useState(() => window.innerWidth < 1000);
   const [compactPanel, setCompactPanel] = useState<"notes" | "editor" | "assistant">("editor");
 
   useEffect(() => {
     const resize = () => setCompact(window.innerWidth < 1000);
-    const showMain = () => setCompactPanel("editor");
     window.addEventListener("resize", resize);
-    window.addEventListener("notes-rs:show-main", showMain);
     return () => {
       window.removeEventListener("resize", resize);
-      window.removeEventListener("notes-rs:show-main", showMain);
     };
   }, []);
+
+  useEffect(() => setCompactPanel("editor"), [editorRequest]);
 
   return (
     <div className="app-shell flex h-full flex-col overflow-hidden text-foreground">
