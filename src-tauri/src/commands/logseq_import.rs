@@ -1215,6 +1215,68 @@ mod tests {
         .expect("prepare fixture")
     }
 
+    fn source_metadata(
+        root: &Path,
+        manifest: &notes_import::GraphManifest,
+    ) -> BTreeMap<String, (u64, std::time::SystemTime)> {
+        manifest
+            .entries()
+            .iter()
+            .map(|entry| {
+                let metadata = std::fs::symlink_metadata(root.join(&entry.relative_path))
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "could not inspect source metadata for {}: {error}",
+                            entry.relative_path
+                        )
+                    });
+                let modified = metadata.modified().unwrap_or_else(|error| {
+                    panic!(
+                        "could not read source mtime for {}: {error}",
+                        entry.relative_path
+                    )
+                });
+                (entry.relative_path.clone(), (metadata.len(), modified))
+            })
+            .collect()
+    }
+
+    fn deepest_import_page(prepared: &PreparedImport) -> (uuid::Uuid, usize, usize) {
+        prepared
+            .pages
+            .iter()
+            .map(|page| {
+                let parents = page
+                    .blocks
+                    .iter()
+                    .map(|block| (block.uuid, block.parent_block_uuid))
+                    .collect::<HashMap<_, _>>();
+                let maximum_depth = page
+                    .blocks
+                    .iter()
+                    .map(|block| {
+                        let mut depth = 1_usize;
+                        let mut parent = block.parent_block_uuid;
+                        while let Some(parent_uuid) = parent {
+                            depth += 1;
+                            assert!(
+                                depth <= page.blocks.len(),
+                                "prepared real-corpus page contains a parent cycle"
+                            );
+                            parent = *parents
+                                .get(&parent_uuid)
+                                .expect("prepared parent belongs to its page");
+                        }
+                        depth
+                    })
+                    .max()
+                    .unwrap_or_default();
+                (page.uuid, maximum_depth, page.blocks.len())
+            })
+            .max_by_key(|(_, depth, _)| *depth)
+            .expect("prepared corpus contains pages")
+    }
+
     #[test]
     fn adapter_preserves_journals_tasks_tree_styles_and_order() {
         let graph = prepared_fixture("parser");
@@ -1338,13 +1400,37 @@ mod tests {
             import_namespace_uuid: uuid::Uuid::now_v7(),
         };
         let before = notes_import::scan_logseq_graph(&source_root).expect("scan source before");
+        let source_metadata_before = source_metadata(&source_root, &before.manifest);
         let graph = prepare_selected_graph(&source_root, identity, &ignored_progress())
             .expect("prepare real corpus");
         assert!(graph.prepared.is_committable());
         assert!(!graph.prepared.pages.is_empty());
         let expected_report = graph.prepared.report.clone();
+        let expected_journal_count = graph
+            .prepared
+            .pages
+            .iter()
+            .filter(|page| matches!(page.kind, ImportPageKind::Journal { .. }))
+            .count();
+        let (deepest_page_uuid, expected_maximum_depth, deepest_page_block_count) =
+            deepest_import_page(&graph.prepared);
+        assert!(
+            expected_maximum_depth >= 4,
+            "the real-corpus smoke must exercise a meaningfully nested page"
+        );
         let materialized = notes_import::materialize_source_media(&graph.prepared, &source_root)
             .expect("materialize real media");
+        let expected_attachment_count = materialized.attachments.len();
+        let expected_blobs = materialized
+            .blobs
+            .iter()
+            .map(|blob| {
+                (
+                    BlobHash::from_bytes(*blob.sha256.as_bytes()),
+                    blob.size_bytes,
+                )
+            })
+            .collect::<Vec<_>>();
         let (batch, blobs) =
             build_external_import_batch(graph.prepared, graph.scan_diagnostics, materialized)
                 .expect("build real core batch");
@@ -1365,10 +1451,45 @@ mod tests {
             ExternalImportOutcome::Applied {
                 page_count,
                 block_count,
+                attachment_count,
                 ..
             } if page_count == expected_report.page_count
                 && block_count == expected_report.block_count
+                && attachment_count == expected_attachment_count as u64
         ));
+        for (hash, size) in expected_blobs {
+            blob_store
+                .open_verified(hash, size)
+                .expect("every imported source blob remains verified");
+        }
+        let snapshot = notes_core::export_sync_snapshot(&connection, 0)
+            .await
+            .expect("export imported workspace snapshot");
+        assert_eq!(snapshot.pages.len(), expected_report.page_count as usize);
+        assert_eq!(snapshot.blocks.len(), expected_report.block_count as usize);
+        assert_eq!(
+            snapshot
+                .page_identities
+                .iter()
+                .filter(|identity| matches!(identity.kind, notes_core::PageKind::Journal { .. }))
+                .count(),
+            expected_journal_count
+        );
+        assert_eq!(
+            snapshot
+                .attachments
+                .iter()
+                .filter(|attachment| attachment.present)
+                .count(),
+            expected_attachment_count
+        );
+        assert_eq!(
+            db::read_subtree(&connection, deepest_page_uuid, u32::MAX)
+                .await
+                .expect("read deepest imported page")
+                .len(),
+            deepest_page_block_count
+        );
 
         let second = prepare_selected_graph(&source_root, identity, &ignored_progress())
             .expect("prepare exact rerun");
@@ -1386,5 +1507,10 @@ mod tests {
 
         let after = notes_import::scan_logseq_graph(&source_root).expect("scan source after");
         assert_eq!(before.manifest, after.manifest);
+        assert_eq!(
+            source_metadata_before,
+            source_metadata(&source_root, &after.manifest),
+            "the import smoke must not change source file sizes or mtimes"
+        );
     }
 }
