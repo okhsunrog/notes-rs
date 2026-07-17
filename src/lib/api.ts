@@ -21,8 +21,17 @@ import type {
   GraphItem,
   GraphSnapshot,
   HistoryStatus,
+  ImportDiagnostic,
   JournalDate,
   JournalListLimit,
+  LogseqImportAvailability,
+  LogseqImportBlocker,
+  LogseqImportCommitResult,
+  LogseqImportDiagnosticPage,
+  LogseqImportPreview,
+  LogseqImportProgress,
+  LogseqImportReportSummary,
+  LogseqImportStage,
   ObjectKind,
   Page,
   PageKind,
@@ -60,8 +69,17 @@ export type {
   GraphItem,
   GraphSnapshot,
   HistoryStatus,
+  ImportDiagnostic,
   JournalDate,
   JournalListLimit,
+  LogseqImportAvailability,
+  LogseqImportBlocker,
+  LogseqImportCommitResult,
+  LogseqImportDiagnosticPage,
+  LogseqImportPreview,
+  LogseqImportProgress,
+  LogseqImportReportSummary,
+  LogseqImportStage,
   ObjectKind,
   Page,
   PageKind,
@@ -213,6 +231,11 @@ export const findBacklinks = checkedCommand(commands.findBacklinks);
 export const getGraphSnapshot = checkedCommand(commands.graphSnapshot);
 export const exportData = checkedCommand(commands.exportData);
 export const importData = checkedCommand(commands.importData);
+export const getLogseqImportCapability = commands.logseqImportCapability;
+export const prepareLogseqImport = checkedCommand(commands.prepareLogseqImport);
+export const getLogseqImportDiagnostics = checkedCommand(commands.logseqImportDiagnostics);
+export const commitLogseqImport = checkedCommand(commands.commitLogseqImport);
+export const discardLogseqImport = commands.discardLogseqImport;
 export const createBackup = checkedCommand(commands.createBackup);
 export const attachFile = checkedCommand(commands.attachFile);
 export const listAttachments = checkedCommand(commands.listAttachments);

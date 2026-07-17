@@ -19,7 +19,13 @@ import { SearchCard } from "@/features/search/search-card";
 import { PagesList } from "@/features/pages/pages-list";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import { getSyncStatus, loadSettings, type Content, type WindowDecorationMode } from "@/lib/api";
+import {
+  getPage,
+  getSyncStatus,
+  loadSettings,
+  type Content,
+  type WindowDecorationMode,
+} from "@/lib/api";
 import { queryKeys } from "@/lib/query";
 import { useAppShortcuts } from "@/app/use-app-shortcuts";
 import { useStartupState } from "@/app/use-startup-state";
@@ -115,9 +121,20 @@ function App() {
           onBack={() => setSettingsOpen(false)}
           onDecorationModeChanged={setWindowDecorationMode}
           dataAvailable={ready}
-          onDataChanged={() => {
+          onDataChanged={(openPageUuid) => {
             workspace.resetWorkspace();
-            setStatus("Imported archive.");
+            if (!openPageUuid) return;
+            void getPage(openPageUuid)
+              .then((page) => {
+                if (!page) {
+                  setStatus("import error: imported page was not found");
+                  return;
+                }
+                workspace.selectPage(page);
+                setSettingsOpen(false);
+                setStatus("Opened the imported Logseq workspace.");
+              })
+              .catch((error: unknown) => setStatus(`import error: ${String(error)}`));
           }}
         />
       </Suspense>

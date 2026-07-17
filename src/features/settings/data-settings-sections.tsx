@@ -1,14 +1,25 @@
 import { DatabaseBackup, Download, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { LogseqImportSection } from "./logseq-import-section";
 import { SettingsSection } from "./settings-controls";
 
 type Props = {
   dataAvailable: boolean;
   busy: boolean;
   dataAction: (action: "export" | "import" | "backup") => Promise<void>;
+  onDataChanged: (openPageUuid: string | null) => void;
+  onError: (message: string) => void;
+  onMessage: (message: string) => void;
 };
 
-export function DataSettingsSections({ dataAvailable, busy, dataAction }: Props) {
+export function DataSettingsSections({
+  dataAvailable,
+  busy,
+  dataAction,
+  onDataChanged,
+  onError,
+  onMessage,
+}: Props) {
   return (
     <SettingsSection
       title="Data"
@@ -45,6 +56,12 @@ export function DataSettingsSections({ dataAvailable, busy, dataAction }: Props)
           Data tools become available after the database starts successfully.
         </p>
       )}
+      <LogseqImportSection
+        disabled={!dataAvailable || busy}
+        onDataChanged={onDataChanged}
+        onError={onError}
+        onMessage={onMessage}
+      />
     </SettingsSection>
   );
 }

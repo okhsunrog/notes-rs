@@ -42,7 +42,7 @@ type Props = {
   onBack: () => void;
   onDecorationModeChanged: (mode: WindowDecorationMode) => void;
   dataAvailable: boolean;
-  onDataChanged: () => void;
+  onDataChanged: (openPageUuid?: string | null) => void;
 };
 
 export function SettingsPage({
@@ -385,7 +385,14 @@ export function SettingsPage({
           onMessage={setMessage}
         />
 
-        <DataSettingsSections dataAvailable={dataAvailable} busy={busy} dataAction={dataAction} />
+        <DataSettingsSections
+          dataAvailable={dataAvailable}
+          busy={busy}
+          dataAction={dataAction}
+          onDataChanged={onDataChanged}
+          onError={setError}
+          onMessage={setMessage}
+        />
 
         {error && (
           <p
@@ -396,7 +403,7 @@ export function SettingsPage({
           </p>
         )}
         {message && (
-          <p className="flex items-center gap-2 text-sm text-emerald-600">
+          <p role="status" className="flex items-center gap-2 text-sm text-emerald-600">
             <Check className="size-4" />
             {message}
           </p>
