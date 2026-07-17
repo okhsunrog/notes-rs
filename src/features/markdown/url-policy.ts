@@ -1,4 +1,5 @@
 import type { MarkdownLinkTarget } from "./types";
+import { safeMarkdownImageSourceTransform } from "./image-policy";
 
 const PAGE_HREF_PREFIX = "notes-page:";
 const BLOCK_HREF_PREFIX = "notes-block:";
@@ -112,8 +113,15 @@ function hasControlCharacter(value: string): boolean {
   return false;
 }
 
-/** ReactMarkdown URL transform. Empty output is rendered as inert text by MarkdownLink. */
-export function safeMarkdownUrlTransform(rawUrl: string): string {
+/** ReactMarkdown URL transform. Images use their own attachment-only resolver boundary. */
+export function safeMarkdownUrlTransform(
+  rawUrl: string,
+  key?: string,
+  node?: Readonly<{ tagName?: string }>,
+): string {
+  if (key === "src" && node?.tagName === "img") {
+    return safeMarkdownImageSourceTransform(rawUrl);
+  }
   const classified = classifyMarkdownUrl(rawUrl);
   return classified.kind === "allowed" ? classified.href : "";
 }
