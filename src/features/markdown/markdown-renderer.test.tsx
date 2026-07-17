@@ -50,6 +50,24 @@ describe("MarkdownRenderer", () => {
     expect(html).toContain('href="notes-block:019c8d1a-4ab1-7f31-8f00-f594337c3ca5"');
   });
 
+  it("uses raw source escapes without losing a later valid notes link", () => {
+    const html = render(String.raw`\[[Escaped]] and [[Valid]]`);
+
+    expect(html.match(/data-markdown-link="page"/g)).toHaveLength(1);
+    expect(html).toContain("[[Escaped]] and");
+    expect(html).toContain('href="notes-page:Valid"');
+    expect(html).not.toContain('href="notes-page:Escaped"');
+  });
+
+  it("keeps closed nested notes syntax visible and inert", () => {
+    const html = render(`[[outer [[inner]] tail]] and [[cross ((${ATTACHMENT_UUID})) tail]]`);
+
+    expect(html).not.toContain('data-markdown-link="page"');
+    expect(html).not.toContain('data-markdown-link="block"');
+    expect(html).toContain("[[outer [[inner]] tail]]");
+    expect(html).toContain(`[[cross ((${ATTACHMENT_UUID})) tail]]`);
+  });
+
   it("does not interpret notes syntax inside inline or fenced code", () => {
     const html = render(
       "[[Outside]] `[[Inline code]]`\n\n```text\n[[Fenced code]]\n((019c8d1a-4ab1-7f31-8f00-f594337c3ca5))\n```",
