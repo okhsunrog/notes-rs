@@ -1,7 +1,7 @@
 # Sync & Backend Architecture Plan
 
-Status: approved design, ready for implementation.
-Audience: implementing agent/developer. This document is self-contained; read it fully before starting. It encodes decisions already made with the project owner — do not re-litigate them, but do flag genuine contradictions you discover in code.
+Status: core architecture implemented; pre-release hardening remains. Updated 2026-07-17.
+Audience: developer/maintainer. This document records the decisions and the resulting implementation. Items explicitly marked remaining are not implemented and must not be inferred from the target design.
 
 ## 1. Context
 
@@ -96,7 +96,7 @@ Rules:
 
 ```json
 {
-  "op_id": "uuid-v4",
+  "op_id": "uuid-v7",
   "device_id": "uuid-v4",
   "hlc": "0189f3a2b4c8-0003-d1e2f3a4",   // sortable: wall_ms hex - counter hex - device suffix
   "format_version": 1,
@@ -147,7 +147,7 @@ history_actions (id, action_uuid, label, forward_json, inverse_json, created_at)
 
 ## 6. Sync protocol
 
-Transport: HTTP + WebSocket, JSON bodies (serde). Auth v1: static bearer token per device, configured on the server (env/config file) and entered in app settings. Token pairing UX can improve later.
+Transport: HTTP + WebSocket, JSON bodies (serde). Auth v1 is a static bearer-token mapping bootstrapped from the server TOML and entered in app settings. Token pairing, rotation, and scopes remain future work.
 
 ```
 GET  /v1/health
@@ -170,7 +170,7 @@ Realtime target: op visible on a second online device < 500 ms after local apply
 
 ## 7. Server (Phase 3)
 
-Stack: **axum + tokio + rusqlite** (same pinned versions as the app where possible), single binary, config via env/file. TLS is the reverse-proxy's job. Storage layout:
+Stack: **axum + tokio + rusqlite** (same pinned versions as the app where possible), one static musl binary, bootstrap TOML plus remotely persisted AI settings. The server does not read product configuration from environment variables. TLS is the reverse-proxy's job. Storage layout:
 
 ```
 data_dir/
@@ -189,7 +189,7 @@ data_dir/
 ### Phase 4 — server-only AI and remote administration
 
 - Run all `notes-ai` workers against each user's server replica. The server owns provider credentials, embedding identity, vector generations, extraction, retrieval, and chat.
-- `POST /v1/search` returns hits plus requested/effective mode, execution owner, degradation reason, and indexing watermark. Clients never label an FTS fallback as semantic search.
+- `POST /v1/search` runs the server's single hybrid-and-rerank retrieval pipeline. Local FTS is a separate client-owned command, and an unavailable server produces an explicit unavailable state rather than a hidden fallback. Per-request requested/effective-mode metadata is not yet part of the response and remains follow-up work.
 - `POST /v1/chat` streams typed `ChatEvent` values from `notes-protocol`.
 - Authenticated admin endpoints expose server AI settings, secret presence, provider probes, indexing policy, progress, failures, pause/resume/rebuild, and runtime statistics. Secrets are accepted write-only.
 - When the server is absent or unreachable, editing and local FTS continue. Semantic search, extraction, and chat are explicitly unavailable; there is no hidden client AI fallback.
@@ -199,23 +199,23 @@ data_dir/
 
 - Queue rows contain node UUID, exact composed-input hash, embedding identity fingerprint, and source server seq. A completed provider request is committed only if those values still match transactionally.
 - Embedding identity includes provider endpoint identity, model, dimensions, distance/normalization policy, and input-format version.
-- Model/config changes build a new generation while queries continue using the active generation. The server atomically activates the new generation after completion and deletes the previous one later.
+- Model/config changes create a distinct generation keyed by provider identity, model, dimensions, and input format. The server atomically activates a completed generation and retires the previous one. Keeping the previous provider runtime serving queries throughout a new generation build remains follow-up work; the UI exposes the building state instead of claiming the new semantic index is ready.
 - Client Settings show server-owned indexing progress and whether the semantic index is current with the synchronized replica.
 
 ## 9. Phased delivery plan
 
-| Phase | Deliverable                                                                                                                | Acceptance criteria                                                                                                                                                |
-| ----- | -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 0     | Workspace split into `notes-core` / `notes-ai` / `notes-sync` / hosts                                                      | App unchanged; all tests pass; `notes-core` has no tauri/rig deps                                                                                                  |
-| 1     | Apply-engine: all mutations are ops; schema bump (new tables, HLC columns, uuid-based refs in ops); undo emits inverse ops | All existing frontend flows work; op round-trip unit tests; idempotency tests                                                                                      |
-| 2     | Sync machine in `notes-sync` with in-memory/loopback transport; HLC; LWW; tombstones; convergence property tests           | Property tests green (§10); no network code yet required to be complete                                                                                            |
-| 3     | Server v1 (oplog, WS fanout, snapshot, blobs) + client integration + sync UI (status, device settings)                     | Two desktop instances converge realtime (<500 ms online); offline edits on both sides converge on reconnect; new-device bootstrap from snapshot equals full replay |
-| 4     | Server-only AI store/workers, `/search`, `/chat`; remove all client AI/vector code                                         | Both clients contain zero local vectors/provider keys; offline FTS remains honest and functional                                                                   |
-| 5     | Remote admin settings/status UI, index generations, compaction, monitoring, and deployment polish                          | Provider configuration and indexing lifecycle are safely manageable from the app; self-host quickstart works end-to-end                                            |
+| Phase | Deliverable                                                                            | State                                                                                                                                             |
+| ----- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0     | Workspace split into `notes-core` / `notes-ai` / `notes-sync` / hosts                  | Complete: workspace-wide build, lint, tests, and binding-drift checks run in CI.                                                                  |
+| 1     | Apply-engine, HLC columns, UUID op references, and inverse-operation undo              | Complete: mutations share the apply boundary; idempotency, conflict, undo, and persistence tests pass.                                            |
+| 2     | Transport-independent sync machine, HLC/LWW/tombstones, and convergence tests          | Complete: loopback and HTTP use the same `SyncClient`; remote batches apply and advance cursors atomically.                                       |
+| 3     | Oplog server, WebSocket fanout, snapshots, blobs, client integration, and sync status  | Complete for pre-release use: realtime/offline catch-up, replay, snapshot bootstrap, and blob tests pass. Safe cursor-aware log deletion remains. |
+| 4     | Server-only AI store/workers, `/search`, `/chat`, and removal of client AI/vector code | Complete: desktop and Android contain no sqlite-vec, provider credentials, or local AI worker path.                                               |
+| 5     | Remote provider/index administration, monitoring, compaction, and deployment polish    | Partial: remote settings/probes/progress/reindex and musl/Ansible deployment are complete; compaction and credential hardening remain.            |
 
-Keep phases mergeable: each phase lands green on `main` behind the absence-of-config (no server configured → nothing changes for a standalone user).
+The absence-of-config behavior remains intentional: without a server, local editing and FTS work and network/AI capabilities are explicitly unavailable.
 
-## 10. Testing strategy (non-negotiable before Phase 3)
+## 10. Testing strategy
 
 - **Convergence property test** (proptest): generate random op sequences from N simulated devices with random interleavings/duplications/reorderings of _concurrent_ ops (causal order per device preserved); assert all replicas reach identical source-table state, including the server replica.
 - Idempotent redelivery; echo delivery (own op back from server).
@@ -236,8 +236,20 @@ Keep phases mergeable: each phase lands green on `main` behind the absence-of-co
 - `src-tauri` — thin local domain/sync/API adapter; settings contain server connection and UI/device preferences only.
 - Frontend — explicit sync/AI/index capabilities, narrow domain-event invalidation, remote server administration, and honest offline degradation.
 
-## 12. Open questions (resolve with the owner before the relevant phase, not before starting)
+## 12. Remaining architecture work
 
-1. Auth hardening timeline (per-device tokens vs pairing flow). The protocol uses token scopes (`sync`, `user`, `admin`) now even if the first deployment grants all scopes to one token.
-2. When measured vector count/latency justifies a Qdrant adapter. Do not add the service speculatively.
-3. Whether `content_json` merging ever needs to be finer than LWW-with-content — revisit only if real usage shows lost edits.
+1. **Device registry and cursor-aware compaction.** Snapshots are generated and tested, but oplog/applied-op deletion is intentionally disabled. Add durable device cursors, retirement semantics, and a compaction floor before deleting any history.
+2. **Credential hardening.** Replace the bootstrap static-token map with paired, scoped, revocable per-device credentials. No token-scope contract exists yet.
+3. **Generation handover.** Retain the old embedder/runtime alongside its active vector generation until the replacement reaches activation, then retire both together.
+4. **Search execution metadata.** Return a typed search response containing execution owner, requested/effective mode, degradation reason, and source/index watermark when the UI needs finer diagnostics than the existing server/offline distinction and index status.
+5. **Measured vector-store evolution.** Add a Qdrant adapter only if real vector count or latency justifies it.
+6. **Content merge granularity.** Revisit LWW-with-content only if real use demonstrates unacceptable lost edits.
+
+## 13. Review items incorporated during implementation
+
+- Full-database undo snapshots were replaced by forward/inverse operation actions, so undo no longer reimports the workspace or requeues every embedding.
+- Loopback and production HTTP sync share one transport-independent `SyncClient`; catch-up applies sequenced batches and advances the cursor in one transaction, and server replay resumes from the materialized cursor.
+- Core, transport, command, and worker failures use typed categories instead of substring classification. SQLite work runs on dedicated connection threads rather than parking Tokio's blocking pool behind a connection mutex.
+- Retrieval and reranking share one policy pipeline. Provider workers are notify-driven, cancellable, and protect embedding writes with the exact source hash inside the write transaction.
+- Tauri commands are split by domain, generated bindings cover commands/events/channels/UUIDs/enums, and frontend backend-state caching is centralized in TanStack Query with narrow typed invalidation.
+- Stable integer-ID collision detection, shared blob validation, explicit database exports, git-pinned `llm-relay`, workspace-wide CI, atomic note creation, title-only operations, and debounced-title flush cancellation are in place.

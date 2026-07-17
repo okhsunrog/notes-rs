@@ -1,72 +1,81 @@
 # notes-rs
 
-A graph-native personal knowledge app built with Tauri, React, TypeScript, SQLite/FTS5, and vector search. Notes are stored as an outline of addressable blocks with wikilinks, block references, backlinks, hybrid retrieval, and a provider-neutral graph agent.
+notes-rs is a local-first personal knowledge app for desktop and Android. Notes are addressable outline blocks connected by wikilinks, block references, backlinks, and extracted entities. React and Tauri provide the shared client; Rust, SQLite, and FTS5 keep writing and lexical search available offline; an optional self-hosted Axum server provides realtime sync and all AI functionality.
 
-The right-hand Graph tab visualizes the selected page's local knowledge neighborhood and backlinks. Pages can contain file attachments copied into app data and embedded in portable archives. Settings includes JSON export/import, timestamped local backups, and explicit push/pull folder sync suitable for Syncthing, Nextcloud, or similar tools; pull, import, attachment deletion, and page deletion create a recovery backup automatically.
+## What works
 
-## Features
+- Hierarchical block editing with autosave, Markdown rendering, wikilink and block-reference autocomplete, persisted folding, paragraph splitting, keyboard navigation, and action-based undo/redo.
+- Local pages, graph, backlinks, attachments, import/export, timestamped recovery backups, and English/Russian FTS5 search. These features work without a server.
+- Near-realtime op-based sync over HTTP and WebSocket, with an offline outbox, HLC/LWW conflict resolution, tombstones, deterministic structural reconciliation, snapshot bootstrap, and content-addressed blobs.
+- Server-owned semantic retrieval, reranking, entity extraction, and streaming chat. The clients contain no provider keys, vector database, embedding model, or AI background workers.
+- Remote AI administration in Settings: provider URLs and models, write-only API keys, capability probes, automatic-indexing and extraction switches, queue progress, failures, and reindex controls.
+- A full-workspace graph view, six color palettes with light/dark/system brightness, responsive mobile navigation, Android edge-to-edge safe areas, and configurable native or client window decorations on desktop.
+- Debug-only, localhost-bound Tauri MCP integration for live screenshots, accessibility snapshots, input, logs, and IPC inspection.
 
-- Hierarchical block outliner with autosave, wikilinks, block references, autocomplete, persisted folding, structural undo/redo, atomic paragraph splitting, attachments, and keyboard navigation.
-- SQLite/FTS5 search with English/Russian stemming, `sqlite-vec` semantic retrieval, reciprocal-rank fusion, backlink boost, configurable reranking, and an OpenAI/Anthropic-compatible graph agent powered by `llm-relay` and Rig.
-- Background embeddings and entity extraction with exponential backoff, stale-result protection, queue status, pause/resume, retry, and cancellation controls.
-- Local graph/backlinks explorer, six configurable color atmospheres with tuned light/dark variants, responsive narrow-window tabs, import/export, backups, and manual conflict-safe folder sync.
-- Debug-only, localhost-bound Tauri MCP bridge for accessibility snapshots, screenshots, interaction, logs, and IPC inspection.
+Select **New note** or press `Ctrl/Cmd+N` to start writing. Enter a title, then press `Enter` to focus the first block. `Ctrl/Cmd+K` opens search. The graph has its own full-workspace surface; the side companion is reserved for AI.
 
 ### Outliner shortcuts
 
-| Shortcut                          | Action                                                              |
-| --------------------------------- | ------------------------------------------------------------------- |
-| `Enter`                           | Save and create the next sibling block                              |
-| `Shift+Enter`                     | Insert a newline inside the current block                           |
-| `Tab` / `Shift+Tab`               | Indent / outdent                                                    |
-| `Ctrl/Cmd+↑` / `Ctrl/Cmd+↓`       | Reorder among siblings                                              |
-| `Ctrl/Cmd+Enter`                  | Toggle the persisted fold state                                     |
-| `Backspace` on an empty leaf      | Delete the block                                                    |
-| `Ctrl/Cmd+Z` / `Ctrl/Cmd+Shift+Z` | Native text undo/redo while editing; structural undo/redo elsewhere |
+| Shortcut                          | Action                                                       |
+| --------------------------------- | ------------------------------------------------------------ |
+| `Enter`                           | Save and create the next sibling block                       |
+| `Shift+Enter`                     | Insert a newline inside the current block                    |
+| `Tab` / `Shift+Tab`               | Indent / outdent                                             |
+| `Ctrl/Cmd+Up` / `Ctrl/Cmd+Down`   | Reorder among siblings                                       |
+| `Ctrl/Cmd+Enter`                  | Toggle the persisted fold state                              |
+| `Backspace` on an empty leaf      | Delete the block                                             |
+| `Ctrl/Cmd+Z` / `Ctrl/Cmd+Shift+Z` | Text undo/redo while editing; structural undo/redo elsewhere |
 
-### Start writing
+## Architecture
 
-Select **New note** in the sidebar or press `Ctrl/Cmd+N`. A uniquely named untitled page is created and its title is selected immediately. Type a title and press `Enter` to move straight into the first block. `Ctrl/Cmd+K` opens search from anywhere in the workspace.
+The durable source of truth is a UUID-addressed operation stream. Each client and the server materialize that stream into their own `notes.db`; integer SQLite IDs never cross replica boundaries. Local mutations and remote operations pass through the same idempotent apply engine. Per-field HLC clocks preserve independent title, content, and structure edits, while the sync client batches remote apply and cursor advancement atomically.
 
-Appearance is configured independently in **Settings → Appearance**:
+Persisted Rust state is exposed through generated tauri-specta bindings and cached in TanStack Query. One typed domain-event adapter invalidates the narrow affected query keys. Draft text and caret state stay local to the editor instead of being mixed into the backend cache.
 
-- Brightness: System, Light, or Dark.
-- Palette: Iris, Tidal, Ember, Sakura, Nordic, or Moss.
+The server keeps source notes and the oplog in SQLite. Derived embeddings, generations, indexing jobs, and extraction state live in a separate disposable `ai.db` behind a `VectorStore` interface. sqlite-vec is loaded only by the server binary. Provider settings are bootstrapped from the server TOML on first start and subsequently managed from the authenticated application Settings page; provider secrets are stored server-side with owner-only permissions and are never returned to the webview.
 
-Palette changes are applied immediately and kept locally for the next launch.
-
-## Current scope
-
-This repository is a capable demo rather than a complete Obsidian or Logseq replacement. The main remaining product work is:
-
-- Markdown vault and importer interoperability, including migration from Obsidian and Logseq.
-- Daily notes, templates, tags/properties UI, saved queries, and a plugin or extension model.
-- Automatic multi-device sync with conflict resolution; current folder sync exchanges explicit snapshots.
-- Drag-and-drop block movement, cross-block selection, inline transclusion, and richer Markdown editing.
-- A scalable interactive graph with filters and layouts; the current graph is a compact local-neighborhood view.
-- End-to-end UI regression tests in CI, accessibility testing beyond semantic snapshots, and production packaging/signing across all supported platforms.
-- Bundle splitting and lazy loading for heavier Settings, graph, and assistant surfaces.
+The detailed implementation record is in [SYNC_ARCHITECTURE_PLAN.md](SYNC_ARCHITECTURE_PLAN.md).
 
 ## Development
 
-Install the [Vite+ CLI](https://viteplus.dev/guide/), then let it provision the pinned Node.js and Bun versions and install dependencies:
+Install the [Vite+ CLI](https://viteplus.dev/guide/), then let it provision the pinned Node.js and Bun versions:
 
 ```sh
 vp install
 vp dev
 ```
 
-Run the desktop app in development mode with:
+Run the desktop client:
 
 ```sh
 vp run desktop:dev
 ```
 
-### MCP UI inspection
+Initialize and build Android from the same client source:
 
-Debug builds include the localhost-only [MCP Server Tauri](https://github.com/hypothesi/mcp-server-tauri) bridge. The repository's `.codex/config.toml` registers its pinned MCP server with Codex; trust the project and restart Codex after the first checkout so the project-scoped server is loaded.
+```sh
+vp run tauri android init
+vp run tauri android build --debug
+```
 
-With the Tauri development app running, Codex can capture screenshots and DOM snapshots, inspect logs and IPC traffic, find elements, click, type, scroll, resize windows, and execute JavaScript in the webview. A pinned local CLI is also available for terminal diagnostics:
+The only build-time environment input is Tauri's `TAURI_DEV_HOST`, which Vite needs for Android/device hot reload. Product configuration does not read process environment variables.
+
+### Validation
+
+```sh
+vp check
+vp test
+vp build
+cargo fmt --all -- --check
+cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
+cargo test --workspace --locked --all-features
+```
+
+CI also regenerates the tauri-specta TypeScript bindings and fails when the committed contract has drifted from Rust.
+
+### Live UI inspection
+
+Debug desktop builds include [MCP Server Tauri](https://github.com/hypothesi/mcp-server-tauri). The project-scoped `.codex/config.toml` pins its server. With the development app running, the bridge can inspect the accessibility tree, capture screenshots, click, type, resize, and inspect logs and Tauri IPC.
 
 ```sh
 vp exec tauri-mcp driver-session start --port 9223
@@ -74,29 +83,30 @@ vp exec tauri-mcp webview-dom-snapshot --type accessibility
 vp exec tauri-mcp webview-screenshot --file screenshot.png
 ```
 
-The development command applies `src-tauri/tauri.dev.conf.json`, which enables the global Tauri API required by the bridge and permits the Vite development server in the CSP. The bridge is not registered in release builds and binds to `127.0.0.1` in debug builds.
+The MCP bridge and relaxed development CSP are absent from release builds.
 
-The standard validation workflow is:
+## Configuration and deployment
+
+Client configuration lives only in the typed application Settings file: appearance, window frame, server URL, bearer token, and sync enablement. There are no `.env` files or alternate client configuration paths. If no server is configured, editing, graph navigation, attachments, history, and FTS remain available; sync, semantic search, extraction, and chat are visibly unavailable.
+
+The server uses `server/config.example.toml` as a first-start bootstrap. After that, provider configuration and runtime indexing controls are changed remotely from Settings. OpenRouter is the current embeddings/reranking deployment, while completion can use any OpenAI Chat Completions-compatible or Anthropic Messages-compatible endpoint with a custom base URL.
+
+Build a static musl server archive or deploy it through the sibling `cloud-forge` Ansible project:
 
 ```sh
-vp check
-vp test
-vp build
-cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
-cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
-cargo test --manifest-path src-tauri/Cargo.toml --locked
+just package-server
+just deploy-server
 ```
 
-Vite+ owns frontend formatting, linting, type checking, testing, dependency management, runtime selection, and Git hooks. Its project configuration is centralized in `vite.config.ts`.
+TLS and public routing belong to the existing reverse proxy; the notes server binds privately and ships as one static binary plus its bootstrap TOML.
 
-Release webviews use a restrictive Content Security Policy and do not expose the global Tauri API. Both are relaxed only by the explicit development overlay used for MCP inspection and hot reload.
+## Remaining work
 
-## Configuration
+The core architecture is implemented, but this is still a pre-release project. The main remaining work is:
 
-Open **Settings** from the title bar to configure Chat, extraction, embedding and reranking providers, API keys, model dimensions, privacy controls, sync, and window decorations. Chat and extraction accept either the OpenAI Chat Completions or Anthropic Messages protocol with any custom HTTP(S) API base. Capability probes validate unsaved settings independently for plain completion, streaming, required tools, and strict structured output. Entity extraction uses a typed JSON Schema contract through `llm-relay`: OpenAI-compatible servers receive `response_format.json_schema`, while native Anthropic servers receive a required typed tool. Window decorations offer the native compositor frame or a borderless notes-rs frame; on KDE Plasma (Wayland) the native mode uses KWin's server-side decorations, negotiated automatically by GTK.
-
-The application has one configuration source: the typed `settings.json` shown in Settings. It is written atomically in platform app data with owner-only permissions; secrets are never returned to the webview. Process environment variables and alternate configuration files are not inputs. Provider changes take effect after using **Restart app**.
-
-OpenRouter remains the migration-compatible default, not a requirement. Chat and extraction can target any OpenAI- or Anthropic-compatible endpoint; an empty API key is supported for local no-auth servers. Extraction can inherit the Chat transport or use a separate protocol, URL, key, and model.
-
-The privacy controls can disable extraction and conversational query rewriting independently. Builds made with the Rust `local-models` feature can enable strict local-only mode, which forces local embeddings/reranking and disables cloud Chat, extraction, and rewriting. Background failures retain their category and safe diagnostic text; transient failures back off, permanent configuration/authentication failures stop, and malformed structured output gets one retry before requiring attention. AI write tools are read-only by default and become available for one request only after an explicit confirmation in Chat.
+- cursor-aware oplog compaction and device registration/pairing; snapshots are created and bootstrap works, but the server deliberately does not delete history until it can prove every registered device is past the compaction floor;
+- uninterrupted semantic queries while a provider change builds a new vector generation; generation activation is atomic, but the new provider runtime currently becomes authoritative while its generation is building;
+- scoped and revocable per-device credentials instead of the current static token mapping;
+- Markdown-vault, Obsidian, and Logseq import, plus daily notes, templates, properties, saved queries, and an extension model;
+- drag-and-drop block movement, cross-block selection, transclusion, richer Markdown authoring, graph filters/layouts, and larger-corpus performance work;
+- signed production packages and end-to-end UI/accessibility regression coverage on desktop and real Android hardware.
