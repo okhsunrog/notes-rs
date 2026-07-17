@@ -15,8 +15,6 @@ pub struct ServerConfig {
     pub snapshot_every_ops: u64,
     #[serde(default = "default_max_blob_bytes")]
     pub max_blob_bytes: u64,
-    #[serde(default)]
-    pub storage: StorageConfig,
     pub ai: Option<AiConfig>,
     pub users: Vec<UserConfig>,
 }
@@ -31,6 +29,7 @@ pub struct AiConfig {
     pub rerank_model: String,
     pub chat_model: String,
     pub extraction_model: String,
+    pub automatic_embeddings: bool,
     pub entity_extraction_enabled: bool,
     pub query_rewriting_enabled: bool,
 }
@@ -45,6 +44,7 @@ impl Default for AiConfig {
             rerank_model: "cohere/rerank-v3.5".into(),
             chat_model: "google/gemini-3.1-flash-lite".into(),
             extraction_model: "google/gemini-3.1-flash-lite".into(),
+            automatic_embeddings: true,
             entity_extraction_enabled: true,
             query_rewriting_enabled: true,
         }
@@ -56,22 +56,6 @@ impl Default for AiConfig {
 pub struct UserConfig {
     pub id: String,
     pub tokens: Vec<String>,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct StorageConfig {
-    pub embedding_provider_id: String,
-    pub embedding_dimensions: usize,
-}
-
-impl Default for StorageConfig {
-    fn default() -> Self {
-        Self {
-            embedding_provider_id: "openrouter:qwen/qwen3-embedding-8b".into(),
-            embedding_dimensions: 4096,
-        }
-    }
 }
 
 impl ServerConfig {
@@ -90,9 +74,6 @@ impl ServerConfig {
         }
         tracing_subscriber::EnvFilter::try_new(&self.log_filter)
             .context("log_filter must be a valid tracing filter")?;
-        if self.storage.embedding_dimensions == 0 {
-            bail!("storage.embedding_dimensions must be positive");
-        }
         if self.max_blob_bytes == 0 {
             bail!("max_blob_bytes must be positive");
         }
@@ -103,14 +84,6 @@ impl ServerConfig {
             notes_ai::config::validate_http_base_url(&ai.openrouter_base_url)?;
             if ai.embedding_dimensions == 0 {
                 bail!("ai.embedding_dimensions must be positive");
-            }
-            let expected_id = format!("openrouter:{}", ai.embedding_model);
-            if self.storage.embedding_provider_id != expected_id
-                || self.storage.embedding_dimensions != ai.embedding_dimensions
-            {
-                bail!(
-                    "storage embedding identity and dimensions must match the configured AI embedder"
-                );
             }
             for (name, value) in [
                 ("embedding_model", &ai.embedding_model),
@@ -181,7 +154,6 @@ mod tests {
             data_dir: "/tmp/notes".into(),
             snapshot_every_ops: 10_000,
             max_blob_bytes: 1,
-            storage: StorageConfig::default(),
             ai: None,
             users: vec![UserConfig {
                 id: "../owner".into(),
@@ -192,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_ai_storage_drift() {
+    fn rejects_invalid_ai_configuration() {
         let ai = AiConfig {
             openrouter_api_key: "test-key".into(),
             ..AiConfig::default()
@@ -203,11 +175,10 @@ mod tests {
             data_dir: "/tmp/notes".into(),
             snapshot_every_ops: 10_000,
             max_blob_bytes: 1,
-            storage: StorageConfig {
-                embedding_provider_id: "openrouter:different-model".into(),
-                embedding_dimensions: 4096,
-            },
-            ai: Some(ai),
+            ai: Some(AiConfig {
+                embedding_dimensions: 0,
+                ..ai
+            }),
             users: vec![UserConfig {
                 id: "owner".into(),
                 tokens: vec!["a-token-with-at-least-thirty-two-characters".into()],

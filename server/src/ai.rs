@@ -4,10 +4,10 @@ use anyhow::{Context, Result, bail};
 use notes_ai::agent;
 use notes_ai::embed::EmbedderBackend;
 use notes_ai::retrieval::RetrievalPipeline;
-use notes_ai::store::{AiStore, embedding_identity_fingerprint};
+use notes_ai::store::{AiControl, AiStore, GenerationStatus, embedding_identity_fingerprint};
 use notes_core::Connection;
 use notes_core::db::{self, SearchHit};
-use notes_protocol::{ChatEvent, ChatTurn};
+use notes_protocol::{AiGenerationState, AiIndexStatus, AiRuntimeSettings, ChatEvent, ChatTurn};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -25,8 +25,12 @@ pub struct AiRuntime {
     users: Arc<HashMap<String, UserAi>>,
     chat: llm_relay::ClientConfig,
     extraction: llm_relay::ClientConfig,
-    entity_extraction_enabled: bool,
-    query_rewriting_enabled: bool,
+    embedding_provider_id: String,
+    embedding_model: String,
+    embedding_dimensions: usize,
+    rerank_model: String,
+    chat_model: String,
+    extraction_model: String,
 }
 
 impl AiRuntime {
@@ -62,10 +66,15 @@ impl AiRuntime {
         let mut users = HashMap::new();
         for user in registry.users() {
             let store = Arc::new(
-                AiStore::open(
+                AiStore::open_with_control(
                     data_dir.join("users").join(&user.id).join("ai.db"),
                     identity.clone(),
                     config.embedding_dimensions,
+                    AiControl {
+                        automatic_embeddings: config.automatic_embeddings,
+                        entity_extraction: config.entity_extraction_enabled,
+                        query_rewriting: config.query_rewriting_enabled,
+                    },
                 )
                 .await
                 .with_context(|| format!("opening AI store for {}", user.id))?,
@@ -89,8 +98,12 @@ impl AiRuntime {
             users: Arc::new(users),
             chat,
             extraction,
-            entity_extraction_enabled: config.entity_extraction_enabled,
-            query_rewriting_enabled: config.query_rewriting_enabled,
+            embedding_provider_id: format!("openrouter:{}", config.embedding_model),
+            embedding_model: config.embedding_model.clone(),
+            embedding_dimensions: config.embedding_dimensions,
+            rerank_model: config.rerank_model.clone(),
+            chat_model: config.chat_model.clone(),
+            extraction_model: config.extraction_model.clone(),
         };
         runtime.spawn_workers(embedder);
         Ok(runtime)
@@ -98,26 +111,21 @@ impl AiRuntime {
 
     fn spawn_workers(&self, embedder: Arc<dyn EmbedderBackend>) {
         for user in self.users.values() {
-            let paused = Arc::new(AtomicBool::new(false));
             notes_ai::embed::spawn_worker(
                 user.notes.clone(),
                 user.store.clone(),
                 embedder.clone(),
                 Arc::new(|| {}),
-                paused.clone(),
             );
-            if self.entity_extraction_enabled {
-                notes_ai::extract::spawn_worker(
-                    user.notes.clone(),
-                    user.store.clone(),
-                    Arc::new(notes_ai::extract::EntityExtractor::new(
-                        self.extraction.clone(),
-                    )),
-                    Arc::new(|| {}),
-                    Arc::new(|| {}),
-                    paused,
-                );
-            }
+            notes_ai::extract::spawn_worker(
+                user.notes.clone(),
+                user.store.clone(),
+                Arc::new(notes_ai::extract::EntityExtractor::new(
+                    self.extraction.clone(),
+                )),
+                Arc::new(|| {}),
+                Arc::new(|| {}),
+            );
         }
     }
 
@@ -137,6 +145,58 @@ impl AiRuntime {
         self.user(user_id)?.retrieval.retrieve(query, limit).await
     }
 
+    pub async fn status(&self, user_id: &str) -> Result<AiIndexStatus> {
+        let user = self.user(user_id)?;
+        let source_nodes = user.store.source_node_count(&user.notes).await?;
+        let status = user.store.status(source_nodes).await?;
+        Ok(AiIndexStatus {
+            embedding_provider_id: self.embedding_provider_id.clone(),
+            embedding_model: self.embedding_model.clone(),
+            embedding_dimensions: self.embedding_dimensions,
+            rerank_model: self.rerank_model.clone(),
+            chat_model: self.chat_model.clone(),
+            extraction_model: self.extraction_model.clone(),
+            generation_id: status.generation_id,
+            generation_state: match status.generation_status {
+                GenerationStatus::Building => AiGenerationState::Building,
+                GenerationStatus::Active => AiGenerationState::Active,
+                GenerationStatus::Retired => AiGenerationState::Retired,
+            },
+            settings: AiRuntimeSettings {
+                automatic_embeddings: status.control.automatic_embeddings,
+                entity_extraction: status.control.entity_extraction,
+                query_rewriting: status.control.query_rewriting,
+            },
+            pending_embeddings: status.pending,
+            failed_embeddings: status.failed,
+            indexed_nodes: status.indexed,
+            source_nodes: status.source_nodes,
+            pending_extractions: status.extraction_pending,
+            failed_extractions: status.extraction_failed,
+        })
+    }
+
+    pub async fn update_settings(
+        &self,
+        user_id: &str,
+        settings: AiRuntimeSettings,
+    ) -> Result<AiIndexStatus> {
+        let user = self.user(user_id)?;
+        user.store
+            .set_control(AiControl {
+                automatic_embeddings: settings.automatic_embeddings,
+                entity_extraction: settings.entity_extraction,
+                query_rewriting: settings.query_rewriting,
+            })
+            .await?;
+        self.status(user_id).await
+    }
+
+    pub async fn reindex(&self, user_id: &str) -> Result<AiIndexStatus> {
+        self.user(user_id)?.store.reset_index().await?;
+        self.status(user_id).await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn chat(
         &self,
@@ -149,6 +209,7 @@ impl AiRuntime {
         emit: impl Fn(ChatEvent) + Send + Sync + 'static,
     ) -> Result<String> {
         let user = self.user(user_id)?;
+        let query_rewriting = user.store.control().await?.query_rewriting;
         let active_node_id = match active_node_uuid {
             Some(uuid) => db::get_node_by_uuid(&user.notes, uuid)
                 .await?
@@ -167,7 +228,7 @@ impl AiRuntime {
             cancelled,
             emit,
             self.chat.clone(),
-            self.query_rewriting_enabled,
+            query_rewriting,
         )
         .await
         .map_err(anyhow::Error::from)

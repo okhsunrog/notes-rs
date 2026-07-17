@@ -34,6 +34,7 @@ import {
 import { queryKeys } from "@/lib/query";
 import { cn } from "@/lib/utils";
 import { DataSettingsSections } from "./data-settings-sections";
+import { ServerAiSettingsSection } from "./server-ai-settings-section";
 import { Field, FieldGroup, ModeButton, SettingsSection } from "./settings-controls";
 import { toSettingsUpdate } from "./settings-update";
 
@@ -362,6 +363,12 @@ export function SettingsPage({
             Device config: {settings.configPath}
           </p>
         </SettingsSection>
+
+        <ServerAiSettingsSection
+          enabled={Boolean(settings.syncServerUrl?.trim() && tokenConfigured)}
+          onError={setError}
+          onMessage={setMessage}
+        />
 
         <DataSettingsSections
           settings={settings}

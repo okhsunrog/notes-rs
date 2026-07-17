@@ -12,9 +12,11 @@ CREATE UNIQUE INDEX one_active_generation
 
 CREATE TABLE index_control (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-  paused INTEGER NOT NULL DEFAULT 0
+  automatic_embeddings INTEGER NOT NULL DEFAULT 1,
+  entity_extraction INTEGER NOT NULL DEFAULT 1,
+  query_rewriting INTEGER NOT NULL DEFAULT 1
 );
-INSERT INTO index_control(singleton, paused) VALUES (1, 0);
+INSERT INTO index_control(singleton) VALUES (1);
 
 CREATE TABLE embedding_jobs (
   generation_id BLOB NOT NULL CHECK (length(generation_id) = 16),

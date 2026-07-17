@@ -32,6 +32,7 @@ export function SettingsSection({
       "Folder sync": FolderSync,
       "Realtime sync": Cloud,
       "Background indexing": Activity,
+      "Server AI": BrainCircuit,
     }[title] ?? Palette;
   return (
     <section className="space-y-5 rounded-3xl border border-border/60 bg-card/70 p-5 shadow-sm backdrop-blur sm:p-6">

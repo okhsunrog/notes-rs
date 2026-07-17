@@ -1,6 +1,8 @@
 import { commands } from "@/lib/bindings";
 import type {
   BlockContent,
+  AiIndexStatus,
+  AiRuntimeSettings,
   ChatEvent,
   CommandError,
   Edge,
@@ -15,6 +17,8 @@ import type {
 } from "@/lib/bindings";
 
 export type {
+  AiIndexStatus,
+  AiRuntimeSettings,
   BlockContent,
   ChatEvent,
   Edge,
@@ -104,6 +108,9 @@ export const restartApp = commands.restartApp;
 export const chatStream = checkedCommand(commands.chatStream);
 export const cancelChat = commands.cancelChat;
 export const getSyncStatus = commands.syncStatus;
+export const getServerAiStatus = checkedCommand(commands.serverAiStatus);
+export const saveServerAiSettings = checkedCommand(commands.saveServerAiSettings);
+export const reindexServerAi = checkedCommand(commands.reindexServerAi);
 export const listEntities = (limit = 30) => unwrapCommand(commands.listEntities(limit));
 export const listPages = (limit = 200) => unwrapCommand(commands.listPages(limit));
 export const createPage = checkedCommand(commands.createPage);

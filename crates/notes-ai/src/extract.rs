@@ -6,7 +6,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::time::{Duration, sleep};
 
 const PREAMBLE: &str = r#"
@@ -77,19 +76,22 @@ pub fn spawn_worker(
     extractor: Arc<EntityExtractor>,
     on_entities_changed: Arc<dyn Fn() + Send + Sync>,
     on_status_changed: Arc<dyn Fn() + Send + Sync>,
-    paused: Arc<AtomicBool>,
 ) {
     tokio::spawn(async move {
         loop {
-            if !paused.load(Ordering::Acquire) {
-                match tick(&notes, &store, &extractor, on_entities_changed.as_ref()).await {
-                    Ok(true) => on_status_changed(),
-                    Ok(false) => {}
-                    Err(error) => {
-                        on_status_changed();
-                        tracing::warn!(?error, "extract worker tick failed");
+            match store.control().await {
+                Ok(control) if control.entity_extraction => {
+                    match tick(&notes, &store, &extractor, on_entities_changed.as_ref()).await {
+                        Ok(true) => on_status_changed(),
+                        Ok(false) => {}
+                        Err(error) => {
+                            on_status_changed();
+                            tracing::warn!(?error, "extract worker tick failed");
+                        }
                     }
                 }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(?error, "reading AI worker settings failed"),
             }
             sleep(Duration::from_secs(2)).await;
         }

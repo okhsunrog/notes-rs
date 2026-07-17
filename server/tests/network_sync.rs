@@ -1,7 +1,7 @@
 use futures::StreamExt;
 use notes_core::{NodeKind, acknowledge_server_op, apply_sequenced, export_sync_snapshot};
 use notes_protocol::ServerMessage;
-use notes_server::config::{ServerConfig, StorageConfig, UserConfig};
+use notes_server::config::{ServerConfig, UserConfig};
 use notes_sync::HttpTransport;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -16,10 +16,6 @@ async fn bootstraps_and_fanouts_operations_over_the_real_network_protocol() {
         data_dir: server_directory.path().to_owned(),
         snapshot_every_ops: 10_000,
         max_blob_bytes: 1024,
-        storage: StorageConfig {
-            embedding_provider_id: "test".into(),
-            embedding_dimensions: 8,
-        },
         ai: None,
         users: vec![UserConfig {
             id: "owner".into(),

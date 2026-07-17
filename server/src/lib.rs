@@ -23,7 +23,5 @@ pub async fn build_state(config: &ServerConfig) -> Result<AppState> {
         data_dir: config.data_dir.clone(),
         max_blob_bytes: config.max_blob_bytes,
         ai,
-        embedding_provider_id: config.storage.embedding_provider_id.clone(),
-        embedding_dimensions: config.storage.embedding_dimensions,
     })
 }

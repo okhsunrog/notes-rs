@@ -11,7 +11,6 @@ use notes_core::Connection;
 use rig::embeddings::EmbeddingModel;
 use serde::Deserialize;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "local-models")]
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
@@ -649,19 +648,22 @@ pub fn spawn_worker(
     store: Arc<AiStore>,
     embedder: Arc<dyn EmbedderBackend>,
     on_status_changed: Arc<dyn Fn() + Send + Sync>,
-    paused: Arc<AtomicBool>,
 ) {
     tokio::spawn(async move {
         loop {
-            if !paused.load(Ordering::Acquire) {
-                match tick(&notes, &store, embedder.as_ref()).await {
-                    Ok(true) => on_status_changed(),
-                    Ok(false) => {}
-                    Err(e) => {
-                        on_status_changed();
-                        tracing::warn!(error = ?e, "embed worker tick failed");
+            match store.control().await {
+                Ok(control) if control.automatic_embeddings => {
+                    match tick(&notes, &store, embedder.as_ref()).await {
+                        Ok(true) => on_status_changed(),
+                        Ok(false) => {}
+                        Err(e) => {
+                            on_status_changed();
+                            tracing::warn!(error = ?e, "embed worker tick failed");
+                        }
                     }
                 }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(?error, "reading AI worker settings failed"),
             }
             sleep(Duration::from_millis(500)).await;
         }

@@ -13,8 +13,8 @@ use axum::routing::{get, post, put};
 use futures::{SinkExt, StreamExt};
 use notes_core::db::SearchHit;
 use notes_protocol::{
-    AcceptedOps, BootstrapRequest, ChatEvent, ChatTurn, ClientMessage, OpsBatch, PushOps,
-    ServerInfo, ServerMessage,
+    AcceptedOps, AiIndexStatus, AiRuntimeSettings, BootstrapRequest, ChatEvent, ChatTurn,
+    ClientMessage, OpsBatch, PushOps, ServerInfo, ServerMessage,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -34,8 +34,6 @@ pub struct AppState {
     pub data_dir: PathBuf,
     pub max_blob_bytes: u64,
     pub ai: Option<Arc<crate::ai::AiRuntime>>,
-    pub embedding_provider_id: String,
-    pub embedding_dimensions: usize,
 }
 
 #[derive(Clone)]
@@ -185,6 +183,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/snapshot", get(get_snapshot))
         .route("/v1/bootstrap", post(bootstrap))
         .route("/v1/info", get(info))
+        .route("/v1/ai/status", get(ai_status).put(update_ai_settings))
+        .route("/v1/ai/reindex", post(reindex_ai))
         .route("/v1/search", post(search))
         .route("/v1/chat", post(chat))
         .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT));
@@ -208,10 +208,51 @@ pub fn router(state: AppState) -> Router {
 
 async fn info(State(state): State<AppState>) -> Json<ServerInfo> {
     Json(ServerInfo {
-        embedding_provider_id: state.embedding_provider_id,
-        embedding_dimensions: state.embedding_dimensions,
         ai_enabled: state.ai.is_some(),
     })
+}
+
+async fn ai_status(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+) -> Result<Json<AiIndexStatus>, ApiError> {
+    let ai = state
+        .ai
+        .as_ref()
+        .ok_or_else(|| ApiError::unavailable("server AI is not configured"))?;
+    ai.status(&user.0.id)
+        .await
+        .map(Json)
+        .map_err(ApiError::internal)
+}
+
+async fn update_ai_settings(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Json(settings): Json<AiRuntimeSettings>,
+) -> Result<Json<AiIndexStatus>, ApiError> {
+    let ai = state
+        .ai
+        .as_ref()
+        .ok_or_else(|| ApiError::unavailable("server AI is not configured"))?;
+    ai.update_settings(&user.0.id, settings)
+        .await
+        .map(Json)
+        .map_err(ApiError::internal)
+}
+
+async fn reindex_ai(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+) -> Result<Json<AiIndexStatus>, ApiError> {
+    let ai = state
+        .ai
+        .as_ref()
+        .ok_or_else(|| ApiError::unavailable("server AI is not configured"))?;
+    ai.reindex(&user.0.id)
+        .await
+        .map(Json)
+        .map_err(ApiError::internal)
 }
 
 const fn default_search_limit() -> u32 {
@@ -656,7 +697,7 @@ const fn default_ops_limit() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ServerConfig, StorageConfig, UserConfig};
+    use crate::config::{ServerConfig, UserConfig};
     use axum::http::Request;
     use http_body_util::BodyExt;
     use notes_core::{Hlc, NodeKind, Op, OpKind};
@@ -673,10 +714,6 @@ mod tests {
             data_dir: directory.path().to_owned(),
             snapshot_every_ops: 2,
             max_blob_bytes: 1024,
-            storage: StorageConfig {
-                embedding_provider_id: "test".into(),
-                embedding_dimensions: 8,
-            },
             ai: None,
             users: vec![UserConfig {
                 id: "owner".into(),
@@ -804,8 +841,6 @@ mod tests {
             .expect("body")
             .to_bytes();
         let info: ServerInfo = serde_json::from_slice(&body).expect("server info");
-        assert_eq!(info.embedding_provider_id, "test");
-        assert_eq!(info.embedding_dimensions, 8);
         assert!(!info.ai_enabled);
     }
 

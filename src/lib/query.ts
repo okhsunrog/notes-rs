@@ -20,6 +20,7 @@ export const queryKeys = {
   history: [...root, "history"] as const,
   settings: [...root, "settings"] as const,
   syncStatus: [...root, "sync-status"] as const,
+  serverAi: [...root, "server-ai"] as const,
 };
 
 export function createAppQueryClient() {
@@ -71,6 +72,9 @@ export async function applyDomainEvent(queryClient: QueryClient, event: DomainEv
       return;
     case "sync_status_changed":
       await invalidate(queryKeys.syncStatus);
+      return;
+    case "server_ai_changed":
+      await invalidate(queryKeys.serverAi);
       return;
     case "workspace_changed":
       await invalidate(queryKeys.root);

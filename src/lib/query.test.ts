@@ -47,4 +47,13 @@ describe("domain event query invalidation", () => {
     expect(client.getQueryState(queryKeys.settings)?.isInvalidated).toBe(true);
     expect(client.getQueryState(queryKeys.history)?.isInvalidated).toBe(true);
   });
+
+  it("invalidates server AI state after a remote setting mutation", async () => {
+    const client = new QueryClient();
+    client.setQueryData(queryKeys.serverAi, { generationState: "active" });
+
+    await applyDomainEvent(client, { kind: "server_ai_changed" });
+
+    expect(client.getQueryState(queryKeys.serverAi)?.isInvalidated).toBe(true);
+  });
 });

@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use notes_core::db::SearchHit;
 use notes_protocol::{
-    AcceptedOps, BootstrapRequest, ChatEvent, ChatTurn, OpsBatch, PushOps, SequencedOp, ServerInfo,
+    AcceptedOps, AiIndexStatus, AiRuntimeSettings, BootstrapRequest, ChatEvent, ChatTurn, OpsBatch,
+    PushOps, SequencedOp, ServerInfo,
 };
 use reqwest::StatusCode;
 use serde::Serialize;
@@ -63,6 +64,18 @@ impl HttpTransport {
 
     pub async fn info(&self) -> Result<ServerInfo> {
         self.get_json("v1/info", &[]).await
+    }
+
+    pub async fn ai_status(&self) -> Result<AiIndexStatus> {
+        self.get_json("v1/ai/status", &[]).await
+    }
+
+    pub async fn update_ai_settings(&self, settings: AiRuntimeSettings) -> Result<AiIndexStatus> {
+        self.put_json("v1/ai/status", &settings).await
+    }
+
+    pub async fn reindex_ai(&self) -> Result<AiIndexStatus> {
+        self.post_json("v1/ai/reindex", &()).await
     }
 
     pub async fn bootstrap(&self, snapshot: SyncSnapshot) -> Result<SyncSnapshot> {
@@ -290,6 +303,21 @@ impl HttpTransport {
         let response = self
             .client
             .post(self.endpoint(endpoint)?)
+            .bearer_auth(&self.token)
+            .json(body)
+            .send()
+            .await?;
+        decode_json(response).await
+    }
+
+    async fn put_json<T: DeserializeOwned>(
+        &self,
+        endpoint: &str,
+        body: &impl serde::Serialize,
+    ) -> Result<T> {
+        let response = self
+            .client
+            .put(self.endpoint(endpoint)?)
             .bearer_auth(&self.token)
             .json(body)
             .send()

@@ -16,6 +16,9 @@ export const commands = {
 } | null, CommandError>(__TAURI_INVOKE("mobile_system_info")),
 	setSystemBarsStyle: (darkBackground: boolean) => typedError<null, CommandError>(__TAURI_INVOKE("set_system_bars_style", { darkBackground })),
 	syncStatus: () => __TAURI_INVOKE<SyncStatus>("sync_status"),
+	serverAiStatus: () => typedError<AiIndexStatus, CommandError>(__TAURI_INVOKE("server_ai_status")),
+	saveServerAiSettings: (settings: AiRuntimeSettings) => typedError<AiIndexStatus, CommandError>(__TAURI_INVOKE("save_server_ai_settings", { settings })),
+	reindexServerAi: () => typedError<AiIndexStatus, CommandError>(__TAURI_INVOKE("reindex_server_ai")),
 	loadSettings: () => typedError<SettingsSnapshot, CommandError>(__TAURI_INVOKE("load_settings")),
 	saveSettings: (update: SettingsUpdate) => typedError<SettingsSnapshot, CommandError>(__TAURI_INVOKE("save_settings", { update })),
 	restartApp: () => __TAURI_INVOKE<void>("restart_app"),
@@ -131,6 +134,32 @@ export const events = {
 };
 
 /* Types */
+export type AiGenerationState = "building" | "active" | "retired";
+
+export type AiIndexStatus = {
+	embeddingProviderId: string,
+	embeddingModel: string,
+	embeddingDimensions: number,
+	rerankModel: string,
+	chatModel: string,
+	extractionModel: string,
+	generationId: string,
+	generationState: AiGenerationState,
+	settings: AiRuntimeSettings,
+	pendingEmbeddings: number,
+	failedEmbeddings: number,
+	indexedNodes: number,
+	sourceNodes: number,
+	pendingExtractions: number,
+	failedExtractions: number,
+};
+
+export type AiRuntimeSettings = {
+	automaticEmbeddings: boolean,
+	entityExtraction: boolean,
+	queryRewriting: boolean,
+};
+
 export type BlockContent = {
 	content: string,
 	wikilinkTitles: string[],
@@ -158,7 +187,7 @@ export type CreatedNote = {
  *  Payloads carry affected IDs when a command can identify them; whole-workspace
  *  replacements (import/sync) deliberately request a full cache refresh.
  */
-export type DomainEvent = { kind: "node_changed"; node_uuids: string[]; parent_uuids: string[] } | { kind: "node_deleted"; node_uuids: string[]; parent_uuids: string[] } | { kind: "graph_changed"; node_uuids: string[] } | { kind: "history_changed" } | { kind: "settings_changed" } | { kind: "sync_status_changed" } | { kind: "workspace_changed" };
+export type DomainEvent = { kind: "node_changed"; node_uuids: string[]; parent_uuids: string[] } | { kind: "node_deleted"; node_uuids: string[]; parent_uuids: string[] } | { kind: "graph_changed"; node_uuids: string[] } | { kind: "history_changed" } | { kind: "settings_changed" } | { kind: "sync_status_changed" } | { kind: "server_ai_changed" } | { kind: "workspace_changed" };
 
 export type DomainEventMessage = DomainEvent;
 

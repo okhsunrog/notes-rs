@@ -4,10 +4,6 @@ data_dir = "/var/lib/notes-rs"
 snapshot_every_ops = 10000
 max_blob_bytes = 1073741824
 
-[storage]
-embedding_provider_id = "openrouter:qwen/qwen3-embedding-8b"
-embedding_dimensions = 4096
-
 [ai]
 openrouter_api_key = "replace-with-a-secret"
 openrouter_base_url = "https://openrouter.ai/api/v1"
@@ -16,6 +12,7 @@ embedding_dimensions = 4096
 rerank_model = "cohere/rerank-v3.5"
 chat_model = "google/gemini-3.1-flash-lite"
 extraction_model = "google/gemini-3.1-flash-lite"
+automatic_embeddings = true
 entity_extraction_enabled = true
 query_rewriting_enabled = true
 

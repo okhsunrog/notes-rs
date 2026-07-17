@@ -3,7 +3,7 @@ use base64::Engine;
 use notes_core::Connection;
 use notes_core::db::{self, Node, SearchHit};
 use notes_core::{NodeKind, ReorderDirection};
-use notes_protocol::{ChatEvent, ChatTurn};
+use notes_protocol::{AiIndexStatus, AiRuntimeSettings, ChatEvent, ChatTurn};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -177,6 +177,7 @@ pub enum DomainEvent {
     HistoryChanged,
     SettingsChanged,
     SyncStatusChanged,
+    ServerAiChanged,
     WorkspaceChanged,
 }
 
@@ -269,6 +270,45 @@ pub fn sync_status(state: State<'_, crate::sync::SyncRuntime>) -> crate::sync::S
         .read()
         .unwrap_or_else(|error| error.into_inner())
         .clone()
+}
+
+fn remote_ai(state: &AppState) -> CommandResult<&notes_sync::HttpTransport> {
+    state.remote_ai.as_ref().ok_or_else(|| CommandError {
+        code: CommandErrorCode::Unavailable,
+        message: "server AI requires a configured notes-rs server".into(),
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn server_ai_status(state: State<'_, AppState>) -> CommandResult<AiIndexStatus> {
+    remote_ai(&state)?.ai_status().await.map_err(err)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn save_server_ai_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    settings: AiRuntimeSettings,
+) -> CommandResult<AiIndexStatus> {
+    let status = remote_ai(&state)?
+        .update_ai_settings(settings)
+        .await
+        .map_err(err)?;
+    emit_domain(&app, DomainEvent::ServerAiChanged);
+    Ok(status)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn reindex_server_ai(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CommandResult<AiIndexStatus> {
+    let status = remote_ai(&state)?.reindex_ai().await.map_err(err)?;
+    emit_domain(&app, DomainEvent::ServerAiChanged);
+    Ok(status)
 }
 
 #[tauri::command]

@@ -59,12 +59,49 @@ pub struct IndexStatus {
     pub identity: String,
     pub dimensions: usize,
     pub generation_id: uuid::Uuid,
-    pub generation_status: String,
-    pub paused: bool,
+    pub generation_status: GenerationStatus,
+    pub control: AiControl,
     pub pending: u64,
     pub failed: u64,
     pub indexed: u64,
     pub source_nodes: u64,
+    pub extraction_pending: u64,
+    pub extraction_failed: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenerationStatus {
+    Building,
+    Active,
+    Retired,
+}
+
+impl GenerationStatus {
+    fn from_database(value: &str) -> Result<Self> {
+        match value {
+            "building" => Ok(Self::Building),
+            "active" => Ok(Self::Active),
+            "retired" => Ok(Self::Retired),
+            _ => bail!("unknown AI index generation status {value:?}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AiControl {
+    pub automatic_embeddings: bool,
+    pub entity_extraction: bool,
+    pub query_rewriting: bool,
+}
+
+impl Default for AiControl {
+    fn default() -> Self {
+        Self {
+            automatic_embeddings: true,
+            entity_extraction: true,
+            query_rewriting: true,
+        }
+    }
 }
 
 #[async_trait]
@@ -83,9 +120,19 @@ pub struct AiStore {
 
 impl AiStore {
     pub async fn open(path: impl AsRef<Path>, identity: String, dimensions: usize) -> Result<Self> {
+        Self::open_with_control(path, identity, dimensions, AiControl::default()).await
+    }
+
+    pub async fn open_with_control(
+        path: impl AsRef<Path>,
+        identity: String,
+        dimensions: usize,
+        default_control: AiControl,
+    ) -> Result<Self> {
         if dimensions == 0 {
             bail!("embedding dimensions must be positive");
         }
+        let initialize_control = !path.as_ref().exists();
         register_sqlite_vec();
         let connection = Connection::open(path.as_ref())
             .await
@@ -135,13 +182,17 @@ impl AiStore {
             })
             .await?;
         ensure_vector_table(&connection, &table_name, dimensions).await?;
-        Ok(Self {
+        let store = Self {
             connection,
             identity,
             dimensions,
             generation_id,
             table_name,
-        })
+        };
+        if initialize_control {
+            store.set_control(default_control).await?;
+        }
+        Ok(store)
     }
 
     pub fn identity(&self) -> &str {
@@ -150,6 +201,68 @@ impl AiStore {
 
     pub fn dimensions(&self) -> usize {
         self.dimensions
+    }
+
+    pub async fn control(&self) -> Result<AiControl> {
+        self.connection
+            .call(|database| {
+                database.query_row(
+                    "SELECT automatic_embeddings, entity_extraction, query_rewriting
+                     FROM index_control WHERE singleton = 1",
+                    [],
+                    |row| {
+                        Ok(AiControl {
+                            automatic_embeddings: row.get(0)?,
+                            entity_extraction: row.get(1)?,
+                            query_rewriting: row.get(2)?,
+                        })
+                    },
+                )
+            })
+            .await
+    }
+
+    pub async fn set_control(&self, control: AiControl) -> Result<AiControl> {
+        self.connection
+            .call(move |database| {
+                database.execute(
+                    "UPDATE index_control SET automatic_embeddings = ?1,
+                       entity_extraction = ?2, query_rewriting = ?3
+                     WHERE singleton = 1",
+                    rusqlite::params![
+                        control.automatic_embeddings,
+                        control.entity_extraction,
+                        control.query_rewriting
+                    ],
+                )?;
+                Ok(control)
+            })
+            .await
+    }
+
+    pub async fn reset_index(&self) -> Result<()> {
+        let generation_id = self.generation_id;
+        let table_name = self.table_name.clone();
+        self.connection
+            .call(move |database| {
+                let transaction = database.transaction()?;
+                transaction.execute(&format!("DELETE FROM {table_name}"), [])?;
+                transaction.execute(
+                    "DELETE FROM generation_vectors WHERE generation_id = ?1",
+                    [generation_id],
+                )?;
+                transaction.execute(
+                    "DELETE FROM embedding_jobs WHERE generation_id = ?1",
+                    [generation_id],
+                )?;
+                transaction.execute(
+                    "UPDATE index_generations SET status = 'building', activated_at = NULL
+                     WHERE id = ?1",
+                    [generation_id],
+                )?;
+                transaction.commit()
+            })
+            .await
     }
 
     pub async fn reconcile(&self, notes: &Connection, source_seq: u64) -> Result<u64> {
@@ -265,6 +378,10 @@ impl AiStore {
             })
             .await?;
         Ok(source_nodes)
+    }
+
+    pub async fn source_node_count(&self, notes: &Connection) -> Result<u64> {
+        Ok(index_documents(notes).await?.len() as u64)
     }
 
     pub async fn take_jobs(&self, limit: u32) -> Result<Vec<IndexJob>> {
@@ -685,10 +802,17 @@ impl AiStore {
                     [generation_id],
                     |row| row.get::<_, String>(0),
                 )?;
-                let paused = database.query_row(
-                    "SELECT paused FROM index_control WHERE singleton = 1",
+                let control = database.query_row(
+                    "SELECT automatic_embeddings, entity_extraction, query_rewriting
+                     FROM index_control WHERE singleton = 1",
                     [],
-                    |row| Ok(row.get::<_, i64>(0)? != 0),
+                    |row| {
+                        Ok(AiControl {
+                            automatic_embeddings: row.get(0)?,
+                            entity_extraction: row.get(1)?,
+                            query_rewriting: row.get(2)?,
+                        })
+                    },
                 )?;
                 let (pending, failed) = database.query_row(
                     "SELECT COUNT(*), COALESCE(SUM(retry_count > 0), 0)
@@ -701,16 +825,32 @@ impl AiStore {
                     [generation_id],
                     |row| row.get::<_, i64>(0).map(|value| value as u64),
                 )?;
+                let (extraction_pending, extraction_failed) = database.query_row(
+                    "SELECT COUNT(*), COALESCE(SUM(retry_count > 0), 0)
+                     FROM extraction_jobs",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64)),
+                )?;
                 Ok(IndexStatus {
                     identity,
                     dimensions,
                     generation_id,
-                    generation_status: status,
-                    paused,
+                    generation_status: GenerationStatus::from_database(&status).map_err(
+                        |error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                0,
+                                rusqlite::types::Type::Text,
+                                error.into(),
+                            )
+                        },
+                    )?,
+                    control,
                     pending,
                     failed,
                     indexed,
                     source_nodes,
+                    extraction_pending,
+                    extraction_failed,
                 })
             })
             .await
@@ -1011,11 +1151,16 @@ mod tests {
             .await
             .expect("write embedding");
         let status = store.status(source_nodes).await.expect("status");
-        assert_eq!(status.generation_status, "active");
+        assert_eq!(status.generation_status, GenerationStatus::Active);
         assert_eq!(status.indexed, 1);
         let matches = store.search(vec![0.25, 0.75], 4).await.expect("search");
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].node_uuid, node.uuid);
+
+        store.reset_index().await.expect("reset index");
+        let status = store.status(source_nodes).await.expect("reset status");
+        assert_eq!(status.generation_status, GenerationStatus::Building);
+        assert_eq!(status.indexed, 0);
     }
 
     #[tokio::test]
@@ -1062,6 +1207,6 @@ mod tests {
         let status = store.status(source_nodes).await.expect("status");
         assert_eq!(status.indexed, 0);
         assert_eq!(status.pending, 1);
-        assert_eq!(status.generation_status, "building");
+        assert_eq!(status.generation_status, GenerationStatus::Building);
     }
 }

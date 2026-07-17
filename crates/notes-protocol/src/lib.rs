@@ -12,9 +12,43 @@ pub struct SequencedOp {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerInfo {
-    pub embedding_provider_id: String,
-    pub embedding_dimensions: usize,
     pub ai_enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum AiGenerationState {
+    Building,
+    Active,
+    Retired,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AiRuntimeSettings {
+    pub automatic_embeddings: bool,
+    pub entity_extraction: bool,
+    pub query_rewriting: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AiIndexStatus {
+    pub embedding_provider_id: String,
+    pub embedding_model: String,
+    pub embedding_dimensions: usize,
+    pub rerank_model: String,
+    pub chat_model: String,
+    pub extraction_model: String,
+    pub generation_id: uuid::Uuid,
+    pub generation_state: AiGenerationState,
+    pub settings: AiRuntimeSettings,
+    pub pending_embeddings: u64,
+    pub failed_embeddings: u64,
+    pub indexed_nodes: u64,
+    pub source_nodes: u64,
+    pub pending_extractions: u64,
+    pub failed_extractions: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
