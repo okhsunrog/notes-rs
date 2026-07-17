@@ -593,9 +593,6 @@ pub async fn create_note(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> CommandResult<db::CreatedNote> {
-    db::checkpoint_history(&state.conn, "create note")
-        .await
-        .map_err(err)?;
     let note = db::create_note(&state.conn).await.map_err(err)?;
     emit_nodes_changed(
         &app,
@@ -631,9 +628,6 @@ pub async fn split_block(
     id: i64,
     parts: Vec<db::BlockContent>,
 ) -> CommandResult<Vec<Node>> {
-    db::checkpoint_history(&state.conn, "split block")
-        .await
-        .map_err(err)?;
     let nodes = db::split_block(&state.conn, id, parts).await.map_err(err)?;
     emit_nodes_changed(&app, &state.conn, &nodes, []).await;
     emit_domain(&app, DomainEvent::HistoryChanged);
@@ -713,9 +707,6 @@ pub async fn delete_page(
         .into_iter()
         .map(|node| node.uuid)
         .collect::<Vec<_>>();
-    db::checkpoint_history(&state.conn, "delete page")
-        .await
-        .map_err(err)?;
     write_backup(&app, &state.conn, "before-delete")
         .await
         .map_err(err)?;
@@ -1174,9 +1165,6 @@ pub async fn create_block(
     content: String,
     content_json: Option<String>,
 ) -> CommandResult<Node> {
-    db::checkpoint_history(&state.conn, "create block")
-        .await
-        .map_err(err)?;
     let node = db::create_block(&state.conn, parent_id, position, content, content_json)
         .await
         .map_err(err)?;
@@ -1196,9 +1184,6 @@ pub async fn indent_block(
         .await
         .map_err(err)?
         .and_then(|node| node.parent_id);
-    db::checkpoint_history(&state.conn, "indent block")
-        .await
-        .map_err(err)?;
     let node = db::indent_block(&state.conn, uuid).await.map_err(err)?;
     emit_nodes_changed(
         &app,
@@ -1222,9 +1207,6 @@ pub async fn outdent_block(
         .await
         .map_err(err)?
         .and_then(|node| node.parent_id);
-    db::checkpoint_history(&state.conn, "outdent block")
-        .await
-        .map_err(err)?;
     let node = db::outdent_block(&state.conn, uuid).await.map_err(err)?;
     emit_nodes_changed(
         &app,
@@ -1243,9 +1225,6 @@ async fn move_block_in_direction(
     uuid: uuid::Uuid,
     direction: ReorderDirection,
 ) -> CommandResult<Node> {
-    db::checkpoint_history(&state.conn, "reorder block")
-        .await
-        .map_err(err)?;
     let node = db::move_block_in_direction(&state.conn, uuid, direction)
         .await
         .map_err(err)?;
@@ -1290,9 +1269,6 @@ pub async fn delete_block(
         deleted_node.iter().filter_map(|node| node.parent_id),
     )
     .await;
-    db::checkpoint_history(&state.conn, "delete block")
-        .await
-        .map_err(err)?;
     let deleted = db::delete_block(&state.conn, id).await.map_err(err)?;
     if deleted {
         emit_domain(
@@ -1371,18 +1347,7 @@ pub async fn create_page(
     if title.is_empty() {
         return Err("title is required".into());
     }
-    db::checkpoint_history(&state.conn, "create page")
-        .await
-        .map_err(err)?;
-    let page = db::create_node(
-        &state.conn,
-        NodeKind::Page,
-        Some(title),
-        String::new(),
-        None,
-    )
-    .await
-    .map_err(err)?;
+    let page = db::create_page(&state.conn, title).await.map_err(err)?;
     emit_nodes_changed(&app, &state.conn, std::slice::from_ref(&page), []).await;
     emit_domain(&app, DomainEvent::HistoryChanged);
     Ok(page)

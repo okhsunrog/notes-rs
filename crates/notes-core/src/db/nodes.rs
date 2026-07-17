@@ -95,8 +95,9 @@ pub async fn create_note(conn: &Connection) -> Result<CreatedNote> {
     let page_uuid = uuid::Uuid::now_v7();
     let block_uuid = uuid::Uuid::now_v7();
     let now = chrono::Utc::now().timestamp();
-    apply_local(
+    apply_local_action(
         conn,
+        "create note",
         vec![
             OpKind::NodeCreate(NodeCreate {
                 uuid: page_uuid,
@@ -257,7 +258,7 @@ pub async fn split_block(
             position: (index as f64 + 1.0) * 1024.0,
         })
     }));
-    apply_local(conn, kinds).await?;
+    apply_local_action(conn, "split block", kinds).await?;
     let mut nodes = Vec::with_capacity(result_uuids.len());
     for uuid in result_uuids {
         nodes.push(
@@ -453,6 +454,35 @@ pub async fn delete_page(conn: &Connection, id: i64) -> Result<Option<Vec<Node>>
             .into_iter()
             .map(|uuid| OpKind::NodeDelete(NodeDelete { uuid })),
     );
-    apply_local(conn, kinds).await?;
+    apply_local_action(conn, "delete page", kinds).await?;
     Ok(Some(attachments))
+}
+
+pub async fn create_page(conn: &Connection, title: String) -> Result<Node> {
+    let title = title.trim().to_owned();
+    if title.is_empty() {
+        anyhow::bail!("title is required");
+    }
+    if let Some(existing) = get_page_by_title(conn, title.clone()).await? {
+        return Ok(existing);
+    }
+    let uuid = uuid::Uuid::now_v7();
+    apply_local_action(
+        conn,
+        "create page",
+        vec![OpKind::NodeCreate(NodeCreate {
+            uuid,
+            node_kind: NodeKind::Page,
+            title: Some(title),
+            content: String::new(),
+            content_json: None,
+            parent_uuid: None,
+            position: None,
+            created_at: chrono::Utc::now().timestamp(),
+        })],
+    )
+    .await?;
+    get_node_by_uuid(conn, uuid)
+        .await?
+        .context("created page was not materialized")
 }

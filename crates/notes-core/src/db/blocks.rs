@@ -37,8 +37,9 @@ pub async fn create_block(
             },
         )
         .await?;
-    apply_local(
+    apply_local_action(
         conn,
+        "create block",
         vec![OpKind::NodeCreate(NodeCreate {
             uuid,
             node_kind: NodeKind::Block,
@@ -123,8 +124,9 @@ pub async fn move_block(
             },
         )
         .await?;
-    apply_local(
+    apply_local_action(
         conn,
+        "move block",
         vec![OpKind::NodeMove(NodeMove {
             uuid,
             parent_uuid,
@@ -185,7 +187,7 @@ pub async fn reorder_block(
             })
         })
         .collect();
-    apply_local(conn, kinds).await?;
+    apply_local_action(conn, "reorder block", kinds).await?;
     get_node_by_uuid(conn, uuid)
         .await?
         .context("reordered block disappeared")
@@ -275,7 +277,12 @@ pub async fn delete_block(conn: &Connection, id: i64) -> Result<bool> {
     let Some(uuid) = uuid else {
         return Ok(false);
     };
-    apply_local(conn, vec![OpKind::NodeDelete(NodeDelete { uuid })]).await?;
+    apply_local_action(
+        conn,
+        "delete block",
+        vec![OpKind::NodeDelete(NodeDelete { uuid })],
+    )
+    .await?;
     Ok(true)
 }
 

@@ -1,6 +1,6 @@
 use crate::model::{BackgroundQueue, FailureKind, NodeKind, ReorderDirection};
 use crate::operation::{
-    self, AttachmentAdd, AttachmentRemove, EdgeAdd, NodeCreate, NodeDelete, NodeMove,
+    self, AttachmentAdd, AttachmentRemove, EdgeAdd, EdgeRemove, NodeCreate, NodeDelete, NodeMove,
     NodeSetContent, NodeSetTitle, OpKind, Origin,
 };
 use crate::sqlite::Connection;
@@ -15,6 +15,7 @@ mod archive;
 mod attachments;
 mod blocks;
 mod graph;
+mod history;
 mod migrations;
 mod nodes;
 mod queues;
@@ -24,6 +25,7 @@ pub use archive::*;
 pub use attachments::*;
 pub use blocks::*;
 pub use graph::*;
+pub use history::*;
 pub use nodes::*;
 pub use queues::*;
 pub use search::*;
@@ -163,6 +165,15 @@ async fn apply_local(conn: &Connection, kinds: Vec<OpKind>) -> Result<()> {
     let operations = operation::local_ops(conn, kinds).await?;
     operation::apply_batch(conn, &operations, Origin::Local).await?;
     Ok(())
+}
+
+async fn apply_local_action(conn: &Connection, action: &str, kinds: Vec<OpKind>) -> Result<()> {
+    if kinds.is_empty() {
+        return Ok(());
+    }
+    let inverse = history::capture_inverse_kinds(conn, &kinds).await?;
+    apply_local(conn, kinds.clone()).await?;
+    history::record_action(conn, action, kinds, inverse).await
 }
 
 async fn require_node_uuid(conn: &Connection, id: i64) -> Result<uuid::Uuid> {
@@ -1022,18 +1033,9 @@ mod tests {
         )
         .await
         .expect("create first page");
-        checkpoint_history(&connection, "create second")
+        let second = create_page(&connection, "Second".into())
             .await
-            .expect("checkpoint");
-        let second = create_node(
-            &connection,
-            NodeKind::Page,
-            Some("Second".into()),
-            String::new(),
-            None,
-        )
-        .await
-        .expect("create second page");
+            .expect("create second page");
         let before_undo: i64 = connection
             .call(|database| {
                 database.query_row("SELECT COUNT(*) FROM applied_ops", [], |row| row.get(0))
@@ -1089,6 +1091,75 @@ mod tests {
         assert_eq!(
             history_status(&connection).await.expect("redo status"),
             (1, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_page_restores_its_subtree_with_operation_history() {
+        let (_database, connection) = temporary_database().await;
+        let note = create_note(&connection).await.expect("create note");
+        let child = create_block(
+            &connection,
+            Some(note.initial_block.id),
+            None,
+            "nested".into(),
+            None,
+        )
+        .await
+        .expect("create nested block");
+        let history_before_delete = history_status(&connection).await.expect("history status").0;
+
+        assert!(
+            delete_page(&connection, note.page.id)
+                .await
+                .expect("delete page")
+                .is_some()
+        );
+        assert!(
+            get_node_by_uuid(&connection, child.uuid)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            history_status(&connection).await.expect("history status").0,
+            history_before_delete + 1
+        );
+
+        assert!(undo_history(&connection).await.expect("undo page delete"));
+        let restored_page = get_node_by_uuid(&connection, note.page.uuid)
+            .await
+            .expect("read page")
+            .expect("restored page");
+        let restored_parent = get_node_by_uuid(&connection, note.initial_block.uuid)
+            .await
+            .expect("read parent")
+            .expect("restored parent");
+        let restored_child = get_node_by_uuid(&connection, child.uuid)
+            .await
+            .expect("read child")
+            .expect("restored child");
+        assert_eq!(restored_parent.parent_id, Some(restored_page.id));
+        assert_eq!(restored_child.parent_id, Some(restored_parent.id));
+
+        let history_columns = connection
+            .call(|database| -> rusqlite::Result<Vec<String>> {
+                let mut statement = database.prepare("PRAGMA table_info(history_redo)")?;
+                statement
+                    .query_map([], |row| row.get(1))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .await
+            .expect("history columns");
+        assert!(
+            history_columns
+                .iter()
+                .any(|column| column == "inverse_json")
+        );
+        assert!(
+            !history_columns
+                .iter()
+                .any(|column| column == "archive_json")
         );
     }
 }

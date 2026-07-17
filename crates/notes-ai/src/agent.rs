@@ -806,9 +806,6 @@ impl Tool for CreateNode {
                 "pages require a non-empty title".into(),
             ));
         }
-        db::checkpoint_history(&self.conn, "AI create node")
-            .await
-            .map_err(into_tool_err)?;
         db::create_node(&self.conn, args.kind, args.title, args.content, None)
             .await
             .map_err(into_tool_err)
@@ -874,9 +871,6 @@ impl Tool for LinkNodes {
                     .into(),
             ));
         }
-        db::checkpoint_history(&self.conn, "AI link nodes")
-            .await
-            .map_err(into_tool_err)?;
         db::link_nodes(&self.conn, args.src, args.dst, args.kind, args.weight)
             .await
             .map_err(into_tool_err)?;

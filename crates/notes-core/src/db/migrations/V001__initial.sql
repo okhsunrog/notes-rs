@@ -47,14 +47,18 @@ CREATE INDEX idx_entity_descriptions_entity
 
 CREATE TABLE history_undo (
   id INTEGER PRIMARY KEY,
+  action_uuid BLOB NOT NULL UNIQUE CHECK (length(action_uuid) = 16),
   action TEXT NOT NULL,
-  archive_json TEXT NOT NULL,
+  forward_json TEXT NOT NULL,
+  inverse_json TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
 CREATE TABLE history_redo (
   id INTEGER PRIMARY KEY,
+  action_uuid BLOB NOT NULL UNIQUE CHECK (length(action_uuid) = 16),
   action TEXT NOT NULL,
-  archive_json TEXT NOT NULL,
+  forward_json TEXT NOT NULL,
+  inverse_json TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
 
