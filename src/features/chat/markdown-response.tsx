@@ -1,10 +1,20 @@
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { MarkdownRenderer, type MarkdownOpenHandler } from "@/features/markdown";
 
-export default function MarkdownResponse({ children }: { children: string }) {
+const ASSISTANT_CONTEXT = { kind: "assistant" } as const;
+
+export default function MarkdownResponse({
+  children,
+  onOpenLink,
+}: {
+  children: string;
+  onOpenLink: MarkdownOpenHandler;
+}) {
   return (
-    <div className="assistant-markdown text-[13px] leading-relaxed">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown>
-    </div>
+    <MarkdownRenderer
+      className="assistant-markdown text-[13px] leading-relaxed"
+      context={ASSISTANT_CONTEXT}
+      markdown={children}
+      onOpenLink={onOpenLink}
+    />
   );
 }

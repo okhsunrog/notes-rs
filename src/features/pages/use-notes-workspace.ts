@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import type { MarkdownOpenRequest } from "@/features/markdown";
 import {
   createNote,
   deletePage,
+  getBlock,
   getContainingPage,
   getHistoryStatus,
   getPage,
+  getPageByTitle,
   redo,
   undo,
   type Content,
@@ -125,6 +129,53 @@ export function useNotesWorkspace(
     [onStatus, queryClient, showEditor],
   );
 
+  const openMarkdownLink = useCallback(
+    async (request: MarkdownOpenRequest) => {
+      const { disposition, target } = request;
+      try {
+        if (target.kind === "external") {
+          await openUrl(target.href);
+          return;
+        }
+        if (target.kind === "fragment") {
+          const fragment = decodeFragment(target.fragment);
+          const element = fragment ? document.getElementById(fragment) : null;
+          if (element) {
+            element.scrollIntoView({ behavior: "smooth", block: "start" });
+          } else {
+            onStatus(`Section #${fragment || target.fragment} is not available on this page.`);
+          }
+          return;
+        }
+
+        const content: Content | null =
+          target.kind === "page"
+            ? await getPageByTitle(target.title).then((page) =>
+                page ? { kind: "page", record: page } : null,
+              )
+            : await getBlock(target.uuid).then((block) =>
+                block ? { kind: "block", record: block } : null,
+              );
+        if (!content) {
+          onStatus(
+            target.kind === "page"
+              ? `Page “${target.title}” was not found.`
+              : `Block ${target.uuid} was not found.`,
+          );
+          return;
+        }
+
+        await openContent(content);
+        if (disposition === "adjacent") {
+          onStatus("Split view is not available yet; opened the link in the current pane.");
+        }
+      } catch (error) {
+        onStatus(`link error: ${String(error)}`);
+      }
+    },
+    [onStatus, openContent],
+  );
+
   const removePage = useCallback(
     async (page: Page) => {
       if (
@@ -181,10 +232,19 @@ export function useNotesWorkspace(
     hits,
     moveHistory,
     newNote,
+    openMarkdownLink,
     openContent,
     removePage,
     resetWorkspace,
     selectPage,
     setHits,
   };
+}
+
+function decodeFragment(fragment: string): string {
+  try {
+    return decodeURIComponent(fragment);
+  } catch {
+    return fragment;
+  }
 }

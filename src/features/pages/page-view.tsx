@@ -12,6 +12,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Outliner } from "@/features/outliner/outliner";
+import type { MarkdownOpenHandler } from "@/features/markdown";
 import { AttachmentsCard } from "@/features/attachments/attachments-card";
 import { renamePage, setPageLayout, type Page, type PageLayout } from "@/lib/api";
 import { DebouncedAction } from "@/lib/debounced-action";
@@ -23,6 +24,7 @@ type Props = {
   onStatus: (s: string) => void;
   onClose: () => void;
   onDelete: (page: Page) => void | Promise<void>;
+  onOpenMarkdownLink: MarkdownOpenHandler;
   initialBlockUuid?: string | null;
   autoFocusTitle?: boolean;
 };
@@ -37,6 +39,7 @@ export function PageView({
   onStatus,
   onClose,
   onDelete,
+  onOpenMarkdownLink,
   initialBlockUuid = null,
   autoFocusTitle = false,
 }: Props) {
@@ -248,6 +251,7 @@ export function PageView({
           page={page}
           initialEditingUuid={initialBlockUuid}
           focusRequest={bodyFocusRequest}
+          onOpenMarkdownLink={onOpenMarkdownLink}
           presentation={presentation}
         />
       </div>

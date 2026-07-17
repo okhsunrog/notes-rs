@@ -4,6 +4,7 @@ import { ArrowUp, CheckCircle2, PencilLine, Sparkles, Square, Trash2, Wrench } f
 import { useConfirmation } from "@/app/confirmation";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import type { MarkdownOpenHandler } from "@/features/markdown";
 import { cancelChat, chatStream, type ChatEvent, type ChatTurn, type Page } from "@/lib/api";
 
 const CHAT_STORAGE_KEY = "notes-rs.chat.v1";
@@ -30,7 +31,13 @@ function boundedHistory(turns: ChatTurn[]) {
   return result.reverse();
 }
 
-export function ChatCard({ page }: { page: Page | null }) {
+export function ChatCard({
+  page,
+  onOpenMarkdownLink,
+}: {
+  page: Page | null;
+  onOpenMarkdownLink: MarkdownOpenHandler;
+}) {
   const confirm = useConfirmation();
   const [chatInput, setChatInput] = useState("");
   const [chatLog, setChatLog] = useState<ChatTurn[]>(loadStoredChat);
@@ -216,7 +223,7 @@ export function ChatCard({ page }: { page: Page | null }) {
                     <p className="whitespace-pre-wrap text-[13px] leading-relaxed">{t.text}</p>
                   }
                 >
-                  <MarkdownResponse>{t.text}</MarkdownResponse>
+                  <MarkdownResponse onOpenLink={onOpenMarkdownLink}>{t.text}</MarkdownResponse>
                 </Suspense>
               ) : (
                 <p className="whitespace-pre-wrap text-[13px] leading-relaxed">{t.text}</p>

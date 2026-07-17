@@ -32,14 +32,13 @@ import {
   type Block,
   type BlockContent,
   type BlockStyle,
-  type PageLayout,
 } from "@/lib/api";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { BlockChildren } from "./block-tree";
 import { BlockEdit, type BlockEditHandle } from "./block-edit";
 import { useOutliner } from "./outliner-store";
 import { nextSibling, prevSibling } from "./keyboard";
-import { renderMarkdown } from "./render-markdown";
+import { RenderedBlock } from "./rendered-block";
 import { detectTrigger, type Trigger } from "./autocomplete";
 import {
   AutocompleteMenu,
@@ -671,7 +670,13 @@ export function BlockNode({ block, depth, ordinal }: Props) {
             </>
           ) : (
             <div className={readOnly ? "cursor-default" : "cursor-text"}>
-              <RenderedBlock block={block} ordinal={ordinal} layout={store.layout} />
+              <RenderedBlock
+                block={block}
+                ordinal={ordinal}
+                layout={store.layout}
+                readOnly={readOnly}
+                onOpenLink={store.onOpenMarkdownLink}
+              />
             </div>
           )}
         </div>
@@ -781,64 +786,6 @@ function BlockStylePicker({
       </SelectContent>
     </Select>
   );
-}
-
-function RenderedBlock({
-  block,
-  ordinal,
-  layout,
-}: {
-  block: Block;
-  ordinal: number;
-  layout: PageLayout;
-}) {
-  if (block.style === "divider") return <hr className="my-4 border-border/70" />;
-  if (!block.markdown) {
-    return <span className="text-sm text-muted-foreground/45">Start writing…</span>;
-  }
-  if (block.style === "code") {
-    return (
-      <pre className="overflow-x-auto rounded-xl border border-border/60 bg-muted/55 p-3 text-xs leading-relaxed">
-        <code>{block.markdown}</code>
-      </pre>
-    );
-  }
-
-  const content = renderMarkdown(block.markdown);
-  if (block.style === "heading_1") {
-    return <h2 className="mt-5 mb-2 text-2xl font-semibold tracking-tight">{content}</h2>;
-  }
-  if (block.style === "heading_2") {
-    return <h3 className="mt-4 mb-1.5 text-xl font-semibold tracking-tight">{content}</h3>;
-  }
-  if (block.style === "heading_3") {
-    return <h4 className="mt-3 mb-1 text-base font-semibold">{content}</h4>;
-  }
-  if (block.style === "quote") {
-    return (
-      <blockquote className="border-l-2 border-primary/35 pl-4 text-sm leading-relaxed text-muted-foreground italic">
-        {content}
-      </blockquote>
-    );
-  }
-  if (layout === "outline" && (block.style === "bullet" || block.style === "numbered")) {
-    return <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{content}</p>;
-  }
-  if (block.style === "bullet" || block.style === "numbered" || block.style === "task") {
-    return (
-      <div className="flex gap-2 text-sm leading-relaxed">
-        {block.style === "task" ? (
-          <input type="checkbox" disabled className="mt-1 size-3.5 accent-primary" />
-        ) : (
-          <span className="w-4 shrink-0 text-right text-muted-foreground">
-            {block.style === "numbered" ? `${ordinal}.` : "•"}
-          </span>
-        )}
-        <span className="min-w-0 whitespace-pre-wrap break-words">{content}</span>
-      </div>
-    );
-  }
-  return <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{content}</p>;
 }
 
 /** Convert "auto comp" → "auto* comp*" for FTS5 prefix matching. Strips

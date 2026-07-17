@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, RefreshCw, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ChatCard } from "@/features/chat/chat-card";
+import type { MarkdownOpenHandler } from "@/features/markdown";
 import {
   contentText,
   contentUuid,
@@ -17,12 +18,17 @@ import {
 } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
 
-type Props = {
+type PanelProps = {
+  page: Page | null;
+  onOpenMarkdownLink: MarkdownOpenHandler;
+};
+
+type GraphProps = {
   page: Page | null;
   onOpenContent: (content: Content) => void | Promise<void>;
 };
 
-export function KnowledgePanel({ page }: Props) {
+export function KnowledgePanel({ page, onOpenMarkdownLink }: PanelProps) {
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
       <div className="flex shrink-0 items-center gap-2 px-1 pt-1">
@@ -35,13 +41,17 @@ export function KnowledgePanel({ page }: Props) {
         </div>
       </div>
       <div className="min-h-0 flex-1 pt-1">
-        <ChatCard page={page} />
+        <ChatCard page={page} onOpenMarkdownLink={onOpenMarkdownLink} />
       </div>
     </div>
   );
 }
 
-export function GraphWorkspace({ page, onOpenContent, onClose }: Props & { onClose: () => void }) {
+export function GraphWorkspace({
+  page,
+  onOpenContent,
+  onClose,
+}: GraphProps & { onClose: () => void }) {
   const graphQuery = useQuery({
     queryKey: queryKeys.graph(page?.uuid ?? null),
     queryFn: () => getGraphSnapshot(page?.uuid ?? null),

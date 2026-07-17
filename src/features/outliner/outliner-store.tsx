@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import type { MarkdownOpenHandler } from "@/features/markdown";
 import type { PageLayout } from "@/lib/api";
 
 type Store = {
@@ -6,6 +7,7 @@ type Store = {
   setEditing: (uuid: string | null) => void;
   layout: PageLayout;
   readOnly: boolean;
+  onOpenMarkdownLink: MarkdownOpenHandler;
 };
 
 const OutlinerCtx = createContext<Store | null>(null);
@@ -23,12 +25,14 @@ export function OutlinerProvider({
   initialEditingUuid = null,
   initialEditingRequest = 0,
   layout,
+  onOpenMarkdownLink,
   readOnly,
 }: {
   children: React.ReactNode;
   initialEditingUuid?: string | null;
   initialEditingRequest?: number;
   layout: PageLayout;
+  onOpenMarkdownLink: MarkdownOpenHandler;
   readOnly: boolean;
 }) {
   const [editingUuid, setEditing] = useState<string | null>(
@@ -46,8 +50,8 @@ export function OutlinerProvider({
   }, [readOnly]);
 
   const store = useMemo(
-    () => ({ editingUuid, setEditing, layout, readOnly }),
-    [editingUuid, layout, readOnly],
+    () => ({ editingUuid, setEditing, layout, onOpenMarkdownLink, readOnly }),
+    [editingUuid, layout, onOpenMarkdownLink, readOnly],
   );
 
   return <OutlinerCtx.Provider value={store}>{children}</OutlinerCtx.Provider>;

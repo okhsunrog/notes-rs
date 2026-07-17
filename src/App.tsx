@@ -236,6 +236,7 @@ function App() {
               onStatus={setStatus}
               onClose={workspace.closePage}
               onDelete={workspace.removePage}
+              onOpenMarkdownLink={workspace.openMarkdownLink}
             />
           ) : (
             <HomeView
@@ -248,7 +249,12 @@ function App() {
             />
           )
         }
-        right={<KnowledgePanel page={workspace.activePage} onOpenContent={openContent} />}
+        right={
+          <KnowledgePanel
+            page={workspace.activePage}
+            onOpenMarkdownLink={workspace.openMarkdownLink}
+          />
+        }
         fullWorkspace={
           graphOpen ? (
             <GraphWorkspace
