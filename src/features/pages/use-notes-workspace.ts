@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { MarkdownOpenRequest } from "@/features/markdown";
@@ -25,40 +25,43 @@ import {
   type SearchHit,
 } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
+import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify";
 import { useConfirmation } from "@/app/confirmation";
 import {
   DockVisibility,
   PaneContentKind,
   adjacentDisposition,
-  createInitialWorkspaceState,
   currentDisposition,
   getActivePane,
   homeTarget,
   journalDayTarget,
   pageTarget,
-  workspaceReducer,
   type OpenDisposition,
   type OpenTarget,
   type PaneId,
   type SplitId,
 } from "@/features/workspace/workspace-model";
+import { useWorkspaceStore, type WorkspaceStore } from "@/features/workspace/workspace-store";
 import { PagePresentation } from "./page-presentation";
 import { usePageSessionRegistry } from "./page-session";
 
+type StatusMessageHandler = (status: string) => void;
+type ShowEditor = () => void;
+
 export function useNotesWorkspace(
   ready: boolean,
-  onStatus: (message: string) => void,
-  showEditor: () => void,
+  _onStatusOrShowEditor: StatusMessageHandler | ShowEditor,
+  showEditorArg?: ShowEditor,
 ) {
+  const showEditor =
+    showEditorArg ??
+    ((_onStatusOrShowEditor.length === 0 ? _onStatusOrShowEditor : () => {}) as ShowEditor);
   const confirm = useConfirmation();
   const pageSessions = usePageSessionRegistry();
   const queryClient = useQueryClient();
   const [hits, setHits] = useState<SearchHit[]>([]);
-  const [windowWorkspace, dispatchWorkspace] = useReducer(
-    workspaceReducer,
-    undefined,
-    createInitialWorkspaceState,
-  );
+  const windowWorkspace = useWorkspaceStore((state: WorkspaceStore) => state);
+  const dispatchWorkspace = useWorkspaceStore((state: WorkspaceStore) => state.dispatch);
   const [newNote, setNewNote] = useState<{ pageUuid: string; blockUuid: string | null } | null>(
     null,
   );
@@ -90,9 +93,12 @@ export function useNotesWorkspace(
   });
   const activePage = activePageQuery.data ?? null;
 
-  const openTarget = useCallback((target: OpenTarget, disposition: OpenDisposition) => {
-    dispatchWorkspace({ type: "open_target", target, disposition });
-  }, []);
+  const openTarget = useCallback(
+    (target: OpenTarget, disposition: OpenDisposition) => {
+      dispatchWorkspace({ type: "open_target", target, disposition });
+    },
+    [dispatchWorkspace],
+  );
 
   useEffect(() => {
     if (activePageUuid !== null && activePageQuery.isSuccess && activePageQuery.data === null) {
@@ -100,7 +106,13 @@ export function useNotesWorkspace(
       dispatchWorkspace({ type: "forget_page", pageUuid: activePageUuid });
       setNewNote(null);
     }
-  }, [activePageQuery.data, activePageQuery.isSuccess, activePageUuid, pageSessions]);
+  }, [
+    activePageQuery.data,
+    activePageQuery.isSuccess,
+    activePageUuid,
+    dispatchWorkspace,
+    pageSessions,
+  ]);
 
   const createNewNote = useCallback(async () => {
     if (creatingNoteRef.current) return;
@@ -119,15 +131,15 @@ export function useNotesWorkspace(
         currentDisposition,
       );
       setHits([]);
-      onStatus("New note ready — name it, then press Enter to write.");
+      notifyInfo("New note ready — name it, then press Enter to write.");
       showEditor();
     } catch (error) {
-      onStatus(`create error: ${String(error)}`);
+      notifyError("create", error);
     } finally {
       creatingNoteRef.current = false;
       setCreatingNote(false);
     }
-  }, [onStatus, openTarget, queryClient, showEditor]);
+  }, [openTarget, queryClient, showEditor]);
 
   const moveHistory = useCallback(
     async (direction: "undo" | "redo") => {
@@ -137,14 +149,16 @@ export function useNotesWorkspace(
         if (changed && navigationEpoch === navigationEpochRef.current) {
           dispatchWorkspace({ type: "reset" });
           setHits([]);
-          onStatus(direction === "undo" ? "Undid structural change." : "Redid structural change.");
+          notifyInfo(
+            direction === "undo" ? "Undid structural change." : "Redid structural change.",
+          );
           await queryClient.invalidateQueries({ queryKey: queryKeys.root });
         }
       } catch (error) {
-        onStatus(`${direction} error: ${String(error)}`);
+        notifyError(direction, error);
       }
     },
-    [onStatus, queryClient],
+    [dispatchWorkspace, queryClient],
   );
 
   const openJournal = useCallback(
@@ -170,14 +184,14 @@ export function useNotesWorkspace(
         showEditor();
       } catch (error) {
         if (navigationEpoch === navigationEpochRef.current) {
-          onStatus(`journal error: ${String(error)}`);
+          notifyError("journal", error);
         }
       } finally {
         journalBusyRef.current = false;
         setJournalBusy(false);
       }
     },
-    [onStatus, openTarget, queryClient, showEditor],
+    [openTarget, queryClient, showEditor],
   );
 
   const captureJournal = useCallback(
@@ -195,7 +209,7 @@ export function useNotesWorkspace(
         ]);
         if (openAfterCapture) {
           if (navigationEpoch !== navigationEpochRef.current) {
-            onStatus(`Captured in journal ${date}.`);
+            notifyInfo(`Captured in journal ${date}.`);
             return true;
           }
           const page = await queryClient.fetchQuery({
@@ -204,7 +218,7 @@ export function useNotesWorkspace(
           });
           if (!page) throw new Error("captured journal page was not found");
           if (navigationEpoch !== navigationEpochRef.current) {
-            onStatus(`Captured in journal ${date}.`);
+            notifyInfo(`Captured in journal ${date}.`);
             return true;
           }
           queryClient.setQueryData(queryKeys.page(page.uuid), page);
@@ -213,17 +227,17 @@ export function useNotesWorkspace(
           setHits([]);
           showEditor();
         }
-        onStatus(`Captured in journal ${date}.`);
+        notifyInfo(`Captured in journal ${date}.`);
         return true;
       } catch (error) {
-        onStatus(`capture error: ${String(error)}`);
+        notifyError("capture", error);
         return false;
       } finally {
         journalBusyRef.current = false;
         setJournalBusy(false);
       }
     },
-    [onStatus, openTarget, queryClient, showEditor],
+    [openTarget, queryClient, showEditor],
   );
 
   const quickCapture = useCallback(
@@ -254,7 +268,7 @@ export function useNotesWorkspace(
           content.kind === "page" ? content.record : await getContainingPage(content.record.uuid);
         if (navigationEpoch !== navigationEpochRef.current) return;
         if (!page) {
-          onStatus(`No containing page found for ${content.record.uuid}`);
+          notifyError("open", `No containing page found for ${content.record.uuid}`);
           return;
         }
         queryClient.setQueryData(queryKeys.page(page.uuid), page);
@@ -266,15 +280,15 @@ export function useNotesWorkspace(
         );
         showEditor();
         if (content.kind === "block") {
-          onStatus(`Opened ${pageDisplayTitle(page)} containing the selected block.`);
+          notifyInfo(`Opened ${pageDisplayTitle(page)} containing the selected block.`);
         }
       } catch (error) {
         if (navigationEpoch === navigationEpochRef.current) {
-          onStatus(`open error: ${String(error)}`);
+          notifyError("open", error);
         }
       }
     },
-    [onStatus, openTarget, queryClient, showEditor],
+    [openTarget, queryClient, showEditor],
   );
 
   const openMarkdownLink = useCallback(
@@ -292,7 +306,10 @@ export function useNotesWorkspace(
           if (element) {
             element.scrollIntoView({ behavior: "smooth", block: "start" });
           } else {
-            onStatus(`Section #${fragment || target.fragment} is not available on this page.`);
+            notifyError(
+              "open",
+              `Section #${fragment || target.fragment} is not available on this page.`,
+            );
           }
           return;
         }
@@ -311,7 +328,8 @@ export function useNotesWorkspace(
           content = block ? { kind: "block", record: block } : null;
         }
         if (!content) {
-          onStatus(
+          notifyError(
+            "open",
             target.kind === "page"
               ? `Page “${target.title}” was not found.`
               : `Block ${target.uuid} was not found.`,
@@ -321,10 +339,10 @@ export function useNotesWorkspace(
 
         await openContent(content, openDisposition);
       } catch (error) {
-        onStatus(`link error: ${String(error)}`);
+        notifyError("link", error);
       }
     },
-    [onStatus, openContent, openJournal],
+    [openContent, openJournal],
   );
 
   const removePage = useCallback(
@@ -350,13 +368,13 @@ export function useNotesWorkspace(
               (hit) => !(hit.content.kind === "page" && hit.content.record.uuid === page.uuid),
             ),
           );
-          onStatus("Page deleted; a recovery backup was created.");
+          notifySuccess("Page deleted; a recovery backup was created.");
         }
       } catch (error) {
-        onStatus(`delete error: ${String(error)}`);
+        notifyError("delete", error);
       }
     },
-    [confirm, onStatus, pageSessions, queryClient],
+    [confirm, dispatchWorkspace, pageSessions, queryClient],
   );
 
   const selectPage = useCallback(
@@ -375,7 +393,7 @@ export function useNotesWorkspace(
     dispatchWorkspace({ type: "reset" });
     setHits([]);
     void queryClient.invalidateQueries({ queryKey: queryKeys.root });
-  }, [queryClient]);
+  }, [dispatchWorkspace, queryClient]);
 
   return {
     activePage,
