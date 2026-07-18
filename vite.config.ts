@@ -12,7 +12,14 @@ export default defineConfig({
       import("@vitejs/plugin-react"),
       import("@tailwindcss/vite"),
     ]);
-    return [react(), tailwindcss()];
+    return [
+      react({
+        babel: {
+          plugins: [["babel-plugin-react-compiler", {}]],
+        },
+      } as any),
+      tailwindcss(),
+    ];
   }),
   resolve: {
     alias: {
