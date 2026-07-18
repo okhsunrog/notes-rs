@@ -10,6 +10,7 @@ import {
   type PageDocumentSnapshot,
 } from "@/lib/api";
 import { DebouncedAction } from "@/lib/debounced-action";
+import { notifyError } from "@/lib/notify";
 import { queryKeys } from "@/lib/query";
 import {
   useDocumentDraftOverlay,
@@ -27,7 +28,6 @@ type Props = {
   authoringMode: DocumentAuthoringMode;
   focusRequest: number;
   onOpenMarkdownLink: MarkdownOpenHandler;
-  onStatus: (message: string) => void;
   onFlushReady?: (flush: (() => Promise<boolean>) | null) => void;
 };
 
@@ -59,7 +59,6 @@ export function DocumentPage({
   authoringMode,
   focusRequest,
   onOpenMarkdownLink,
-  onStatus,
   onFlushReady,
 }: Props) {
   const queryClient = useQueryClient();
@@ -92,7 +91,6 @@ export function DocumentPage({
       authoringMode={authoringMode}
       focusRequest={focusRequest}
       onOpenMarkdownLink={onOpenMarkdownLink}
-      onStatus={onStatus}
       onFlushReady={onFlushReady}
       queryClient={queryClient}
     />
@@ -112,7 +110,6 @@ function LoadedDocumentPage({
   authoringMode,
   focusRequest,
   onOpenMarkdownLink,
-  onStatus,
   onFlushReady,
   queryClient,
 }: LoadedProps) {
@@ -123,9 +120,7 @@ function LoadedDocumentPage({
   const autosave = useRef(new DebouncedAction()).current;
   const saveInFlight = useRef<Promise<boolean> | null>(null);
   const persistedRef = useRef(persisted);
-  const onStatusRef = useRef(onStatus);
   persistedRef.current = persisted;
-  onStatusRef.current = onStatus;
 
   const flush = useCallback(async (): Promise<boolean> => {
     autosave.cancel();
@@ -166,7 +161,7 @@ function LoadedDocumentPage({
             }
           }
           setSaveState("error");
-          onStatusRef.current(`document save error: ${String(error)}`);
+          notifyError("document save", error);
           return false;
         }
       }

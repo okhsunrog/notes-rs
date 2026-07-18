@@ -33,6 +33,7 @@ import { useNotesWorkspace } from "@/features/pages/use-notes-workspace";
 import type { JournalDate } from "@/lib/api";
 import { useAssistantController } from "@/features/chat/use-assistant-controller";
 import { Workbench } from "@/features/workspace/workbench";
+import { notifyError, notifySuccess } from "@/lib/notify";
 import {
   DockVisibility,
   PaneContentKind,
@@ -49,13 +50,12 @@ const SettingsPage = lazy(() =>
 
 function App() {
   const { ready, startupError } = useStartupState();
-  const [status, setStatus] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [windowDecorationMode, setWindowDecorationMode] = useState<WindowDecorationMode>("native");
   const [searchOpen, setSearchOpen] = useState(false);
   const [editorRequest, setEditorRequest] = useState(0);
   const showEditor = useCallback(() => setEditorRequest((request) => request + 1), []);
-  const workspace = useNotesWorkspace(ready, setStatus, showEditor);
+  const workspace = useNotesWorkspace(ready, showEditor);
   const assistant = useAssistantController();
   const graphOpen = workspace.activePane.content.kind === PaneContentKind.Graph;
 
@@ -91,15 +91,6 @@ function App() {
     }
   }, [settingsQuery.data]);
 
-  useEffect(() => {
-    if (!status) return;
-    const timeout = window.setTimeout(
-      () => setStatus(""),
-      status.toLowerCase().includes("error") ? 8_000 : 4_000,
-    );
-    return () => window.clearTimeout(timeout);
-  }, [status]);
-
   useAppShortcuts({
     enabled: ready,
     createNote: () => void createNewNote(),
@@ -127,14 +118,14 @@ function App() {
             void getPage(openPageUuid)
               .then((page) => {
                 if (!page) {
-                  setStatus("import error: imported page was not found");
+                  notifyError("import", "imported page was not found");
                   return;
                 }
                 workspace.selectPage(page);
                 setSettingsOpen(false);
-                setStatus("Opened the imported Logseq workspace.");
+                notifySuccess("Opened the imported Logseq workspace.");
               })
-              .catch((error: unknown) => setStatus(`import error: ${String(error)}`));
+              .catch((error: unknown) => notifyError("import", error));
           }}
         />
       </Suspense>
@@ -177,7 +168,6 @@ function App() {
   return (
     <>
       <AppLayout
-        status={status}
         editorRequest={editorRequest}
         headerActions={
           <>
@@ -296,7 +286,6 @@ function App() {
             onQuickCapture={workspace.quickCapture}
             journalBusy={workspace.journalBusy}
             onSelect={workspace.selectPage}
-            onStatus={setStatus}
           />
         }
         workbench={
@@ -307,7 +296,6 @@ function App() {
             newNote={workspace.newNote}
             hits={workspace.hits}
             setHits={workspace.setHits}
-            onStatus={setStatus}
             onCreate={createNewNote}
             onOpenContent={openContent}
             onOpenJournal={openJournal}
@@ -351,7 +339,6 @@ function App() {
               await openContent(content, disposition);
               setSearchOpen(false);
             }}
-            onStatus={setStatus}
           />
         </DialogContent>
       </Dialog>

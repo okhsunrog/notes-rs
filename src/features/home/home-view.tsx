@@ -16,7 +16,6 @@ type Props = {
   onCreate: () => void | Promise<void>;
   onOpenJournal: (date: JournalDate, disposition?: OpenDisposition) => void | Promise<void>;
   onOpenContent: (content: Content, disposition?: OpenDisposition) => void | Promise<void>;
-  onStatus: (status: string) => void;
 };
 
 export function HomeView({
@@ -27,7 +26,6 @@ export function HomeView({
   onCreate,
   onOpenJournal,
   onOpenContent,
-  onStatus,
 }: Props) {
   return (
     <div className="mx-auto flex min-h-full max-w-4xl flex-col justify-center px-8 py-16 sm:px-12">
@@ -87,13 +85,7 @@ export function HomeView({
       </div>
 
       <div className="mt-10">
-        <SearchCard
-          variant="inline"
-          hits={hits}
-          setHits={setHits}
-          onOpenContent={onOpenContent}
-          onStatus={onStatus}
-        />
+        <SearchCard variant="inline" hits={hits} setHits={setHits} onOpenContent={onOpenContent} />
       </div>
     </div>
   );

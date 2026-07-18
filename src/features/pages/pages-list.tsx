@@ -10,6 +10,7 @@ import { pageDisplayTitle } from "@/features/journal/journal-date";
 import { listJournals, listPages, type JournalDate, type Page } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { queryKeys } from "@/lib/query";
+import { notifyError } from "@/lib/notify";
 import {
   dispositionFromShiftKey,
   type OpenDisposition,
@@ -23,7 +24,6 @@ type Props = {
   onOpenJournal: (date: JournalDate, disposition?: OpenDisposition) => void | Promise<void>;
   onQuickCapture: (markdown: string) => boolean | Promise<boolean>;
   journalBusy: boolean;
-  onStatus: (s: string) => void;
 };
 
 export function PagesList({
@@ -34,7 +34,6 @@ export function PagesList({
   onOpenJournal,
   onQuickCapture,
   journalBusy,
-  onStatus,
 }: Props) {
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState(false);
@@ -51,9 +50,9 @@ export function PagesList({
   const recentJournals = journalsQuery.data ?? [];
 
   useEffect(() => {
-    if (pagesQuery.error) onStatus(`error: ${String(pagesQuery.error)}`);
-    if (journalsQuery.error) onStatus(`journal error: ${String(journalsQuery.error)}`);
-  }, [journalsQuery.error, onStatus, pagesQuery.error]);
+    if (pagesQuery.error) notifyError("pages", pagesQuery.error);
+    if (journalsQuery.error) notifyError("journal", journalsQuery.error);
+  }, [journalsQuery.error, pagesQuery.error]);
 
   async function create() {
     if (busy) return;
@@ -62,7 +61,7 @@ export function PagesList({
       await onCreate();
       await queryClient.invalidateQueries({ queryKey: queryKeys.pages });
     } catch (err) {
-      onStatus(`error: ${String(err)}`);
+      notifyError("pages", err);
     } finally {
       setBusy(false);
     }

@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, ExternalLink, File, Loader2, Paperclip, Trash2 } from "lucide-react";
 import { useConfirmation } from "@/app/confirmation";
 import { Button } from "@/components/ui/button";
+import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify";
 import {
   attachFile,
   deleteAttachment,
@@ -15,11 +16,9 @@ import { queryKeys } from "@/lib/query";
 
 export function AttachmentsCard({
   location,
-  onStatus,
   readOnly = false,
 }: {
   location: AttachmentOwner;
-  onStatus: (message: string) => void;
   readOnly?: boolean;
 }) {
   const confirm = useConfirmation();
@@ -41,9 +40,9 @@ export function AttachmentsCard({
 
   useEffect(() => {
     if (attachmentsQuery.error) {
-      onStatus(`attachment error: ${String(attachmentsQuery.error)}`);
+      notifyError("attachments", attachmentsQuery.error);
     }
-  }, [attachmentsQuery.error, onStatus]);
+  }, [attachmentsQuery.error]);
 
   async function add() {
     if (readOnlyRef.current) return;
@@ -56,15 +55,15 @@ export function AttachmentsCard({
         if (readOnlyRef.current) {
           await deleteAttachment(attachment.uuid);
           await queryClient.invalidateQueries({ queryKey: queryKeys.attachments(location.uuid) });
-          onStatus("Attachment was not added because this pane is now read-only.");
+          notifyInfo("Attachment was not added because this pane is now read-only.");
           return;
         }
         await queryClient.invalidateQueries({ queryKey: queryKeys.attachments(location.uuid) });
         setExpanded(true);
-        onStatus(`Attached ${attachment.filename}`);
+        notifySuccess(`Attached ${attachment.filename}`);
       }
     } catch (error) {
-      onStatus(`attachment error: ${String(error)}`);
+      notifyError("attachment", error);
     } finally {
       setBusy(false);
     }
@@ -85,10 +84,10 @@ export function AttachmentsCard({
     try {
       if (await deleteAttachment(attachment.uuid)) {
         await queryClient.invalidateQueries({ queryKey: queryKeys.attachments(location.uuid) });
-        onStatus("Attachment removed; a recovery backup was created.");
+        notifySuccess("Attachment removed; a recovery backup was created.");
       }
     } catch (error) {
-      onStatus(`attachment error: ${String(error)}`);
+      notifyError("attachment", error);
     }
   }
 
@@ -155,7 +154,7 @@ export function AttachmentsCard({
                     aria-label={`Open ${attachment.filename}`}
                     onClick={() =>
                       void openAttachment(attachment.uuid).catch((error) =>
-                        onStatus(`open error: ${String(error)}`),
+                        notifyError("open", error),
                       )
                     }
                   >

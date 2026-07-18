@@ -34,7 +34,6 @@ type WorkbenchProps = {
   newNote: { pageUuid: string; blockUuid: string | null } | null;
   hits: SearchHit[];
   setHits: React.Dispatch<React.SetStateAction<SearchHit[]>>;
-  onStatus: (status: string) => void;
   onCreate: () => void | Promise<void>;
   onOpenContent: (content: Content, disposition?: OpenDisposition) => void | Promise<void>;
   onOpenJournal: (date: JournalDate, disposition?: OpenDisposition) => void | Promise<void>;
@@ -260,7 +259,6 @@ function PaneSurface({
           onCreate={props.onCreate}
           onOpenJournal={props.onOpenJournal}
           onOpenContent={props.onOpenContent}
-          onStatus={props.onStatus}
         />
       );
     case PaneContentKind.Page:
@@ -325,7 +323,6 @@ function PagePane({
       presentation={content.presentation}
       onPresentationChange={(presentation) => props.onPresentationChange(paneId, presentation)}
       onSaved={props.onSaved}
-      onStatus={props.onStatus}
       onClose={() => props.onClosePane(paneId)}
       onDelete={props.onDelete}
       onOpenMarkdownLink={props.onOpenMarkdownLink}

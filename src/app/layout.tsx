@@ -13,7 +13,6 @@ enum CompactRegion {
 }
 
 type Props = {
-  status?: string;
   headerActions?: ReactNode;
   sidebar: ReactNode;
   workbench: ReactNode;
@@ -27,7 +26,6 @@ type Props = {
 };
 
 export function AppLayout({
-  status,
   headerActions,
   sidebar,
   workbench,
@@ -133,13 +131,6 @@ export function AppLayout({
               connected thinking
             </p>
           </div>
-        </div>
-        <div className="pointer-events-none absolute inset-x-1/3 flex justify-center">
-          {status && (
-            <span className="max-w-sm truncate rounded-full border border-border/60 bg-card/70 px-3 py-1 text-[11px] text-muted-foreground shadow-sm backdrop-blur">
-              {status}
-            </span>
-          )}
         </div>
         <div className="flex items-center gap-1">{headerActions}</div>
       </header>

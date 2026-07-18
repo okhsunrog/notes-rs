@@ -18,6 +18,7 @@ import {
   type SearchHit,
   type SearchMode,
 } from "@/lib/api";
+import { notifyError, notifyInfo } from "@/lib/notify";
 import {
   dispositionFromShiftKey,
   type OpenDisposition,
@@ -28,10 +29,9 @@ type Props = {
   hits: SearchHit[];
   setHits: React.Dispatch<React.SetStateAction<SearchHit[]>>;
   onOpenContent: (content: Content, disposition?: OpenDisposition) => void | Promise<void>;
-  onStatus: (s: string) => void;
 };
 
-export function SearchCard({ variant = "card", hits, setHits, onOpenContent, onStatus }: Props) {
+export function SearchCard({ variant = "card", hits, setHits, onOpenContent }: Props) {
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<SearchMode>("fts");
   const [busy, setBusy] = useState(false);
@@ -43,9 +43,9 @@ export function SearchCard({ variant = "card", hits, setHits, onOpenContent, onS
     try {
       const out = await search(mode, query, 20);
       setHits(out);
-      onStatus(`${out.length} hits (${mode})`);
+      notifyInfo(`${out.length} hits (${mode})`);
     } catch (err) {
-      onStatus(`error: ${String(err)}`);
+      notifyError("search", err);
     } finally {
       setBusy(false);
     }

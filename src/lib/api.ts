@@ -116,7 +116,7 @@ const COMMAND_ERROR_CODES = new Set<CommandError["code"]>([
   "internal",
 ]);
 
-function isCommandError(error: unknown): error is CommandError {
+export function isCommandError(error: unknown): error is CommandError {
   if (typeof error !== "object" || error === null) return false;
   const candidate = error as { code?: unknown; message?: unknown };
   return (
@@ -126,7 +126,7 @@ function isCommandError(error: unknown): error is CommandError {
   );
 }
 
-function unknownErrorMessage(error: unknown) {
+export function unknownErrorMessage(error: unknown) {
   if (typeof error === "string") return error;
   if (error instanceof Error) return error.message;
   if (typeof error === "object" && error !== null && "message" in error) {

@@ -23,6 +23,7 @@ import { Outliner } from "@/features/outliner/outliner";
 import type { MarkdownOpenHandler } from "@/features/markdown";
 import { AttachmentsCard } from "@/features/attachments/attachments-card";
 import { pageDisplayTitle, shiftJournalDate } from "@/features/journal/journal-date";
+import { notifyError } from "@/lib/notify";
 import {
   CommandFailure,
   getPage,
@@ -50,7 +51,6 @@ type Props = {
   paneId: PaneId;
   page: Page;
   onSaved: (updated: Page) => void;
-  onStatus: (s: string) => void;
   onClose: () => void;
   onDelete: (page: Page) => void | Promise<void>;
   onOpenMarkdownLink: MarkdownOpenHandler;
@@ -70,7 +70,6 @@ export function PageView({
   paneId,
   page,
   onSaved,
-  onStatus,
   onClose,
   onDelete,
   onOpenMarkdownLink,
@@ -104,11 +103,9 @@ export function PageView({
   const titleSaveInFlight = useRef<Promise<boolean> | null>(null);
   const documentFlushRef = useRef<(() => Promise<boolean>) | null>(null);
   const onSavedRef = useRef(onSaved);
-  const onStatusRef = useRef(onStatus);
 
   titleRef.current = title;
   onSavedRef.current = onSaved;
-  onStatusRef.current = onStatus;
 
   const flush = useCallback(async (): Promise<boolean> => {
     autosave.cancel();
@@ -169,7 +166,7 @@ export function PageView({
             }
           }
           setSaveState("error");
-          onStatusRef.current(`save error: ${String(err)}`);
+          notifyError("save", err);
           return false;
         }
       }
@@ -253,7 +250,7 @@ export function PageView({
       pageRef.current = updated;
       onSavedRef.current(updated);
     } catch (error) {
-      onStatusRef.current(`layout error: ${String(error)}`);
+      notifyError("layout", error);
     } finally {
       setLayoutBusy(false);
     }
@@ -459,7 +456,6 @@ export function PageView({
             authoringMode={documentAuthoringMode}
             focusRequest={bodyFocusRequest}
             onOpenMarkdownLink={onOpenMarkdownLink}
-            onStatus={onStatus}
             onFlushReady={registerDocumentFlush}
           />
         ) : (
@@ -475,11 +471,7 @@ export function PageView({
         )}
       </div>
       <div className="mt-16">
-        <AttachmentsCard
-          location={{ kind: "page", uuid: page.uuid }}
-          onStatus={onStatus}
-          readOnly={!canEdit}
-        />
+        <AttachmentsCard location={{ kind: "page", uuid: page.uuid }} readOnly={!canEdit} />
       </div>
     </article>
   );
