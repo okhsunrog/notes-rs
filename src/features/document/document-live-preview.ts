@@ -179,6 +179,18 @@ function intersects(ranges: readonly TextRange[], from: number, to: number): boo
   return ranges.some((range) => range.from < to && range.to > from);
 }
 
+/**
+ * True when a range's raw Markdown source is currently revealed (its line holds the caret or
+ * selection), using the exact gating `buildDocumentLivePreviewDecorations` applies. Callers use
+ * this to tell a decorated, navigable link apart from one whose raw source is being edited.
+ */
+export function isRangeSourceRevealed(
+  state: EditorState,
+  range: Readonly<{ from: number; to: number }>,
+): boolean {
+  return intersects(activeSourceRanges(state), range.from, range.to);
+}
+
 function clippedRanges(ranges: readonly TextRange[], from: number, to: number): TextRange[] {
   const clipped: TextRange[] = [];
   for (const range of ranges) {

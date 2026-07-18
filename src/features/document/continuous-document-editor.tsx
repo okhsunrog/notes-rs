@@ -8,10 +8,7 @@ import type { MarkdownOpenHandler } from "@/features/markdown";
 import { documentAuthoringExtensions, type DocumentAuthoringMode } from "./document-live-preview";
 import { resolveDocumentHistoryKey } from "./document-editor-model";
 import type { DocumentHistoryAction } from "./document-editor-model";
-import {
-  resolveDocumentLinkOpenDisposition,
-  resolveDocumentLinkTarget,
-} from "./document-link-navigation";
+import { resolveDocumentLinkClickDisposition } from "./document-link-navigation";
 import { notesLinkMarkdownExtension } from "./notes-link-markdown-extension";
 
 export type { DocumentAuthoringMode } from "./document-live-preview";
@@ -184,25 +181,31 @@ export function ContinuousDocumentEditor({
               scheduleModeAfterComposition();
               return false;
             },
-            click(event, view) {
+            // Resolved on mousedown, before CodeMirror's own default handling would place the
+            // caret and retroactively reveal the link's raw source — the decoration state must
+            // reflect what the user actually saw when they clicked, not what it becomes after.
+            mousedown(event, view) {
               const { onOpenMarkdownLink, pageUuid: contextPageUuid } = callbacksRef.current;
               if (!onOpenMarkdownLink || !contextPageUuid) return false;
-              const disposition = resolveDocumentLinkOpenDisposition({
-                button: event.button,
-                ctrlKey: event.ctrlKey,
-                metaKey: event.metaKey,
-                shiftKey: event.shiftKey,
-              });
-              if (!disposition) return false;
               const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
               if (pos === null) return false;
-              const target = resolveDocumentLinkTarget(view.state, pos);
-              if (!target) return false;
+              const resolved = resolveDocumentLinkClickDisposition(
+                view.state,
+                pos,
+                {
+                  button: event.button,
+                  ctrlKey: event.ctrlKey,
+                  metaKey: event.metaKey,
+                  shiftKey: event.shiftKey,
+                },
+                pendingModeRef.current,
+              );
+              if (!resolved) return false;
               event.preventDefault();
               void onOpenMarkdownLink({
                 context: { kind: "note", presentation: "live_preview", pageUuid: contextPageUuid },
-                disposition,
-                target,
+                disposition: resolved.disposition,
+                target: resolved.target,
               });
               return true;
             },

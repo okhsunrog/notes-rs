@@ -6,6 +6,8 @@ import {
   classifyMarkdownUrl,
   pageTargetHref,
 } from "@/features/markdown/url-policy";
+import type { DocumentAuthoringMode } from "./document-live-preview";
+import { isRangeSourceRevealed } from "./document-live-preview";
 import { NOTES_LINK_NODE_NAMES } from "./notes-link-markdown-extension";
 
 type MarkdownSyntaxNode = ReturnType<ReturnType<typeof syntaxTree>["resolveInner"]>;
@@ -17,39 +19,68 @@ export type DocumentLinkClick = Readonly<{
   shiftKey: boolean;
 }>;
 
+export type ResolvedDocumentLink = Readonly<{
+  target: MarkdownLinkTarget;
+  range: Readonly<{ from: number; to: number }>;
+}>;
+
 /**
- * Modifier-click gate for editor link navigation. A plain click must remain ordinary caret
- * placement; only an explicit Mod-click opens the typed workspace navigation path, mirroring the
- * Reading renderer's Shift-click-for-adjacent convention layered under a Mod requirement so the
- * editor's own click-to-place-caret behavior is never overloaded.
+ * Gates click-to-navigate on the exact same decoration state the editor already renders, so the
+ * click behavior can never disagree with what the user sees:
+ *
+ * - a fully decorated link in Live Preview (its raw source is not revealed) opens on a plain
+ *   click, Shift for an adjacent pane — matching the read-only Reading renderer exactly, and
+ *   giving touch a working tap-to-navigate gesture for free, with no modifier concept required;
+ * - once a link's raw source is revealed (the caret is on that line) or the pane is in Source
+ *   mode, where nothing is ever decorated, a plain click must remain ordinary caret placement —
+ *   only Mod-click (Mod-Shift for adjacent) forces navigation from there.
  */
 export function resolveDocumentLinkOpenDisposition(
   event: DocumentLinkClick,
+  mode: DocumentAuthoringMode,
+  isDecorated: boolean,
 ): MarkdownOpenDisposition | null {
   if (event.button !== 0) return null;
+  if (mode === "live_preview" && isDecorated) {
+    return event.shiftKey ? "adjacent" : "current";
+  }
   if (!event.ctrlKey && !event.metaKey) return null;
   return event.shiftKey ? "adjacent" : "current";
 }
 
 /**
- * Resolves the notes-rs or ordinary Markdown link target under a document position, reusing the
- * exact typed URL policy the Reading renderer applies so editor navigation cannot diverge from it.
- * Returns null for positions with no navigable link, including blocked/invalid targets.
+ * Resolves the notes-rs or ordinary Markdown link under a document position, reusing the exact
+ * typed URL policy the Reading renderer applies so editor navigation cannot diverge from it. The
+ * returned range matches the exact node range `document-live-preview.ts` decorates, so callers can
+ * test it against `isRangeSourceRevealed` for click-gating. Returns null for positions with no
+ * navigable link, including blocked/invalid targets.
  */
-export function resolveDocumentLinkTarget(
-  state: EditorState,
-  pos: number,
-): MarkdownLinkTarget | null {
+export function resolveDocumentLink(state: EditorState, pos: number): ResolvedDocumentLink | null {
   const tree = syntaxTree(state);
   for (const side of [1, -1] as const) {
     let node: MarkdownSyntaxNode | null = tree.resolveInner(pos, side);
     while (node) {
       const target = targetForNode(state, node);
-      if (target) return target;
+      if (target) return { target, range: { from: node.from, to: node.to } };
       node = node.parent;
     }
   }
   return null;
+}
+
+/** Convenience wrapper for callers that only need the click-gating decision, not the link. */
+export function resolveDocumentLinkClickDisposition(
+  state: EditorState,
+  pos: number,
+  event: DocumentLinkClick,
+  mode: DocumentAuthoringMode,
+): (ResolvedDocumentLink & { disposition: MarkdownOpenDisposition }) | null {
+  const resolved = resolveDocumentLink(state, pos);
+  if (!resolved) return null;
+  const isDecorated = mode === "live_preview" && !isRangeSourceRevealed(state, resolved.range);
+  const disposition = resolveDocumentLinkOpenDisposition(event, mode, isDecorated);
+  if (!disposition) return null;
+  return { ...resolved, disposition };
 }
 
 function targetForNode(state: EditorState, node: MarkdownSyntaxNode): MarkdownLinkTarget | null {

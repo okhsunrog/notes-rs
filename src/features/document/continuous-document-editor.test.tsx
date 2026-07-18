@@ -21,6 +21,14 @@ beforeAll(() => {
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
+  // jsdom has no layout engine: Range lacks getClientRects, which CodeMirror's own default
+  // mousedown handling calls to place the caret. Dispatching a real "mousedown" (needed to test
+  // the link-navigation handler, which now runs there instead of on "click") reaches that code
+  // path once our handler declines to intercept the event. The stub only prevents the crash; the
+  // tests that need a specific position mock `EditorView.posAtCoords` directly.
+  if (!Range.prototype.getClientRects) {
+    Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
+  }
 });
 
 afterEach(() => {
@@ -118,8 +126,8 @@ describe("ContinuousDocumentEditor", () => {
     expect(secondEditor?.textContent).not.toContain("Document A");
   });
 
-  it("navigates a notes-rs link on Mod-click and leaves a plain click as caret placement", async () => {
-    const source = "See [[Project Aurora]] today";
+  it("navigates a decorated link on a plain click, Shift for adjacent", async () => {
+    const source = "plain\nSee [[Project Aurora]] today";
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -142,29 +150,127 @@ describe("ContinuousDocumentEditor", () => {
         />,
       ),
     );
+    // The default caret sits on line 1 ("plain"), so the link on line 2 renders decorated.
     const link = container.querySelector<HTMLElement>(".cm-lp-link");
     expect(link).not.toBeNull();
     const view = editorView(container);
     // jsdom has no real layout engine, so posAtCoords cannot resolve real pixel coordinates here;
     // this stands in for the browser's own coordinate-to-position mapping while still exercising
-    // the production click handler, modifier gate, and syntax-tree target resolution unmocked.
+    // the production mousedown handler, decoration-state gate, and syntax-tree target resolution
+    // unmocked.
     vi.spyOn(view, "posAtCoords").mockReturnValue(source.indexOf("Project Aurora"));
 
     act(() => {
-      link!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-    });
-    expect(onOpenMarkdownLink).not.toHaveBeenCalled();
-
-    act(() => {
-      link!.dispatchEvent(
-        new MouseEvent("click", { bubbles: true, cancelable: true, ctrlKey: true }),
-      );
+      link!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
     });
     expect(onOpenMarkdownLink).toHaveBeenCalledWith({
       context: { kind: "note", presentation: "live_preview", pageUuid: "page-uuid" },
       disposition: "current",
       target: { kind: "page", title: "Project Aurora" },
     });
+
+    onOpenMarkdownLink.mockClear();
+    act(() => {
+      link!.dispatchEvent(
+        new MouseEvent("mousedown", { bubbles: true, cancelable: true, shiftKey: true }),
+      );
+    });
+    expect(onOpenMarkdownLink).toHaveBeenCalledWith(
+      expect.objectContaining({ disposition: "adjacent" }),
+    );
+  });
+
+  it("leaves a plain click as caret placement once the link's line already holds the caret", async () => {
+    const source = "plain\nSee [[Project Aurora]] today";
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const onOpenMarkdownLink = vi.fn();
+    cleanup.push(() => {
+      act(() => root.unmount());
+      container.remove();
+    });
+    await act(async () =>
+      root.render(
+        <ContinuousDocumentEditor
+          value={source}
+          readOnly={false}
+          focusRequest={0}
+          pageUuid="page-uuid"
+          onChange={() => undefined}
+          onCompositionEnd={() => undefined}
+          onBlur={() => undefined}
+          onOpenMarkdownLink={onOpenMarkdownLink}
+        />,
+      ),
+    );
+    const view = editorView(container);
+    const linkPos = source.indexOf("Project Aurora");
+    act(() => {
+      view.focus();
+      view.dispatch({ selection: { anchor: linkPos } });
+    });
+    vi.spyOn(view, "posAtCoords").mockReturnValue(linkPos);
+    const content = container.querySelector<HTMLElement>(".cm-content");
+
+    act(() => {
+      content!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    });
+    expect(onOpenMarkdownLink).not.toHaveBeenCalled();
+
+    act(() => {
+      content!.dispatchEvent(
+        new MouseEvent("mousedown", { bubbles: true, cancelable: true, ctrlKey: true }),
+      );
+    });
+    expect(onOpenMarkdownLink).toHaveBeenCalledWith(
+      expect.objectContaining({ disposition: "current" }),
+    );
+  });
+
+  it("never navigates on a plain click in Source mode, where nothing is decorated", async () => {
+    const source = "See [[Project Aurora]] today";
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const onOpenMarkdownLink = vi.fn();
+    cleanup.push(() => {
+      act(() => root.unmount());
+      container.remove();
+    });
+    await act(async () =>
+      root.render(
+        <ContinuousDocumentEditor
+          value={source}
+          readOnly={false}
+          focusRequest={0}
+          mode="source"
+          pageUuid="page-uuid"
+          onChange={() => undefined}
+          onCompositionEnd={() => undefined}
+          onBlur={() => undefined}
+          onOpenMarkdownLink={onOpenMarkdownLink}
+        />,
+      ),
+    );
+    const view = editorView(container);
+    const linkPos = source.indexOf("Project Aurora");
+    vi.spyOn(view, "posAtCoords").mockReturnValue(linkPos);
+    const content = container.querySelector<HTMLElement>(".cm-content");
+
+    act(() => {
+      content!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    });
+    expect(onOpenMarkdownLink).not.toHaveBeenCalled();
+
+    act(() => {
+      content!.dispatchEvent(
+        new MouseEvent("mousedown", { bubbles: true, cancelable: true, ctrlKey: true }),
+      );
+    });
+    expect(onOpenMarkdownLink).toHaveBeenCalledWith(
+      expect.objectContaining({ disposition: "current" }),
+    );
   });
 
   it("resolves the actual clicked position rather than the start of the line", async () => {
@@ -196,14 +302,12 @@ describe("ContinuousDocumentEditor", () => {
     const view = editorView(container);
     // A DOM click on plain text targets the containing .cm-line, not a decorated span. The
     // resolver must use the actual pointer position, not fall back to the line/element start —
-    // otherwise Mod-clicking unrelated trailing text on a line that starts with a link would
-    // wrongly navigate to that link.
+    // otherwise clicking unrelated trailing text on a line that starts with a link would wrongly
+    // navigate to that link.
     vi.spyOn(view, "posAtCoords").mockReturnValue(source.indexOf("trailing"));
 
     act(() => {
-      content!.dispatchEvent(
-        new MouseEvent("click", { bubbles: true, cancelable: true, ctrlKey: true }),
-      );
+      content!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
     });
     expect(onOpenMarkdownLink).not.toHaveBeenCalled();
   });
