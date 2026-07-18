@@ -16,7 +16,7 @@ export function formatError(error: unknown): string {
 }
 
 export function notifyError(context: string, error: unknown) {
-  toast.error(formatError(error), { description: context });
+  toast.error(`${context} error: ${formatError(error)}`);
 }
 
 export function notifySuccess(message: string) {

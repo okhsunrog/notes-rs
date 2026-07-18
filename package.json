@@ -45,10 +45,13 @@
     "zustand": "^5.0.14"
   },
   "devDependencies": {
+    "@babel/core": "^8.0.1",
     "@hypothesi/tauri-mcp-cli": "0.12.0",
     "@hypothesi/tauri-mcp-server": "0.12.0",
+    "@rolldown/plugin-babel": "^0.2.3",
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/cli": "^2.11.4",
+    "@types/babel__core": "^7.20.5",
     "@types/jsdom": "^28.0.3",
     "@types/mdast": "^4.0.4",
     "@types/node": "^26.1.1",

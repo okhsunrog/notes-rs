@@ -21,7 +21,7 @@ describe("JournalNavigation", () => {
       <JournalNavigation activeDate="2026-07-17" busy onOpenDate={() => undefined} />,
     );
 
-    expect(html.match(/disabled=""/g)).toHaveLength(4);
+    expect(html.match(/(?<!data-)disabled=""/g)).toHaveLength(4);
     expect(html).toContain('aria-busy="true"');
     expect(html).toContain('aria-disabled="true"');
   });

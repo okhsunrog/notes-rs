@@ -41,27 +41,17 @@ import {
   type PaneId,
   type SplitId,
 } from "@/features/workspace/workspace-model";
-import { useWorkspaceStore, type WorkspaceStore } from "@/features/workspace/workspace-store";
+import { useWorkspaceStore } from "@/features/workspace/workspace-store";
 import { PagePresentation } from "./page-presentation";
 import { usePageSessionRegistry } from "./page-session";
 
-type StatusMessageHandler = (status: string) => void;
-type ShowEditor = () => void;
-
-export function useNotesWorkspace(
-  ready: boolean,
-  _onStatusOrShowEditor: StatusMessageHandler | ShowEditor,
-  showEditorArg?: ShowEditor,
-) {
-  const showEditor =
-    showEditorArg ??
-    ((_onStatusOrShowEditor.length === 0 ? _onStatusOrShowEditor : () => {}) as ShowEditor);
+export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
   const confirm = useConfirmation();
   const pageSessions = usePageSessionRegistry();
   const queryClient = useQueryClient();
   const [hits, setHits] = useState<SearchHit[]>([]);
-  const windowWorkspace = useWorkspaceStore((state: WorkspaceStore) => state);
-  const dispatchWorkspace = useWorkspaceStore((state: WorkspaceStore) => state.dispatch);
+  const windowWorkspace = useWorkspaceStore((state) => state);
+  const dispatchWorkspace = useWorkspaceStore((state) => state.dispatch);
   const [newNote, setNewNote] = useState<{ pageUuid: string; blockUuid: string | null } | null>(
     null,
   );
@@ -209,7 +199,7 @@ export function useNotesWorkspace(
         ]);
         if (openAfterCapture) {
           if (navigationEpoch !== navigationEpochRef.current) {
-            notifyInfo(`Captured in journal ${date}.`);
+            notifySuccess(`Captured in journal ${date}.`);
             return true;
           }
           const page = await queryClient.fetchQuery({
@@ -218,7 +208,7 @@ export function useNotesWorkspace(
           });
           if (!page) throw new Error("captured journal page was not found");
           if (navigationEpoch !== navigationEpochRef.current) {
-            notifyInfo(`Captured in journal ${date}.`);
+            notifySuccess(`Captured in journal ${date}.`);
             return true;
           }
           queryClient.setQueryData(queryKeys.page(page.uuid), page);
@@ -227,7 +217,7 @@ export function useNotesWorkspace(
           setHits([]);
           showEditor();
         }
-        notifyInfo(`Captured in journal ${date}.`);
+        notifySuccess(`Captured in journal ${date}.`);
         return true;
       } catch (error) {
         notifyError("capture", error);

@@ -8,18 +8,13 @@ const host = process.env.TAURI_DEV_HOST;
 
 export default defineConfig({
   plugins: lazyPlugins(async () => {
-    const [{ default: react }, { default: tailwindcss }] = await Promise.all([
-      import("@vitejs/plugin-react"),
-      import("@tailwindcss/vite"),
-    ]);
-    return [
-      react({
-        babel: {
-          plugins: [["babel-plugin-react-compiler", {}]],
-        },
-      } as any),
-      tailwindcss(),
-    ];
+    const [{ default: react, reactCompilerPreset }, { default: babel }, { default: tailwindcss }] =
+      await Promise.all([
+        import("@vitejs/plugin-react"),
+        import("@rolldown/plugin-babel"),
+        import("@tailwindcss/vite"),
+      ]);
+    return [react(), babel({ presets: [reactCompilerPreset()] }), tailwindcss()];
   }),
   resolve: {
     alias: {
