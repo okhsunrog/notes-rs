@@ -126,8 +126,9 @@ pub fn run() {
         .plugin(tauri_plugin_mobile_system::init());
 
     // Development-only bridge for MCP-powered UI inspection and automation.
-    // Restrict it to localhost; release builds do not register the plugin.
-    #[cfg(all(debug_assertions, not(mobile)))]
+    // Restrict it to localhost; release builds do not register the plugin. Reachable on Android
+    // over `adb forward tcp:9223 tcp:9223`, same as desktop; not yet enabled on iOS (untested).
+    #[cfg(all(debug_assertions, not(target_os = "ios")))]
     let builder = builder.plugin(
         tauri_plugin_mcp_bridge::Builder::new()
             .bind_address("127.0.0.1")

@@ -84,13 +84,15 @@ CI also regenerates the tauri-specta TypeScript bindings and fails when the comm
 
 ### Live UI inspection
 
-Debug desktop builds include [MCP Server Tauri](https://github.com/hypothesi/mcp-server-tauri). The project-scoped `.codex/config.toml` pins its server. With the development app running, the bridge can inspect the accessibility tree, capture screenshots, click, type, resize, and inspect logs and Tauri IPC.
+Debug builds, desktop and Android alike, include [MCP Server Tauri](https://github.com/hypothesi/mcp-server-tauri). The project-scoped `.codex/config.toml` pins its server. With the development app running, the bridge can inspect the accessibility tree, capture screenshots, click, type, resize, and inspect logs and Tauri IPC.
 
 ```sh
 vp exec tauri-mcp driver-session start --port 9223
 vp exec tauri-mcp webview-dom-snapshot --type accessibility
 vp exec tauri-mcp webview-screenshot --file screenshot.png
 ```
+
+Desktop dev must run via `vp run desktop:dev` (`tauri dev --config src-tauri/tauri.dev.conf.json`), which turns on `withGlobalTauri` so the bridge's JS bridge can reach `window.__TAURI__`; the default `tauri.conf.json` leaves it off for shipped builds. On Android, pass the same `--config` flag to `tauri android dev` and forward the port first: `adb forward tcp:9223 tcp:9223`.
 
 The MCP bridge and relaxed development CSP are absent from release builds.
 
