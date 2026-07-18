@@ -7,11 +7,10 @@ import { Button } from "@/components/ui/button";
 import { EmptyJournalView } from "@/features/journal/empty-journal-view";
 import { GraphWorkspace } from "@/features/graph/knowledge-panel";
 import { HomeView } from "@/features/home/home-view";
-import type { MarkdownOpenHandler } from "@/features/markdown";
 import { PagePresentation } from "@/features/pages/page-presentation";
 import { PageView } from "@/features/pages/page-view";
 import { usePageSessionRegistry } from "@/features/pages/page-session";
-import { getPage, type Content, type JournalDate, type Page, type SearchHit } from "@/lib/api";
+import { getPage, type SearchHit } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
 import { cn } from "@/lib/utils";
 import {
@@ -19,44 +18,27 @@ import {
   WorkspaceNodeKind,
   currentDisposition,
   leafPaneIds,
-  type OpenDisposition,
   type PaneContent,
   type PaneId,
-  type SplitId,
   type WorkspaceNode,
-  type WorkspaceState,
 } from "./workspace-model";
+import { useWorkspaceController } from "./workspace-controller";
+import { useWorkspaceStore } from "./workspace-store";
 
 type WorkbenchProps = {
-  state: WorkspaceState;
   creatingNote: boolean;
   journalBusy: boolean;
   newNote: { pageUuid: string; blockUuid: string | null } | null;
   hits: SearchHit[];
   setHits: React.Dispatch<React.SetStateAction<SearchHit[]>>;
-  onCreate: () => void | Promise<void>;
-  onOpenContent: (content: Content, disposition?: OpenDisposition) => void | Promise<void>;
-  onOpenJournal: (date: JournalDate, disposition?: OpenDisposition) => void | Promise<void>;
-  onCaptureJournal: (
-    date: JournalDate,
-    markdown: string,
-    openAfterCapture?: boolean,
-  ) => Promise<boolean>;
-  onSaved: (page: Page) => void;
-  onDelete: (page: Page) => void | Promise<void>;
-  onOpenMarkdownLink: MarkdownOpenHandler;
-  onFocusPane: (paneId: PaneId) => void;
-  onShowCompactPane: (paneId: PaneId) => void;
-  onClosePane: (paneId: PaneId) => void;
-  onPaneBack: (paneId: PaneId) => void;
-  onPaneForward: (paneId: PaneId) => void;
-  onResizeSplit: (splitId: SplitId, ratio: number) => void;
-  onPresentationChange: (paneId: PaneId, presentation: PagePresentation) => void;
 };
 
 export function Workbench(props: WorkbenchProps) {
   const compact = useCompactLayout();
-  const paneIds = leafPaneIds(props.state.tree);
+  const tree = useWorkspaceStore((state) => state.tree);
+  const compactVisiblePaneId = useWorkspaceStore((state) => state.compactVisiblePaneId);
+  const dispatch = useWorkspaceStore((state) => state.dispatch);
+  const paneIds = leafPaneIds(tree);
   return (
     <div className="flex h-full min-h-0 flex-col">
       {compact && paneIds.length > 1 && (
@@ -70,10 +52,10 @@ export function Workbench(props: WorkbenchProps) {
               key={paneId}
               type="button"
               role="tab"
-              variant={props.state.compactVisiblePaneId === paneId ? "secondary" : "ghost"}
+              variant={compactVisiblePaneId === paneId ? "secondary" : "ghost"}
               size="xs"
-              aria-selected={props.state.compactVisiblePaneId === paneId}
-              onClick={() => props.onShowCompactPane(paneId)}
+              aria-selected={compactVisiblePaneId === paneId}
+              onClick={() => dispatch({ type: "show_compact_pane", paneId })}
               className="rounded-lg"
             >
               <Columns2 className="size-3" />
@@ -83,7 +65,7 @@ export function Workbench(props: WorkbenchProps) {
         </div>
       )}
       <div className="min-h-0 flex-1">
-        <WorkspaceTree node={props.state.tree} compact={compact} {...props} />
+        <WorkspaceTree node={tree} compact={compact} {...props} />
       </div>
     </div>
   );
@@ -110,7 +92,9 @@ function SplitFrame({
 }) {
   const firstRef = usePanelRef();
   const secondRef = usePanelRef();
-  const firstVisible = containsPane(node.first, props.state.compactVisiblePaneId);
+  const compactVisiblePaneId = useWorkspaceStore((state) => state.compactVisiblePaneId);
+  const dispatch = useWorkspaceStore((state) => state.dispatch);
+  const firstVisible = containsPane(node.first, compactVisiblePaneId);
 
   useEffect(() => {
     const first = firstRef.current;
@@ -144,7 +128,13 @@ function SplitFrame({
         collapsible={compact}
         collapsedSize={0}
         onResize={(size, _id, previous) => {
-          if (!compact && previous) props.onResizeSplit(node.splitId, size.asPercentage / 100);
+          if (!compact && previous) {
+            dispatch({
+              type: "resize_split",
+              splitId: node.splitId,
+              ratio: size.asPercentage / 100,
+            });
+          }
         }}
       >
         <WorkspaceTree node={node.first} compact={compact} {...props} />
@@ -177,10 +167,11 @@ function PaneFrame({
   compact,
   ...props
 }: WorkbenchProps & { paneId: PaneId; compact: boolean }) {
-  const pane = props.state.panes[paneId];
-  const active = props.state.activePaneId === paneId;
-  const primary = props.state.primaryPaneId === paneId;
-  const compactVisible = props.state.compactVisiblePaneId === paneId;
+  const pane = useWorkspaceStore((state) => state.panes[paneId]);
+  const active = useWorkspaceStore((state) => state.activePaneId === paneId);
+  const primary = useWorkspaceStore((state) => state.primaryPaneId === paneId);
+  const compactVisible = useWorkspaceStore((state) => state.compactVisiblePaneId === paneId);
+  const dispatch = useWorkspaceStore((state) => state.dispatch);
   if (!pane) return null;
 
   return (
@@ -196,7 +187,7 @@ function PaneFrame({
         compact && !compactVisible && "pointer-events-none invisible",
       )}
       onPointerDown={() => {
-        if (!active) props.onFocusPane(paneId);
+        if (!active) dispatch({ type: "focus_pane", paneId });
       }}
     >
       <div className="flex h-9 shrink-0 items-center gap-1 border-b border-border/50 bg-card/55 px-2">
@@ -206,7 +197,7 @@ function PaneFrame({
           size="icon-xs"
           disabled={pane.back.length === 0}
           aria-label="Go back in pane"
-          onClick={() => props.onPaneBack(paneId)}
+          onClick={() => dispatch({ type: "go_back", paneId })}
         >
           <ArrowLeft className="size-3.5" />
         </Button>
@@ -216,7 +207,7 @@ function PaneFrame({
           size="icon-xs"
           disabled={pane.forward.length === 0}
           aria-label="Go forward in pane"
-          onClick={() => props.onPaneForward(paneId)}
+          onClick={() => dispatch({ type: "go_forward", paneId })}
         >
           <ArrowRight className="size-3.5" />
         </Button>
@@ -230,7 +221,7 @@ function PaneFrame({
             size="icon-xs"
             className="ml-auto"
             aria-label="Close adjacent pane"
-            onClick={() => props.onClosePane(paneId)}
+            onClick={() => dispatch({ type: "close_pane", paneId })}
           >
             <X className="size-3.5" />
           </Button>
@@ -248,6 +239,8 @@ function PaneSurface({
   content,
   ...props
 }: WorkbenchProps & { paneId: PaneId; content: PaneContent }) {
+  const controller = useWorkspaceController();
+  const dispatch = useWorkspaceStore((state) => state.dispatch);
   switch (content.kind) {
     case PaneContentKind.Home:
       return (
@@ -256,24 +249,24 @@ function PaneSurface({
           journalBusy={props.journalBusy}
           hits={props.hits}
           setHits={props.setHits}
-          onCreate={props.onCreate}
-          onOpenJournal={props.onOpenJournal}
-          onOpenContent={props.onOpenContent}
+          onCreate={controller.createNewNote}
+          onOpenJournal={controller.openJournal}
+          onOpenContent={controller.openContent}
         />
       );
     case PaneContentKind.Page:
       return <PagePane paneId={paneId} content={content} {...props} />;
     case PaneContentKind.Graph:
-      return <GraphPane content={content} paneId={paneId} {...props} />;
+      return <GraphPane content={content} paneId={paneId} />;
     case PaneContentKind.JournalDay:
       return (
         <EmptyJournalView
           date={content.date}
           busy={props.journalBusy}
-          onCapture={props.onCaptureJournal}
-          onClose={() => props.onClosePane(paneId)}
+          onCapture={controller.captureJournal}
+          onClose={() => dispatch({ type: "close_pane", paneId })}
           onOpenDate={(date, disposition) =>
-            props.onOpenJournal(date, disposition ?? currentDisposition)
+            controller.openJournal(date, disposition ?? currentDisposition)
           }
         />
       );
@@ -289,6 +282,9 @@ function PagePane({
   content: Extract<PaneContent, { kind: PaneContentKind.Page }>;
 }) {
   const pageSessions = usePageSessionRegistry();
+  const controller = useWorkspaceController();
+  const active = useWorkspaceStore((state) => state.activePaneId === paneId);
+  const dispatch = useWorkspaceStore((state) => state.dispatch);
   const pageQuery = useQuery({
     queryKey: queryKeys.page(content.pageUuid),
     queryFn: () => getPage(content.pageUuid),
@@ -319,15 +315,17 @@ function PagePane({
       initialBlockUuid={
         props.newNote?.pageUuid === page.uuid ? props.newNote.blockUuid : content.blockUuid
       }
-      autoFocusTitle={props.state.activePaneId === paneId && props.newNote?.pageUuid === page.uuid}
+      autoFocusTitle={active && props.newNote?.pageUuid === page.uuid}
       presentation={content.presentation}
-      onPresentationChange={(presentation) => props.onPresentationChange(paneId, presentation)}
-      onSaved={props.onSaved}
-      onClose={() => props.onClosePane(paneId)}
-      onDelete={props.onDelete}
-      onOpenMarkdownLink={props.onOpenMarkdownLink}
+      onPresentationChange={(presentation) =>
+        dispatch({ type: "set_page_presentation", paneId, presentation })
+      }
+      onSaved={controller.onSaved}
+      onClose={() => dispatch({ type: "close_pane", paneId })}
+      onDelete={controller.onDelete}
+      onOpenMarkdownLink={controller.openMarkdownLink}
       onOpenJournalDate={(date, disposition) =>
-        props.onOpenJournal(date, disposition ?? currentDisposition)
+        controller.openJournal(date, disposition ?? currentDisposition)
       }
       journalBusy={props.journalBusy}
     />
@@ -337,11 +335,12 @@ function PagePane({
 function GraphPane({
   content,
   paneId,
-  ...props
-}: WorkbenchProps & {
+}: {
   paneId: PaneId;
   content: Extract<PaneContent, { kind: PaneContentKind.Graph }>;
 }) {
+  const controller = useWorkspaceController();
+  const dispatch = useWorkspaceStore((state) => state.dispatch);
   const pageQuery = useQuery({
     queryKey: queryKeys.page(content.focusPageUuid ?? "graph-root"),
     queryFn: () => getPage(content.focusPageUuid as string),
@@ -350,8 +349,8 @@ function GraphPane({
   return (
     <GraphWorkspace
       page={pageQuery.data ?? null}
-      onOpenContent={props.onOpenContent}
-      onClose={() => props.onPaneBack(paneId)}
+      onOpenContent={controller.openContent}
+      onClose={() => dispatch({ type: "go_back", paneId })}
     />
   );
 }

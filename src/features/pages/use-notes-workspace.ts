@@ -28,21 +28,16 @@ import { queryKeys } from "@/lib/query";
 import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify";
 import { useConfirmation } from "@/app/confirmation";
 import {
-  DockVisibility,
   PaneContentKind,
   adjacentDisposition,
   currentDisposition,
-  getActivePane,
   homeTarget,
   journalDayTarget,
   pageTarget,
   type OpenDisposition,
   type OpenTarget,
-  type PaneId,
-  type SplitId,
 } from "@/features/workspace/workspace-model";
 import { useWorkspaceStore } from "@/features/workspace/workspace-store";
-import { PagePresentation } from "./page-presentation";
 import { usePageSessionRegistry } from "./page-session";
 
 export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
@@ -50,7 +45,7 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
   const pageSessions = usePageSessionRegistry();
   const queryClient = useQueryClient();
   const [hits, setHits] = useState<SearchHit[]>([]);
-  const windowWorkspace = useWorkspaceStore((state) => state);
+  const activePane = useWorkspaceStore((state) => state.panes[state.activePaneId]);
   const dispatchWorkspace = useWorkspaceStore((state) => state.dispatch);
   const [newNote, setNewNote] = useState<{ pageUuid: string; blockUuid: string | null } | null>(
     null,
@@ -60,7 +55,6 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
   const creatingNoteRef = useRef(false);
   const journalBusyRef = useRef(false);
   const navigationEpochRef = useRef(0);
-  const activePane = getActivePane(windowWorkspace);
   const activeContent = activePane.content;
   const activePageUuid =
     activeContent.kind === PaneContentKind.Page
@@ -387,7 +381,6 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
 
   return {
     activePage,
-    activePane,
     activePageUuid,
     applyUpdated,
     captureJournal,
@@ -411,20 +404,6 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
     selectPage,
     setHits,
     quickCapture,
-    windowWorkspace,
-    closePane: (paneId: PaneId) => dispatchWorkspace({ type: "close_pane", paneId }),
-    focusPane: (paneId: PaneId) => dispatchWorkspace({ type: "focus_pane", paneId }),
-    showCompactPane: (paneId: PaneId) => dispatchWorkspace({ type: "show_compact_pane", paneId }),
-    goPaneBack: (paneId: PaneId) => dispatchWorkspace({ type: "go_back", paneId }),
-    goPaneForward: (paneId: PaneId) => dispatchWorkspace({ type: "go_forward", paneId }),
-    setPagePresentation: (paneId: PaneId, presentation: PagePresentation) =>
-      dispatchWorkspace({ type: "set_page_presentation", paneId, presentation }),
-    setDockVisibility: (visibility: DockVisibility) =>
-      dispatchWorkspace({ type: "set_dock_visibility", visibility }),
-    setDockWidth: (width: number) => dispatchWorkspace({ type: "set_dock_width", width }),
-    resizeSplit: (splitId: SplitId, ratio: number) =>
-      dispatchWorkspace({ type: "resize_split", splitId, ratio }),
-    openTarget,
   };
 }
 

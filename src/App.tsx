@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   Bot,
@@ -19,27 +19,24 @@ import { SearchCard } from "@/features/search/search-card";
 import { PagesList } from "@/features/pages/pages-list";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import {
-  getPage,
-  getSyncStatus,
-  loadSettings,
-  type Content,
-  type WindowDecorationMode,
-} from "@/lib/api";
+import { getPage, getSyncStatus, loadSettings, type WindowDecorationMode } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
 import { useAppShortcuts } from "@/app/use-app-shortcuts";
 import { useStartupState } from "@/app/use-startup-state";
 import { useNotesWorkspace } from "@/features/pages/use-notes-workspace";
-import type { JournalDate } from "@/lib/api";
 import { useAssistantController } from "@/features/chat/use-assistant-controller";
 import { Workbench } from "@/features/workspace/workbench";
+import {
+  WorkspaceControllerProvider,
+  type WorkspaceController,
+} from "@/features/workspace/workspace-controller";
+import { useWorkspaceStore } from "@/features/workspace/workspace-store";
 import { notifyError, notifySuccess } from "@/lib/notify";
 import {
   DockVisibility,
   PaneContentKind,
   currentDisposition,
   graphTarget,
-  type OpenDisposition,
 } from "@/features/workspace/workspace-model";
 
 const SettingsPage = lazy(() =>
@@ -57,7 +54,10 @@ function App() {
   const showEditor = useCallback(() => setEditorRequest((request) => request + 1), []);
   const workspace = useNotesWorkspace(ready, showEditor);
   const assistant = useAssistantController();
-  const graphOpen = workspace.activePane.content.kind === PaneContentKind.Graph;
+  const activePane = useWorkspaceStore((state) => state.panes[state.activePaneId]);
+  const assistantDock = useWorkspaceStore((state) => state.assistantDock);
+  const dispatchWorkspace = useWorkspaceStore((state) => state.dispatch);
+  const graphOpen = activePane.content.kind === PaneContentKind.Graph;
 
   const settingsQuery = useQuery({
     queryKey: queryKeys.settings,
@@ -68,21 +68,25 @@ function App() {
     queryFn: getSyncStatus,
     enabled: ready,
   });
-  const createNewNote = useCallback(async () => {
-    await workspace.createNewNote();
-  }, [workspace]);
-
-  const openContent = useCallback(
-    async (content: Content, disposition?: OpenDisposition) => {
-      await workspace.openContent(content, disposition);
-    },
-    [workspace],
-  );
-  const openJournal = useCallback(
-    async (date: JournalDate, disposition?: OpenDisposition) => {
-      await workspace.openJournal(date, disposition);
-    },
-    [workspace],
+  const workspaceController = useMemo<WorkspaceController>(
+    () => ({
+      createNewNote: workspace.createNewNote,
+      openContent: workspace.openContent,
+      openJournal: workspace.openJournal,
+      captureJournal: workspace.captureJournal,
+      onSaved: workspace.applyUpdated,
+      onDelete: workspace.removePage,
+      openMarkdownLink: workspace.openMarkdownLink,
+    }),
+    [
+      workspace.applyUpdated,
+      workspace.captureJournal,
+      workspace.createNewNote,
+      workspace.openContent,
+      workspace.openJournal,
+      workspace.openMarkdownLink,
+      workspace.removePage,
+    ],
   );
 
   useEffect(() => {
@@ -93,7 +97,7 @@ function App() {
 
   useAppShortcuts({
     enabled: ready,
-    createNote: () => void createNewNote(),
+    createNote: () => void workspace.createNewNote(),
     openSearch: () => setSearchOpen(true),
     undo: () => void workspace.moveHistory("undo"),
     redo: () => void workspace.moveHistory("redo"),
@@ -166,7 +170,7 @@ function App() {
   }
 
   return (
-    <>
+    <WorkspaceControllerProvider controller={workspaceController}>
       <AppLayout
         editorRequest={editorRequest}
         headerActions={
@@ -200,9 +204,13 @@ function App() {
               aria-pressed={graphOpen}
               onClick={() => {
                 if (graphOpen) {
-                  workspace.goPaneBack(workspace.activePane.id);
+                  dispatchWorkspace({ type: "go_back", paneId: activePane.id });
                 } else {
-                  workspace.openTarget(graphTarget(workspace.activePageUuid), currentDisposition);
+                  dispatchWorkspace({
+                    type: "open_target",
+                    target: graphTarget(workspace.activePageUuid),
+                    disposition: currentDisposition,
+                  });
                 }
               }}
               className="hidden h-8 gap-1.5 rounded-xl px-2.5 sm:flex"
@@ -215,20 +223,20 @@ function App() {
               variant="ghost"
               size="sm"
               aria-label={
-                workspace.windowWorkspace.assistantDock.visibility === DockVisibility.Hidden
+                assistantDock.visibility === DockVisibility.Hidden
                   ? "Show Assistant"
                   : "Hide Assistant"
               }
-              aria-expanded={
-                workspace.windowWorkspace.assistantDock.visibility !== DockVisibility.Hidden
-              }
+              aria-expanded={assistantDock.visibility !== DockVisibility.Hidden}
               aria-controls="assistant-dock-content"
               onClick={() =>
-                workspace.setDockVisibility(
-                  workspace.windowWorkspace.assistantDock.visibility === DockVisibility.Hidden
-                    ? DockVisibility.Open
-                    : DockVisibility.Hidden,
-                )
+                dispatchWorkspace({
+                  type: "set_dock_visibility",
+                  visibility:
+                    assistantDock.visibility === DockVisibility.Hidden
+                      ? DockVisibility.Open
+                      : DockVisibility.Hidden,
+                })
               }
             >
               <Bot className="size-4" />
@@ -281,8 +289,8 @@ function App() {
                 ? workspace.activePage.kind.date
                 : null)
             }
-            onCreate={createNewNote}
-            onOpenJournal={openJournal}
+            onCreate={workspace.createNewNote}
+            onOpenJournal={workspace.openJournal}
             onQuickCapture={workspace.quickCapture}
             journalBusy={workspace.journalBusy}
             onSelect={workspace.selectPage}
@@ -290,26 +298,11 @@ function App() {
         }
         workbench={
           <Workbench
-            state={workspace.windowWorkspace}
             creatingNote={workspace.creatingNote}
             journalBusy={workspace.journalBusy}
             newNote={workspace.newNote}
             hits={workspace.hits}
             setHits={workspace.setHits}
-            onCreate={createNewNote}
-            onOpenContent={openContent}
-            onOpenJournal={openJournal}
-            onCaptureJournal={workspace.captureJournal}
-            onSaved={workspace.applyUpdated}
-            onDelete={workspace.removePage}
-            onOpenMarkdownLink={workspace.openMarkdownLink}
-            onFocusPane={workspace.focusPane}
-            onShowCompactPane={workspace.showCompactPane}
-            onClosePane={workspace.closePane}
-            onPaneBack={workspace.goPaneBack}
-            onPaneForward={workspace.goPaneForward}
-            onResizeSplit={(splitId, ratio) => workspace.resizeSplit(splitId, ratio)}
-            onPresentationChange={workspace.setPagePresentation}
           />
         }
         assistant={
@@ -319,11 +312,13 @@ function App() {
             controller={assistant}
           />
         }
-        assistantVisibility={workspace.windowWorkspace.assistantDock.visibility}
-        assistantWidth={workspace.windowWorkspace.assistantDock.width}
+        assistantVisibility={assistantDock.visibility}
+        assistantWidth={assistantDock.width}
         assistantBusy={assistant.state.busy}
-        onAssistantVisibilityChange={workspace.setDockVisibility}
-        onAssistantWidthChange={workspace.setDockWidth}
+        onAssistantVisibilityChange={(visibility) =>
+          dispatchWorkspace({ type: "set_dock_visibility", visibility })
+        }
+        onAssistantWidthChange={(width) => dispatchWorkspace({ type: "set_dock_width", width })}
       />
       <Dialog open={searchOpen} onOpenChange={setSearchOpen}>
         <DialogContent className="search-dialog top-[18%] max-w-2xl translate-y-0 rounded-2xl border-border/60 bg-background/95 p-3 shadow-2xl backdrop-blur-xl">
@@ -336,7 +331,7 @@ function App() {
             hits={workspace.hits}
             setHits={workspace.setHits}
             onOpenContent={async (content, disposition) => {
-              await openContent(content, disposition);
+              await workspace.openContent(content, disposition);
               setSearchOpen(false);
             }}
           />
@@ -350,7 +345,7 @@ function App() {
           left: "calc(1rem + var(--safe-area-inset-left))",
         }}
       />
-    </>
+    </WorkspaceControllerProvider>
   );
 }
 
