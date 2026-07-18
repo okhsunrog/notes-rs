@@ -38,3 +38,6 @@ notes.db-wal
 
 # Track this project's CLAUDE.md (globally ignored elsewhere)
 !CLAUDE.md
+
+# Local Codex agent profiles
+.codex/agents/
