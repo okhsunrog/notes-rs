@@ -67,6 +67,8 @@ vp run tauri android build --debug
 
 The only build-time environment input is Tauri's `TAURI_DEV_HOST`, which Vite needs for Android/device hot reload. Product configuration does not read process environment variables.
 
+Theming uses `oklch()` colors, which require Chromium 111+. If a device's palette renders unstyled or colorless (buttons/accents transparent while everything else looks fine), its Android System WebView is too old — update it. If the device has no Google account configured, WebView can be sideloaded directly: download the matching architecture's APK from [APKMirror's Android System WebView page](https://www.apkmirror.com/apk/google-inc/android-system-webview/) and `adb install -r` it; no Play Store/account needed.
+
 ### Validation
 
 ```sh
