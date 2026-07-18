@@ -36,7 +36,11 @@ type WorkbenchProps = {
 export function Workbench(props: WorkbenchProps) {
   const compact = useCompactLayout();
   const tree = useWorkspaceStore((state) => state.tree);
-  const compactVisiblePaneId = useWorkspaceStore((state) => state.compactVisiblePaneId);
+  // Only compact layout renders this value; selecting null on desktop keeps
+  // navigation/focus changes from re-rendering the whole pane tree.
+  const compactVisiblePaneId = useWorkspaceStore((state) =>
+    compact ? state.compactVisiblePaneId : null,
+  );
   const dispatch = useWorkspaceStore((state) => state.dispatch);
   const paneIds = leafPaneIds(tree);
   return (
@@ -92,9 +96,12 @@ function SplitFrame({
 }) {
   const firstRef = usePanelRef();
   const secondRef = usePanelRef();
-  const compactVisiblePaneId = useWorkspaceStore((state) => state.compactVisiblePaneId);
+  const compactVisiblePaneId = useWorkspaceStore((state) =>
+    compact ? state.compactVisiblePaneId : null,
+  );
   const dispatch = useWorkspaceStore((state) => state.dispatch);
-  const firstVisible = containsPane(node.first, compactVisiblePaneId);
+  const firstVisible =
+    compactVisiblePaneId !== null && containsPane(node.first, compactVisiblePaneId);
 
   useEffect(() => {
     const first = firstRef.current;
@@ -119,7 +126,24 @@ function SplitFrame({
   }, [compact, firstRef, firstVisible, node.ratio, secondRef]);
 
   return (
-    <Group orientation={node.axis} id={node.splitId} className="h-full min-h-0">
+    <Group
+      orientation={node.axis}
+      id={node.splitId}
+      className="h-full min-h-0"
+      onLayoutChanged={(layout, meta) => {
+        // Persist the ratio once per completed drag/keyboard resize; the panel
+        // library animates intermediate positions without store round-trips.
+        if (compact || !meta.isUserInteraction) return;
+        const first = layout[`${node.splitId}-first`];
+        const second = layout[`${node.splitId}-second`];
+        if (first === undefined || second === undefined || first + second <= 0) return;
+        dispatch({
+          type: "resize_split",
+          splitId: node.splitId,
+          ratio: first / (first + second),
+        });
+      }}
+    >
       <Panel
         id={`${node.splitId}-first`}
         panelRef={firstRef}
@@ -127,15 +151,6 @@ function SplitFrame({
         minSize={compact ? 0 : "28%"}
         collapsible={compact}
         collapsedSize={0}
-        onResize={(size, _id, previous) => {
-          if (!compact && previous) {
-            dispatch({
-              type: "resize_split",
-              splitId: node.splitId,
-              ratio: size.asPercentage / 100,
-            });
-          }
-        }}
       >
         <WorkspaceTree node={node.first} compact={compact} {...props} />
       </Panel>

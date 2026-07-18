@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { MarkdownOpenRequest } from "@/features/markdown";
@@ -31,12 +31,14 @@ import {
   PaneContentKind,
   adjacentDisposition,
   currentDisposition,
+  getActivePane,
   homeTarget,
   journalDayTarget,
   pageTarget,
   type OpenDisposition,
   type OpenTarget,
 } from "@/features/workspace/workspace-model";
+import type { WorkspaceController } from "@/features/workspace/workspace-controller";
 import { useWorkspaceStore } from "@/features/workspace/workspace-store";
 import { usePageSessionRegistry } from "./page-session";
 
@@ -45,7 +47,7 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
   const pageSessions = usePageSessionRegistry();
   const queryClient = useQueryClient();
   const [hits, setHits] = useState<SearchHit[]>([]);
-  const activePane = useWorkspaceStore((state) => state.panes[state.activePaneId]);
+  const activePane = useWorkspaceStore(getActivePane);
   const dispatchWorkspace = useWorkspaceStore((state) => state.dispatch);
   const [newNote, setNewNote] = useState<{ pageUuid: string; blockUuid: string | null } | null>(
     null,
@@ -379,11 +381,34 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
     void queryClient.invalidateQueries({ queryKey: queryKeys.root });
   }, [dispatchWorkspace, queryClient]);
 
+  const controller = useMemo<WorkspaceController>(
+    () => ({
+      createNewNote,
+      openContent,
+      openJournal,
+      captureJournal,
+      onSaved: applyUpdated,
+      onDelete: removePage,
+      openMarkdownLink,
+    }),
+    [
+      applyUpdated,
+      captureJournal,
+      createNewNote,
+      openContent,
+      openJournal,
+      openMarkdownLink,
+      removePage,
+    ],
+  );
+
   return {
     activePage,
+    activePane,
     activePageUuid,
     applyUpdated,
     captureJournal,
+    controller,
     closePage: () => {
       navigationEpochRef.current += 1;
       openTarget(homeTarget, currentDisposition);

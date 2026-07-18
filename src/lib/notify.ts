@@ -2,21 +2,21 @@ import { toast } from "sonner";
 import { CommandFailure, isCommandError, unknownErrorMessage } from "./api";
 
 export function formatError(error: unknown): string {
-  if (error instanceof CommandFailure) {
-    return error.code ? `${error.code}: ${error.message}` : error.message;
+  if (error instanceof CommandFailure || isCommandError(error)) {
+    return `${error.code}: ${error.message}`;
   }
-  if (isCommandError(error)) {
-    const commandFailure = new CommandFailure(error);
-    return commandFailure.code
-      ? `${commandFailure.code}: ${commandFailure.message}`
-      : commandFailure.message;
+  if (error instanceof Error) {
+    if (!error.message) return String(error);
+    return error.name === "Error" ? error.message : `${error.name}: ${error.message}`;
   }
-  if (error instanceof Error) return error.message;
   return unknownErrorMessage(error);
 }
 
+/** Errors stay visible twice as long as the default so a glance away doesn't miss them. */
+const ERROR_TOAST_DURATION_MS = 8_000;
+
 export function notifyError(context: string, error: unknown) {
-  toast.error(`${context} error: ${formatError(error)}`);
+  toast.error(`${context} error: ${formatError(error)}`, { duration: ERROR_TOAST_DURATION_MS });
 }
 
 export function notifySuccess(message: string) {

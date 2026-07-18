@@ -18,6 +18,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { toast } from "sonner";
+import { notifyError, notifyInfo } from "@/lib/notify";
 import {
   CommandFailure,
   deleteBlock,
@@ -291,7 +292,7 @@ export function BlockNode({ block, depth, ordinal }: Props) {
     } catch (error) {
       console.error("block style update failed", error);
       setSaveState("error");
-      toast.error("Could not change the block style.");
+      notifyError("block style", error);
     } finally {
       styleBusyRef.current = false;
       setStyleBusy(false);
@@ -313,7 +314,7 @@ export function BlockNode({ block, depth, ordinal }: Props) {
     } catch (error) {
       console.error("task state update failed", error);
       setSaveState("error");
-      toast.error("Could not update the task state.");
+      notifyError("task state", error);
     } finally {
       styleBusyRef.current = false;
       setStyleBusy(false);
@@ -447,7 +448,7 @@ export function BlockNode({ block, depth, ordinal }: Props) {
       }
 
       if (!localStorage.getItem("outliner.paste-split.notified")) {
-        toast.info("Each paragraph became a separate block.", { duration: 4000 });
+        notifyInfo("Each paragraph became a separate block.");
         localStorage.setItem("outliner.paste-split.notified", "1");
       }
     })();
@@ -464,7 +465,7 @@ export function BlockNode({ block, depth, ordinal }: Props) {
       .map((p) => p.trim())
       .filter((p) => p.length > 0);
     if (paragraphs.length < 2) {
-      toast.info("No paragraph breaks found — add blank lines between paragraphs first.");
+      notifyInfo("No paragraph breaks found — add blank lines between paragraphs first.");
       return;
     }
     clearTimer();

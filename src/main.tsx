@@ -8,6 +8,7 @@ import { ConfirmationProvider } from "@/app/confirmation";
 import { ErrorBoundary } from "@/app/error-boundary";
 import { disableViewportZoom } from "@/app/viewport-zoom";
 import { PageSessionProvider } from "@/features/pages/page-session";
+import { Toaster } from "@/components/ui/sonner";
 import "./index.css";
 
 import { createAppQueryClient, listenForDomainEvents } from "@/lib/query";
@@ -30,6 +31,14 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
           </ConfirmationProvider>
         </AppearanceProvider>
       </QueryClientProvider>
+      <Toaster
+        position="bottom-right"
+        mobileOffset={{
+          right: "calc(1rem + var(--safe-area-inset-right))",
+          bottom: "calc(1rem + var(--safe-area-inset-bottom))",
+          left: "calc(1rem + var(--safe-area-inset-left))",
+        }}
+      />
     </ThemeProvider>
   </React.StrictMode>,
 );

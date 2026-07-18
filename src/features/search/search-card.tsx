@@ -18,7 +18,7 @@ import {
   type SearchHit,
   type SearchMode,
 } from "@/lib/api";
-import { notifyError, notifyInfo } from "@/lib/notify";
+import { notifyError } from "@/lib/notify";
 import {
   dispositionFromShiftKey,
   type OpenDisposition,
@@ -35,6 +35,7 @@ export function SearchCard({ variant = "card", hits, setHits, onOpenContent }: P
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<SearchMode>("fts");
   const [busy, setBusy] = useState(false);
+  const [resultSummary, setResultSummary] = useState<string | null>(null);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -43,8 +44,9 @@ export function SearchCard({ variant = "card", hits, setHits, onOpenContent }: P
     try {
       const out = await search(mode, query, 20);
       setHits(out);
-      notifyInfo(`${out.length} hits (${mode})`);
+      setResultSummary(`${out.length} hits (${mode})`);
     } catch (err) {
+      setResultSummary(null);
       notifyError("search", err);
     } finally {
       setBusy(false);
@@ -82,6 +84,12 @@ export function SearchCard({ variant = "card", hits, setHits, onOpenContent }: P
             Search
           </Button>
         </form>
+
+        {resultSummary && (
+          <p aria-live="polite" className="text-xs text-muted-foreground">
+            {resultSummary}
+          </p>
+        )}
 
         {hits.length > 0 && (
           <div className="space-y-2">

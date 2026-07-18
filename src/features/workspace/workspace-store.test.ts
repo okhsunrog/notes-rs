@@ -1,18 +1,11 @@
-import { beforeEach, describe, expect, it } from "vitest";
-import { currentDisposition, pageTarget } from "./workspace-model";
-import { createInitialWorkspaceState } from "./workspace-model";
-import { type WorkspaceStore, useWorkspaceStore } from "./workspace-store";
-
-const resetStore = () => {
-  useWorkspaceStore.setState((state: WorkspaceStore) => ({
-    ...createInitialWorkspaceState(),
-    dispatch: state.dispatch,
-  }));
-};
+import { beforeEach, describe, expect, it } from "vite-plus/test";
+import { createInitialWorkspaceState, currentDisposition, pageTarget } from "./workspace-model";
+import { useWorkspaceStore } from "./workspace-store";
 
 describe("workspace-store", () => {
   beforeEach(() => {
-    resetStore();
+    // setState shallow-merges, so this resets the workspace fields while keeping dispatch.
+    useWorkspaceStore.setState(createInitialWorkspaceState());
   });
 
   it("opens a page into the active pane", () => {
@@ -49,9 +42,5 @@ describe("workspace-store", () => {
       nextSplitOrdinal: initial.nextSplitOrdinal,
       assistantDock: initial.assistantDock,
     });
-  });
-
-  it("keeps a dispatch function in state", () => {
-    expect(typeof useWorkspaceStore.getState().dispatch).toBe("function");
   });
 });

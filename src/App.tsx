@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   Bot,
@@ -13,7 +13,6 @@ import {
 } from "lucide-react";
 import { AppLayout } from "@/app/layout";
 import { WindowControls } from "@/app/window-controls";
-import { Toaster } from "@/components/ui/sonner";
 import { KnowledgePanel } from "@/features/graph/knowledge-panel";
 import { SearchCard } from "@/features/search/search-card";
 import { PagesList } from "@/features/pages/pages-list";
@@ -26,10 +25,7 @@ import { useStartupState } from "@/app/use-startup-state";
 import { useNotesWorkspace } from "@/features/pages/use-notes-workspace";
 import { useAssistantController } from "@/features/chat/use-assistant-controller";
 import { Workbench } from "@/features/workspace/workbench";
-import {
-  WorkspaceControllerProvider,
-  type WorkspaceController,
-} from "@/features/workspace/workspace-controller";
+import { WorkspaceControllerProvider } from "@/features/workspace/workspace-controller";
 import { useWorkspaceStore } from "@/features/workspace/workspace-store";
 import { notifyError, notifySuccess } from "@/lib/notify";
 import {
@@ -54,7 +50,7 @@ function App() {
   const showEditor = useCallback(() => setEditorRequest((request) => request + 1), []);
   const workspace = useNotesWorkspace(ready, showEditor);
   const assistant = useAssistantController();
-  const activePane = useWorkspaceStore((state) => state.panes[state.activePaneId]);
+  const activePane = workspace.activePane;
   const assistantDock = useWorkspaceStore((state) => state.assistantDock);
   const dispatchWorkspace = useWorkspaceStore((state) => state.dispatch);
   const graphOpen = activePane.content.kind === PaneContentKind.Graph;
@@ -68,27 +64,6 @@ function App() {
     queryFn: getSyncStatus,
     enabled: ready,
   });
-  const workspaceController = useMemo<WorkspaceController>(
-    () => ({
-      createNewNote: workspace.createNewNote,
-      openContent: workspace.openContent,
-      openJournal: workspace.openJournal,
-      captureJournal: workspace.captureJournal,
-      onSaved: workspace.applyUpdated,
-      onDelete: workspace.removePage,
-      openMarkdownLink: workspace.openMarkdownLink,
-    }),
-    [
-      workspace.applyUpdated,
-      workspace.captureJournal,
-      workspace.createNewNote,
-      workspace.openContent,
-      workspace.openJournal,
-      workspace.openMarkdownLink,
-      workspace.removePage,
-    ],
-  );
-
   useEffect(() => {
     if (settingsQuery.data) {
       setWindowDecorationMode(settingsQuery.data.windowDecorationMode);
@@ -170,7 +145,7 @@ function App() {
   }
 
   return (
-    <WorkspaceControllerProvider controller={workspaceController}>
+    <WorkspaceControllerProvider controller={workspace.controller}>
       <AppLayout
         editorRequest={editorRequest}
         headerActions={
@@ -337,14 +312,6 @@ function App() {
           />
         </DialogContent>
       </Dialog>
-      <Toaster
-        position="bottom-right"
-        mobileOffset={{
-          right: "calc(1rem + var(--safe-area-inset-right))",
-          bottom: "calc(1rem + var(--safe-area-inset-bottom))",
-          left: "calc(1rem + var(--safe-area-inset-left))",
-        }}
-      />
     </WorkspaceControllerProvider>
   );
 }
