@@ -3,6 +3,11 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* Base UI portals share this stacking context with the application shell. */
+#root {
+  isolation: isolate;
+}
+
 :root {
   --app-viewport-background:
     radial-gradient(

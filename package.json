@@ -10,6 +10,7 @@
     "prepare": "vp config"
   },
   "dependencies": {
+    "@base-ui/react": "^1.6.0",
     "@codemirror/commands": "^6.10.4",
     "@codemirror/lang-markdown": "^6.5.1",
     "@codemirror/language": "^6.12.4",
@@ -29,7 +30,6 @@
     "mermaid": "^11.16.0",
     "micromark-util-decode-string": "^2.0.1",
     "next-themes": "^0.4.6",
-    "radix-ui": "^1.6.2",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-markdown": "^10.1.0",

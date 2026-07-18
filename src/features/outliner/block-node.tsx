@@ -834,7 +834,9 @@ function BlockStylePicker({
       value={style.kind}
       open={open}
       onOpenChange={setOpen}
-      onValueChange={onChange}
+      onValueChange={(value) => {
+        if (value !== null) onChange(value);
+      }}
       disabled={busy}
     >
       <SelectTrigger
@@ -901,7 +903,9 @@ function TaskStatePicker({
       value={state}
       open={open}
       onOpenChange={setOpen}
-      onValueChange={onChange}
+      onValueChange={(value) => {
+        if (value !== null) onChange(value);
+      }}
       disabled={busy}
     >
       <SelectTrigger
