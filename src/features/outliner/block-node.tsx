@@ -43,6 +43,7 @@ import { BlockChildren } from "./block-tree";
 import { BlockEdit, type BlockEditHandle } from "./block-edit";
 import {
   resolveBlockEditKey,
+  runStructuralEditAfterFlush,
   splitEditorContent,
   type BlockEditKeyEvent,
   type BlockEditPasteEvent,
@@ -435,11 +436,14 @@ export function BlockNode({ block, depth, ordinal }: Props) {
     clearTimer();
     void (async () => {
       try {
-        const parts = [draftRef.current, ...paragraphs.slice(1)].map(blockContent);
-        const changed = await splitBlock(block.uuid, parts, splitExpectedRevision());
-        sessions.discardBlock(block.pageUuid, block.uuid);
-        await invalidateChildren(containerUuid);
-        store.setEditing(lastOrderedBlock(changed)?.uuid ?? block.uuid);
+        const completed = await runStructuralEditAfterFlush(flush, async () => {
+          const parts = [draftRef.current, ...paragraphs.slice(1)].map(blockContent);
+          const changed = await splitBlock(block.uuid, parts, splitExpectedRevision());
+          sessions.discardBlock(block.pageUuid, block.uuid);
+          await invalidateChildren(containerUuid);
+          store.setEditing(lastOrderedBlock(changed)?.uuid ?? block.uuid);
+        });
+        if (!completed) return;
       } catch (error) {
         console.error("paste split failed", error);
         setSaveState("error");
@@ -502,15 +506,18 @@ export function BlockNode({ block, depth, ordinal }: Props) {
       return;
     }
     clearTimer();
-    const markdown = draftRef.current;
-    const parts = splitEditorContent(markdown, selectionStart, selectionEnd).map(blockContent);
     try {
-      const changed = await splitBlock(block.uuid, parts, splitExpectedRevision());
-      sessions.discardBlock(block.pageUuid, block.uuid);
-      await invalidateChildren(containerUuid);
-      store.setEditing(
-        changed.find((candidate) => candidate.uuid !== block.uuid)?.uuid ?? block.uuid,
-      );
+      await runStructuralEditAfterFlush(flush, async () => {
+        const parts = splitEditorContent(draftRef.current, selectionStart, selectionEnd).map(
+          blockContent,
+        );
+        const changed = await splitBlock(block.uuid, parts, splitExpectedRevision());
+        sessions.discardBlock(block.pageUuid, block.uuid);
+        await invalidateChildren(containerUuid);
+        store.setEditing(
+          changed.find((candidate) => candidate.uuid !== block.uuid)?.uuid ?? block.uuid,
+        );
+      });
     } catch (e) {
       console.error("enter (split block) failed", e);
       setSaveState("error");

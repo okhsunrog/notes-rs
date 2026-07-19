@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   replaceEditorRange,
   resolveBlockEditKey,
+  runStructuralEditAfterFlush,
   splitEditorContent,
   type BlockEditKeyEvent,
 } from "./block-edit-model";
@@ -62,6 +63,27 @@ describe("active block editor model", () => {
   it("splits plain Enter at the actual selection and removes the selected range", () => {
     expect(splitEditorContent("left selected right", 5, 13)).toEqual(["left ", " right"]);
     expect(splitEditorContent("abcdef", 4, 2)).toEqual(["ab", "ef"]);
+  });
+
+  it("flushes immediate typing before Enter splits against the acknowledged revision", async () => {
+    let revision = "r1";
+    const events: string[] = [];
+
+    const completed = await runStructuralEditAfterFlush(
+      async () => {
+        events.push("save typed draft at r1");
+        await Promise.resolve();
+        revision = "r2";
+        return true;
+      },
+      async () => {
+        events.push(`split at ${revision}`);
+        if (revision !== "r2") throw new Error("conflict");
+      },
+    );
+
+    expect(completed).toBe(true);
+    expect(events).toEqual(["save typed draft at r1", "split at r2"]);
   });
 
   it("gives an open autocomplete menu priority over structural commands", () => {

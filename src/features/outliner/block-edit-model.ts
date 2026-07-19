@@ -137,6 +137,15 @@ export function splitEditorContent(
   return [value.slice(0, from), value.slice(to)];
 }
 
+export async function runStructuralEditAfterFlush(
+  flush: () => Promise<boolean>,
+  edit: () => Promise<void>,
+): Promise<boolean> {
+  if (!(await flush())) return false;
+  await edit();
+  return true;
+}
+
 /** Builds the single transaction used by autocomplete and other host inserts. */
 export function replaceEditorRange(
   state: EditorState,
