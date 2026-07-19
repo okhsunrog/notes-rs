@@ -438,6 +438,41 @@ async fn fused_search_surfaces_snippets_and_prioritizes_only_exact_titles() {
 }
 
 #[tokio::test]
+async fn fused_search_prioritizes_a_stem_equivalent_title_over_body_hits() {
+    let database = database().await;
+    let connection = &database.connection;
+    let projects = db::create_page(connection, "Проекты".into())
+        .await
+        .expect("create navigational title fixture");
+    let body_page = db::create_page(connection, "Черновик".into())
+        .await
+        .expect("create body fixture page");
+    let body = db::create_block(
+        connection,
+        body_page.uuid,
+        None,
+        None,
+        BlockStyle::Paragraph,
+        "проект проект проект".into(),
+    )
+    .await
+    .expect("create strong body fixture");
+
+    let hits = db::search_fts(connection, "проекта".into(), 10)
+        .await
+        .expect("fused morphology search");
+
+    assert_eq!(
+        hits.first().map(|hit| hit.content.uuid()),
+        Some(projects.uuid)
+    );
+    assert!(
+        hits.iter().any(|hit| hit.content.uuid() == body.uuid),
+        "the promoted title must not discard the body channel"
+    );
+}
+
+#[tokio::test]
 async fn fused_search_builds_snippets_from_raw_stem_variant_markdown() {
     let database = database().await;
     let connection = &database.connection;

@@ -261,13 +261,18 @@ fn token_spans(text: &str) -> Vec<(usize, usize)> {
 }
 
 pub async fn search_fts(conn: &Connection, query: String, limit: u32) -> Result<Vec<SearchHit>> {
+    let query_title_tokens = stemmed_token_set(&query);
     let pages = search_pages_ranked(conn, query.clone(), limit).await?;
     let blocks =
         search_blocks_ranked(conn, query, limit, crate::stem::SearchTokenMode::Prefix).await?;
 
-    let (exact_pages, pages): (Vec<_>, Vec<_>) =
-        pages.into_iter().partition(|ranked| ranked.exact_title);
-    let mut hits = exact_pages
+    let (priority_pages, pages): (Vec<_>, Vec<_>) = pages.into_iter().partition(|ranked| {
+        ranked.exact_title
+            || ranked.page.title.as_deref().is_some_and(|title| {
+                !query_title_tokens.is_empty() && stemmed_token_set(title) == query_title_tokens
+            })
+    });
+    let mut hits = priority_pages
         .into_iter()
         .map(page_search_hit)
         .collect::<Vec<_>>();
@@ -295,6 +300,14 @@ pub async fn search_fts(conn: &Connection, query: String, limit: u32) -> Result<
     Ok(hits)
 }
 
+fn stemmed_token_set(text: &str) -> std::collections::HashSet<String> {
+    token_spans(text)
+        .into_iter()
+        .map(|(start, end)| crate::stem::stem(&text[start..end]))
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
 fn page_search_hit(ranked: RankedPage) -> SearchHit {
     SearchHit {
         content: Content::Page(ranked.page),
@@ -308,5 +321,22 @@ fn block_search_hit(ranked: RankedBlock) -> SearchHit {
         content: Content::Block(ranked.block),
         score: -ranked.bm25,
         snippet: Some(ranked.snippet),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stemmed_token_set;
+
+    #[test]
+    fn navigational_title_tokens_are_stemmed_order_independent_sets() {
+        assert_eq!(
+            stemmed_token_set("ESP32 Прошивка"),
+            stemmed_token_set("прошивки esp32")
+        );
+        assert_ne!(
+            stemmed_token_set("ESP32 Прошивка"),
+            stemmed_token_set("прошивки esp32 draft")
+        );
     }
 }
