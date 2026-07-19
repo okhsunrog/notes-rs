@@ -69,6 +69,41 @@ fn legacy_search_requests_default_to_reranking() {
 }
 
 #[test]
+fn default_reranking_keeps_the_new_client_request_compatible_with_old_servers() {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct LegacySearchRequest {
+        query: String,
+        limit: u32,
+    }
+
+    let request = SearchRequest {
+        query: "project".into(),
+        limit: 8,
+        rerank: true,
+    };
+    let encoded = serde_json::to_value(&request).expect("encode default-rerank request");
+    assert_eq!(
+        encoded,
+        serde_json::json!({ "query": "project", "limit": 8 })
+    );
+    let legacy: LegacySearchRequest =
+        serde_json::from_value(encoded).expect("old server accepts the default request shape");
+    assert_eq!(legacy.query, "project");
+    assert_eq!(legacy.limit, 8);
+
+    assert_eq!(
+        serde_json::to_value(SearchRequest {
+            query: "project".into(),
+            limit: 8,
+            rerank: false,
+        })
+        .expect("encode explicit rerank opt-out"),
+        serde_json::json!({ "query": "project", "limit": 8, "rerank": false })
+    );
+}
+
+#[test]
 fn structured_errors_round_trip_without_stringly_typed_codes() {
     let websocket = ServerMessage::Error {
         code: ServerErrorCode::Conflict,

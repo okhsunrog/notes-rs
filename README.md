@@ -102,6 +102,8 @@ Client configuration lives only in the typed application Settings file: appearan
 
 The server uses `server/config.example.toml` as a first-start bootstrap. After that, provider configuration and runtime indexing controls are changed remotely from Settings. OpenRouter is the current embeddings/reranking deployment, while completion can use any OpenAI Chat Completions-compatible or Anthropic Messages-compatible endpoint with a custom base URL.
 
+For rolling upgrades, deploy the server before clients so newly introduced request fields are accepted throughout the transition.
+
 Build a static musl server archive or deploy it through the sibling `cloud-forge` Ansible project:
 
 ```sh

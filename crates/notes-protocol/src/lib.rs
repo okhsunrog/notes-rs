@@ -110,13 +110,17 @@ const fn default_rerank() -> bool {
     true
 }
 
+const fn is_true(value: &bool) -> bool {
+    *value
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SearchRequest {
     pub query: String,
     #[serde(default = "default_search_limit")]
     pub limit: u32,
-    #[serde(default = "default_rerank")]
+    #[serde(default = "default_rerank", skip_serializing_if = "is_true")]
     pub rerank: bool,
 }
 
