@@ -5,6 +5,9 @@ notes-rs is a local-first personal knowledge app for desktop and Android. Typed 
 ## What works
 
 - Hierarchical block editing with autosave, Markdown rendering, wikilink and block-reference autocomplete, device-local remembered folding, paragraph splitting, keyboard navigation, and action-based undo/redo.
+- Outline and continuous Document authoring, with CodeMirror Source/Live Preview modes, a linked Reading projection, and revision-guarded atomic saves.
+- Daily journals with Today/calendar navigation and quick capture, plus loss-aware Logseq graph import for pages, journals, nested blocks, tasks, UUIDs, and local assets.
+- A responsive multi-pane workspace with adjacent navigation, linked previews, preserved page sessions, and a collapsible AI companion.
 - Local pages, graph, backlinks, attachments, import/export, timestamped recovery backups, and English/Russian FTS5 search. These features work without a server.
 - Near-realtime op-based sync over HTTP and WebSocket, with an offline outbox, HLC/LWW conflict resolution, tombstones, deterministic structural reconciliation, snapshot bootstrap, and content-addressed blobs.
 - Server-owned semantic retrieval, reranking, entity extraction, and streaming chat. Extracted entities remain disposable server-side AI data rather than client graph nodes; the clients contain no provider keys, vector database, embedding model, or AI background workers.
@@ -30,7 +33,7 @@ Select **New note** or press `Ctrl/Cmd+N` to start writing. Enter a title, then 
 
 The durable source of truth is a UUID-addressed operation stream. Each client and the server materialize that stream into their own `notes.db`; integer SQLite IDs never cross replica boundaries. Local mutations and remote operations pass through the same idempotent apply engine. Per-field HLC clocks preserve independent title, content, and structure edits, while the sync client batches remote apply and cursor advancement atomically.
 
-Persisted Rust state is exposed through generated tauri-specta bindings and cached in TanStack Query. One typed domain-event adapter invalidates the narrow affected query keys. Draft text and caret state stay local to the editor instead of being mixed into the backend cache.
+Persisted Rust state is exposed through generated tauri-specta bindings and cached in TanStack Query. One typed domain-event adapter invalidates the narrow affected query keys. The Zustand workspace store owns pane layout, navigation, focus, and Assistant-dock projection; `PageSessionRegistry` owns unsaved drafts, conflicts, and linked-reading subscribers. A shared notify layer turns typed command failures into consistent user-visible messages without mixing transient UI state into the backend cache.
 
 The server keeps source pages, blocks, attachments, and the oplog in SQLite. Derived embeddings, generations, indexing jobs, extracted entities, and extraction state live in a separate disposable `ai.db` behind a `VectorStore` interface; they are not synced into the client graph. sqlite-vec is loaded only by the server binary. Provider settings are bootstrapped from the server TOML on first start and subsequently managed from the authenticated application Settings page; provider secrets are stored server-side with owner-only permissions and are never returned to the webview.
 
@@ -111,6 +114,8 @@ just package-server
 just deploy-server
 ```
 
+`just package-server` produces the ignored `release-server/` staging directory and `notes-server-release.tar.gz` archive locally; release binaries are not committed.
+
 TLS and public routing belong to the existing reverse proxy; the notes server binds privately and ships as one static binary plus its bootstrap TOML.
 
 ## Remaining work
@@ -120,6 +125,6 @@ The core architecture is implemented, but this is still a pre-release project. T
 - cursor-aware oplog compaction and device registration/pairing; snapshots are created and bootstrap works, but the server deliberately does not delete history until it can prove every registered device is past the compaction floor;
 - uninterrupted semantic queries while a provider change builds a new vector generation; generation activation is atomic, but the new provider runtime currently becomes authoritative while its generation is building;
 - scoped and revocable per-device credentials instead of the current static token mapping;
-- Markdown-vault, Obsidian, and Logseq import, plus daily notes, templates, properties, saved queries, and an extension model;
+- Markdown-vault and Obsidian import, plus journal templates, properties, saved queries, and an extension model;
 - drag-and-drop block movement, cross-block selection, transclusion, richer Markdown authoring, graph filters/layouts, and larger-corpus performance work;
 - signed production packages and end-to-end UI/accessibility regression coverage on desktop and real Android hardware.

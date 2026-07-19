@@ -1,6 +1,8 @@
 # Workspace Panes and Companion Architecture
 
-Status: accepted on 2026-07-17. Implementation is pending.
+Status: accepted on 2026-07-17 and implemented. The Zustand pane tree, adjacent navigation,
+responsive compact projection, linked Reading sessions, and collapsible Assistant dock are shipped;
+native multi-window hosting and promoting the Assistant into a normal pane remain reserved.
 
 This decision defines how one native notes-rs window composes navigation, one or more independent
 content surfaces, and the AI companion. It deliberately treats side-by-side layout as a general

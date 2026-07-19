@@ -8,8 +8,8 @@ deliberately before the first release.
 
 The accepted editor and page-presentation target is recorded separately in
 [`EDITOR_ARCHITECTURE.md`](EDITOR_ARCHITECTURE.md). The durable `PageLayout` versus pane-local
-Reading boundary is implemented; CodeMirror, continuous Document editing, and linked preview
-sessions remain pending.
+Reading boundary, continuous CodeMirror Document editing, Live Preview, and linked preview sessions
+are implemented; rich semantic widgets and the remaining large-document/mobile gates are pending.
 
 General multi-pane composition, adjacent navigation, linked preview, responsive projection, and
 the collapsible AI companion are defined in
@@ -51,7 +51,7 @@ desktop / Android
   generated tauri-specta commands and DomainEvent
   Tauri host
     notes-core -> local notes.db (pages, blocks, refs, FTS, history, outbox)
-    notes-sync -> transport-independent sync machine + HTTP/SSE remote API
+    notes-sync -> transport-independent sync machine + HTTP/WebSocket remote API
     src-tauri sync -> foreground WebSocket session + blob orchestration
     no notes-ai dependency
               |
@@ -70,7 +70,8 @@ Workspace ownership follows that boundary:
 - `crates/notes-core`: typed content model, SQLite persistence, operations, HLC/LWW apply, local
   FTS, graph derivation, archives, and action history.
 - `crates/notes-protocol`: transport-only sync, chat, search, status, and AI administration DTOs.
-- `crates/notes-sync`: transport-independent `SyncClient` plus production HTTP/SSE transport.
+- `crates/notes-sync`: transport-independent `SyncClient` plus production HTTP/WebSocket transport
+  (SSE is used only for streaming chat).
 - `crates/notes-ai`: server-only retrieval, reranking, extraction, agent, workers, and `ai.db`.
 - `src-tauri`: thin desktop/mobile adapter over core, sync, settings, and remote server APIs.
 - `server`: Axum host, authentication, per-user state, oplog, snapshots, blobs, and AI runtime.
@@ -86,16 +87,18 @@ A `Page` owns a title and an ordered tree of blocks. Its persisted `PageLayout` 
 
 Changing layout never converts or duplicates content. `PagePresentation = Editing | Reading` is
 pane/component-local state and never enters SQLite, operations, archives, snapshots, RPC, or sync.
-The current Document renderer still uses the block tree; its continuous CodeMirror adapter remains
-an editor migration task.
+The continuous CodeMirror adapter edits a marker-free Document projection and commits through a
+revision-guarded atomic document replacement. Source and Live Preview are authoring modes over the
+same durable block tree; Reading is a pane-local projection.
 
-Side-by-side Split remains a future workspace layout operation and likewise never enters content
+Side-by-side Split is implemented as a workspace layout operation and likewise never enters content
 operations or sync. See [`EDITOR_ARCHITECTURE.md`](EDITOR_ARCHITECTURE.md) and
 [`WORKSPACE_ARCHITECTURE.md`](WORKSPACE_ARCHITECTURE.md).
 
 The accepted Journal target adds a closed `PageKind = Note | Journal { date }` independently of
-layout. Journal reuses the ordinary page/block model and defaults to Outline; calendar/timeline is a
-workspace surface, not another page kind or editor. Its implementation is pending. See
+layout. Journal reuses the ordinary page/block model and defaults to Outline; Today/calendar and
+quick-capture UI are workspace surfaces, not another page kind or editor. These minimum product
+surfaces are implemented. See
 [`JOURNAL_ARCHITECTURE.md`](JOURNAL_ARCHITECTURE.md).
 
 ### Blocks
@@ -174,7 +177,7 @@ The closed operation set is:
 
 | Domain     | Operations                                                                            |
 | ---------- | ------------------------------------------------------------------------------------- |
-| Page       | `page_create`, `page_set_title`, `page_set_layout`, `page_delete`                     |
+| Page       | `page_create`, `page_alias_set`, `page_set_title`, `page_set_layout`, `page_delete`   |
 | Block      | `block_create`, `block_set_markdown`, `block_set_style`, `block_move`, `block_delete` |
 | Attachment | `attachment_add`, `attachment_remove`                                                 |
 
@@ -312,10 +315,11 @@ URL, sync token, and native/borderless window preference; appearance preferences
 UI state. There is no `.env` product-configuration path. `TAURI_DEV_HOST` remains the one build-time
 input required by Tauri/Vite for device development.
 
-The server starts from a TOML bootstrap containing listen/storage settings, the static token-to-user
-mapping, and initial AI provider configuration. Provider/runtime AI settings are subsequently
-manageable through the authenticated app UI. TLS and public routing are owned by the existing
-reverse proxy. Deployment produces a static musl binary rather than a container image.
+The server starts from a TOML bootstrap containing listen/storage settings, SHA-256 token-to-user
+credentials, per-user administration and blob quotas, and initial AI provider configuration.
+Provider/runtime AI settings are subsequently manageable by an authenticated administrator through
+the app UI. TLS and public routing are owned by the existing reverse proxy. Deployment produces a
+static musl binary rather than a container image.
 
 ## 9. Implemented status
 
@@ -323,9 +327,9 @@ reverse proxy. Deployment produces a static musl binary rather than a container 
 | ---------------------------------------------------------------------- | ------------------------------------------- |
 | Typed `pages` / `blocks` baseline with no generic nodes                | Complete                                    |
 | Typed block styles and provisional three-way page view                 | Complete as a prototype                     |
-| Accepted continuous editor and pane-local view architecture            | Design complete; implementation pending     |
+| Continuous editor, Live Preview, linked Reading, and pane workspace    | Complete; richer widgets/gates remain       |
 | Typed Journal/workspace identity and sync/archive invariants           | Complete                                    |
-| Journal product surfaces and Logseq conversion boundary                | In progress                                 |
+| Journal product surfaces and loss-aware Logseq conversion              | Complete for the accepted minimum scope     |
 | UUIDv7 operations, HLC/LWW apply, tombstones, deterministic structure  | Complete                                    |
 | Action-based inverse-operation undo/redo                               | Complete                                    |
 | Local FTS, refs, backlinks, graph, attachments, archives               | Complete                                    |
@@ -370,20 +374,15 @@ Architecture and correctness:
 
 Product and corpus support:
 
-1. Implement the accepted editor architecture: durable `PageLayout`, pane-local Document views,
-   shared Markdown AST rendering, CodeMirror 6 Live Preview, and a continuous Document adapter.
-2. Replace the single-content shell with the accepted pane tree, adjacent navigation, linked
-   preview, responsive projection, and collapsible Assistant dock.
-3. Add server-side retrieval chunking for large blocks/documents. The current index unit is one
+1. Finish rich semantic Live Preview widgets and the remaining large-document/mobile editor gates.
+2. Add server-side retrieval chunking for large blocks/documents. The current index unit is one
    page or block UUID, which is sufficient for the demo but not ideal for long articles.
-4. Implement the accepted Journal domain, Today/calendar surfaces, deterministic offline identity,
-   and journal-aware search/graph filters.
-5. Add Markdown-vault, Obsidian, and the staged Logseq importer, including page properties, block
-   UUIDs, nesting, and assets; no legacy notes-rs database importer is planned.
-6. Add journal templates, general properties, saved queries, and an extension model.
-7. Add drag-and-drop movement, cross-block selection, transclusion, richer Markdown authoring,
+3. Add journal-aware search/graph filters and journal templates.
+4. Add Markdown-vault and Obsidian import; no legacy notes-rs database importer is planned.
+5. Add general properties, saved queries, and an extension model.
+6. Add drag-and-drop movement, cross-block selection, transclusion, richer Markdown authoring,
    graph filters/layouts, and measured larger-corpus performance work.
-8. Add signed production packages and end-to-end UI/accessibility coverage on desktop and real
+7. Add signed production packages and end-to-end UI/accessibility coverage on desktop and real
    Android hardware.
 
 ## 12. Explicit non-goals
