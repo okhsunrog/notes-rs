@@ -269,8 +269,9 @@ pub async fn search_blocks_fts(
     state: State<'_, AppState>,
     query: String,
     limit: u32,
+    token_mode: notes_core::SearchTokenMode,
 ) -> CommandResult<Vec<db::Block>> {
-    db::search_blocks_fts(&state.conn, query, limit)
+    db::search_blocks_fts(&state.conn, query, limit, token_mode)
         .await
         .map_err(err)
 }

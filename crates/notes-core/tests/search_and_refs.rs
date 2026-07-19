@@ -326,15 +326,37 @@ async fn search_normalizes_unicode_treats_wildcards_literally_and_stems_russian(
     )
     .await
     .expect("create searchable Russian block");
-    let hits = db::search_blocks_fts(connection, "заметка".into(), 10)
-        .await
-        .expect("stemmed FTS search");
+    let hits = db::search_blocks_fts(
+        connection,
+        "заметка".into(),
+        10,
+        notes_core::SearchTokenMode::Plain,
+    )
+    .await
+    .expect("stemmed FTS search");
     assert!(hits.iter().any(|hit| hit.uuid == block.uuid));
     assert!(
-        db::search_blocks_fts(connection, "   ".into(), 10)
-            .await
-            .expect("blank FTS search")
-            .is_empty()
+        db::search_blocks_fts(
+            connection,
+            "зам".into(),
+            10,
+            notes_core::SearchTokenMode::Prefix,
+        )
+        .await
+        .expect("prefix FTS search")
+        .iter()
+        .any(|hit| hit.uuid == block.uuid)
+    );
+    assert!(
+        db::search_blocks_fts(
+            connection,
+            "   ".into(),
+            10,
+            notes_core::SearchTokenMode::Plain,
+        )
+        .await
+        .expect("blank FTS search")
+        .is_empty()
     );
 
     db::set_block_content(
@@ -347,18 +369,28 @@ async fn search_normalizes_unicode_treats_wildcards_literally_and_stems_russian(
     .await
     .expect("update indexed block");
     assert!(
-        db::search_blocks_fts(connection, "заметка".into(), 10)
-            .await
-            .expect("search removed terms")
-            .is_empty()
+        db::search_blocks_fts(
+            connection,
+            "заметка".into(),
+            10,
+            notes_core::SearchTokenMode::Plain,
+        )
+        .await
+        .expect("search removed terms")
+        .is_empty()
     );
     assert_eq!(
-        db::search_blocks_fts(connection, "документами".into(), 10)
-            .await
-            .expect("search replacement terms")
-            .into_iter()
-            .map(|hit| hit.uuid)
-            .collect::<Vec<_>>(),
+        db::search_blocks_fts(
+            connection,
+            "документами".into(),
+            10,
+            notes_core::SearchTokenMode::Plain,
+        )
+        .await
+        .expect("search replacement terms")
+        .into_iter()
+        .map(|hit| hit.uuid)
+        .collect::<Vec<_>>(),
         vec![block.uuid]
     );
     assert!(
@@ -367,10 +399,15 @@ async fn search_normalizes_unicode_treats_wildcards_literally_and_stems_russian(
             .expect("delete indexed block")
     );
     assert!(
-        db::search_blocks_fts(connection, "документ".into(), 10)
-            .await
-            .expect("search deleted block")
-            .is_empty()
+        db::search_blocks_fts(
+            connection,
+            "документ".into(),
+            10,
+            notes_core::SearchTokenMode::Plain,
+        )
+        .await
+        .expect("search deleted block")
+        .is_empty()
     );
 }
 

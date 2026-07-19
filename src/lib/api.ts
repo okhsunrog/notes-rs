@@ -45,6 +45,7 @@ import type {
   SearchHit,
   SecretKey,
   SearchMode,
+  SearchTokenMode,
   SettingsSnapshot,
   SettingsUpdate,
   StartupStatus,
@@ -290,8 +291,8 @@ export const getOrCreatePageByTitle = checkedCommand(commands.getOrCreatePageByT
 export const getPageByTitle = checkedCommand(commands.getPageByTitle);
 export const searchPagesByTitle = (query: string, limit = 8) =>
   unwrapCommand(commands.searchPagesByTitle(query, limit));
-export const searchBlocksFts = (query: string, limit = 8) =>
-  unwrapCommand(commands.searchBlocksFts(query, limit));
+export const searchBlocksFts = (query: string, limit = 8, tokenMode: SearchTokenMode = "plain") =>
+  unwrapCommand(commands.searchBlocksFts(query, limit, tokenMode));
 
 export function search(mode: SearchMode, query: string, limit = 20) {
   return unwrapCommand(commands.searchNotes(mode, query, limit));

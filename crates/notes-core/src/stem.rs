@@ -5,7 +5,16 @@
 //! spaces so the FTS5 `unicode61` tokenizer at index time sees the already-stemmed
 //! forms.
 use rust_stemmers::{Algorithm, Stemmer};
+use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub enum SearchTokenMode {
+    #[default]
+    Plain,
+    Prefix,
+}
 
 fn russian() -> &'static Stemmer {
     static S: OnceLock<Stemmer> = OnceLock::new();
@@ -81,23 +90,39 @@ fn push_stemmed(out: &mut String, token: &str) {
 /// stemmed token prevents punctuation such as `?`, `-`, `:` and unmatched
 /// quotes from being interpreted as operators or column selectors.
 pub fn stem_search_query(text: &str) -> String {
+    stem_search_query_with_mode(text, SearchTokenMode::Plain)
+}
+
+pub fn stem_search_query_with_mode(text: &str, mode: SearchTokenMode) -> String {
     let mut tokens = Vec::new();
     let mut token = String::new();
     for character in text.chars() {
         if character.is_alphanumeric() {
             token.push(character);
         } else if !token.is_empty() {
-            tokens.push(stem(&token));
-            token.clear();
+            tokens.push(std::mem::take(&mut token));
         }
     }
     if !token.is_empty() {
-        tokens.push(stem(&token));
+        tokens.push(token);
     }
+
+    let last_index = tokens.len().checked_sub(1);
     tokens
         .into_iter()
-        .filter(|token| !token.is_empty())
-        .map(|token| format!("\"{token}\""))
+        .enumerate()
+        .filter_map(|(index, raw)| {
+            let stemmed = stem(&raw);
+            if stemmed.is_empty() {
+                return None;
+            }
+            if mode == SearchTokenMode::Prefix && Some(index) == last_index {
+                let raw = raw.to_lowercase();
+                Some(format!("(\"{raw}\"* OR \"{stemmed}\"*)"))
+            } else {
+                Some(format!("\"{stemmed}\""))
+            }
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -126,6 +151,40 @@ mod tests {
             "\"whi\" \"offlin\" \"first\" \"titl\" \"rust\""
         );
         assert_eq!(stem_search_query("???"), "");
+    }
+
+    #[test]
+    fn prefix_search_matches_a_longer_word() {
+        let database = rusqlite::Connection::open_in_memory().expect("open database");
+        database
+            .execute_batch(
+                "CREATE VIRTUAL TABLE search_test USING fts5(content);
+                 INSERT INTO search_test(content) VALUES ('programming');",
+            )
+            .expect("create FTS fixture");
+
+        let query = stem_search_query_with_mode("prog", SearchTokenMode::Prefix);
+        let count: i64 = database
+            .query_row(
+                "SELECT count(*) FROM search_test WHERE search_test MATCH ?1",
+                [query],
+                |row| row.get(0),
+            )
+            .expect("run prefix search");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn prefix_search_quotes_tokens_and_drops_operators() {
+        assert_eq!(
+            stem_search_query_with_mode("prog OR title:Rust*", SearchTokenMode::Prefix),
+            "\"prog\" \"or\" \"titl\" (\"rust\"* OR \"rust\"*)"
+        );
+        assert_eq!(stem_search_query_with_mode("", SearchTokenMode::Prefix), "");
+        assert_eq!(
+            stem_search_query_with_mode("***", SearchTokenMode::Prefix),
+            ""
+        );
     }
 
     #[test]

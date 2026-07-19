@@ -35,3 +35,4 @@ pub use operation::{
     validate_attachment_filename,
 };
 pub use sqlite::Connection;
+pub use stem::SearchTokenMode;

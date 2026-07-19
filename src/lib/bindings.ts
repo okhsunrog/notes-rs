@@ -138,7 +138,7 @@ export const commands = {
 	updatedAt: number,
 } | null, CommandError>(__TAURI_INVOKE("get_page_by_title", { title })),
 	searchPagesByTitle: (query: string, limit: number) => typedError<Page[], CommandError>(__TAURI_INVOKE("search_pages_by_title", { query, limit })),
-	searchBlocksFts: (query: string, limit: number) => typedError<Block[], CommandError>(__TAURI_INVOKE("search_blocks_fts", { query, limit })),
+	searchBlocksFts: (query: string, limit: number, tokenMode: SearchTokenMode) => typedError<Block[], CommandError>(__TAURI_INVOKE("search_blocks_fts", { query, limit, tokenMode })),
 };
 
 /** Events */
@@ -495,6 +495,8 @@ export type SearchHit = {
 };
 
 export type SearchMode = "fts" | "semantic";
+
+export type SearchTokenMode = "plain" | "prefix";
 
 export type SecretKey = "SYNC_TOKEN";
 

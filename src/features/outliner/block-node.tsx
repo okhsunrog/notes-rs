@@ -334,8 +334,7 @@ export function BlockNode({ block, depth, ordinal }: Props) {
           if (reqId !== acReqId.current) return;
           setAcItems(pages.map(pageToItem));
         } else {
-          const ftsQuery = buildFtsPrefix(trigger.query);
-          const blocks = ftsQuery ? await searchBlocksFts(ftsQuery, 8) : [];
+          const blocks = trigger.query ? await searchBlocksFts(trigger.query, 8, "prefix") : [];
           if (reqId !== acReqId.current) return;
           setAcItems(blocks.map(blockToItem));
         }
@@ -936,18 +935,6 @@ function TaskStatePicker({
       </SelectContent>
     </Select>
   );
-}
-
-/** Convert "auto comp" → "auto* comp*" for FTS5 prefix matching. Strips
- * characters that would break the FTS5 expression (operators are bare words,
- * so we keep alphanumerics + Cyrillic). */
-function buildFtsPrefix(q: string): string {
-  return q
-    .split(/\s+/)
-    .map((t) => t.replace(/[^\p{L}\p{N}]+/gu, ""))
-    .filter((t) => t.length > 0)
-    .map((t) => `${t}*`)
-    .join(" ");
 }
 
 function BlockBullet({ state }: { state: SaveState }) {

@@ -25,8 +25,13 @@ pub async fn search_pages_by_title(
     .await
 }
 
-pub async fn search_blocks_fts(conn: &Connection, query: String, limit: u32) -> Result<Vec<Block>> {
-    let query = crate::stem::stem_search_query(&query);
+pub async fn search_blocks_fts(
+    conn: &Connection,
+    query: String,
+    limit: u32,
+    token_mode: crate::stem::SearchTokenMode,
+) -> Result<Vec<Block>> {
+    let query = crate::stem::stem_search_query_with_mode(&query, token_mode);
     if query.is_empty() {
         return Ok(Vec::new());
     }
@@ -48,7 +53,7 @@ pub async fn search_blocks_fts(conn: &Connection, query: String, limit: u32) -> 
 
 pub async fn search_fts(conn: &Connection, query: String, limit: u32) -> Result<Vec<SearchHit>> {
     let pages = search_pages_by_title(conn, query.clone(), limit).await?;
-    let blocks = search_blocks_fts(conn, query, limit).await?;
+    let blocks = search_blocks_fts(conn, query, limit, crate::stem::SearchTokenMode::Plain).await?;
     let mut hits = pages
         .into_iter()
         .enumerate()
