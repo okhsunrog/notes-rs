@@ -149,6 +149,7 @@ impl ApiError {
                 notes_core::CoreError::NotFound(message) => Self::not_found(message.clone()),
                 notes_core::CoreError::Conflict(message)
                 | notes_core::CoreError::SyncConflict(message) => Self::conflict(message.clone()),
+                notes_core::CoreError::SyncSequenceGap { .. } => Self::conflict(core.to_string()),
                 notes_core::CoreError::Database(_) => Self::internal(error),
             };
         }

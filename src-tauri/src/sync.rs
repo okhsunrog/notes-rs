@@ -561,6 +561,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sequence_gaps_are_retriable_but_other_sync_conflicts_are_permanent() {
+        let gap = anyhow::Error::from(notes_core::CoreError::sync_sequence_gap(1_001, 1_501));
+        assert!(!is_permanent_failure(&gap));
+
+        let conflict = anyhow::Error::from(notes_core::CoreError::sync_conflict(
+            "operation id was reused",
+        ));
+        assert!(is_permanent_failure(&conflict));
+    }
+
+    #[test]
     fn empty_snapshot_has_no_source_records() {
         assert!(snapshot_is_empty(&SyncSnapshot {
             format_version: notes_sync::FORMAT_VERSION,

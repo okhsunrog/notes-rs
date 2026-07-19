@@ -483,10 +483,7 @@ pub async fn apply_sequenced_batch(
                 continue;
             }
             if seq != cursor.saturating_add(1) {
-                return Err(CoreError::sync_conflict(format!(
-                    "sync sequence gap: expected {}, received {seq}",
-                    cursor.saturating_add(1)
-                )));
+                return Err(CoreError::sync_sequence_gap(cursor.saturating_add(1), seq));
             }
             let existing = transaction
                 .query_row(

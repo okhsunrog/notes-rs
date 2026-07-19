@@ -8,6 +8,8 @@ pub enum CoreError {
     Conflict(String),
     #[error("{0}")]
     SyncConflict(String),
+    #[error("sync sequence gap: expected {expected}, received {received}")]
+    SyncSequenceGap { expected: u64, received: u64 },
     #[error(transparent)]
     Database(#[from] rusqlite::Error),
 }
@@ -27,6 +29,10 @@ impl CoreError {
 
     pub fn sync_conflict(message: impl Into<String>) -> Self {
         Self::SyncConflict(message.into())
+    }
+
+    pub fn sync_sequence_gap(expected: u64, received: u64) -> Self {
+        Self::SyncSequenceGap { expected, received }
     }
 }
 

@@ -225,7 +225,13 @@ async fn sequenced_apply_rejects_gaps_and_conflicting_duplicates_atomically() {
     let error = notes_core::apply_sequenced(connection, 2, &second)
         .await
         .expect_err("initial sequence gap must fail");
-    assert!(error.to_string().contains("sequence gap"));
+    assert!(matches!(
+        error.downcast_ref::<notes_core::CoreError>(),
+        Some(notes_core::CoreError::SyncSequenceGap {
+            expected: 1,
+            received: 2,
+        })
+    ));
     assert_eq!(notes_core::sync_cursor(connection).await.unwrap(), 0);
     assert!(
         db::get_page(connection, second_page)

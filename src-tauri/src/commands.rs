@@ -188,9 +188,9 @@ fn err<E: std::fmt::Display + 'static>(error: E) -> CommandError {
             let code = match error {
                 notes_core::CoreError::InvalidInput(_) => CommandErrorCode::InvalidInput,
                 notes_core::CoreError::NotFound(_) => CommandErrorCode::NotFound,
-                notes_core::CoreError::Conflict(_) | notes_core::CoreError::SyncConflict(_) => {
-                    CommandErrorCode::Conflict
-                }
+                notes_core::CoreError::Conflict(_)
+                | notes_core::CoreError::SyncConflict(_)
+                | notes_core::CoreError::SyncSequenceGap { .. } => CommandErrorCode::Conflict,
                 notes_core::CoreError::Database(_) => CommandErrorCode::Internal,
             };
             return CommandError::new(code, message);
@@ -236,9 +236,9 @@ fn err<E: std::fmt::Display + 'static>(error: E) -> CommandError {
         let code = match error {
             notes_core::CoreError::InvalidInput(_) => CommandErrorCode::InvalidInput,
             notes_core::CoreError::NotFound(_) => CommandErrorCode::NotFound,
-            notes_core::CoreError::Conflict(_) | notes_core::CoreError::SyncConflict(_) => {
-                CommandErrorCode::Conflict
-            }
+            notes_core::CoreError::Conflict(_)
+            | notes_core::CoreError::SyncConflict(_)
+            | notes_core::CoreError::SyncSequenceGap { .. } => CommandErrorCode::Conflict,
             notes_core::CoreError::Database(_) => CommandErrorCode::Internal,
         };
         return CommandError::new(code, error.to_string());
