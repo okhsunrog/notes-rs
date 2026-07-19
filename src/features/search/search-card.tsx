@@ -29,6 +29,7 @@ import {
   journalDateFromSearchQuery,
   movePaletteSelection,
   preservePaletteSelection,
+  resolvePendingPaletteEnter,
   stablePaletteItems,
 } from "./search-palette";
 import {
@@ -89,6 +90,10 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
   const [frozenRecentPages, setFrozenRecentPages] = useState<Page[]>([]);
   const [frozenRecentJournals, setFrozenRecentJournals] = useState<Page[]>([]);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [pendingEnter, setPendingEnter] = useState<{
+    query: string;
+    shiftKey: boolean;
+  } | null>(null);
   const localTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const serverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const localEpoch = useRef(0);
@@ -338,6 +343,18 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
     [controller, onDismiss, onOpenContent],
   );
 
+  useEffect(() => {
+    const activation = resolvePendingPaletteEnter(
+      pendingEnter,
+      queryValue,
+      displayedSearchSettled,
+      rows,
+    );
+    if (!activation) return;
+    setPendingEnter(null);
+    void activateRow(activation.item, activation.shiftKey);
+  }, [activateRow, displayedSearchSettled, pendingEnter, queryValue, rows]);
+
   const triggerEnterOnlySearch = () => {
     if (
       aiSearchAsYouType ||
@@ -374,6 +391,11 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
       return;
     }
     if (event.key === "Enter") {
+      if (queryValue && !displayedSearchSettled) {
+        event.preventDefault();
+        setPendingEnter({ query: queryValue, shiftKey: event.shiftKey });
+        return;
+      }
       if (triggerEnterOnlySearch()) {
         event.preventDefault();
         return;
@@ -388,6 +410,7 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
   const handleQueryChange = (value: string) => {
     setResultsFrozen(false);
     setSelectedKey(null);
+    setPendingEnter(null);
     setQuery(value);
   };
 

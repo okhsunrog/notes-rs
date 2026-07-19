@@ -5,6 +5,7 @@ import {
   journalDateFromSearchQuery,
   movePaletteSelection,
   preservePaletteSelection,
+  resolvePendingPaletteEnter,
   stablePaletteItems,
 } from "./search-palette";
 
@@ -58,5 +59,18 @@ describe("search palette helpers", () => {
     const items = [{ key: "one" }, { key: "two" }, { key: "three" }];
     expect(movePaletteSelection("one", items, -1)).toBe("three");
     expect(movePaletteSelection("three", items, 1)).toBe("one");
+  });
+
+  it("resolves a pending Enter to the first row only after the same query settles", () => {
+    const pending = { query: "project", shiftKey: true };
+    const rows = [{ key: "first" }, { key: "second" }];
+
+    expect(resolvePendingPaletteEnter(pending, "project", false, rows)).toBeNull();
+    expect(resolvePendingPaletteEnter(pending, "changed", true, rows)).toBeNull();
+    expect(resolvePendingPaletteEnter(pending, "project", true, [])).toBeNull();
+    expect(resolvePendingPaletteEnter(pending, "project", true, rows)).toEqual({
+      item: rows[0],
+      shiftKey: true,
+    });
   });
 });
