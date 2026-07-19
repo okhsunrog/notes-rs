@@ -1,7 +1,7 @@
 use notes_core::db::{self, DataArchive};
 use notes_core::{
-    AttachmentOwner, BlobHash, BlockSetMarkdown, BlockStyle, Connection, Hlc, Op, OpKind, OrderKey,
-    Origin, PageLayout, TaskState,
+    AttachmentOwner, BlobHash, BlockMove, BlockSetMarkdown, BlockSetStyle, BlockStyle, Connection,
+    Hlc, Op, OpKind, OrderKey, Origin, PageDelete, PageLayout, TaskState,
 };
 
 struct TestDatabase {
@@ -24,35 +24,176 @@ fn hash(byte: u8) -> BlobHash {
     BlobHash::from_bytes([byte; 32])
 }
 
+async fn apply_remote(connection: &Connection, index: u128, kind: OpKind) {
+    let workspace_uuid = db::workspace_uuid(connection)
+        .await
+        .expect("read workspace identity");
+    let remote_device = uuid::Uuid::from_u128(0xD3A1CE);
+    let remote = Op {
+        op_id: uuid::Uuid::from_u128(0xA11CE + index),
+        workspace_uuid,
+        device_id: remote_device,
+        hlc: Hlc::new(u64::MAX - index as u64, 0, remote_device),
+        format_version: notes_core::operation::FORMAT_VERSION,
+        kind,
+    };
+    assert!(
+        notes_core::apply(connection, &remote, Origin::Remote)
+            .await
+            .expect("apply remote operation")
+            .applied
+    );
+}
+
 #[tokio::test]
-async fn undo_is_skipped_after_a_remote_field_wins() {
+async fn consecutive_undo_of_two_same_field_actions_both_apply() {
     let database = database().await;
     let note = db::create_note(&database.connection, None)
         .await
         .expect("create note")
         .into_created()
         .expect("untitled note is created");
-    let workspace_uuid = db::workspace_uuid(&database.connection)
+    db::set_block_style(
+        &database.connection,
+        note.initial_block.uuid,
+        BlockStyle::task(TaskState::Now),
+    )
+    .await
+    .expect("turn block into task");
+    db::set_task_state(
+        &database.connection,
+        note.initial_block.uuid,
+        TaskState::Done,
+    )
+    .await
+    .expect("complete task");
+
+    assert_eq!(
+        db::undo_history(&database.connection).await.unwrap(),
+        db::HistoryMoveResult::Applied
+    );
+    assert_eq!(
+        db::undo_history(&database.connection).await.unwrap(),
+        db::HistoryMoveResult::Applied
+    );
+    assert_eq!(
+        db::get_block(&database.connection, note.initial_block.uuid)
+            .await
+            .unwrap()
+            .unwrap()
+            .style,
+        BlockStyle::Paragraph
+    );
+}
+
+#[tokio::test]
+async fn three_deep_same_field_stack_undoes_without_false_skips() {
+    let database = database().await;
+    let note = db::create_note(&database.connection, None)
         .await
-        .expect("read workspace identity");
-    let remote_device = uuid::Uuid::from_u128(0xD3A1CE);
-    let remote = Op {
-        op_id: uuid::Uuid::from_u128(0xA11CE),
-        workspace_uuid,
-        device_id: remote_device,
-        hlc: Hlc::new(u64::MAX - 1, 0, remote_device),
-        format_version: notes_core::operation::FORMAT_VERSION,
-        kind: OpKind::BlockSetMarkdown(BlockSetMarkdown {
+        .unwrap()
+        .into_created()
+        .unwrap();
+    db::set_block_style(
+        &database.connection,
+        note.initial_block.uuid,
+        BlockStyle::task(TaskState::Now),
+    )
+    .await
+    .unwrap();
+    db::set_task_state(
+        &database.connection,
+        note.initial_block.uuid,
+        TaskState::Doing,
+    )
+    .await
+    .unwrap();
+    db::set_task_state(
+        &database.connection,
+        note.initial_block.uuid,
+        TaskState::Done,
+    )
+    .await
+    .unwrap();
+
+    for expected in [
+        BlockStyle::task(TaskState::Doing),
+        BlockStyle::task(TaskState::Now),
+        BlockStyle::Paragraph,
+    ] {
+        assert_eq!(
+            db::undo_history(&database.connection).await.unwrap(),
+            db::HistoryMoveResult::Applied
+        );
+        assert_eq!(
+            db::get_block(&database.connection, note.initial_block.uuid)
+                .await
+                .unwrap()
+                .unwrap()
+                .style,
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn undo_redo_undo_cycles_refresh_both_history_stacks() {
+    let database = database().await;
+    let note = db::create_note(&database.connection, None)
+        .await
+        .unwrap()
+        .into_created()
+        .unwrap();
+    db::set_block_style(
+        &database.connection,
+        note.initial_block.uuid,
+        BlockStyle::task(TaskState::Now),
+    )
+    .await
+    .unwrap();
+    db::set_task_state(
+        &database.connection,
+        note.initial_block.uuid,
+        TaskState::Done,
+    )
+    .await
+    .unwrap();
+
+    for undo in [true, true, false, false, true, true] {
+        let result = if undo {
+            db::undo_history(&database.connection).await
+        } else {
+            db::redo_history(&database.connection).await
+        };
+        assert_eq!(result.unwrap(), db::HistoryMoveResult::Applied);
+    }
+    assert_eq!(
+        db::get_block(&database.connection, note.initial_block.uuid)
+            .await
+            .unwrap()
+            .unwrap()
+            .style,
+        BlockStyle::Paragraph
+    );
+}
+
+#[tokio::test]
+async fn multi_op_undo_is_all_or_nothing_after_one_remote_field_wins() {
+    let database = database().await;
+    let note = db::create_note(&database.connection, None)
+        .await
+        .expect("create note")
+        .into_created()
+        .expect("untitled note is created");
+    apply_remote(
+        &database.connection,
+        1,
+        OpKind::BlockSetMarkdown(BlockSetMarkdown {
             uuid: note.initial_block.uuid,
             markdown: "remote edit".into(),
         }),
-    };
-    assert!(
-        notes_core::apply(&database.connection, &remote, Origin::Remote)
-            .await
-            .expect("apply remote edit")
-            .applied
-    );
+    )
+    .await;
 
     assert_eq!(
         db::undo_history(&database.connection)
@@ -81,7 +222,143 @@ async fn undo_is_skipped_after_a_remote_field_wins() {
 }
 
 #[tokio::test]
-async fn history_writes_tagged_envelopes_and_reads_legacy_entries() {
+async fn redo_is_skipped_after_a_remote_change_following_undo() {
+    let database = database().await;
+    let note = db::create_note(&database.connection, None)
+        .await
+        .unwrap()
+        .into_created()
+        .unwrap();
+    db::set_block_style(
+        &database.connection,
+        note.initial_block.uuid,
+        BlockStyle::Heading1,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        db::undo_history(&database.connection).await.unwrap(),
+        db::HistoryMoveResult::Applied
+    );
+    apply_remote(
+        &database.connection,
+        2,
+        OpKind::BlockSetStyle(BlockSetStyle {
+            uuid: note.initial_block.uuid,
+            style: BlockStyle::Heading2,
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        db::redo_history(&database.connection).await.unwrap(),
+        db::HistoryMoveResult::Skipped
+    );
+    assert_eq!(
+        db::get_block(&database.connection, note.initial_block.uuid)
+            .await
+            .unwrap()
+            .unwrap()
+            .style,
+        BlockStyle::Heading2
+    );
+}
+
+#[tokio::test]
+async fn structural_undo_is_skipped_after_a_remote_move() {
+    let database = database().await;
+    let note = db::create_note(&database.connection, None)
+        .await
+        .unwrap()
+        .into_created()
+        .unwrap();
+    let sibling = db::create_block(
+        &database.connection,
+        note.page.uuid,
+        None,
+        Some(note.initial_block.uuid),
+        BlockStyle::Paragraph,
+        "sibling".into(),
+    )
+    .await
+    .unwrap();
+    db::move_block(
+        &database.connection,
+        sibling.uuid,
+        Some(note.initial_block.uuid),
+        None,
+    )
+    .await
+    .unwrap();
+    apply_remote(
+        &database.connection,
+        3,
+        OpKind::BlockMove(BlockMove {
+            uuid: sibling.uuid,
+            page_uuid: note.page.uuid,
+            parent_uuid: None,
+            order_key: OrderKey::from_ordinal(3),
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        db::undo_history(&database.connection).await.unwrap(),
+        db::HistoryMoveResult::Skipped
+    );
+    assert_eq!(
+        db::get_block(&database.connection, sibling.uuid)
+            .await
+            .unwrap()
+            .unwrap()
+            .parent_uuid,
+        None
+    );
+}
+
+#[tokio::test]
+async fn undo_block_delete_is_skipped_after_remote_page_delete() {
+    let database = database().await;
+    let note = db::create_note(&database.connection, None)
+        .await
+        .unwrap()
+        .into_created()
+        .unwrap();
+    assert!(
+        db::delete_block(&database.connection, note.initial_block.uuid)
+            .await
+            .unwrap()
+    );
+    apply_remote(
+        &database.connection,
+        4,
+        OpKind::PageDelete(PageDelete {
+            uuid: note.page.uuid,
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        db::undo_history(&database.connection).await.unwrap(),
+        db::HistoryMoveResult::Skipped
+    );
+    assert!(
+        db::get_block(&database.connection, note.initial_block.uuid)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        db::history_status(&database.connection)
+            .await
+            .unwrap()
+            .redo_count,
+        0
+    );
+}
+
+#[tokio::test]
+async fn legacy_history_gets_one_unguarded_apply_even_after_a_remote_conflict() {
     let database = database().await;
     let note = db::create_note(&database.connection, None)
         .await
@@ -115,6 +392,15 @@ async fn history_writes_tagged_envelopes_and_reads_legacy_entries() {
         })
         .await
         .expect("replace inverse with legacy v1 JSON");
+    apply_remote(
+        &database.connection,
+        5,
+        OpKind::BlockSetMarkdown(BlockSetMarkdown {
+            uuid: note.initial_block.uuid,
+            markdown: "remote edit before legacy undo".into(),
+        }),
+    )
+    .await;
 
     assert_eq!(
         db::undo_history(&database.connection)

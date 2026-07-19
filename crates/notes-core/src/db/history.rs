@@ -5,7 +5,7 @@ use crate::operation::{
 };
 use crate::{Hlc, PageAlias};
 use rusqlite::OptionalExtension;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 type HistoryRow = (i64, uuid::Uuid, String, String, String);
 const HISTORY_PAYLOAD_VERSION: u32 = 2;
@@ -347,7 +347,7 @@ fn capture_history_guards(
     let mut fields = Vec::new();
     let mut seen = HashSet::new();
     for operation in operations {
-        for field in history_fields(operation) {
+        for field in history_guard_fields(operation) {
             if seen.insert(field.clone()) {
                 fields.push(field);
             }
@@ -364,48 +364,99 @@ fn capture_history_guards(
         .collect()
 }
 
-fn history_fields(operation: &OpKind) -> Vec<HistoryField> {
+fn history_guard_fields(operation: &OpKind) -> Vec<HistoryField> {
     match operation {
         OpKind::PageCreate(payload) => vec![
             HistoryField::PageExistence { uuid: payload.uuid },
             HistoryField::PageTitle { uuid: payload.uuid },
             HistoryField::PageLayout { uuid: payload.uuid },
         ],
-        OpKind::PageAliasSet(payload) => vec![HistoryField::PageAlias {
-            uuid: payload.uuid,
-            alias: payload.alias.clone(),
-        }],
-        OpKind::PageSetTitle(payload) => vec![HistoryField::PageTitle { uuid: payload.uuid }],
-        OpKind::PageSetLayout(payload) => vec![HistoryField::PageLayout { uuid: payload.uuid }],
-        OpKind::PageDelete(payload) => {
-            vec![HistoryField::PageExistence { uuid: payload.uuid }]
+        OpKind::PageAliasSet(payload) => vec![
+            HistoryField::PageAlias {
+                uuid: payload.uuid,
+                alias: payload.alias.clone(),
+            },
+            HistoryField::PageExistence { uuid: payload.uuid },
+        ],
+        OpKind::PageSetTitle(payload) => vec![
+            HistoryField::PageTitle { uuid: payload.uuid },
+            HistoryField::PageExistence { uuid: payload.uuid },
+        ],
+        OpKind::PageSetLayout(payload) => vec![
+            HistoryField::PageLayout { uuid: payload.uuid },
+            HistoryField::PageExistence { uuid: payload.uuid },
+        ],
+        OpKind::PageDelete(payload) => vec![
+            HistoryField::PageExistence { uuid: payload.uuid },
+            HistoryField::PageTitle { uuid: payload.uuid },
+            HistoryField::PageLayout { uuid: payload.uuid },
+        ],
+        OpKind::BlockCreate(payload) => {
+            let mut fields = vec![
+                HistoryField::BlockExistence { uuid: payload.uuid },
+                HistoryField::BlockMarkdown { uuid: payload.uuid },
+                HistoryField::BlockStyle { uuid: payload.uuid },
+                HistoryField::BlockStructure { uuid: payload.uuid },
+                HistoryField::PageExistence {
+                    uuid: payload.page_uuid,
+                },
+            ];
+            if let Some(parent_uuid) = payload.parent_uuid {
+                fields.push(HistoryField::BlockExistence { uuid: parent_uuid });
+            }
+            fields
         }
-        OpKind::BlockCreate(payload) => vec![
+        OpKind::BlockSetMarkdown(payload) => vec![
+            HistoryField::BlockMarkdown { uuid: payload.uuid },
+            HistoryField::BlockExistence { uuid: payload.uuid },
+        ],
+        OpKind::BlockSetStyle(payload) => vec![
+            HistoryField::BlockStyle { uuid: payload.uuid },
+            HistoryField::BlockExistence { uuid: payload.uuid },
+        ],
+        OpKind::BlockMove(payload) => {
+            let mut fields = vec![
+                HistoryField::BlockStructure { uuid: payload.uuid },
+                HistoryField::BlockExistence { uuid: payload.uuid },
+                HistoryField::PageExistence {
+                    uuid: payload.page_uuid,
+                },
+            ];
+            if let Some(parent_uuid) = payload.parent_uuid {
+                fields.push(HistoryField::BlockExistence { uuid: parent_uuid });
+            }
+            fields
+        }
+        OpKind::BlockDelete(payload) => vec![
             HistoryField::BlockExistence { uuid: payload.uuid },
             HistoryField::BlockMarkdown { uuid: payload.uuid },
             HistoryField::BlockStyle { uuid: payload.uuid },
             HistoryField::BlockStructure { uuid: payload.uuid },
+            HistoryField::PageExistence {
+                uuid: payload.page_uuid,
+            },
         ],
-        OpKind::BlockSetMarkdown(payload) => {
-            vec![HistoryField::BlockMarkdown { uuid: payload.uuid }]
-        }
-        OpKind::BlockSetStyle(payload) => {
-            vec![HistoryField::BlockStyle { uuid: payload.uuid }]
-        }
-        OpKind::BlockMove(payload) => {
-            vec![HistoryField::BlockStructure { uuid: payload.uuid }]
-        }
-        OpKind::BlockDelete(payload) => {
-            vec![HistoryField::BlockExistence { uuid: payload.uuid }]
-        }
-        OpKind::AttachmentAdd(payload) => vec![HistoryField::Attachment {
-            owner: payload.owner,
-            blob_hash: payload.blob_hash,
-        }],
-        OpKind::AttachmentRemove(payload) => vec![HistoryField::Attachment {
-            owner: payload.owner,
-            blob_hash: payload.blob_hash,
-        }],
+        OpKind::AttachmentAdd(payload) => vec![
+            HistoryField::Attachment {
+                owner: payload.owner,
+                blob_hash: payload.blob_hash,
+            },
+            owner_existence(payload.owner),
+        ],
+        OpKind::AttachmentRemove(payload) => vec![
+            HistoryField::Attachment {
+                owner: payload.owner,
+                blob_hash: payload.blob_hash,
+            },
+            owner_existence(payload.owner),
+        ],
+    }
+}
+
+fn owner_existence(owner: AttachmentOwner) -> HistoryField {
+    match owner {
+        AttachmentOwner::Page(uuid) => HistoryField::PageExistence { uuid },
+        AttachmentOwner::Block(uuid) => HistoryField::BlockExistence { uuid },
     }
 }
 
@@ -497,6 +548,70 @@ fn guards_match(
     Ok(true)
 }
 
+fn refresh_sibling_guards(
+    transaction: &rusqlite::Transaction<'_>,
+    next_guards: &[HistoryGuard],
+) -> anyhow::Result<()> {
+    let replacements = next_guards
+        .iter()
+        .map(|guard| (guard.field.clone(), guard.expected_hlc.clone()))
+        .collect::<HashMap<_, _>>();
+    if replacements.is_empty() {
+        return Ok(());
+    }
+    for table in ["history_undo", "history_redo"] {
+        let rows = {
+            let mut statement = transaction.prepare(&format!(
+                "SELECT id, forward_json, inverse_json FROM {table}"
+            ))?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (id, forward_json, inverse_json) in rows {
+            let mut forward = decode_history_payload(&forward_json)?;
+            let mut inverse = decode_history_payload(&inverse_json)?;
+            let changed = refresh_payload_guards(&mut forward, &replacements)
+                | refresh_payload_guards(&mut inverse, &replacements);
+            if changed {
+                transaction.execute(
+                    &format!(
+                        "UPDATE {table} SET forward_json = ?1, inverse_json = ?2 WHERE id = ?3"
+                    ),
+                    rusqlite::params![
+                        encode_history_payload(&forward)?,
+                        encode_history_payload(&inverse)?,
+                        id
+                    ],
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn refresh_payload_guards(
+    payload: &mut GuardedHistoryPayload,
+    replacements: &HashMap<HistoryField, Option<Hlc>>,
+) -> bool {
+    let mut changed = false;
+    for guard in &mut payload.guards {
+        if let Some(expected_hlc) = replacements.get(&guard.field)
+            && guard.expected_hlc != *expected_hlc
+        {
+            guard.expected_hlc = expected_hlc.clone();
+            changed = true;
+        }
+    }
+    changed
+}
+
 pub(crate) fn record_action(
     transaction: &rusqlite::Transaction<'_>,
     action: &str,
@@ -508,7 +623,7 @@ pub(crate) fn record_action(
     }
     let action_uuid = uuid::Uuid::now_v7();
     let action = action.to_owned();
-    let inverse_guards = capture_history_guards(transaction, &forward)?;
+    let inverse_guards = capture_history_guards(transaction, &inverse)?;
     let forward_json = encode_history_payload(&GuardedHistoryPayload {
         history_format_version: HISTORY_PAYLOAD_VERSION,
         operations: forward,
@@ -607,6 +722,14 @@ async fn move_history(conn: &Connection, undo: bool) -> Result<HistoryMoveResult
         let forward_json = encode_history_payload(&forward)?;
         let inverse_json = encode_history_payload(&inverse)?;
         transaction.execute(&format!("DELETE FROM {source} WHERE id = ?1"), [entry_id])?;
+        refresh_sibling_guards(
+            &transaction,
+            if undo {
+                &forward.guards
+            } else {
+                &inverse.guards
+            },
+        )?;
         transaction.execute(
             &format!(
                 "INSERT INTO {target}(action_uuid, action, forward_json, inverse_json, created_at)

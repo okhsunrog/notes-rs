@@ -149,8 +149,8 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
         if (result === "skipped") {
           notifyInfo(
             direction === "undo"
-              ? "Undo skipped — changed on another device."
-              : "Redo skipped — changed on another device.",
+              ? "Undo skipped — the content changed since that action."
+              : "Redo skipped — the content changed since that action.",
           );
           return;
         }
