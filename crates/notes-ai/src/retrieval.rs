@@ -1,5 +1,5 @@
 use crate::embed::{EmbedderBackend, RerankBackend};
-use crate::store::VectorStore;
+use crate::store::{VectorMatch, VectorStore};
 use anyhow::{Result, bail};
 use notes_core::Connection;
 use notes_core::db::{self, Content, SearchHit};
@@ -19,6 +19,11 @@ pub struct RetrievalPipeline {
     reranker: Arc<dyn RerankBackend>,
 }
 
+struct RankedCandidate {
+    hit: SearchHit,
+    rerank_text: String,
+}
+
 impl RetrievalPipeline {
     pub fn new(
         notes: Connection,
@@ -35,12 +40,26 @@ impl RetrievalPipeline {
     }
 
     pub async fn hybrid_candidates(&self, query: String, limit: u32) -> Result<Vec<SearchHit>> {
+        Ok(self
+            .hybrid_ranked_candidates(query, limit)
+            .await?
+            .into_iter()
+            .map(|candidate| candidate.hit)
+            .collect())
+    }
+
+    async fn hybrid_ranked_candidates(
+        &self,
+        query: String,
+        limit: u32,
+    ) -> Result<Vec<RankedCandidate>> {
         validate(&query, limit)?;
         let embedding = self.embedder.embed_query(query.clone()).await?;
-        let (fts, vectors) = tokio::try_join!(
+        let (fts, vector_chunks) = tokio::try_join!(
             db::search_fts(&self.notes, query, limit.saturating_mul(4)),
             self.vectors.search(embedding, limit.saturating_mul(4))
         )?;
+        let vectors = dedup_vector_matches(vector_chunks);
         let vector_uuids = vectors
             .iter()
             .map(|result| result.content_uuid)
@@ -54,6 +73,11 @@ impl RetrievalPipeline {
                     .into_iter()
                     .map(|content| (content.uuid(), content)),
             )
+            .collect::<HashMap<_, _>>();
+        let mut rerank_texts = vectors
+            .iter()
+            .filter(|result| !result.chunk_text.is_empty())
+            .map(|result| (result.content_uuid, result.chunk_text.clone()))
             .collect::<HashMap<_, _>>();
         let mut snippets = fts
             .iter()
@@ -73,14 +97,19 @@ impl RetrievalPipeline {
         let mut hits = scores
             .into_iter()
             .filter_map(|(uuid, score)| {
-                content.remove(&uuid).map(|content| SearchHit {
-                    content,
-                    score,
-                    snippet: snippets.remove(&uuid),
+                content.remove(&uuid).map(|content| RankedCandidate {
+                    rerank_text: rerank_texts
+                        .remove(&uuid)
+                        .unwrap_or_else(|| content.text().to_owned()),
+                    hit: SearchHit {
+                        content,
+                        score,
+                        snippet: snippets.remove(&uuid),
+                    },
                 })
             })
             .collect::<Vec<_>>();
-        hits.sort_by(|left, right| right.score.total_cmp(&left.score));
+        hits.sort_by(|left, right| right.hit.score.total_cmp(&left.hit.score));
         hits.truncate(limit as usize);
         Ok(hits)
     }
@@ -99,13 +128,20 @@ impl RetrievalPipeline {
             return self.hybrid_candidates(query, limit).await;
         }
         let pool = limit.saturating_mul(4).max(RERANK_POOL_MIN);
-        let candidates = self.hybrid_candidates(query.clone(), pool).await?;
+        let candidates = self.hybrid_ranked_candidates(query.clone(), pool).await?;
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
-        let documents = candidates.iter().map(hit_text).collect();
+        let documents = candidates
+            .iter()
+            .map(|candidate| candidate.rerank_text.clone())
+            .collect();
         let scored = self.reranker.rerank(query, documents).await?;
-        Ok(select_reranked_hits(scored, &candidates, limit as usize))
+        let hits = candidates
+            .into_iter()
+            .map(|candidate| candidate.hit)
+            .collect::<Vec<_>>();
+        Ok(select_reranked_hits(scored, &hits, limit as usize))
     }
 
     pub fn notes(&self) -> &Connection {
@@ -117,8 +153,24 @@ impl RetrievalPipeline {
     }
 }
 
-fn hit_text(hit: &SearchHit) -> String {
-    hit.content.text().to_owned()
+fn dedup_vector_matches(matches: Vec<VectorMatch>) -> Vec<VectorMatch> {
+    let mut best = HashMap::<uuid::Uuid, VectorMatch>::new();
+    for candidate in matches {
+        match best.entry(candidate.content_uuid) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(candidate);
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry)
+                if candidate.distance < entry.get().distance =>
+            {
+                entry.insert(candidate);
+            }
+            _ => {}
+        }
+    }
+    let mut matches = best.into_values().collect::<Vec<_>>();
+    matches.sort_by(|left, right| left.distance.total_cmp(&right.distance));
+    matches
 }
 
 pub fn select_reranked_hits(
@@ -175,6 +227,7 @@ pub fn content_documents(content: &[Content]) -> Vec<String> {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct StubEmbedder;
@@ -213,6 +266,58 @@ mod tests {
 
     struct CountingReranker(AtomicUsize);
 
+    struct StaticVectors(Vec<VectorMatch>);
+
+    #[async_trait]
+    impl VectorStore for StaticVectors {
+        async fn search(&self, _embedding: Vec<f32>, _limit: u32) -> Result<Vec<VectorMatch>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[derive(Default)]
+    struct CapturingReranker(Mutex<Vec<String>>);
+
+    #[async_trait]
+    impl RerankBackend for CapturingReranker {
+        async fn rerank(&self, _query: String, docs: Vec<String>) -> Result<Vec<(usize, f32)>> {
+            *self.0.lock().unwrap() = docs;
+            Ok(vec![(0, 0.9)])
+        }
+    }
+
+    #[test]
+    fn vector_chunk_dedup_keeps_the_best_distance_and_matched_text() {
+        let first = uuid::Uuid::from_u128(1);
+        let second = uuid::Uuid::from_u128(2);
+        let deduped = dedup_vector_matches(vec![
+            VectorMatch {
+                content_uuid: first,
+                distance: 0.4,
+                chunk_index: 0,
+                chunk_text: "weaker chunk".into(),
+            },
+            VectorMatch {
+                content_uuid: second,
+                distance: 0.2,
+                chunk_index: 0,
+                chunk_text: "second document".into(),
+            },
+            VectorMatch {
+                content_uuid: first,
+                distance: 0.1,
+                chunk_index: 3,
+                chunk_text: "best chunk".into(),
+            },
+        ]);
+
+        assert_eq!(deduped.len(), 2);
+        assert_eq!(deduped[0].content_uuid, first);
+        assert_eq!(deduped[0].chunk_index, 3);
+        assert_eq!(deduped[0].chunk_text, "best chunk");
+        assert_eq!(deduped[1].content_uuid, second);
+    }
+
     #[async_trait]
     impl RerankBackend for CountingReranker {
         async fn rerank(&self, _query: String, _docs: Vec<String>) -> Result<Vec<(usize, f32)>> {
@@ -246,5 +351,50 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].content.uuid(), page.uuid);
         assert_eq!(reranker.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn reranker_receives_the_best_matched_chunk_instead_of_the_whole_block() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let notes = db::open(directory.path().join("notes.db"))
+            .await
+            .expect("open notes database");
+        let page = db::create_page(&notes, "Vector page".into())
+            .await
+            .expect("create page");
+        let block = db::create_block(
+            &notes,
+            page.uuid,
+            None,
+            None,
+            notes_core::BlockStyle::Paragraph,
+            "the complete block is deliberately different".into(),
+        )
+        .await
+        .expect("create block");
+        let reranker = Arc::new(CapturingReranker::default());
+        let pipeline = RetrievalPipeline::new(
+            notes,
+            Arc::new(StaticVectors(vec![VectorMatch {
+                content_uuid: block.uuid,
+                distance: 0.1,
+                chunk_index: 2,
+                chunk_text: "Vector page\nmatched tail chunk".into(),
+            }])),
+            Arc::new(StubEmbedder),
+            reranker.clone(),
+        );
+
+        let hits = pipeline
+            .retrieve("semantic query absent from FTS".into(), 5)
+            .await
+            .expect("retrieve with reranking");
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].content.uuid(), block.uuid);
+        assert_eq!(
+            *reranker.0.lock().unwrap(),
+            vec!["Vector page\nmatched tail chunk"]
+        );
     }
 }

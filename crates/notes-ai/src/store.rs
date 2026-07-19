@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::Once;
 use unicode_categories::UnicodeCategories;
 
-const INPUT_FORMAT_VERSION: u32 = 1;
+const INPUT_FORMAT_VERSION: u32 = 2;
 const MAX_ATTEMPTS: i64 = 8;
 const BACKOFF_BASE_SECS: i64 = 5;
 
@@ -32,9 +32,10 @@ fn register_sqlite_vec() {
 }
 
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(include_str!(
-        "store/migrations/V001__initial.sql"
-    ))])
+    Migrations::new(vec![
+        M::up(include_str!("store/migrations/V001__initial.sql")),
+        M::up(include_str!("store/migrations/V002__chunked_vectors.sql")),
+    ])
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +43,21 @@ pub struct IndexJob {
     pub content_uuid: uuid::Uuid,
     pub input_hash: String,
     pub input_text: String,
+    pub input_header: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbeddedChunk {
+    pub chunk_index: u32,
+    pub input_text: String,
+    pub embedding: Vec<f32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbeddedDocument {
+    pub content_uuid: uuid::Uuid,
+    pub input_hash: String,
+    pub chunks: Vec<EmbeddedChunk>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -69,10 +85,12 @@ pub struct AiEntity {
     pub updated_at: i64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct VectorMatch {
     pub content_uuid: uuid::Uuid,
     pub distance: f64,
+    pub chunk_index: u32,
+    pub chunk_text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -329,7 +347,8 @@ impl AiStore {
                 let current = {
                     let mut statement = transaction.prepare(
                         "SELECT content_uuid, input_hash FROM generation_vectors
-                         WHERE generation_id = ?1",
+                         WHERE generation_id = ?1
+                         GROUP BY content_uuid, input_hash",
                     )?;
                     statement
                         .query_map([generation_id], |row| {
@@ -349,12 +368,14 @@ impl AiStore {
                     }
                     transaction.execute(
                         "INSERT INTO embedding_jobs
-                           (generation_id, content_uuid, input_hash, input_text, source_seq,
+                           (generation_id, content_uuid, input_hash, input_text, input_header,
+                            source_seq,
                             enqueued_at, retry_count, last_attempt, last_error, terminal)
-                         VALUES (?1, ?2, ?3, ?4, ?5, unixepoch(), 0, NULL, NULL, 0)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, unixepoch(), 0, NULL, NULL, 0)
                          ON CONFLICT(generation_id, content_uuid) DO UPDATE SET
                            input_hash = excluded.input_hash,
                            input_text = excluded.input_text,
+                           input_header = excluded.input_header,
                            source_seq = excluded.source_seq,
                            enqueued_at = excluded.enqueued_at,
                            retry_count = CASE
@@ -374,37 +395,31 @@ impl AiStore {
                             content_uuid,
                             document.input_hash,
                             document.text,
+                            document.header,
                             source_seq as i64
                         ],
                     )?;
                 }
                 let stale = {
                     let mut statement = transaction.prepare(
-                        "SELECT content_uuid, vector_rowid FROM generation_vectors
+                        "SELECT DISTINCT content_uuid FROM generation_vectors
                          WHERE generation_id = ?1",
                     )?;
                     statement
-                        .query_map([generation_id], |row| {
-                            Ok((row.get::<_, uuid::Uuid>(0)?, row.get::<_, i64>(1)?))
-                        })?
+                        .query_map([generation_id], |row| row.get::<_, uuid::Uuid>(0))?
                         .filter_map(|row| match row {
-                            Ok((uuid, rowid)) if !present.contains(&uuid) => {
-                                Some(Ok((uuid, rowid)))
-                            }
+                            Ok(uuid) if !present.contains(&uuid) => Some(Ok(uuid)),
                             Ok(_) => None,
                             Err(error) => Some(Err(error)),
                         })
                         .collect::<Result<Vec<_>, _>>()?
                 };
-                for (content_uuid, vector_rowid) in stale {
-                    transaction.execute(
-                        &format!("DELETE FROM {table_name} WHERE rowid = ?1"),
-                        [vector_rowid],
-                    )?;
-                    transaction.execute(
-                        "DELETE FROM generation_vectors
-                         WHERE generation_id = ?1 AND content_uuid = ?2",
-                        rusqlite::params![generation_id, content_uuid],
+                for content_uuid in stale {
+                    delete_document_vectors(
+                        &transaction,
+                        &table_name,
+                        generation_id,
+                        content_uuid,
                     )?;
                 }
                 let stale_jobs = {
@@ -444,7 +459,8 @@ impl AiStore {
         self.connection
             .call(move |database| {
                 let mut statement = database.prepare(
-                    "SELECT content_uuid, input_hash, input_text FROM embedding_jobs
+                    "SELECT content_uuid, input_hash, input_text, input_header
+                     FROM embedding_jobs
                      WHERE generation_id = ?1 AND terminal = 0 AND retry_count < ?3
                        AND (last_attempt IS NULL
                             OR unixepoch() - last_attempt >= ?4 * (1 << retry_count))
@@ -463,6 +479,7 @@ impl AiStore {
                                 content_uuid: row.get(0)?,
                                 input_hash: row.get(1)?,
                                 input_text: row.get(2)?,
+                                input_header: row.get(3)?,
                             })
                         },
                     )?
@@ -598,6 +615,7 @@ impl AiStore {
                             content_uuid: row.get(0)?,
                             input_hash: row.get(1)?,
                             input_text: row.get(2)?,
+                            input_header: String::new(),
                         })
                     })?
                     .collect::<Result<Vec<_>, _>>()
@@ -738,7 +756,7 @@ impl AiStore {
     pub async fn write_embeddings(
         &self,
         source_documents: u64,
-        items: Vec<(uuid::Uuid, String, Vec<f32>)>,
+        documents: Vec<EmbeddedDocument>,
     ) -> Result<()> {
         let generation_id = self.generation_id;
         let dimensions = self.dimensions;
@@ -746,68 +764,85 @@ impl AiStore {
         self.connection
             .call(move |database| {
                 let transaction = database.transaction()?;
-                for (content_uuid, input_hash, embedding) in items {
-                    if embedding.len() != dimensions {
+                for document in documents {
+                    if document.chunks.is_empty() {
                         return Err(rusqlite::Error::InvalidParameterName(format!(
-                            "embedding for {content_uuid} has dimension {}, expected {dimensions}",
-                            embedding.len()
+                            "embedding for {} has no chunks",
+                            document.content_uuid
                         )));
+                    }
+                    for (expected_index, chunk) in document.chunks.iter().enumerate() {
+                        if chunk.chunk_index != expected_index as u32 {
+                            return Err(rusqlite::Error::InvalidParameterName(format!(
+                                "embedding chunks for {} are not contiguous",
+                                document.content_uuid
+                            )));
+                        }
+                        if chunk.embedding.len() != dimensions {
+                            return Err(rusqlite::Error::InvalidParameterName(format!(
+                                "embedding for {} chunk {} has dimension {}, expected {dimensions}",
+                                document.content_uuid,
+                                chunk.chunk_index,
+                                chunk.embedding.len()
+                            )));
+                        }
                     }
                     let still_current = transaction
                         .query_row(
                             "SELECT source_seq FROM embedding_jobs
                              WHERE generation_id = ?1 AND content_uuid = ?2 AND input_hash = ?3",
-                            rusqlite::params![generation_id, content_uuid, input_hash],
+                            rusqlite::params![
+                                generation_id,
+                                document.content_uuid,
+                                document.input_hash
+                            ],
                             |row| row.get::<_, i64>(0),
                         )
                         .optional()?;
                     let Some(source_seq) = still_current else {
                         continue;
                     };
-                    let rowid = match transaction
-                        .query_row(
-                            "SELECT vector_rowid FROM generation_vectors
-                             WHERE generation_id = ?1 AND content_uuid = ?2",
-                            rusqlite::params![generation_id, content_uuid],
-                            |row| row.get::<_, i64>(0),
-                        )
-                        .optional()?
-                    {
-                        Some(rowid) => rowid,
-                        None => next_vector_rowid(&transaction, generation_id)?,
-                    };
-                    let blob = embedding
-                        .iter()
-                        .flat_map(|value| value.to_le_bytes())
-                        .collect::<Vec<_>>();
-                    transaction.execute(
-                        &format!("DELETE FROM {table_name} WHERE rowid = ?1"),
-                        [rowid],
+                    delete_document_vectors(
+                        &transaction,
+                        &table_name,
+                        generation_id,
+                        document.content_uuid,
                     )?;
-                    transaction.execute(
-                        &format!("INSERT INTO {table_name}(rowid, embedding) VALUES (?1, ?2)"),
-                        rusqlite::params![rowid, blob],
-                    )?;
-                    transaction.execute(
-                        "INSERT INTO generation_vectors
-                           (generation_id, content_uuid, vector_rowid, input_hash, source_seq)
-                         VALUES (?1, ?2, ?3, ?4, ?5)
-                         ON CONFLICT(generation_id, content_uuid) DO UPDATE SET
-                           vector_rowid = excluded.vector_rowid,
-                           input_hash = excluded.input_hash,
-                           source_seq = excluded.source_seq",
-                        rusqlite::params![
-                            generation_id,
-                            content_uuid,
-                            rowid,
-                            input_hash,
-                            source_seq
-                        ],
-                    )?;
+                    for chunk in document.chunks {
+                        let rowid = next_vector_rowid(&transaction, generation_id)?;
+                        let blob = chunk
+                            .embedding
+                            .iter()
+                            .flat_map(|value| value.to_le_bytes())
+                            .collect::<Vec<_>>();
+                        transaction.execute(
+                            &format!("INSERT INTO {table_name}(rowid, embedding) VALUES (?1, ?2)"),
+                            rusqlite::params![rowid, blob],
+                        )?;
+                        transaction.execute(
+                            "INSERT INTO generation_vectors
+                               (generation_id, content_uuid, chunk_index, chunk_text,
+                                vector_rowid, input_hash, source_seq)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                            rusqlite::params![
+                                generation_id,
+                                document.content_uuid,
+                                i64::from(chunk.chunk_index),
+                                chunk.input_text,
+                                rowid,
+                                document.input_hash,
+                                source_seq
+                            ],
+                        )?;
+                    }
                     transaction.execute(
                         "DELETE FROM embedding_jobs
                          WHERE generation_id = ?1 AND content_uuid = ?2 AND input_hash = ?3",
-                        rusqlite::params![generation_id, content_uuid, input_hash],
+                        rusqlite::params![
+                            generation_id,
+                            document.content_uuid,
+                            document.input_hash
+                        ],
                     )?;
                 }
                 activate_generation_if_complete(&transaction, generation_id, source_documents)?;
@@ -846,7 +881,8 @@ impl AiStore {
                     |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64)),
                 )?;
                 let indexed = database.query_row(
-                    "SELECT COUNT(*) FROM generation_vectors WHERE generation_id = ?1",
+                    "SELECT COUNT(DISTINCT content_uuid) FROM generation_vectors
+                     WHERE generation_id = ?1",
                     [generation_id],
                     |row| row.get::<_, i64>(0).map(|value| value as u64),
                 )?;
@@ -905,7 +941,8 @@ fn activate_generation_if_complete(
         |row| row.get::<_, i64>(0).map(|value| value as u64),
     )?;
     let indexed = transaction.query_row(
-        "SELECT COUNT(*) FROM generation_vectors WHERE generation_id = ?1",
+        "SELECT COUNT(DISTINCT content_uuid) FROM generation_vectors
+         WHERE generation_id = ?1",
         [generation_id],
         |row| row.get::<_, i64>(0).map(|value| value as u64),
     )?;
@@ -952,7 +989,8 @@ impl VectorStore for AiStore {
                     return Ok(Vec::new());
                 }
                 let mut statement = database.prepare(&format!(
-                    "SELECT mapping.content_uuid, vectors.distance
+                    "SELECT mapping.content_uuid, vectors.distance,
+                            mapping.chunk_index, mapping.chunk_text
                      FROM {table_name} vectors
                      JOIN generation_vectors mapping
                        ON mapping.generation_id = ?3
@@ -967,6 +1005,8 @@ impl VectorStore for AiStore {
                             Ok(VectorMatch {
                                 content_uuid: row.get(0)?,
                                 distance: row.get(1)?,
+                                chunk_index: row.get(2)?,
+                                chunk_text: row.get(3)?,
                             })
                         },
                     )?
@@ -978,6 +1018,7 @@ impl VectorStore for AiStore {
 
 struct IndexDocument {
     text: String,
+    header: String,
     input_hash: String,
 }
 
@@ -1072,6 +1113,7 @@ async fn index_documents(notes: &Connection) -> Result<BTreeMap<uuid::Uuid, Inde
         .into_iter()
         .filter_map(|(uuid, input)| {
             let text = compose_text(&input)?;
+            let header = composition_header(&input);
             let mut digest = Sha256::new();
             digest.update(INPUT_FORMAT_VERSION.to_le_bytes());
             digest.update(text.as_bytes());
@@ -1080,6 +1122,7 @@ async fn index_documents(notes: &Connection) -> Result<BTreeMap<uuid::Uuid, Inde
                 IndexDocument {
                     input_hash: format!("{:x}", digest.finalize()),
                     text,
+                    header,
                 },
             ))
         })
@@ -1137,6 +1180,7 @@ fn extraction_input(title: Option<&str>, content: &str) -> IndexDocument {
     digest.update(text.as_bytes());
     IndexDocument {
         text,
+        header: String::new(),
         input_hash: format!("{:x}", digest.finalize()),
     }
 }
@@ -1145,6 +1189,16 @@ fn compose_text(input: &CompositionInput) -> Option<String> {
     if !has_meaningful_content(input.block_style, &input.body) {
         return None;
     }
+    let header = composition_header(input);
+    let body = input.body.trim();
+    Some(if header.is_empty() {
+        body.to_owned()
+    } else {
+        format!("{header}\n{body}")
+    })
+}
+
+fn composition_header(input: &CompositionInput) -> String {
     let mut parts = Vec::new();
     if let Some(title) = input
         .page_title
@@ -1177,8 +1231,7 @@ fn compose_text(input: &CompositionInput) -> Option<String> {
             .map(|(_, content)| truncate_excerpt(content, ANCESTOR_EXCERPT_CHARS))
             .filter(|excerpt| !excerpt.is_empty()),
     );
-    parts.push(input.body.trim().to_owned());
-    Some(parts.join("\n"))
+    parts.join("\n")
 }
 
 fn normalize_whitespace(value: &str) -> String {
@@ -1271,6 +1324,37 @@ fn next_vector_rowid(
     )
 }
 
+fn delete_document_vectors(
+    transaction: &rusqlite::Transaction<'_>,
+    table_name: &str,
+    generation_id: uuid::Uuid,
+    content_uuid: uuid::Uuid,
+) -> rusqlite::Result<()> {
+    let rowids = {
+        let mut statement = transaction.prepare(
+            "SELECT vector_rowid FROM generation_vectors
+             WHERE generation_id = ?1 AND content_uuid = ?2",
+        )?;
+        statement
+            .query_map(rusqlite::params![generation_id, content_uuid], |row| {
+                row.get::<_, i64>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for rowid in rowids {
+        transaction.execute(
+            &format!("DELETE FROM {table_name} WHERE rowid = ?1"),
+            [rowid],
+        )?;
+    }
+    transaction.execute(
+        "DELETE FROM generation_vectors
+         WHERE generation_id = ?1 AND content_uuid = ?2",
+        rusqlite::params![generation_id, content_uuid],
+    )?;
+    Ok(())
+}
+
 pub fn embedding_identity_fingerprint(endpoint: &str, model: &str, dimensions: usize) -> String {
     let mut digest = Sha256::new();
     digest.update(b"notes-rs:embedding-identity:v1\0");
@@ -1297,6 +1381,18 @@ mod tests {
             section_heading: None,
             body: body.into(),
             ancestors: Vec::new(),
+        }
+    }
+
+    fn one_chunk_embedding(job: &IndexJob, embedding: Vec<f32>) -> EmbeddedDocument {
+        EmbeddedDocument {
+            content_uuid: job.content_uuid,
+            input_hash: job.input_hash.clone(),
+            chunks: vec![EmbeddedChunk {
+                chunk_index: 0,
+                input_text: job.input_text.clone(),
+                embedding,
+            }],
         }
     }
 
@@ -1475,11 +1571,7 @@ mod tests {
         store
             .write_embeddings(
                 source_documents,
-                vec![(
-                    jobs[0].content_uuid,
-                    jobs[0].input_hash.clone(),
-                    vec![0.25, 0.75],
-                )],
+                vec![one_chunk_embedding(&jobs[0], vec![0.25, 0.75])],
             )
             .await
             .expect("write embedding");
@@ -1554,7 +1646,7 @@ mod tests {
         store
             .write_embeddings(
                 source_documents,
-                vec![(stale_job.content_uuid, stale_job.input_hash, vec![1.0, 0.0])],
+                vec![one_chunk_embedding(&stale_job, vec![1.0, 0.0])],
             )
             .await
             .expect("ignore stale result");

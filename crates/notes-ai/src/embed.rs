@@ -1,5 +1,6 @@
+use crate::chunking::{TextChunk, split_for_embedding};
 use crate::config::{EmbeddingProvider, RerankProvider};
-use crate::store::AiStore;
+use crate::store::{AiStore, EmbeddedChunk, EmbeddedDocument, IndexJob};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 #[cfg(feature = "local-models")]
@@ -10,15 +11,13 @@ use fastembed::{
 use notes_core::Connection;
 use rig::embeddings::EmbeddingModel;
 use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 #[cfg(feature = "local-models")]
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
-
-const MAX_PROVIDER_INPUT_CHARS: usize = 8_000;
-const PROVIDER_TRUNCATION_MARKER: &str = "\n[notes-rs: input truncated]";
 
 // ───────────────────────── embedder: trait + factory ─────────────────────────
 
@@ -703,30 +702,37 @@ async fn tick(notes: &Connection, store: &AiStore, embedder: &dyn EmbedderBacken
     if jobs.is_empty() {
         return Ok(false);
     }
-    let texts = jobs
+    let prepared = jobs
         .iter()
-        .map(|job| cap_provider_input(&job.input_text))
+        .enumerate()
+        .flat_map(|(job_index, job)| {
+            split_for_embedding(&job.input_text, &job.input_header)
+                .into_iter()
+                .map(move |chunk| PreparedChunk { job_index, chunk })
+        })
+        .collect::<Vec<_>>();
+    let texts = prepared
+        .iter()
+        .map(|prepared| prepared.chunk.text.clone())
         .collect::<Vec<_>>();
     let items = match embedder.embed_passages(texts.clone()).await {
         Ok(embeddings) => {
-            match validate_embedding_response(embeddings, jobs.len(), embedder.ndims()) {
-                Ok(embeddings) => jobs
-                    .iter()
-                    .zip(embeddings)
-                    .map(|(job, embedding)| (job.content_uuid, job.input_hash.clone(), embedding))
-                    .collect(),
+            match validate_embedding_response(embeddings, prepared.len(), embedder.ndims()) {
+                Ok(embeddings) => {
+                    assemble_embedded_documents(&jobs, &prepared, embeddings, &HashSet::new())
+                }
                 Err(error) => {
                     tracing::warn!(
                         ?error,
                         "embedding batch response was invalid; retrying per item"
                     );
-                    embed_individually(store, embedder, &jobs, texts).await?
+                    embed_individually(store, embedder, &jobs, &prepared, texts).await?
                 }
             }
         }
         Err(error) => {
             tracing::warn!(?error, "embedding batch failed; retrying per item");
-            embed_individually(store, embedder, &jobs, texts).await?
+            embed_individually(store, embedder, &jobs, &prepared, texts).await?
         }
     };
     // The provider call above can be slow enough for source content to change while it is in
@@ -739,21 +745,9 @@ async fn tick(notes: &Connection, store: &AiStore, embedder: &dyn EmbedderBacken
     Ok(true)
 }
 
-fn cap_provider_input(input: &str) -> String {
-    if input.chars().count() <= MAX_PROVIDER_INPUT_CHARS {
-        return input.to_owned();
-    }
-    let marker_chars = PROVIDER_TRUNCATION_MARKER.chars().count();
-    let content_chars = MAX_PROVIDER_INPUT_CHARS.saturating_sub(marker_chars);
-    let byte_limit = input
-        .char_indices()
-        .nth(content_chars)
-        .map_or(input.len(), |(index, _)| index);
-    format!(
-        "{}{}",
-        input[..byte_limit].trim_end(),
-        PROVIDER_TRUNCATION_MARKER
-    )
+struct PreparedChunk {
+    job_index: usize,
+    chunk: TextChunk,
 }
 
 fn validate_embedding_response(
@@ -785,11 +779,14 @@ fn validate_embedding_response(
 async fn embed_individually(
     store: &AiStore,
     embedder: &dyn EmbedderBackend,
-    jobs: &[crate::store::IndexJob],
+    jobs: &[IndexJob],
+    prepared: &[PreparedChunk],
     texts: Vec<String>,
-) -> Result<Vec<(uuid::Uuid, String, Vec<f32>)>> {
-    let mut items = Vec::with_capacity(jobs.len());
-    for (job, text) in jobs.iter().zip(texts) {
+) -> Result<Vec<EmbeddedDocument>> {
+    let mut embeddings = Vec::with_capacity(prepared.len());
+    let mut failures = HashMap::<usize, (String, bool)>::new();
+    for (prepared_chunk, text) in prepared.iter().zip(texts) {
+        let job = &jobs[prepared_chunk.job_index];
         let result = match embedder.embed_passages(vec![text]).await {
             Ok(embeddings) => validate_embedding_response(embeddings, 1, embedder.ndims())
                 .map(|mut embeddings| embeddings.remove(0))
@@ -801,7 +798,7 @@ async fn embed_individually(
         };
         match result {
             Ok(embedding) => {
-                items.push((job.content_uuid, job.input_hash.clone(), embedding));
+                embeddings.push(embedding);
             }
             Err((error, terminal)) => {
                 tracing::warn!(
@@ -810,17 +807,58 @@ async fn embed_individually(
                     terminal,
                     "individual embedding failed"
                 );
-                store
-                    .record_failure(
-                        vec![(job.content_uuid, job.input_hash.clone())],
-                        &error.to_string(),
-                        terminal,
-                    )
-                    .await?;
+                let failure = failures
+                    .entry(prepared_chunk.job_index)
+                    .or_insert_with(|| (error.to_string(), terminal));
+                failure.1 |= terminal;
+                embeddings.push(Vec::new());
             }
         }
     }
-    Ok(items)
+    for (job_index, (error, terminal)) in &failures {
+        let job = &jobs[*job_index];
+        store
+            .record_failure(
+                vec![(job.content_uuid, job.input_hash.clone())],
+                error,
+                *terminal,
+            )
+            .await?;
+    }
+    Ok(assemble_embedded_documents(
+        jobs,
+        prepared,
+        embeddings,
+        &failures.keys().copied().collect(),
+    ))
+}
+
+fn assemble_embedded_documents(
+    jobs: &[IndexJob],
+    prepared: &[PreparedChunk],
+    embeddings: Vec<Vec<f32>>,
+    failed_jobs: &HashSet<usize>,
+) -> Vec<EmbeddedDocument> {
+    let mut chunks = (0..jobs.len()).map(|_| Vec::new()).collect::<Vec<_>>();
+    for (prepared_chunk, embedding) in prepared.iter().zip(embeddings) {
+        if failed_jobs.contains(&prepared_chunk.job_index) {
+            continue;
+        }
+        chunks[prepared_chunk.job_index].push(EmbeddedChunk {
+            chunk_index: prepared_chunk.chunk.chunk_index,
+            input_text: prepared_chunk.chunk.text.clone(),
+            embedding,
+        });
+    }
+    jobs.iter()
+        .enumerate()
+        .filter(|(index, _)| !failed_jobs.contains(index))
+        .map(|(index, job)| EmbeddedDocument {
+            content_uuid: job.content_uuid,
+            input_hash: job.input_hash.clone(),
+            chunks: std::mem::take(&mut chunks[index]),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -836,6 +874,27 @@ mod tests {
     #[derive(Default)]
     struct PoisonBatchEmbedder {
         call_sizes: StdMutex<Vec<usize>>,
+    }
+
+    struct UniformEmbedder;
+
+    #[async_trait]
+    impl EmbedderBackend for UniformEmbedder {
+        fn ndims(&self) -> usize {
+            2
+        }
+
+        fn id(&self) -> String {
+            "test:uniform".into()
+        }
+
+        async fn embed_passages(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
+            Ok(texts.into_iter().map(|_| vec![1.0, 0.0]).collect())
+        }
+
+        async fn embed_query(&self, _text: String) -> Result<Vec<f32>> {
+            Ok(vec![1.0, 0.0])
+        }
     }
 
     #[async_trait]
@@ -952,11 +1011,17 @@ mod tests {
 
     #[test]
     fn oversized_provider_input_is_utf8_safe_capped_and_marked() {
-        let input = format!("prefix {}", "Ж".repeat(MAX_PROVIDER_INPUT_CHARS + 100));
-        let capped = cap_provider_input(&input);
+        let input = format!(
+            "prefix {}",
+            "Ж".repeat(crate::chunking::MAX_PROVIDER_INPUT_CHARS + 100)
+        );
+        let capped = crate::chunking::cap_provider_input(&input);
 
-        assert_eq!(capped.chars().count(), MAX_PROVIDER_INPUT_CHARS);
-        assert!(capped.ends_with(PROVIDER_TRUNCATION_MARKER));
+        assert_eq!(
+            capped.chars().count(),
+            crate::chunking::MAX_PROVIDER_INPUT_CHARS
+        );
+        assert!(capped.ends_with(crate::chunking::PROVIDER_TRUNCATION_MARKER));
         assert!(capped.starts_with("prefix Ж"));
     }
 
@@ -1007,6 +1072,64 @@ mod tests {
         assert_eq!(calls.first(), Some(&16));
         assert_eq!(calls.len(), 17);
         assert!(calls[1..].iter().all(|size| *size == 1));
+    }
+
+    #[tokio::test]
+    async fn tier_two_document_round_trips_through_reconcile_embed_and_query() {
+        use crate::store::VectorStore;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let notes = notes_core::db::open(directory.path().join("notes.db"))
+            .await
+            .expect("notes database");
+        let page = notes_core::db::create_page(&notes, "Large table".into())
+            .await
+            .expect("create page");
+        let markdown = (0..300)
+            .map(|index| format!("| row {index:03} | value {index:03} |"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let block = notes_core::db::create_block(
+            &notes,
+            page.uuid,
+            None,
+            None,
+            notes_core::BlockStyle::Paragraph,
+            markdown,
+        )
+        .await
+        .expect("create long block");
+        let store = AiStore::open(directory.path().join("ai.db"), "identity".into(), 2)
+            .await
+            .expect("AI store");
+
+        assert!(
+            tick(&notes, &store, &UniformEmbedder)
+                .await
+                .expect("embedding tick")
+        );
+
+        let status = store.status(1).await.expect("AI status");
+        assert_eq!(
+            status.indexed, 1,
+            "indexed counts retrieval units, not chunks"
+        );
+        assert_eq!(
+            status.generation_status,
+            crate::store::GenerationStatus::Active
+        );
+        let matches = store.search(vec![1.0, 0.0], 32).await.expect("KNN query");
+        assert!(matches.len() > 1);
+        assert!(
+            matches
+                .iter()
+                .all(|matched| matched.content_uuid == block.uuid)
+        );
+        assert!(
+            matches
+                .iter()
+                .all(|matched| matched.chunk_text.starts_with("Large table\n"))
+        );
     }
 
     #[tokio::test]
