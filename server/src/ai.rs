@@ -399,6 +399,62 @@ fn build_provider_clients(config: &AiConfig) -> Result<ProviderClients> {
     })
 }
 
+/// Opens the production retrieval pipeline for the CLI eval harness without
+/// starting background embedding or extraction workers.
+pub async fn open_eval_pipeline(
+    bootstrap: &AiConfig,
+    data_dir: &Path,
+    user_id: &str,
+) -> Result<RetrievalPipeline> {
+    let settings_path = data_dir.join(SETTINGS_FILE);
+    let config = if settings_path.exists() {
+        let bytes = std::fs::read(&settings_path)
+            .with_context(|| format!("reading AI settings {}", settings_path.display()))?;
+        let config: AiConfig = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing AI settings {}", settings_path.display()))?;
+        config.validate()?;
+        config
+    } else {
+        bootstrap.validate()?;
+        bootstrap.clone()
+    };
+    let user_dir = data_dir.join("users").join(user_id);
+    let notes_path = user_dir.join("notes.db");
+    let ai_path = user_dir.join("ai.db");
+    for (label, path) in [("notes", &notes_path), ("AI index", &ai_path)] {
+        if !path.is_file() {
+            bail!("{label} database does not exist: {}", path.display());
+        }
+    }
+    let clients = build_provider_clients(&config)?;
+    let notes = notes_core::db::open(&notes_path)
+        .await
+        .with_context(|| format!("opening notes replica for {user_id}"))?;
+    let identity = embedding_identity_fingerprint(
+        config.retrieval_base_url.as_str(),
+        &config.embedding_model,
+        config.embedding_dimensions,
+    );
+    let store = Arc::new(
+        AiStore::open(&ai_path, identity, config.embedding_dimensions)
+            .await
+            .with_context(|| format!("opening AI index for {user_id}"))?,
+    );
+    let status = store.status(0).await?;
+    if status.generation_status != GenerationStatus::Active {
+        bail!(
+            "AI index for user {user_id} is {:?}; finish indexing before eval",
+            status.generation_status
+        );
+    }
+    Ok(RetrievalPipeline::new(
+        notes,
+        store,
+        clients.embedder,
+        clients.reranker,
+    ))
+}
+
 async fn status_for(active: &ActiveAi, user_id: &str) -> Result<AiIndexStatus> {
     let user = active.user(user_id)?;
     let source_documents = user.store.source_document_count(&user.notes).await?;

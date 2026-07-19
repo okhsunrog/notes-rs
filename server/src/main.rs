@@ -31,20 +31,37 @@ enum Command {
         )]
         cost_per_million_tokens: f64,
     },
+    /// Run a golden retrieval set through real providers (incurs a small charge).
+    Eval {
+        /// TOML file containing [[query]] entries.
+        #[arg(long)]
+        queries: PathBuf,
+        /// Configured user id; optional only when the config has one user.
+        #[arg(long)]
+        user: Option<String>,
+        /// Evaluate hybrid RRF without the configured reranker.
+        #[arg(long)]
+        no_rerank: bool,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let arguments = Arguments::parse();
-    if let Some(Command::InspectIndex {
-        db,
-        uuid,
-        cost_per_million_tokens,
-    }) = arguments.command
-    {
-        return inspect_index(db, uuid, cost_per_million_tokens).await;
+    let Arguments { config, command } = Arguments::parse();
+    match command {
+        Some(Command::InspectIndex {
+            db,
+            uuid,
+            cost_per_million_tokens,
+        }) => return inspect_index(db, uuid, cost_per_million_tokens).await,
+        Some(Command::Eval {
+            queries,
+            user,
+            no_rerank,
+        }) => return run_eval(config, queries, user, !no_rerank).await,
+        None => {}
     }
-    let config = notes_server::ServerConfig::load(&arguments.config)?;
+    let config = notes_server::ServerConfig::load(&config)?;
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_new(&config.log_filter)?)
         .init();
@@ -61,6 +78,34 @@ async fn main() -> Result<()> {
         })
         .await
         .context("serving notes API")?;
+    Ok(())
+}
+
+async fn run_eval(
+    config_path: PathBuf,
+    queries_path: PathBuf,
+    user_id: Option<String>,
+    rerank: bool,
+) -> Result<()> {
+    let config = notes_server::ServerConfig::load(&config_path)?;
+    let ai = config
+        .ai
+        .as_ref()
+        .context("server config has no AI provider settings")?;
+    let user_id = match user_id {
+        Some(user_id) if config.users.iter().any(|user| user.id == user_id) => user_id,
+        Some(user_id) => bail!("user {user_id:?} is not present in the server config"),
+        None if config.users.len() == 1 => config.users[0].id.clone(),
+        None => bail!("--user is required when the server config contains multiple users"),
+    };
+    let set = notes_server::eval::load_golden_set(&queries_path)?;
+    eprintln!(
+        "eval: {} real retrieval query(s), rerank={rerank}; each uses query embedding and optional reranking, so this run incurs a small charge",
+        set.query.len()
+    );
+    let pipeline = notes_server::ai::open_eval_pipeline(ai, &config.data_dir, &user_id).await?;
+    let report = notes_server::eval::evaluate(&pipeline, set, rerank).await?;
+    print!("{}", notes_server::eval::format_report(&report));
     Ok(())
 }
 
@@ -221,6 +266,31 @@ mod tests {
                 cost_per_million_tokens,
                 ..
             }) if cost_per_million_tokens == DEFAULT_EMBEDDING_USD_PER_MILLION_TOKENS
+        ));
+    }
+
+    #[test]
+    fn eval_subcommand_can_disable_reranking() {
+        let arguments = Arguments::try_parse_from([
+            "notes-server",
+            "--config",
+            "/tmp/server.toml",
+            "eval",
+            "--queries",
+            "/tmp/queries.toml",
+            "--user",
+            "alice",
+            "--no-rerank",
+        ])
+        .expect("eval arguments");
+
+        assert!(matches!(
+            arguments.command,
+            Some(Command::Eval {
+                user: Some(user),
+                no_rerank: true,
+                ..
+            }) if user == "alice"
         ));
     }
 

@@ -2,6 +2,7 @@ pub mod ai;
 pub mod api;
 mod blob_ownership;
 pub mod config;
+pub mod eval;
 mod oplog;
 pub mod state;
 

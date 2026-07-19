@@ -1,0 +1,35 @@
+# Copy this file, replace the placeholder UUIDs with real page/block UUIDs,
+# then run:
+#   notes-server --config /path/to/config.toml eval --queries /path/to/queries.toml
+#
+# The eval command uses the real configured embedding and rerank providers.
+# Expect a small provider charge (typically a few cents for 20-30 queries).
+
+[[query]]
+text = "основной проект"
+expect = ["00000000-0000-0000-0000-000000000001"]
+group = "general"
+
+# Accepted morphology debt from SEARCH_AND_FIXES_PLAN.md A2. These genitive
+# forms can diverge from the indexed Snowball stem; semantic retrieval should
+# compensate, and this group makes that behavior measurable.
+
+[[query]]
+text = "список покупок"
+expect = ["00000000-0000-0000-0000-000000000002"]
+group = "morphology"
+
+[[query]]
+text = "замена старых окон"
+expect = ["00000000-0000-0000-0000-000000000003"]
+group = "morphology"
+
+[[query]]
+text = "архив важных писем"
+expect = ["00000000-0000-0000-0000-000000000004"]
+group = "morphology"
+
+[[query]]
+text = "список офисных кресел"
+expect = ["00000000-0000-0000-0000-000000000005"]
+group = "morphology"
