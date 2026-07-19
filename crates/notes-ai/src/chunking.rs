@@ -8,6 +8,9 @@ pub const SINGLE_VECTOR_MAX_CHARS: usize = 2_000;
 pub const CHUNK_BODY_MIN_CHARS: usize = 1_200;
 pub const CHUNK_BODY_TARGET_CHARS: usize = 1_400;
 pub const CHUNK_BODY_MAX_CHARS: usize = 1_600;
+/// A fallback boundary that would leave a fragment shorter than this (e.g. a
+/// lone fence opener) is worse than a hard cut and is rejected.
+pub const FALLBACK_MIN_CHUNK_CHARS: usize = 64;
 pub const MAX_PROVIDER_INPUT_CHARS: usize = 8_000;
 pub const PROVIDER_TRUNCATION_MARKER: &str = "\n[notes-rs: input truncated]";
 
@@ -112,19 +115,18 @@ fn split_body_with_limits(
                 .copied()
         })
         .or_else(|| {
-            [
-                BoundaryKind::BlankLine,
-                BoundaryKind::StructuredLine,
-                BoundaryKind::Line,
-            ]
-            .into_iter()
-            .find_map(|kind| {
-                boundaries
-                    .iter()
-                    .filter(|boundary| boundary.kind == kind && boundary.char_index <= max_chars)
-                    .max_by_key(|boundary| boundary.char_index)
-                    .copied()
-            })
+            // Fallback: the preferred window has no boundary, so chunk balance
+            // beats boundary kind — take the furthest natural boundary within
+            // the limit (char_index is strictly increasing, so kinds never
+            // tie). Boundaries below FALLBACK_MIN_CHUNK_CHARS are rejected in
+            // favor of a hard cut.
+            boundaries
+                .iter()
+                .filter(|boundary| {
+                    (FALLBACK_MIN_CHUNK_CHARS..=max_chars).contains(&boundary.char_index)
+                })
+                .max_by_key(|boundary| boundary.char_index)
+                .copied()
         });
         let byte_index = selected.map_or_else(
             || byte_index_at_char(remaining, max_chars),
@@ -240,15 +242,17 @@ mod tests {
     #[test]
     fn fence_state_and_structured_blank_lines_survive_an_in_fence_split() {
         let body = format!(
-            "```\n{}\n{}\n\n{}\n{}\n```",
+            "```\n{}\n{}\n\n{}\n{}\n\n{}\n{}\n```",
             "x".repeat(1_395),
             "a".repeat(1_198),
             "b".repeat(199),
+            "f".repeat(1_198),
+            "g".repeat(199),
             "c".repeat(500),
         );
         let chunks = split_for_embedding(&body, "");
 
-        assert!(chunks.len() >= 3);
+        assert!(chunks.len() >= 4);
         assert_eq!(chunks[0].text.chars().count(), 1_399);
         assert_eq!(chunks[1].text.chars().count(), 1_399);
         assert!(
@@ -256,11 +260,55 @@ mod tests {
                 .text
                 .contains(&format!("{}\n\n{}", "a".repeat(1_198), "b".repeat(199)))
         );
+        // Third consecutive in-fence split: parity must still be carried, so
+        // the in-fence blank line stays a structured boundary and the segment
+        // splits as a unit exactly like the previous one.
+        assert_eq!(chunks[2].text.chars().count(), 1_399);
+        assert!(
+            chunks[2]
+                .text
+                .contains(&format!("{}\n\n{}", "f".repeat(1_198), "g".repeat(199)))
+        );
 
         let inside_fence = natural_boundaries("\nnext\n```\n", 32, true);
         assert_eq!(inside_fence[0].kind, BoundaryKind::StructuredLine);
         assert!(inside_fence[0].in_code_fence_after);
         assert!(!inside_fence.last().unwrap().in_code_fence_after);
+    }
+
+    #[test]
+    fn fallback_prefers_the_largest_boundary_across_kinds() {
+        // BlankLine boundary at ~300 chars, plain Line boundary at ~1100,
+        // nothing in the preferred [min, max] window: the fallback must take
+        // the furthest boundary (the 1100 Line), not the better-kind blank.
+        let body = format!(
+            "{}\n\n{}\n{}",
+            "a".repeat(299),
+            "b".repeat(798),
+            "c".repeat(2_000),
+        );
+        let chunks = split_for_embedding(&body, "");
+
+        assert_eq!(
+            chunks[0].text,
+            format!("{}\n\n{}", "a".repeat(299), "b".repeat(798))
+        );
+    }
+
+    #[test]
+    fn tiny_leading_boundary_is_rejected_for_a_hard_cut() {
+        // The only natural boundary is right after a lone fence opener; a
+        // 4-char chunk is noise, so the splitter must hard-cut instead.
+        let body = format!("```\n{}", "Ж".repeat(3_000));
+        let chunks = split_for_embedding(&body, "");
+
+        assert!(chunks[0].text.starts_with("```"));
+        assert_eq!(chunks[0].text.chars().count(), CHUNK_BODY_MAX_CHARS);
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.text.chars().count() >= FALLBACK_MIN_CHUNK_CHARS.min(4))
+        );
     }
 
     #[test]
