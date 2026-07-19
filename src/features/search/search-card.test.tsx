@@ -13,6 +13,7 @@ import { SearchCard } from "./search-card";
 const api = vi.hoisted(() => ({
   searchResults: [] as SearchHit[],
   search: vi.fn(),
+  notifyError: vi.fn(),
   settings: {
     aiSearchEnabled: false,
     aiSearchRerank: true,
@@ -34,6 +35,8 @@ vi.mock("@/lib/api", () => ({
   search: api.search,
 }));
 
+vi.mock("@/lib/notify", () => ({ notifyError: api.notifyError }));
+
 const mounted: Array<{ container: HTMLDivElement; root: Root }> = [];
 
 beforeAll(() => {
@@ -45,6 +48,7 @@ beforeAll(() => {
 beforeEach(() => {
   vi.useFakeTimers();
   api.search.mockReset();
+  api.notifyError.mockReset();
   api.search.mockImplementation(async () => api.searchResults);
   api.searchResults = [];
   api.settings = {
@@ -130,6 +134,19 @@ describe("SearchCard page-list refreshes", () => {
     await pressEnter(container);
     expect(semanticAttempts).toBe(2);
     expect(container.textContent).not.toContain("AI search failed — press Enter to retry");
+  });
+
+  it("reports local failures and withholds Create until a successful empty search", async () => {
+    api.search.mockRejectedValueOnce(new Error("database unavailable"));
+    const { container } = await renderSearchCard([]);
+
+    await enterQuery(container, "broken");
+    expect(api.notifyError).toHaveBeenCalledWith("search", expect.any(Error));
+    expect(container.textContent).not.toContain("Create “broken”");
+
+    api.search.mockResolvedValueOnce([]);
+    await enterQuery(container, "recovered");
+    expect(container.textContent).toContain("Create “recovered”");
   });
 });
 

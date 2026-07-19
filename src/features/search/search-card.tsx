@@ -23,6 +23,7 @@ import {
   type SearchHit,
 } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
+import { notifyError } from "@/lib/notify";
 import { cn } from "@/lib/utils";
 import {
   hasExactPageTitle,
@@ -80,6 +81,7 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
   const [serverHits, setServerHits] = useState<SearchHit[]>([]);
   const [serverState, setServerState] = useState<ServerSearchState>("absent");
   const [localPending, setLocalPending] = useState(false);
+  const [localError, setLocalError] = useState(false);
   const [resultsFrozen, setResultsFrozen] = useState(false);
   const [frozenPresentation, setFrozenPresentation] = useState<SearchPresentation>({
     primary: [],
@@ -122,9 +124,13 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
       const result = await search("fts", value, 20);
       if (epoch !== localEpoch.current) return;
       setLocalHits(result);
-    } catch {
+      setLocalError(false);
+    } catch (error) {
       if (epoch !== localEpoch.current) return;
       setLocalHits([]);
+      setLocalError(true);
+      setPendingEnter(null);
+      notifyError("search", error);
     } finally {
       if (epoch === localEpoch.current) setLocalPending(false);
     }
@@ -160,12 +166,14 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
     if (!value) {
       setLocalHits([]);
       setLocalPending(false);
+      setLocalError(false);
       setServerState(serverConfigured ? "idle" : "absent");
       return;
     }
 
     setLocalHits([]);
     setLocalPending(true);
+    setLocalError(false);
     localTimer.current = setTimeout(() => {
       localTimer.current = null;
       void runLocal(value, nextLocalEpoch);
@@ -223,6 +231,7 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
     const nextLocalEpoch = ++localEpoch.current;
     setResultsFrozen(false);
     setLocalPending(true);
+    setLocalError(false);
     void runLocal(value, nextLocalEpoch);
   }, [pagesQuery.data, runLocal]);
 
@@ -272,7 +281,7 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
         label: `Open journal ${journalDate}`,
       });
     }
-    if (displayedSearchSettled && exactTitleMatch) {
+    if (displayedSearchSettled && !localError && exactTitleMatch) {
       rows.push({
         kind: "create_note",
         key: `note:${queryValue}`,
@@ -281,9 +290,15 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
       });
     }
     return rows;
-  }, [displayedSearchSettled, exactTitleMatch, journalDate, queryValue]);
+  }, [displayedSearchSettled, exactTitleMatch, journalDate, localError, queryValue]);
   const trailingRows = useMemo<PaletteRow[]>(() => {
-    if (!queryValue || !displayedSearchSettled || exactTitleMatch || displayedHits.length > 0) {
+    if (
+      !queryValue ||
+      !displayedSearchSettled ||
+      localError ||
+      exactTitleMatch ||
+      displayedHits.length > 0
+    ) {
       return [];
     }
     return [
@@ -294,7 +309,7 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
         label: `Create “${queryValue}”`,
       },
     ];
-  }, [displayedHits.length, displayedSearchSettled, exactTitleMatch, queryValue]);
+  }, [displayedHits.length, displayedSearchSettled, exactTitleMatch, localError, queryValue]);
   const rows = useMemo(
     () => [...leadingRows, ...primaryRows, ...localRows, ...trailingRows],
     [leadingRows, localRows, primaryRows, trailingRows],
