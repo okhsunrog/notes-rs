@@ -26,14 +26,6 @@ export function hasExactPageTitle(query: string, hits: readonly SearchHit[]): bo
   );
 }
 
-export function stablePaletteItems<T>(
-  current: readonly T[],
-  incoming: readonly T[],
-  frozen: boolean,
-): readonly T[] {
-  return frozen ? current : incoming;
-}
-
 export function preservePaletteSelection<T extends PaletteKeyedItem>(
   selectedKey: string | null,
   items: readonly T[],

@@ -12,7 +12,7 @@ pub async fn rename_page(
     let applied = db::rename_page_if_revision_with_ops(&state.conn, uuid, title, expected_revision)
         .await
         .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
+    emit_events_for_ops(&app, &state.conn, &applied.operations, &[]).await;
     Ok(applied.value)
 }
 
@@ -27,7 +27,7 @@ pub async fn set_page_layout(
     let applied = db::set_page_layout_with_ops(&state.conn, uuid, layout)
         .await
         .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
+    emit_events_for_ops(&app, &state.conn, &applied.operations, &[]).await;
     Ok(applied.value)
 }
 
@@ -41,7 +41,7 @@ pub async fn create_note(
     let applied = db::create_note_with_ops(&state.conn, title)
         .await
         .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
+    emit_events_for_ops(&app, &state.conn, &applied.operations, &[]).await;
     if !applied.operations.is_empty() {
         emit_domain(&app, DomainEvent::HistoryChanged);
     }
@@ -58,7 +58,7 @@ pub async fn create_page(
     let applied = db::create_page_with_ops(&state.conn, title)
         .await
         .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
+    emit_events_for_ops(&app, &state.conn, &applied.operations, &[]).await;
     if !applied.operations.is_empty() {
         emit_domain(&app, DomainEvent::HistoryChanged);
     }
@@ -112,7 +112,12 @@ pub async fn replace_page_document(
         db::replace_page_document_with_outcome(&state.conn, page_uuid, expected_revision, units)
             .await
             .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &outcome.operations).await;
+    let graph_changed = if outcome.graph_changed {
+        outcome.block_uuids.as_slice()
+    } else {
+        &[]
+    };
+    emit_events_for_ops(&app, &state.conn, &outcome.operations, graph_changed).await;
     if !outcome.operations.is_empty() {
         emit_domain(&app, DomainEvent::HistoryChanged);
     }
@@ -149,7 +154,7 @@ pub async fn get_or_create_page_by_title(
     let applied = db::get_or_create_page_by_title_with_ops(&state.conn, title)
         .await
         .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
+    emit_events_for_ops(&app, &state.conn, &applied.operations, &[]).await;
     Ok(applied.value)
 }
 
@@ -165,7 +170,7 @@ pub async fn delete_page(
         .map_err(err)?;
     let deleted = db::delete_page(&state.conn, uuid).await.map_err(err)?;
     if let Some(deleted) = &deleted {
-        emit_events_for_ops(&app, &state.conn, &deleted.operations).await;
+        emit_events_for_ops(&app, &state.conn, &deleted.operations, &[]).await;
         emit_domain(&app, DomainEvent::HistoryChanged);
     }
     Ok(deleted.is_some())

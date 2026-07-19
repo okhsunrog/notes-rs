@@ -130,7 +130,7 @@ pub struct SyncStats {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppliedRemoteOperation {
     pub operation: Op,
-    pub previous_content: Option<String>,
+    pub graph_changed: bool,
 }
 
 #[derive(Clone)]
@@ -213,7 +213,6 @@ impl SyncClient {
             }
             let full_batch = batch.len() == self.batch_size as usize;
             transport.prepare_pull(&batch).await?;
-            let previous_contents = previous_contents(&self.conn, &batch).await?;
             let sequenced = batch
                 .iter()
                 .map(|item| (item.seq, item.envelope.clone()))
@@ -226,11 +225,8 @@ impl SyncClient {
                     .into_iter()
                     .zip(outcomes)
                     .filter(|(_, outcome)| outcome.applied)
-                    .map(|(operation, _)| AppliedRemoteOperation {
-                        previous_content: previous_contents
-                            .get(&operation.envelope.op_id)
-                            .cloned()
-                            .flatten(),
+                    .map(|(operation, outcome)| AppliedRemoteOperation {
+                        graph_changed: outcome.graph_changed,
                         operation: operation.envelope,
                     }),
             );
@@ -239,37 +235,6 @@ impl SyncClient {
             }
         }
     }
-}
-
-async fn previous_contents(
-    connection: &Connection,
-    operations: &[SequencedOp],
-) -> Result<HashMap<uuid::Uuid, Option<String>>> {
-    let content_ops = operations
-        .iter()
-        .filter_map(|operation| match &operation.envelope.kind {
-            notes_core::OpKind::BlockSetMarkdown(payload) => {
-                Some((operation.envelope.op_id, payload.uuid))
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if content_ops.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let blocks = notes_core::db::get_blocks(
-        connection,
-        content_ops.iter().map(|(_, uuid)| *uuid).collect(),
-    )
-    .await?;
-    let contents = blocks
-        .into_iter()
-        .map(|block| (block.uuid, block.markdown))
-        .collect::<HashMap<_, _>>();
-    Ok(content_ops
-        .into_iter()
-        .map(|(op_id, uuid)| (op_id, contents.get(&uuid).cloned()))
-        .collect())
 }
 
 #[cfg(test)]

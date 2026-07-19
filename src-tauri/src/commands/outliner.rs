@@ -42,7 +42,7 @@ pub async fn create_block(
     )
     .await
     .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
+    emit_events_for_ops(&app, &state.conn, &applied.operations, &[]).await;
     emit_domain(&app, DomainEvent::HistoryChanged);
     Ok(applied.value)
 }
@@ -60,7 +60,13 @@ pub async fn set_block_content(
         db::set_block_content_if_revision_with_ops(&state.conn, uuid, content, expected_revision)
             .await
             .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
+    let graph_changed = applied
+        .value
+        .1
+        .then_some(uuid)
+        .into_iter()
+        .collect::<Vec<_>>();
+    emit_events_for_ops(&app, &state.conn, &applied.operations, &graph_changed).await;
     Ok(applied.value.0)
 }
 
@@ -75,7 +81,7 @@ pub async fn set_block_style(
     let applied = db::set_block_style_with_ops(&state.conn, uuid, style)
         .await
         .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
+    emit_events_for_ops(&app, &state.conn, &applied.operations, &[]).await;
     if !applied.operations.is_empty() {
         emit_domain(&app, DomainEvent::HistoryChanged);
     }
@@ -93,7 +99,7 @@ pub async fn set_task_state(
     let applied = db::set_task_state_with_ops(&state.conn, uuid, task_state)
         .await
         .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
+    emit_events_for_ops(&app, &state.conn, &applied.operations, &[]).await;
     if !applied.operations.is_empty() {
         emit_domain(&app, DomainEvent::HistoryChanged);
     }
@@ -112,9 +118,15 @@ pub async fn split_block(
     let applied = db::split_block_with_ops(&state.conn, uuid, parts, expected_revision)
         .await
         .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
+    let graph_changed = applied
+        .value
+        .1
+        .then_some(uuid)
+        .into_iter()
+        .collect::<Vec<_>>();
+    emit_events_for_ops(&app, &state.conn, &applied.operations, &graph_changed).await;
     emit_domain(&app, DomainEvent::HistoryChanged);
-    Ok(applied.value)
+    Ok(applied.value.0)
 }
 
 async fn change_indent(
@@ -129,7 +141,7 @@ async fn change_indent(
         db::outdent_block_with_ops(&state.conn, uuid).await
     }
     .map_err(err)?;
-    emit_events_for_ops(app, &state.conn, &applied.operations).await;
+    emit_events_for_ops(app, &state.conn, &applied.operations, &[]).await;
     if !applied.operations.is_empty() {
         emit_domain(app, DomainEvent::HistoryChanged);
     }
@@ -165,7 +177,7 @@ async fn move_direction(
     let applied = db::move_block_in_direction_with_ops(&state.conn, uuid, direction)
         .await
         .map_err(err)?;
-    emit_events_for_ops(app, &state.conn, &applied.operations).await;
+    emit_events_for_ops(app, &state.conn, &applied.operations, &[]).await;
     if !applied.operations.is_empty() {
         emit_domain(app, DomainEvent::HistoryChanged);
     }
@@ -202,7 +214,7 @@ pub async fn delete_block(
     let applied = db::delete_block_with_ops(&state.conn, uuid)
         .await
         .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
+    emit_events_for_ops(&app, &state.conn, &applied.operations, &[]).await;
     if applied.value {
         emit_domain(&app, DomainEvent::HistoryChanged);
     }

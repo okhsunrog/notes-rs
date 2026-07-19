@@ -179,6 +179,7 @@ pub struct AttachmentRemove {
 pub struct ApplyOutcome {
     pub applied: bool,
     pub affected_uuids: Vec<uuid::Uuid>,
+    pub graph_changed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -503,12 +504,14 @@ pub async fn apply_sequenced_batch(
             let outcome = if existing.is_some() {
                 ApplyOutcome::default()
             } else {
+                let graph_changes_before = effects.graph_changed_blocks.len();
                 let affected_uuids =
                     apply_one_with_effects(&transaction, &operation, &mut effects)?;
                 observe_hlc(&transaction, &operation.hlc)?;
                 ApplyOutcome {
                     applied: true,
                     affected_uuids,
+                    graph_changed: effects.graph_changed_blocks.len() > graph_changes_before,
                 }
             };
             transaction.execute(
@@ -1153,6 +1156,7 @@ pub async fn apply_batch(
                 outcomes.push(ApplyOutcome::default());
                 continue;
             }
+            let graph_changes_before = effects.graph_changed_blocks.len();
             let affected_uuids = apply_one_with_effects(&transaction, &operation, &mut effects)?;
             transaction.execute(
                 "INSERT INTO applied_ops(op_id, seq) VALUES (?1, NULL)",
@@ -1176,6 +1180,7 @@ pub async fn apply_batch(
             outcomes.push(ApplyOutcome {
                 applied: true,
                 affected_uuids,
+                graph_changed: effects.graph_changed_blocks.len() > graph_changes_before,
             });
         }
         effects.finish(&transaction)?;
@@ -1272,6 +1277,7 @@ pub(crate) struct DeferredApplyStats {
 struct ApplyEffects {
     deferred: bool,
     structure_dirty: bool,
+    graph_changed_blocks: BTreeSet<uuid::Uuid>,
     pending_block_refs: BTreeMap<uuid::Uuid, (String, i64)>,
     pending_page_links: BTreeSet<String>,
     stats: DeferredApplyStats,
@@ -1282,6 +1288,7 @@ impl ApplyEffects {
         Self {
             deferred: false,
             structure_dirty: false,
+            graph_changed_blocks: BTreeSet::new(),
             pending_block_refs: BTreeMap::new(),
             pending_page_links: BTreeSet::new(),
             stats: DeferredApplyStats::default(),
@@ -1980,13 +1987,17 @@ fn apply_block_markdown(
 ) -> rusqlite::Result<()> {
     let current = transaction
         .query_row(
-            "SELECT markdown_hlc FROM blocks WHERE uuid = ?1",
+            "SELECT markdown, markdown_hlc FROM blocks WHERE uuid = ?1",
             [uuid],
-            |row| row.get::<_, Option<String>>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
         )
-        .optional()?
-        .flatten();
-    if hlc_wins(current.as_deref(), &operation.hlc) {
+        .optional()?;
+    if let Some((current_markdown, current_hlc)) = current
+        && hlc_wins(current_hlc.as_deref(), &operation.hlc)
+    {
+        if content_references_changed(&current_markdown, markdown) {
+            effects.graph_changed_blocks.insert(uuid);
+        }
         transaction.execute(
             "UPDATE blocks
                 SET markdown = ?2, body_stemmed = ?3, markdown_hlc = ?4,

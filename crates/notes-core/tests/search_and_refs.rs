@@ -1,8 +1,8 @@
 use notes_core::db::{self, BlockContent, Content, GraphRelation};
 use notes_core::{
-    BlockCreate, BlockStyle, Connection, Hlc, JournalDate, ObjectKind, Op, OpKind, OrderKey,
-    Origin, PageAlias, PageAliasSet, PageCreate, PageDelete, PageKind, PageLayout,
-    journal_page_uuid,
+    BlockCreate, BlockSetMarkdown, BlockStyle, Connection, Hlc, JournalDate, ObjectKind, Op,
+    OpKind, OrderKey, Origin, PageAlias, PageAliasSet, PageCreate, PageDelete, PageKind,
+    PageLayout, journal_page_uuid,
 };
 
 const TEST_WORKSPACE_UUID: uuid::Uuid = uuid::Uuid::from_u128(0xC0DE);
@@ -43,6 +43,95 @@ fn remote_op(index: u128, wall_ms: u64, kind: OpKind) -> Op {
         format_version: notes_core::operation::FORMAT_VERSION,
         kind,
     }
+}
+
+#[tokio::test]
+async fn remote_markdown_outcome_reports_only_applied_reference_changes() {
+    let database = database().await;
+    let connection = &database.connection;
+    let page_uuid = uuid::Uuid::from_u128(0xA001);
+    let block_uuid = uuid::Uuid::from_u128(0xB001);
+    notes_core::apply_batch(
+        connection,
+        &[
+            remote_op(
+                1,
+                10,
+                OpKind::PageCreate(PageCreate {
+                    uuid: page_uuid,
+                    kind: PageKind::Note,
+                    title: Some("Page".into()),
+                    layout: PageLayout::Outline,
+                    created_at: 1,
+                }),
+            ),
+            remote_op(
+                2,
+                20,
+                OpKind::BlockCreate(BlockCreate {
+                    uuid: block_uuid,
+                    page_uuid,
+                    parent_uuid: None,
+                    order_key: OrderKey::first(),
+                    style: BlockStyle::Paragraph,
+                    markdown: "Initial text".into(),
+                    created_at: 2,
+                }),
+            ),
+        ],
+        Origin::Remote,
+    )
+    .await
+    .expect("create remote block");
+
+    let changed = notes_core::apply_batch(
+        connection,
+        &[remote_op(
+            3,
+            30,
+            OpKind::BlockSetMarkdown(BlockSetMarkdown {
+                uuid: block_uuid,
+                markdown: "Edited [[Target]]".into(),
+            }),
+        )],
+        Origin::Remote,
+    )
+    .await
+    .expect("apply reference change");
+    assert!(changed[0].graph_changed);
+
+    let same_references = notes_core::apply_batch(
+        connection,
+        &[remote_op(
+            4,
+            40,
+            OpKind::BlockSetMarkdown(BlockSetMarkdown {
+                uuid: block_uuid,
+                markdown: "Reworded [[Target]]".into(),
+            }),
+        )],
+        Origin::Remote,
+    )
+    .await
+    .expect("apply text-only change");
+    assert!(!same_references[0].graph_changed);
+
+    let stale = notes_core::apply_batch(
+        connection,
+        &[remote_op(
+            5,
+            35,
+            OpKind::BlockSetMarkdown(BlockSetMarkdown {
+                uuid: block_uuid,
+                markdown: "Stale [[Other]]".into(),
+            }),
+        )],
+        Origin::Remote,
+    )
+    .await
+    .expect("record stale operation");
+    assert!(stale[0].applied);
+    assert!(!stale[0].graph_changed);
 }
 
 #[tokio::test]

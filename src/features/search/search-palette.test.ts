@@ -6,7 +6,6 @@ import {
   movePaletteSelection,
   preservePaletteSelection,
   resolvePendingPaletteEnter,
-  stablePaletteItems,
 } from "./search-palette";
 
 function pageHit(uuid: string, title: string): SearchHit {
@@ -39,13 +38,6 @@ describe("search palette helpers", () => {
     const hits = [pageHit("page-1", "Проект Ёж")];
     expect(hasExactPageTitle("  ПРОЕКТ ЁЖ  ", hits)).toBe(true);
     expect(hasExactPageTitle("Проект", hits)).toBe(false);
-  });
-
-  it("freezes incoming items after keyboard navigation", () => {
-    const local = [{ key: "content:shared" }, { key: "content:local" }];
-    const server = [{ key: "content:server" }, { key: "content:shared" }];
-    expect(stablePaletteItems(local, server, true)).toBe(local);
-    expect(stablePaletteItems(local, server, false)).toBe(server);
   });
 
   it("preserves selection by stable content key and falls back to the first row", () => {

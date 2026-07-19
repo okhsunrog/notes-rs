@@ -307,7 +307,8 @@ pub async fn split_block(
 ) -> Result<Vec<Block>> {
     Ok(split_block_with_ops(conn, uuid, parts, expected_revision)
         .await?
-        .value)
+        .value
+        .0)
 }
 
 #[doc(hidden)]
@@ -316,12 +317,12 @@ pub async fn split_block_with_ops(
     uuid: uuid::Uuid,
     parts: Vec<BlockContent>,
     expected_revision: ContentRevision,
-) -> Result<AppliedMutation<Vec<Block>>> {
+) -> Result<AppliedMutation<(Vec<Block>, bool)>> {
     if parts.is_empty() {
         return Err(crate::CoreError::invalid("split requires at least one part").into());
     }
     conn.call_domain(
-        move |database| -> crate::CoreResult<AppliedMutation<Vec<Block>>> {
+        move |database| -> crate::CoreResult<AppliedMutation<(Vec<Block>, bool)>> {
             let transaction = database.transaction()?;
             let block_sql = format!("SELECT {BLOCK_COLUMNS} FROM blocks WHERE uuid = ?1");
             let source = transaction
@@ -337,6 +338,8 @@ pub async fn split_block_with_ops(
                     "block content changed since split began",
                 ));
             }
+            let graph_changed =
+                crate::operation::content_references_changed(&source.markdown, &parts[0].markdown);
 
             let siblings = {
                 let sql = format!(
@@ -397,7 +400,7 @@ pub async fn split_block_with_ops(
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             transaction.commit()?;
             Ok(AppliedMutation {
-                value: blocks,
+                value: (blocks, graph_changed),
                 operations: kinds,
             })
         },

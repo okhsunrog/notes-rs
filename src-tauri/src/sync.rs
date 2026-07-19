@@ -424,7 +424,16 @@ async fn synchronize_http(
         .iter()
         .map(|applied| applied.operation.kind.clone())
         .collect::<Vec<_>>();
-    crate::commands::emit_events_for_ops(app, connection, &operations).await;
+    let graph_changed = stats
+        .applied_operations
+        .iter()
+        .filter(|applied| applied.graph_changed)
+        .filter_map(|applied| match &applied.operation.kind {
+            notes_core::OpKind::BlockSetMarkdown(payload) => Some(payload.uuid),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    crate::commands::emit_events_for_ops(app, connection, &operations, &graph_changed).await;
     Ok(())
 }
 
@@ -473,13 +482,20 @@ async fn apply_server_operations(
         .map(|operation| (operation.seq, operation.envelope.clone()))
         .collect();
     let outcomes = apply_sequenced_batch(connection, sequenced).await?;
-    let applied = operations
-        .into_iter()
-        .zip(outcomes)
-        .filter(|(_, outcome)| outcome.applied)
-        .map(|(operation, _)| operation.envelope.kind)
-        .collect::<Vec<_>>();
-    crate::commands::emit_events_for_ops(app, connection, &applied).await;
+    let mut applied = Vec::new();
+    let mut graph_changed = Vec::new();
+    for (operation, outcome) in operations.into_iter().zip(outcomes) {
+        if !outcome.applied {
+            continue;
+        }
+        if outcome.graph_changed
+            && let notes_core::OpKind::BlockSetMarkdown(payload) = &operation.envelope.kind
+        {
+            graph_changed.push(payload.uuid);
+        }
+        applied.push(operation.envelope.kind);
+    }
+    crate::commands::emit_events_for_ops(app, connection, &applied, &graph_changed).await;
     Ok(())
 }
 

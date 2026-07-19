@@ -10,7 +10,7 @@ pub async fn ensure_journal(
     let applied = db::ensure_journal_with_ops(&state.conn, date)
         .await
         .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
+    emit_events_for_ops(&app, &state.conn, &applied.operations, &[]).await;
     if !applied.operations.is_empty() {
         emit_domain(&app, DomainEvent::HistoryChanged);
     }
@@ -50,7 +50,9 @@ pub async fn append_to_journal(
     let applied = db::append_to_journal_with_ops(&state.conn, date, content, style)
         .await
         .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
+    emit_events_for_ops(&app, &state.conn, &applied.operations, &[]).await;
+    // The journals query contains only page/date metadata, not block previews. Existing
+    // journals therefore need only the BlocksChanged invalidation emitted above.
     emit_domain(&app, DomainEvent::HistoryChanged);
     Ok(applied.value)
 }

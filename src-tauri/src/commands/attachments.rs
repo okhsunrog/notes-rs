@@ -83,7 +83,7 @@ pub async fn attach_file(
     )
     .await
     .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
+    emit_events_for_ops(&app, &state.conn, &applied.operations, &[]).await;
     Ok(Some(applied.value))
 }
 
@@ -165,7 +165,7 @@ pub async fn delete_attachment(
     let Some(_attachment) = applied.value else {
         return Ok(false);
     };
-    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
+    emit_events_for_ops(&app, &state.conn, &applied.operations, &[]).await;
     Ok(true)
 }
 

@@ -2,14 +2,20 @@ use super::*;
 use notes_core::OpKind;
 use std::collections::BTreeSet;
 
-pub(crate) fn events_for_ops(operations: &[OpKind]) -> Vec<DomainEvent> {
+pub(crate) fn events_for_ops(
+    operations: &[OpKind],
+    graph_changed_content: &[uuid::Uuid],
+) -> Vec<DomainEvent> {
     let mut changed_pages = BTreeSet::new();
     let mut deleted_pages = BTreeSet::new();
     let mut changed_blocks = BTreeSet::new();
     let mut deleted_blocks = BTreeSet::new();
     let mut containers = BTreeSet::new();
     let mut structure = BTreeSet::new();
-    let mut graph = BTreeSet::new();
+    let mut graph = graph_changed_content
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
     let mut attachment_owners = BTreeSet::new();
 
     for operation in operations {
@@ -43,9 +49,6 @@ pub(crate) fn events_for_ops(operations: &[OpKind]) -> Vec<DomainEvent> {
             }
             OpKind::BlockSetMarkdown(payload) => {
                 changed_blocks.insert(payload.uuid);
-                // OpKind deliberately has no before-image. Conservatively refresh the graph;
-                // this is cheap and prevents a new local or remote mutation path from omitting it.
-                graph.insert(payload.uuid);
             }
             OpKind::BlockSetStyle(payload) => {
                 changed_blocks.insert(payload.uuid);
@@ -126,8 +129,9 @@ pub(crate) async fn emit_events_for_ops(
     app: &AppHandle,
     connection: &Connection,
     operations: &[OpKind],
+    graph_changed_content: &[uuid::Uuid],
 ) {
-    for event in events_for_ops(operations) {
+    for event in events_for_ops(operations, graph_changed_content) {
         let event = enrich_changed_block_containers(connection, event).await;
         if !event_is_empty(&event) {
             emit_domain(app, event);
@@ -267,7 +271,28 @@ mod tests {
         ];
 
         for kind in kinds {
-            assert!(!events_for_ops(std::slice::from_ref(&kind)).is_empty());
+            assert!(!events_for_ops(std::slice::from_ref(&kind), &[]).is_empty());
         }
+    }
+
+    #[test]
+    fn markdown_only_invalidates_graph_when_application_reports_reference_changes() {
+        let uuid = uuid::Uuid::from_u128(1);
+        let operation = OpKind::BlockSetMarkdown(BlockSetMarkdown {
+            uuid,
+            markdown: "edited text".into(),
+        });
+
+        assert!(
+            !events_for_ops(std::slice::from_ref(&operation), &[])
+                .iter()
+                .any(|event| matches!(event, DomainEvent::GraphChanged { .. }))
+        );
+        assert!(events_for_ops(&[operation], &[uuid]).iter().any(|event| {
+            matches!(
+                event,
+                DomainEvent::GraphChanged { content_uuids } if content_uuids == &[uuid]
+            )
+        }));
     }
 }
