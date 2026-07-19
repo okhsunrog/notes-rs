@@ -1173,6 +1173,9 @@ async fn index_documents(notes: &Connection) -> Result<BTreeMap<uuid::Uuid, Inde
         .call(|database| {
             let transaction = database.transaction()?;
             let rows = {
+                // Section headings deliberately use same-parent sibling scope. Top-level list
+                // items are siblings of their heading and are covered directly; nested blocks
+                // carry ancestor breadcrumbs instead. Revisit this only with eval-harness data.
                 let mut statement = transaction.prepare(
                     "WITH RECURSIVE chain(
                    qid, parent_uuid, page_title, journal_date, block_style,
