@@ -200,7 +200,8 @@ async fn append_is_atomic_ordered_and_one_history_action_per_capture() {
         })
         .await
         .unwrap();
-    let latest_operations: Vec<notes_core::OpKind> = serde_json::from_str(&latest_forward).unwrap();
+    let latest_operations: Vec<notes_core::OpKind> =
+        notes_core::decode_persisted_envelope(&latest_forward).unwrap();
     assert_eq!(latest_operations.len(), 1);
     assert!(matches!(
         latest_operations.as_slice(),

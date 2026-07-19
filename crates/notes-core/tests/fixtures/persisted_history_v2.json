@@ -1,0 +1,11 @@
+{
+  "format_version": 2,
+  "payload": [
+    {
+      "kind": "page_delete",
+      "payload": {
+        "uuid": "00000000-0000-0000-0000-000000000001"
+      }
+    }
+  ]
+}

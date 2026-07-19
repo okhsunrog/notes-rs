@@ -37,7 +37,7 @@ impl Oplog {
     }
 
     pub async fn append(&self, operation: notes_core::Op) -> Result<AppendOutcome> {
-        let envelope = serde_json::to_string(&operation)?;
+        let envelope = notes_core::encode_persisted_envelope(&operation)?;
         self.connection
             .call_domain(move |database| -> Result<AppendOutcome> {
                 if let Some((seq, existing)) = database
@@ -48,7 +48,8 @@ impl Oplog {
                     )
                     .optional()?
                 {
-                    let existing = serde_json::from_str(&existing).map_err(json_error)?;
+                    let existing =
+                        notes_core::decode_persisted_envelope(&existing).map_err(json_error)?;
                     if existing != operation {
                         return Err(notes_core::CoreError::sync_conflict(format!(
                             "operation id {} was reused with a different payload",
@@ -134,7 +135,8 @@ impl Oplog {
                     .query_map(rusqlite::params![since, limit], |row| {
                         let seq = row.get::<_, i64>(0)?;
                         let envelope = row.get::<_, String>(1)?;
-                        let envelope = serde_json::from_str(&envelope).map_err(json_error)?;
+                        let envelope =
+                            notes_core::decode_persisted_envelope(&envelope).map_err(json_error)?;
                         Ok(SequencedOp {
                             seq: seq as u64,
                             envelope,
@@ -199,6 +201,18 @@ mod tests {
         let first = log.append(operation(1)).await.expect("append first");
         assert_eq!(first.operation.seq, 1);
         assert!(first.inserted);
+        let stored = log
+            .connection
+            .call(|database| {
+                database.query_row("SELECT envelope FROM oplog WHERE seq = 1", [], |row| {
+                    row.get::<_, String>(0)
+                })
+            })
+            .await
+            .expect("read stored envelope");
+        let stored: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(stored["format_version"], 2);
+        assert_eq!(stored["payload"]["op_id"], operation(1).op_id.to_string());
         let duplicate = log.append(operation(1)).await.expect("append duplicate");
         assert_eq!(duplicate.operation.seq, 1);
         assert!(!duplicate.inserted);
@@ -208,6 +222,32 @@ mod tests {
         let second = reopened.append(operation(2)).await.expect("append second");
         assert_eq!(second.operation.seq, 2);
         reopened.assert_gapless().await.expect("gapless oplog");
+    }
+
+    #[tokio::test]
+    async fn reads_legacy_untagged_oplog_envelopes() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let log = Oplog::open(&directory.path().join("oplog.db"))
+            .await
+            .expect("open oplog");
+        let operation = operation(1);
+        let legacy = serde_json::to_string(&operation).unwrap();
+        let op_id = operation.op_id;
+        log.connection
+            .call(move |database| {
+                database.execute(
+                    "INSERT INTO oplog(seq, op_id, envelope, created_at)
+                     VALUES (1, ?1, ?2, unixepoch())",
+                    rusqlite::params![op_id, legacy],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("insert legacy envelope");
+
+        let operations = log.ops_since(0, 10).await.expect("read legacy oplog");
+        assert_eq!(operations.len(), 1);
+        assert_eq!(operations[0].envelope, operation);
     }
 
     #[tokio::test]

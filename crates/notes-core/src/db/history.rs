@@ -259,9 +259,9 @@ pub(crate) fn record_action(
     }
     let action_uuid = uuid::Uuid::now_v7();
     let action = action.to_owned();
-    let forward_json = serde_json::to_string(&forward)
+    let forward_json = operation::encode_persisted_envelope(&forward)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    let inverse_json = serde_json::to_string(&inverse)
+    let inverse_json = operation::encode_persisted_envelope(&inverse)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     transaction.execute(
         "INSERT INTO history_undo(action_uuid, action, forward_json, inverse_json, created_at)
@@ -330,9 +330,16 @@ async fn move_history(conn: &Connection, undo: bool) -> Result<bool> {
         let Some((entry_id, action_uuid, action, forward_json, inverse_json)) = entry else {
             return Ok(false);
         };
-        let kinds: Vec<OpKind> =
-            serde_json::from_str(if undo { &inverse_json } else { &forward_json })?;
+        let forward: Vec<OpKind> = operation::decode_persisted_envelope(&forward_json)?;
+        let inverse: Vec<OpKind> = operation::decode_persisted_envelope(&inverse_json)?;
+        let kinds = if undo {
+            inverse.clone()
+        } else {
+            forward.clone()
+        };
         operation::apply_local_kinds_in_transaction(&transaction, kinds)?;
+        let forward_json = operation::encode_persisted_envelope(&forward)?;
+        let inverse_json = operation::encode_persisted_envelope(&inverse)?;
         transaction.execute(&format!("DELETE FROM {source} WHERE id = ?1"), [entry_id])?;
         transaction.execute(
             &format!(

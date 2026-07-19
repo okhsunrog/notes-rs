@@ -9,10 +9,50 @@ use crate::{Connection, CoreError, CoreResult, Hlc};
 use anyhow::{Context, Result};
 use notes_blob::BlobHash;
 use rusqlite::OptionalExtension;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 pub const FORMAT_VERSION: u32 = 6;
+pub const PERSISTED_ENVELOPE_VERSION: u32 = 2;
+
+#[derive(Serialize)]
+struct PersistedEnvelopeRef<'a, T> {
+    format_version: u32,
+    payload: &'a T,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PersistedEnvelope<T> {
+    Versioned { format_version: u32, payload: T },
+    Legacy(T),
+}
+
+/// Encode durable operation-bearing JSON with a storage-format discriminator.
+/// This version is independent from the sync/domain `Op::format_version`.
+pub fn encode_persisted_envelope<T: Serialize>(payload: &T) -> serde_json::Result<String> {
+    serde_json::to_string(&PersistedEnvelopeRef {
+        format_version: PERSISTED_ENVELOPE_VERSION,
+        payload,
+    })
+}
+
+/// Decode both the current tagged storage envelope and legacy v1 bare JSON.
+pub fn decode_persisted_envelope<T: DeserializeOwned>(value: &str) -> serde_json::Result<T> {
+    match serde_json::from_str::<PersistedEnvelope<T>>(value)? {
+        PersistedEnvelope::Versioned {
+            format_version: PERSISTED_ENVELOPE_VERSION,
+            payload,
+        }
+        | PersistedEnvelope::Legacy(payload) => Ok(payload),
+        PersistedEnvelope::Versioned { format_version, .. } => {
+            Err(<serde_json::Error as serde::de::Error>::custom(format!(
+                "unsupported persisted envelope format version {format_version}"
+            )))
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
@@ -315,7 +355,7 @@ fn apply_local_kinds_with_policy(
                 "INSERT INTO sync_outbox(op_id, envelope, created_at) VALUES (?1, ?2, ?3)",
                 rusqlite::params![
                     operation.op_id,
-                    serde_json::to_string(operation).map_err(|error| {
+                    encode_persisted_envelope(operation).map_err(|error| {
                         rusqlite::Error::ToSqlConversionFailure(Box::new(error))
                     })?,
                     operation_timestamp(operation),
@@ -378,7 +418,7 @@ pub async fn pending_outbox(conn: &Connection, limit: u32) -> Result<Vec<Op>> {
         statement
             .query_map([limit], |row| row.get::<_, String>(0))?
             .map(|envelope| {
-                serde_json::from_str(&envelope?).map_err(|error| {
+                decode_persisted_envelope(&envelope?).map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(
                         0,
                         rusqlite::types::Type::Text,
@@ -1126,7 +1166,7 @@ pub async fn apply_batch(
                     "INSERT INTO sync_outbox(op_id, envelope, created_at) VALUES (?1, ?2, ?3)",
                     rusqlite::params![
                         operation.op_id,
-                        serde_json::to_string(&operation).map_err(|error| {
+                        encode_persisted_envelope(&operation).map_err(|error| {
                             rusqlite::Error::ToSqlConversionFailure(Box::new(error))
                         })?,
                         chrono::Utc::now().timestamp(),

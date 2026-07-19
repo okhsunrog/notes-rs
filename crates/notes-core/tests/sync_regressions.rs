@@ -177,6 +177,26 @@ async fn local_apply_is_idempotent_and_outbox_is_acknowledged_once() {
             .unwrap()
             .applied
     );
+    let stored = connection
+        .call(|database| {
+            database.query_row("SELECT envelope FROM sync_outbox", [], |row| {
+                row.get::<_, String>(0)
+            })
+        })
+        .await
+        .expect("read stored outbox envelope");
+    let stored_json: serde_json::Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(stored_json["format_version"], 2);
+    assert_eq!(stored_json["payload"]["op_id"], operation.op_id.to_string());
+
+    let legacy = serde_json::to_string(&operation).unwrap();
+    connection
+        .call(move |database| {
+            database.execute("UPDATE sync_outbox SET envelope = ?1", [legacy])?;
+            Ok(())
+        })
+        .await
+        .expect("replace outbox envelope with legacy v1 JSON");
     let pending = notes_core::pending_outbox(connection, 100)
         .await
         .expect("read outbox");

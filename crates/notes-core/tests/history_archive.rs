@@ -24,6 +24,70 @@ fn hash(byte: u8) -> BlobHash {
 }
 
 #[tokio::test]
+async fn history_writes_tagged_envelopes_and_reads_legacy_entries() {
+    let database = database().await;
+    let note = db::create_note(&database.connection, None)
+        .await
+        .expect("create note")
+        .into_created()
+        .expect("untitled note is created");
+    let inverse = database
+        .connection
+        .call(|database| {
+            database.query_row(
+                "SELECT inverse_json FROM history_undo ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+        })
+        .await
+        .expect("read stored history envelope");
+    let tagged: serde_json::Value = serde_json::from_str(&inverse).unwrap();
+    assert_eq!(tagged["format_version"], 2);
+    let legacy = serde_json::to_string(&tagged["payload"]).unwrap();
+    database
+        .connection
+        .call(move |database| {
+            database.execute(
+                "UPDATE history_undo SET inverse_json = ?1 WHERE id = (
+                   SELECT id FROM history_undo ORDER BY id DESC LIMIT 1
+                 )",
+                [legacy],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("replace inverse with legacy v1 JSON");
+
+    assert!(
+        db::undo_history(&database.connection)
+            .await
+            .expect("undo legacy entry")
+    );
+    assert!(
+        db::get_page(&database.connection, note.page.uuid)
+            .await
+            .expect("read undone page")
+            .is_none()
+    );
+    let moved = database
+        .connection
+        .call(|database| {
+            database.query_row(
+                "SELECT inverse_json FROM history_redo ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+        })
+        .await
+        .expect("read rewritten redo envelope");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&moved).unwrap()["format_version"],
+        2
+    );
+}
+
+#[tokio::test]
 async fn task_state_updates_are_typed_undoable_and_reject_non_tasks() {
     let database = database().await;
     let note = db::create_note(&database.connection, None)
