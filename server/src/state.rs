@@ -6,9 +6,11 @@ use notes_core::{
 };
 use notes_protocol::SequencedOp;
 use notes_sync::{Op, SyncSnapshot};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 use tokio::sync::Notify;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -17,8 +19,14 @@ const REPLAY_BATCH_SIZE: usize = 1_000;
 
 #[derive(Clone)]
 pub struct UserRegistry {
-    tokens: Arc<HashMap<String, Arc<UserState>>>,
+    credentials: Arc<Vec<Credential>>,
     users: Arc<Vec<Arc<UserState>>>,
+}
+
+#[derive(Clone)]
+struct Credential {
+    digest: [u8; 32],
+    user: Arc<UserState>,
 }
 
 pub struct UserState {
@@ -52,7 +60,7 @@ impl UserRegistry {
             .await
             .with_context(|| format!("creating data directory {}", config.data_dir.display()))?;
         let mut states = HashMap::new();
-        let mut tokens = HashMap::new();
+        let mut credentials = Vec::new();
         for user in &config.users {
             let state = Arc::new(
                 UserState::open(
@@ -64,20 +72,30 @@ impl UserRegistry {
                 .await?,
             );
             states.insert(user.id.clone(), state.clone());
-            for token in &user.tokens {
-                tokens.insert(token.clone(), state.clone());
+            for digest in user.token_digests()? {
+                credentials.push(Credential {
+                    digest,
+                    user: state.clone(),
+                });
             }
             spawn_local_outbox_publisher(state.clone(), shutdown.child_token());
         }
         tracing::info!(users = states.len(), "opened server user replicas");
         Ok(Self {
-            tokens: Arc::new(tokens),
+            credentials: Arc::new(credentials),
             users: Arc::new(states.into_values().collect()),
         })
     }
 
     pub fn authenticate(&self, token: &str) -> Option<Arc<UserState>> {
-        self.tokens.get(token).cloned()
+        let candidate: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        let mut matched = None;
+        for credential in self.credentials.iter() {
+            if bool::from(candidate.ct_eq(&credential.digest)) {
+                matched = Some(credential.user.clone());
+            }
+        }
+        matched
     }
 
     pub fn users(&self) -> impl Iterator<Item = &Arc<UserState>> {

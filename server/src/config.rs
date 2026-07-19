@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use notes_protocol::{AiProviderSettings, AiProviderSettingsUpdate, CompletionProtocol};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use url::Url;
@@ -67,6 +68,11 @@ pub struct UserConfig {
     pub id: String,
     #[serde(default)]
     pub admin: bool,
+    #[serde(default)]
+    pub token_sha256: Option<String>,
+    #[serde(default)]
+    pub token: Option<String>,
+    #[serde(default)]
     pub tokens: Vec<String>,
 }
 
@@ -77,6 +83,14 @@ impl ServerConfig {
         let config: Self = toml::from_str(&contents)
             .with_context(|| format!("parsing server config {}", path.display()))?;
         config.validate()?;
+        for user in &config.users {
+            if user.token.is_some() || !user.tokens.is_empty() {
+                tracing::warn!(
+                    user = %user.id,
+                    "plaintext server token is deprecated; configure token_sha256 instead"
+                );
+            }
+        }
         Ok(config)
     }
 
@@ -106,19 +120,63 @@ impl ServerConfig {
             if !user_ids.insert(&user.id) {
                 bail!("duplicate user id {}", user.id);
             }
-            if user.tokens.is_empty() {
+            let user_tokens = user.token_digests()?;
+            if user_tokens.is_empty() {
                 bail!("user {} must have at least one token", user.id);
             }
-            for token in &user.tokens {
-                if token.len() < 32 {
-                    bail!("tokens must contain at least 32 characters");
-                }
+            for token in user_tokens {
                 if !tokens.insert(token) {
                     bail!("the same token cannot be assigned more than once");
                 }
             }
         }
         Ok(())
+    }
+}
+
+impl UserConfig {
+    pub fn token_digests(&self) -> Result<Vec<[u8; 32]>> {
+        let plaintext = self.token.iter().chain(&self.tokens);
+        let mut digests = Vec::with_capacity(
+            usize::from(self.token_sha256.is_some())
+                + usize::from(self.token.is_some())
+                + self.tokens.len(),
+        );
+        if let Some(encoded) = &self.token_sha256 {
+            digests.push(parse_sha256(encoded).with_context(|| {
+                format!(
+                    "token_sha256 for user {} must be 64 hexadecimal characters",
+                    self.id
+                )
+            })?);
+        }
+        for token in plaintext {
+            if token.len() < 32 {
+                bail!("tokens must contain at least 32 characters");
+            }
+            digests.push(Sha256::digest(token.as_bytes()).into());
+        }
+        Ok(digests)
+    }
+}
+
+fn parse_sha256(encoded: &str) -> Result<[u8; 32]> {
+    if encoded.len() != 64 {
+        bail!("invalid SHA-256 length");
+    }
+    let mut digest = [0_u8; 32];
+    for (index, pair) in encoded.as_bytes().chunks_exact(2).enumerate() {
+        digest[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
+    }
+    Ok(digest)
+}
+
+fn hex_nibble(byte: u8) -> Result<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => bail!("invalid SHA-256 hexadecimal character"),
     }
 }
 
@@ -251,6 +309,8 @@ mod tests {
             users: vec![UserConfig {
                 id: "../owner".into(),
                 admin: false,
+                token_sha256: None,
+                token: None,
                 tokens: vec!["short".into()],
             }],
         };
@@ -277,6 +337,8 @@ mod tests {
             users: vec![UserConfig {
                 id: "owner".into(),
                 admin: false,
+                token_sha256: None,
+                token: None,
                 tokens: vec!["a-token-with-at-least-thirty-two-characters".into()],
             }],
         };
@@ -372,11 +434,46 @@ mod tests {
         let user: UserConfig = toml::from_str(
             r#"
 id = "owner"
-tokens = ["a-token-with-at-least-thirty-two-characters"]
+token = "a-token-with-at-least-thirty-two-characters"
 "#,
         )
         .expect("legacy user config");
 
         assert!(!user.admin);
+        assert!(user.token.is_some());
+        assert!(user.token_sha256.is_none());
+    }
+
+    #[test]
+    fn hashed_tokens_validate_and_collide_with_their_plaintext_legacy_form() {
+        let plaintext = "test-token-with-at-least-thirty-two-characters";
+        let config = ServerConfig {
+            listen: default_listen(),
+            log_filter: default_log_filter(),
+            data_dir: "/tmp/notes".into(),
+            snapshot_every_ops: 10_000,
+            max_blob_bytes: 1,
+            ai: None,
+            users: vec![
+                UserConfig {
+                    id: "hashed".into(),
+                    admin: true,
+                    token_sha256: Some(
+                        "1fe4109a7f6627feb6d833a37288ce43668a8d649bdfc658494388c3f4cd9a30".into(),
+                    ),
+                    token: None,
+                    tokens: vec![],
+                },
+                UserConfig {
+                    id: "legacy".into(),
+                    admin: false,
+                    token_sha256: None,
+                    token: Some(plaintext.into()),
+                    tokens: vec![],
+                },
+            ],
+        };
+
+        assert!(config.validate().is_err());
     }
 }

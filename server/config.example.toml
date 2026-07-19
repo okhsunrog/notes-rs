@@ -22,4 +22,5 @@ query_rewriting_enabled = true
 [[users]]
 id = "owner"
 admin = true
-tokens = ["replace-with-at-least-32-random-characters"]
+# Generate a random token for the client, then store only its SHA-256 digest here.
+token_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"

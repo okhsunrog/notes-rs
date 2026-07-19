@@ -904,11 +904,17 @@ mod tests {
                 UserConfig {
                     id: "owner".into(),
                     admin: true,
-                    tokens: vec![TOKEN.into()],
+                    token_sha256: Some(
+                        "1fe4109a7f6627feb6d833a37288ce43668a8d649bdfc658494388c3f4cd9a30".into(),
+                    ),
+                    token: None,
+                    tokens: vec![],
                 },
                 UserConfig {
                     id: "other".into(),
                     admin: false,
+                    token_sha256: None,
+                    token: None,
                     tokens: vec![OTHER_TOKEN.into()],
                 },
             ],
@@ -941,6 +947,8 @@ mod tests {
             users: vec![UserConfig {
                 id: "owner".into(),
                 admin: true,
+                token_sha256: None,
+                token: None,
                 tokens: vec![TOKEN.into()],
             }],
         };

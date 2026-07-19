@@ -3533,6 +3533,8 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
+ "subtle",
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.30.0",
