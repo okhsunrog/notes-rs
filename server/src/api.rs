@@ -98,6 +98,14 @@ impl ApiError {
         }
     }
 
+    fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            code: ApiErrorCode::Forbidden,
+            message: message.into(),
+        }
+    }
+
     fn not_found(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
@@ -257,6 +265,7 @@ async fn update_ai_provider(
     Extension(user): Extension<AuthenticatedUser>,
     Json(settings): Json<AiProviderSettingsUpdate>,
 ) -> Result<Json<AiIndexStatus>, ApiError> {
+    require_admin(&user)?;
     let ai = state
         .ai
         .as_ref()
@@ -271,8 +280,10 @@ async fn update_ai_provider(
 
 async fn probe_ai_provider(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
     Json(settings): Json<AiProviderSettingsUpdate>,
 ) -> Result<Json<AiProviderProbeResult>, ApiError> {
+    require_admin(&user)?;
     let ai = state
         .ai
         .as_ref()
@@ -283,6 +294,14 @@ async fn probe_ai_provider(
         .await
         .map(Json)
         .map_err(ApiError::internal)
+}
+
+fn require_admin(user: &AuthenticatedUser) -> Result<(), ApiError> {
+    if user.0.admin {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden("administrator access is required"))
+    }
 }
 
 async fn reindex_ai(
@@ -861,7 +880,7 @@ const fn default_ops_limit() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ServerConfig, UserConfig};
+    use crate::config::{AiConfig, ServerConfig, UserConfig};
     use axum::http::Request;
     use http_body_util::BodyExt;
     use notes_core::{AttachmentOwner, Hlc, Op, OpKind, PageLayout};
@@ -884,10 +903,12 @@ mod tests {
             users: vec![
                 UserConfig {
                     id: "owner".into(),
+                    admin: true,
                     tokens: vec![TOKEN.into()],
                 },
                 UserConfig {
                     id: "other".into(),
+                    admin: false,
                     tokens: vec![OTHER_TOKEN.into()],
                 },
             ],
@@ -906,6 +927,40 @@ mod tests {
                 .expect("set deterministic workspace");
         }
         (directory, router(state))
+    }
+
+    async fn test_app_with_ai(ai: AiConfig) -> (tempfile::TempDir, Router) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let config = ServerConfig {
+            listen: "127.0.0.1:0".parse().expect("listen address"),
+            log_filter: "info".into(),
+            data_dir: directory.path().to_owned(),
+            snapshot_every_ops: 2,
+            max_blob_bytes: 1024,
+            ai: Some(ai),
+            users: vec![UserConfig {
+                id: "owner".into(),
+                admin: true,
+                tokens: vec![TOKEN.into()],
+            }],
+        };
+        let state = crate::build_state(&config).await.expect("server state");
+        (directory, router(state))
+    }
+
+    fn provider_update_json(base_url: &str) -> serde_json::Value {
+        serde_json::json!({
+            "retrievalBaseUrl": base_url,
+            "retrievalApiKey": null,
+            "embeddingModel": "embedding-model",
+            "embeddingDimensions": 1024,
+            "rerankModel": "rerank-model",
+            "completionProtocol": "openai",
+            "completionBaseUrl": base_url,
+            "completionApiKey": null,
+            "chatModel": "chat-model",
+            "extractionModel": "extraction-model"
+        })
     }
 
     fn operation(index: u128, kind: OpKind) -> Op {
@@ -1103,6 +1158,70 @@ mod tests {
         let batch: OpsBatch = serde_json::from_slice(&body).expect("ops batch");
         assert_eq!(batch.ops.len(), 1);
         assert_eq!(batch.ops[0].seq, 1);
+    }
+
+    #[tokio::test]
+    async fn non_admin_cannot_mutate_or_probe_ai_provider() {
+        let (_directory, app) = test_app().await;
+        for (method, uri) in [
+            ("PUT", "/v1/ai/provider"),
+            ("POST", "/v1/ai/provider/probe"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    authorized_as(Request::builder(), OTHER_TOKEN)
+                        .method(method)
+                        .uri(uri)
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            provider_update_json("https://provider.example.test/v1").to_string(),
+                        ))
+                        .expect("provider request"),
+                )
+                .await
+                .expect("provider response");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(
+                typed_error(response).await.error.code,
+                ApiErrorCode::Forbidden
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_with_new_url_and_no_key_never_sends_the_stored_secret() {
+        let trap = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind provider trap");
+        let trap_url = format!("http://{}/v1", trap.local_addr().unwrap());
+        let ai = AiConfig {
+            retrieval_api_key: "stored-retrieval-secret".into(),
+            completion_api_key: "stored-completion-secret".into(),
+            retrieval_base_url: url::Url::parse("http://127.0.0.1:9/old").unwrap(),
+            completion_base_url: url::Url::parse("http://127.0.0.1:9/old").unwrap(),
+            ..AiConfig::default()
+        };
+        let (_directory, app) = test_app_with_ai(ai).await;
+
+        let response = app
+            .oneshot(
+                authorized(Request::builder())
+                    .method("POST")
+                    .uri("/v1/ai/provider/probe")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(provider_update_json(&trap_url).to_string()))
+                    .expect("probe request"),
+            )
+            .await
+            .expect("probe response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), trap.accept())
+                .await
+                .is_err(),
+            "the new provider URL must not receive a request carrying a stored secret"
+        );
     }
 
     #[tokio::test]

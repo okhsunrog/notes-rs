@@ -19,6 +19,7 @@ async fn bootstraps_and_fanouts_operations_over_the_real_network_protocol() {
         ai: None,
         users: vec![UserConfig {
             id: "owner".into(),
+            admin: true,
             tokens: vec![TOKEN.into()],
         }],
     };

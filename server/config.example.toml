@@ -21,4 +21,5 @@ query_rewriting_enabled = true
 
 [[users]]
 id = "owner"
+admin = true
 tokens = ["replace-with-at-least-32-random-characters"]

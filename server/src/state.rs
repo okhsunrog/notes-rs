@@ -23,6 +23,7 @@ pub struct UserRegistry {
 
 pub struct UserState {
     pub id: String,
+    pub admin: bool,
     pub notes: Connection,
     pub oplog: Oplog,
     pub snapshot_dir: PathBuf,
@@ -158,6 +159,7 @@ impl UserState {
         ));
         Ok(Self {
             id: user.id.clone(),
+            admin: user.admin,
             notes,
             oplog,
             snapshot_dir,

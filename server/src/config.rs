@@ -65,6 +65,8 @@ impl Default for AiConfig {
 #[serde(deny_unknown_fields)]
 pub struct UserConfig {
     pub id: String,
+    #[serde(default)]
+    pub admin: bool,
     pub tokens: Vec<String>,
 }
 
@@ -162,11 +164,19 @@ impl AiConfig {
     }
 
     pub fn applying(&self, update: AiProviderSettingsUpdate) -> Self {
+        let retrieval_base_url_changed = update.retrieval_base_url != self.retrieval_base_url;
+        let completion_base_url_changed = update.completion_base_url != self.completion_base_url;
         Self {
             retrieval_api_key: update
                 .retrieval_api_key
                 .filter(|secret| !secret.trim().is_empty())
-                .unwrap_or_else(|| self.retrieval_api_key.clone()),
+                .unwrap_or_else(|| {
+                    if retrieval_base_url_changed {
+                        String::new()
+                    } else {
+                        self.retrieval_api_key.clone()
+                    }
+                }),
             retrieval_base_url: update.retrieval_base_url,
             embedding_model: update.embedding_model,
             embedding_dimensions: update.embedding_dimensions,
@@ -175,7 +185,13 @@ impl AiConfig {
             completion_api_key: update
                 .completion_api_key
                 .filter(|secret| !secret.trim().is_empty())
-                .unwrap_or_else(|| self.completion_api_key.clone()),
+                .unwrap_or_else(|| {
+                    if completion_base_url_changed {
+                        String::new()
+                    } else {
+                        self.completion_api_key.clone()
+                    }
+                }),
             completion_base_url: update.completion_base_url,
             chat_model: update.chat_model,
             extraction_model: update.extraction_model,
@@ -234,6 +250,7 @@ mod tests {
             ai: None,
             users: vec![UserConfig {
                 id: "../owner".into(),
+                admin: false,
                 tokens: vec!["short".into()],
             }],
         };
@@ -259,6 +276,7 @@ mod tests {
             }),
             users: vec![UserConfig {
                 id: "owner".into(),
+                admin: false,
                 tokens: vec!["a-token-with-at-least-thirty-two-characters".into()],
             }],
         };
@@ -322,5 +340,43 @@ mod tests {
             serde_json::to_string(&updated.public_settings()).expect("public settings");
         assert!(!serialized.contains("retrieval-secret"));
         assert!(!serialized.contains("completion-secret"));
+    }
+
+    #[test]
+    fn provider_updates_do_not_reuse_secrets_for_new_base_urls() {
+        let current = AiConfig {
+            retrieval_api_key: "retrieval-secret".into(),
+            completion_api_key: "completion-secret".into(),
+            ..AiConfig::default()
+        };
+        let updated = current.applying(AiProviderSettingsUpdate {
+            retrieval_base_url: Url::parse("https://new-retrieval.example.test/v1").unwrap(),
+            retrieval_api_key: None,
+            embedding_model: current.embedding_model.clone(),
+            embedding_dimensions: current.embedding_dimensions,
+            rerank_model: current.rerank_model.clone(),
+            completion_protocol: current.completion_protocol,
+            completion_base_url: Url::parse("https://new-completion.example.test/v1").unwrap(),
+            completion_api_key: None,
+            chat_model: current.chat_model.clone(),
+            extraction_model: current.extraction_model.clone(),
+        });
+
+        assert!(updated.retrieval_api_key.is_empty());
+        assert!(updated.completion_api_key.is_empty());
+        assert!(updated.validate().is_err());
+    }
+
+    #[test]
+    fn legacy_user_config_defaults_to_non_admin() {
+        let user: UserConfig = toml::from_str(
+            r#"
+id = "owner"
+tokens = ["a-token-with-at-least-thirty-two-characters"]
+"#,
+        )
+        .expect("legacy user config");
+
+        assert!(!user.admin);
     }
 }

@@ -192,7 +192,7 @@ export type AiProviderSettings = {
 
 /**
  *  Complete non-secret provider configuration plus optional write-only secrets.
- *  A missing secret preserves the currently stored value.
+ *  A missing secret preserves the currently stored value only when its base URL is unchanged.
  */
 export type AiProviderSettingsUpdate = {
 	retrievalBaseUrl: string,

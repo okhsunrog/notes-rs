@@ -31,6 +31,7 @@ fn error_codes_use_stable_snake_case_wire_values() {
     let api_codes = [
         (ApiErrorCode::InvalidRequest, "invalid_request"),
         (ApiErrorCode::Unauthorized, "unauthorized"),
+        (ApiErrorCode::Forbidden, "forbidden"),
         (ApiErrorCode::NotFound, "not_found"),
         (ApiErrorCode::Conflict, "conflict"),
         (ApiErrorCode::PayloadTooLarge, "payload_too_large"),

@@ -47,7 +47,7 @@ pub struct AiProviderSettings {
 }
 
 /// Complete non-secret provider configuration plus optional write-only secrets.
-/// A missing secret preserves the currently stored value.
+/// A missing secret preserves the currently stored value only when its base URL is unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AiProviderSettingsUpdate {
@@ -204,6 +204,7 @@ pub enum ServerMessage {
 pub enum ApiErrorCode {
     InvalidRequest,
     Unauthorized,
+    Forbidden,
     NotFound,
     Conflict,
     PayloadTooLarge,
