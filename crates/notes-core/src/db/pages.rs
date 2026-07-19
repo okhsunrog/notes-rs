@@ -227,15 +227,13 @@ pub async fn create_note(conn: &Connection, title: Option<String>) -> Result<Cre
         .filter(|title| !title.is_empty());
     conn.call_domain(move |database| -> crate::CoreResult<CreateNoteResult> {
         let transaction = database.transaction()?;
-        if let Some(normalized_title) = title.as_deref().map(crate::model::normalize_title) {
-            let sql = format!("SELECT {PAGE_COLUMNS} FROM pages WHERE normalized_title = ?1");
-            if let Some(page) = transaction
-                .query_row(&sql, [&normalized_title], row_to_page)
-                .optional()?
-            {
-                transaction.commit()?;
-                return Ok(CreateNoteResult::Existing { page });
-            }
+        if let Some(normalized_title) = title.as_deref().map(crate::model::normalize_title)
+            && let Some(page_uuid) = operation::resolve_page_alias(&transaction, &normalized_title)?
+        {
+            let sql = format!("SELECT {PAGE_COLUMNS} FROM pages WHERE uuid = ?1");
+            let page = transaction.query_row(&sql, [page_uuid], row_to_page)?;
+            transaction.commit()?;
+            return Ok(CreateNoteResult::Existing { page });
         }
 
         let page_uuid = uuid::Uuid::now_v7();

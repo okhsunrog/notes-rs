@@ -1,5 +1,5 @@
-use notes_core::Connection;
 use notes_core::db::{self, CreateNoteResult};
+use notes_core::{Connection, Hlc, Op, OpKind, Origin, PageAlias, PageAliasSet};
 
 struct TestDatabase {
     _directory: tempfile::TempDir,
@@ -87,5 +87,49 @@ async fn create_note_returns_existing_without_mutating_when_the_normalized_title
 
     assert_eq!(page.uuid, created.page.uuid);
     assert_eq!(page.title.as_deref(), Some("Project Alpha"));
+    assert_eq!(mutation_counts(&database.connection).await, counts_before);
+}
+
+#[tokio::test]
+async fn create_note_returns_the_alias_owner_without_mutating() {
+    let database = database().await;
+    let created = db::create_note(&database.connection, Some("Current title".into()))
+        .await
+        .expect("create titled note")
+        .into_created()
+        .expect("free title creates a note");
+    let workspace_uuid = db::workspace_uuid(&database.connection)
+        .await
+        .expect("read workspace UUID");
+    let device_id = uuid::Uuid::from_u128(0xA11A5);
+    notes_core::apply(
+        &database.connection,
+        &Op {
+            op_id: uuid::Uuid::from_u128(0xA11A5),
+            workspace_uuid,
+            device_id,
+            hlc: Hlc::new(1, 0, device_id),
+            format_version: notes_core::operation::FORMAT_VERSION,
+            kind: OpKind::PageAliasSet(PageAliasSet {
+                uuid: created.page.uuid,
+                alias: PageAlias::new("Former title").expect("valid alias"),
+                present: true,
+            }),
+        },
+        Origin::Remote,
+    )
+    .await
+    .expect("apply durable alias");
+    let counts_before = mutation_counts(&database.connection).await;
+
+    let result = db::create_note(&database.connection, Some("  FORMER TITLE  ".into()))
+        .await
+        .expect("resolve alias owner");
+    let CreateNoteResult::Existing { page } = result else {
+        panic!("alias-owned title unexpectedly created a note");
+    };
+
+    assert_eq!(page.uuid, created.page.uuid);
+    assert_eq!(page.title.as_deref(), Some("Current title"));
     assert_eq!(mutation_counts(&database.connection).await, counts_before);
 }
