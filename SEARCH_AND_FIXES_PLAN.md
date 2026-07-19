@@ -144,6 +144,15 @@ The blocks-first interleave plus exact-only title priority ranks the A2 morpholo
 
 In one commit, in `search-card.tsx` unless noted: collapse the six `frozen*` states into one nullable snapshot object set atomically on first arrow key; merge the four copy-pasted row-render map blocks into one indexed map (drop the O(n²) `rows.indexOf`); have `presentSearchResults` return `primarySource` instead of the mirrored condition in the card; replace raw timer refs with the existing `DebouncedAction` (`src/lib/debounced-action.ts`); simplify `blockPageUuids` to a single flatMap; in `db/search.rs` remove (or re-justify with a comment) the dead cross-tier dedup `retain` in `search_pages_ranked`.
 
+### AF13. Follow-ups from the A-fix spot-check (2026-07-19; do before or between B tasks, one commit)
+
+1. **Enter-only AI trigger vs pending-Enter ordering** (`search-card.tsx:402-408`, medium-high): in enter-only mode, Enter pressed inside the 150 ms local-debounce window is captured as pending-Enter and later activates the top row — the AI search the mode exists for silently never fires; behavior is timing-dependent. Fix: when enter-only mode can fire (query non-empty, state idle/failed), `triggerEnterOnlySearch` takes precedence over the pending-Enter capture. Add a test that presses Enter WITHOUT advancing timers past the debounce (the current helper settles first, which is why this escaped).
+2. **Freeze-preserving refresh** (`search-card.tsx:226`): the pages-change refresh unconditionally `setResultsFrozen(false)`, dropping the user's arrow-selection mid-navigation when a background sync/domain event lands. Refresh the underlying data while keeping the freeze: update the frozen snapshot in place instead of unfreezing.
+3. **AF2 fallback cap** (`db/search.rs:192`): when the raw re-tokenizer finds no match (e.g. digit-adjacent tokens like `abc123`), the fallback returns the whole markdown unbounded. Cap it to the same window length (truncate at a word boundary + `…`), no marks.
+4. _(optional, may defer with a note)_: the pages-query subscription doesn't cover `blocks_changed`/`blocks_deleted`, so an edited/deleted block stays stale in open results (pre-existing limitation, not a regression). If a clean signal exists (e.g. re-run on history-status change), wire it; if it gets ugly, leave a code comment and report.
+
+Accepted as-is from the spot-check (no action): AF1 ambiguous-alias fallthrough can duplicate a `normalized_title` (explicitly sanctioned by spec; no unique index exists); literal `<mark>` in note content mis-toggles snippet highlighting (cosmetic, contrived).
+
 ## Track B — Correctness fixes from review
 
 ### B1. Outliner: Enter/paste split must flush in-flight saves (TS)
