@@ -283,6 +283,113 @@ async fn colliding_explicit_aliases_are_ambiguous() {
 }
 
 #[tokio::test]
+async fn title_search_orders_strict_fts_before_substring_fallback() {
+    let database = database().await;
+    let connection = &database.connection;
+
+    assert_eq!(
+        notes_core::stem::stem("Проекты"),
+        notes_core::stem::stem("проекта"),
+        "the primary morphology fixture must be handled by Snowball"
+    );
+    let projects = db::create_page(connection, "Проекты".into())
+        .await
+        .expect("create morphology fixture");
+    assert_eq!(
+        db::search_pages_by_title(connection, "проекта".into(), 10)
+            .await
+            .expect("strict stemmed title search")
+            .into_iter()
+            .map(|page| page.uuid)
+            .collect::<Vec<_>>(),
+        vec![projects.uuid]
+    );
+
+    let firmware = db::create_page(connection, "Прошивка ESP32".into())
+        .await
+        .expect("create multi-token title");
+    assert_eq!(
+        db::search_pages_by_title(connection, "esp32 прошивка".into(), 10)
+            .await
+            .expect("order-independent title search")
+            .into_iter()
+            .map(|page| page.uuid)
+            .collect::<Vec<_>>(),
+        vec![firmware.uuid]
+    );
+    assert_eq!(
+        db::search_pages_by_title(connection, "шивк".into(), 10)
+            .await
+            .expect("mid-word substring fallback")
+            .into_iter()
+            .map(|page| page.uuid)
+            .collect::<Vec<_>>(),
+        vec![firmware.uuid]
+    );
+
+    let exact = db::create_page(connection, "ESP32".into())
+        .await
+        .expect("create exact-match title");
+    assert_eq!(
+        db::search_pages_by_title(connection, "esp32".into(), 10)
+            .await
+            .expect("exact title search")
+            .first()
+            .map(|page| page.uuid),
+        Some(exact.uuid)
+    );
+}
+
+#[tokio::test]
+async fn title_search_relaxes_only_after_strict_and_substring_miss() {
+    let database = database().await;
+    let connection = &database.connection;
+
+    let purchases = db::create_page(connection, "Покупки".into())
+        .await
+        .expect("create relaxed morphology fixture");
+    let buyer = db::create_page(connection, "Покупатель".into())
+        .await
+        .expect("create related relaxed-prefix fixture");
+    let relaxed_hits = db::search_pages_by_title(connection, "покупок".into(), 10)
+        .await
+        .expect("relaxed title search")
+        .into_iter()
+        .map(|page| page.uuid)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        relaxed_hits,
+        std::collections::HashSet::from([purchases.uuid, buyer.uuid]),
+        "the bounded покуп* family is intentionally relevant at the relaxed tier"
+    );
+
+    db::create_page(connection, "Абвге".into())
+        .await
+        .expect("create short-token guard fixture");
+    assert!(
+        db::search_pages_by_title(connection, "абвгд".into(), 10)
+            .await
+            .expect("short title search")
+            .is_empty(),
+        "five-character Cyrillic tokens must not be relaxed"
+    );
+
+    let strict = db::create_page(connection, "Покупок".into())
+        .await
+        .expect("create strict-hit guard fixture");
+    assert_eq!(
+        db::search_pages_by_title(connection, "покупок".into(), 10)
+            .await
+            .expect("strict title search after relaxed fixture")
+            .into_iter()
+            .map(|page| page.uuid)
+            .collect::<Vec<_>>(),
+        vec![strict.uuid],
+        "a strict hit must prevent the relaxed tier from contributing results"
+    );
+}
+
+#[tokio::test]
 async fn search_normalizes_unicode_treats_wildcards_literally_and_stems_russian() {
     let database = database().await;
     let connection = &database.connection;

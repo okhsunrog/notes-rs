@@ -743,14 +743,20 @@ pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> 
         }
         for page in snapshot.pages {
             let normalized_title = page.title.as_deref().map(crate::model::normalize_title);
+            let title_stemmed = page
+                .title
+                .as_deref()
+                .map(crate::stem::stem)
+                .unwrap_or_default();
             transaction.execute(
-                "INSERT INTO pages(uuid, title, normalized_title, layout, title_hlc,
-                                   layout_hlc, existence_hlc, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO pages(uuid, title, normalized_title, title_stemmed, layout,
+                                   title_hlc, layout_hlc, existence_hlc, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 rusqlite::params![
                     page.uuid,
                     page.title,
                     normalized_title,
+                    title_stemmed,
                     page.layout,
                     page.title_hlc.map(|value| value.to_string()),
                     page.layout_hlc.map(|value| value.to_string()),
@@ -1862,7 +1868,8 @@ fn apply_page_title(
                 {
                     transaction.execute(
                         "UPDATE pages
-                            SET title = NULL, normalized_title = NULL, title_hlc = ?2,
+                            SET title = NULL, normalized_title = NULL, title_stemmed = '',
+                                title_hlc = ?2,
                                 updated_at = MAX(updated_at, ?3)
                           WHERE uuid = ?1",
                         rusqlite::params![uuid, operation.hlc.to_string(), timestamp],
@@ -1873,7 +1880,7 @@ fn apply_page_title(
                     return Ok(());
                 }
                 transaction.execute(
-                    "UPDATE pages SET title = NULL, normalized_title = NULL,
+                    "UPDATE pages SET title = NULL, normalized_title = NULL, title_stemmed = '',
                                       updated_at = MAX(updated_at, ?2)
                       WHERE uuid = ?1",
                     rusqlite::params![conflict_uuid, timestamp],
@@ -1881,13 +1888,14 @@ fn apply_page_title(
             }
         }
         transaction.execute(
-            "UPDATE pages SET title = ?2, normalized_title = ?3, title_hlc = ?4,
-                              updated_at = MAX(updated_at, ?5)
+            "UPDATE pages SET title = ?2, normalized_title = ?3, title_stemmed = ?4,
+                              title_hlc = ?5, updated_at = MAX(updated_at, ?6)
               WHERE uuid = ?1",
             rusqlite::params![
                 uuid,
                 title,
                 title.map(crate::model::normalize_title),
+                title.map(crate::stem::stem).unwrap_or_default(),
                 operation.hlc.to_string(),
                 timestamp,
             ],

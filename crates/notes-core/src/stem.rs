@@ -94,21 +94,9 @@ pub fn stem_search_query(text: &str) -> String {
 }
 
 pub fn stem_search_query_with_mode(text: &str, mode: SearchTokenMode) -> String {
-    let mut tokens = Vec::new();
-    let mut token = String::new();
-    for character in text.chars() {
-        if character.is_alphanumeric() {
-            token.push(character);
-        } else if !token.is_empty() {
-            tokens.push(std::mem::take(&mut token));
-        }
-    }
-    if !token.is_empty() {
-        tokens.push(token);
-    }
-
+    let tokens = search_tokens(text);
     let last_index = tokens.len().checked_sub(1);
-    tokens
+    let clauses = tokens
         .into_iter()
         .enumerate()
         .filter_map(|(index, raw)| {
@@ -123,8 +111,93 @@ pub fn stem_search_query_with_mode(text: &str, mode: SearchTokenMode) -> String 
                 Some(format!("\"{stemmed}\""))
             }
         })
-        .collect::<Vec<_>>()
-        .join(" ")
+        .collect::<Vec<_>>();
+    clauses.join(if mode == SearchTokenMode::Prefix {
+        " AND "
+    } else {
+        " "
+    })
+}
+
+/// Build the deliberately narrow fallback used by page-title search after both
+/// strict FTS and literal substring matching miss. It keeps every query token
+/// required, but adds one- and two-character-shorter prefixes for long Cyrillic
+/// tokens so common forms such as `покупок` can reach the indexed `покупк` stem.
+pub(crate) fn relaxed_stem_prefix_search_query(text: &str) -> String {
+    const MIN_RAW_CHARS: usize = 6;
+    const MIN_PREFIX_CHARS: usize = 4;
+    const MAX_TRIM_CHARS: usize = 2;
+
+    let tokens = search_tokens(text);
+    let last_index = tokens.len().checked_sub(1);
+    let mut relaxed = false;
+    let clauses = tokens
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, raw)| {
+            let stemmed = stem(&raw);
+            if stemmed.is_empty() {
+                return None;
+            }
+
+            let mut alternatives = if Some(index) == last_index {
+                vec![
+                    format!("\"{}\"*", raw.to_lowercase()),
+                    format!("\"{stemmed}\"*"),
+                ]
+            } else {
+                vec![format!("\"{stemmed}\"")]
+            };
+            if is_cyrillic_token(&raw) && raw.chars().count() >= MIN_RAW_CHARS {
+                let stemmed_chars = stemmed.chars().collect::<Vec<_>>();
+                for trim in 1..=MAX_TRIM_CHARS {
+                    let Some(prefix_len) = stemmed_chars.len().checked_sub(trim) else {
+                        continue;
+                    };
+                    if prefix_len < MIN_PREFIX_CHARS {
+                        continue;
+                    }
+                    let prefix = stemmed_chars[..prefix_len].iter().collect::<String>();
+                    alternatives.push(format!("\"{prefix}\"*"));
+                    relaxed = true;
+                }
+            }
+            alternatives.dedup();
+            Some(if alternatives.len() == 1 {
+                alternatives.pop().expect("one query alternative")
+            } else {
+                format!("({})", alternatives.join(" OR "))
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if relaxed {
+        clauses.join(" AND ")
+    } else {
+        String::new()
+    }
+}
+
+fn search_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    for character in text.chars() {
+        if character.is_alphanumeric() {
+            token.push(character);
+        } else if !token.is_empty() {
+            tokens.push(std::mem::take(&mut token));
+        }
+    }
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+    tokens
+}
+
+fn is_cyrillic_token(token: &str) -> bool {
+    token
+        .chars()
+        .all(|character| matches!(character, 'А'..='я' | 'Ё' | 'ё'))
 }
 
 #[cfg(test)]
@@ -178,12 +251,43 @@ mod tests {
     fn prefix_search_quotes_tokens_and_drops_operators() {
         assert_eq!(
             stem_search_query_with_mode("prog OR title:Rust*", SearchTokenMode::Prefix),
-            "\"prog\" \"or\" \"titl\" (\"rust\"* OR \"rust\"*)"
+            "\"prog\" AND \"or\" AND \"titl\" AND (\"rust\"* OR \"rust\"*)"
         );
         assert_eq!(stem_search_query_with_mode("", SearchTokenMode::Prefix), "");
         assert_eq!(
             stem_search_query_with_mode("***", SearchTokenMode::Prefix),
             ""
+        );
+
+        let database = rusqlite::Connection::open_in_memory().expect("open database");
+        database
+            .execute_batch(
+                "CREATE VIRTUAL TABLE multi_token_test USING fts5(content);
+                 INSERT INTO multi_token_test(content) VALUES ('firmware esp32');",
+            )
+            .expect("create multi-token FTS fixture");
+        let query = stem_search_query_with_mode("esp32 firm", SearchTokenMode::Prefix);
+        let count: i64 = database
+            .query_row(
+                "SELECT count(*) FROM multi_token_test WHERE multi_token_test MATCH ?1",
+                [query],
+                |row| row.get(0),
+            )
+            .expect("run multi-token prefix search");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn relaxed_prefix_is_bounded_to_long_cyrillic_tokens() {
+        assert_eq!(
+            relaxed_stem_prefix_search_query("покупок"),
+            "(\"покупок\"* OR \"покупо\"* OR \"покуп\"*)"
+        );
+        assert_eq!(relaxed_stem_prefix_search_query("абвгд"), "");
+        assert_eq!(relaxed_stem_prefix_search_query("abcdef"), "");
+        assert_eq!(
+            relaxed_stem_prefix_search_query("абвгде"),
+            "(\"абвгде\"* OR \"абвгд\"* OR \"абвг\"*)"
         );
     }
 
