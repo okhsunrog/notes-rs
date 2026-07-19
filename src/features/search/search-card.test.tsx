@@ -13,6 +13,14 @@ import { SearchCard } from "./search-card";
 const api = vi.hoisted(() => ({
   searchResults: [] as SearchHit[],
   search: vi.fn(),
+  settings: {
+    aiSearchEnabled: false,
+    aiSearchRerank: true,
+    aiSearchTrigger: "as_you_type",
+    configuredKeys: [] as string[],
+    searchDebugSources: false,
+    syncServerUrl: "",
+  },
 }));
 
 vi.mock("@/lib/api", () => ({
@@ -22,14 +30,7 @@ vi.mock("@/lib/api", () => ({
   getPage: vi.fn(async () => null),
   listJournals: vi.fn(async () => []),
   listPages: vi.fn(async () => []),
-  loadSettings: vi.fn(async () => ({
-    aiSearchEnabled: false,
-    aiSearchRerank: true,
-    aiSearchTrigger: "as_you_type",
-    configuredKeys: [],
-    searchDebugSources: false,
-    syncServerUrl: "",
-  })),
+  loadSettings: vi.fn(async () => api.settings),
   search: api.search,
 }));
 
@@ -46,6 +47,14 @@ beforeEach(() => {
   api.search.mockReset();
   api.search.mockImplementation(async () => api.searchResults);
   api.searchResults = [];
+  api.settings = {
+    aiSearchEnabled: false,
+    aiSearchRerank: true,
+    aiSearchTrigger: "as_you_type",
+    configuredKeys: [],
+    searchDebugSources: false,
+    syncServerUrl: "",
+  };
 });
 
 afterEach(() => {
@@ -96,6 +105,32 @@ describe("SearchCard page-list refreshes", () => {
     expect(api.search).toHaveBeenCalledTimes(2);
     expect(container.textContent).not.toContain("Disposable note");
   });
+
+  it("shows an enter-only failure and retries it on the next Enter", async () => {
+    api.settings = {
+      ...api.settings,
+      aiSearchEnabled: true,
+      aiSearchTrigger: "enter_only",
+      configuredKeys: ["SYNC_TOKEN"],
+      syncServerUrl: "https://sync.example.test",
+    };
+    let semanticAttempts = 0;
+    api.search.mockImplementation(async (mode: string) => {
+      if (mode === "fts") return [];
+      semanticAttempts += 1;
+      if (semanticAttempts === 1) throw new Error("temporary server failure");
+      return [];
+    });
+    const { container } = await renderSearchCard([]);
+
+    await enterQuery(container, "semantic");
+    await pressEnter(container);
+    expect(container.textContent).toContain("AI search failed — press Enter to retry");
+
+    await pressEnter(container);
+    expect(semanticAttempts).toBe(2);
+    expect(container.textContent).not.toContain("AI search failed — press Enter to retry");
+  });
 });
 
 async function renderSearchCard(initialPages: Page[]) {
@@ -130,6 +165,15 @@ async function enterQuery(container: HTMLDivElement, value: string) {
   });
   await act(async () => {
     await vi.advanceTimersByTimeAsync(150);
+  });
+}
+
+async function pressEnter(container: HTMLDivElement) {
+  const input = container.querySelector<HTMLInputElement>('input[role="combobox"]');
+  if (!input) throw new Error("search input was not rendered");
+  await act(async () => {
+    input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }));
+    await Promise.resolve();
   });
 }
 

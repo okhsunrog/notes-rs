@@ -360,7 +360,7 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
       aiSearchAsYouType ||
       !serverConfigured ||
       Array.from(queryValue).length < 3 ||
-      serverState !== "idle"
+      (serverState !== "idle" && serverState !== "failed")
     ) {
       return false;
     }
@@ -444,6 +444,11 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
         <span className="absolute right-3 flex items-center gap-1 text-xs text-muted-foreground">
           <Loader2 className="size-3 animate-spin" />
           AI…
+        </span>
+      )}
+      {serverState === "failed" && !aiSearchAsYouType && (
+        <span className="absolute right-3 text-xs text-destructive">
+          AI search failed — press Enter to retry
         </span>
       )}
     </div>
