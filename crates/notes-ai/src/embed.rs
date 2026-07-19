@@ -1228,6 +1228,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_edit_between_ticks_advances_the_reconcile_gate() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let notes = notes_core::db::open(directory.path().join("notes.db"))
+            .await
+            .expect("notes database");
+        let page = notes_core::db::create_page(&notes, "Changing page".into())
+            .await
+            .expect("create page");
+        let store = AiStore::open(directory.path().join("ai.db"), "identity".into(), 2)
+            .await
+            .expect("AI store");
+
+        assert!(
+            tick(&notes, &store, &UniformEmbedder)
+                .await
+                .expect("first tick")
+        );
+        assert_eq!(store.reconcile_scan_count(), 1);
+
+        notes_core::db::create_block(
+            &notes,
+            page.uuid,
+            None,
+            None,
+            notes_core::BlockStyle::Paragraph,
+            "content added between worker ticks".into(),
+        )
+        .await
+        .expect("local edit");
+
+        assert!(
+            tick(&notes, &store, &UniformEmbedder)
+                .await
+                .expect("second tick")
+        );
+        assert_eq!(store.reconcile_scan_count(), 2);
+    }
+
+    #[tokio::test]
     async fn tier_two_document_round_trips_through_reconcile_embed_and_query() {
         use crate::store::VectorStore;
 
