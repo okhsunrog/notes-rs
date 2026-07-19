@@ -15,11 +15,12 @@ pub async fn search_notes(
     mode: SearchMode,
     query: String,
     limit: u32,
+    rerank: Option<bool>,
 ) -> CommandResult<Vec<SearchHit>> {
     let limit = validate_search_request(&query, limit)?;
     match mode {
         SearchMode::Fts => db::search_fts(&state.conn, query, limit).await.map_err(err),
-        SearchMode::Semantic => remote_search(&state, query, limit).await,
+        SearchMode::Semantic => remote_search(&state, query, limit, rerank.unwrap_or(true)).await,
     }
 }
 
@@ -27,12 +28,13 @@ async fn remote_search(
     state: &AppState,
     query: String,
     limit: u32,
+    rerank: bool,
 ) -> CommandResult<Vec<SearchHit>> {
     let remote = state.remote_ai.as_ref().ok_or_else(|| CommandError {
         code: CommandErrorCode::Unavailable,
         message: "semantic search requires a configured notes-rs server; local FTS remains available offline".into(),
     })?;
-    remote.search(query, limit).await.map_err(err)
+    remote.search(query, limit, rerank).await.map_err(err)
 }
 
 fn validate_search_request(query: &str, limit: u32) -> CommandResult<u32> {

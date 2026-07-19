@@ -7,7 +7,7 @@ use notes_core::db::SearchHit;
 use notes_protocol::{
     AcceptedOps, AiIndexStatus, AiProviderProbeResult, AiProviderSettingsUpdate, AiRuntimeSettings,
     ApiErrorCode, ApiErrorResponse, BootstrapRequest, ChatEvent, ChatTurn, OpsBatch, PushOps,
-    SequencedOp, ServerInfo,
+    SearchRequest, SequencedOp, ServerInfo,
 };
 use reqwest::StatusCode;
 use serde::Serialize;
@@ -151,13 +151,16 @@ impl HttpTransport {
         Ok(accepted.ops)
     }
 
-    pub async fn search(&self, query: String, limit: u32) -> Result<Vec<SearchHit>> {
-        #[derive(Serialize)]
-        struct Request {
-            query: String,
-            limit: u32,
-        }
-        self.post_json("v1/search", &Request { query, limit }).await
+    pub async fn search(&self, query: String, limit: u32, rerank: bool) -> Result<Vec<SearchHit>> {
+        self.post_json(
+            "v1/search",
+            &SearchRequest {
+                query,
+                limit,
+                rerank,
+            },
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]

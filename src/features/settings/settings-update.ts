@@ -8,6 +8,10 @@ export function toSettingsUpdate(
   return {
     windowDecorationMode: settings.windowDecorationMode,
     syncServerUrl: settings.syncServerUrl,
+    aiSearchEnabled: settings.aiSearchEnabled,
+    aiSearchTrigger: settings.aiSearchTrigger,
+    aiSearchRerank: settings.aiSearchRerank,
+    searchDebugSources: settings.searchDebugSources,
     apiKeys,
     clearKeys,
   };

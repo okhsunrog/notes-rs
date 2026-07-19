@@ -102,6 +102,24 @@ pub struct AiIndexStatus {
     pub failed_extractions: u64,
 }
 
+fn default_search_limit() -> u32 {
+    20
+}
+
+const fn default_rerank() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SearchRequest {
+    pub query: String,
+    #[serde(default = "default_search_limit")]
+    pub limit: u32,
+    #[serde(default = "default_rerank")]
+    pub rerank: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OpsBatch {
     pub ops: Vec<SequencedOp>,

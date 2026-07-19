@@ -7,6 +7,10 @@ describe("settings update mapping", () => {
     const snapshot = {
       windowDecorationMode: "native",
       syncServerUrl: "https://notes.example.test",
+      aiSearchEnabled: true,
+      aiSearchTrigger: "enter_only",
+      aiSearchRerank: false,
+      searchDebugSources: true,
       configuredKeys: [],
       configPath: "/tmp/settings",
     } satisfies SettingsSnapshot;
@@ -18,5 +22,9 @@ describe("settings update mapping", () => {
     expect(update.apiKeys).toEqual({ SYNC_TOKEN: "secret" });
     expect(update.clearKeys).toEqual(["SYNC_TOKEN"]);
     expect(update.syncServerUrl).toBe(snapshot.syncServerUrl);
+    expect(update.aiSearchEnabled).toBe(true);
+    expect(update.aiSearchTrigger).toBe("enter_only");
+    expect(update.aiSearchRerank).toBe(false);
+    expect(update.searchDebugSources).toBe(true);
   });
 });

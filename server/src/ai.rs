@@ -83,7 +83,13 @@ impl AiRuntime {
             .clone()
     }
 
-    pub async fn search(&self, user_id: &str, query: String, limit: u32) -> Result<Vec<SearchHit>> {
+    pub async fn search(
+        &self,
+        user_id: &str,
+        query: String,
+        limit: u32,
+        rerank: bool,
+    ) -> Result<Vec<SearchHit>> {
         if query.trim().is_empty() || query.chars().count() > 4_096 {
             bail!("query must contain 1 to 4096 characters");
         }
@@ -91,7 +97,11 @@ impl AiRuntime {
             bail!("limit must be between 1 and 100");
         }
         let active = self.active();
-        active.user(user_id)?.retrieval.retrieve(query, limit).await
+        active
+            .user(user_id)?
+            .retrieval
+            .retrieve_with_rerank(query, limit, rerank)
+            .await
     }
 
     pub async fn status(&self, user_id: &str) -> Result<AiIndexStatus> {

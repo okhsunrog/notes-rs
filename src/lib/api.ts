@@ -5,6 +5,7 @@ import type {
   AiProviderSettings,
   AiProviderSettingsUpdate,
   AiRuntimeSettings,
+  AiSearchTrigger,
   Attachment,
   AttachmentImageDescriptor,
   AttachmentImageMime,
@@ -61,6 +62,7 @@ export type {
   AiProviderSettings,
   AiProviderSettingsUpdate,
   AiRuntimeSettings,
+  AiSearchTrigger,
   Attachment,
   AttachmentImageDescriptor,
   AttachmentImageMime,
@@ -296,6 +298,6 @@ export const searchPagesByTitle = (query: string, limit = 8) =>
 export const searchBlocksFts = (query: string, limit = 8, tokenMode: SearchTokenMode = "plain") =>
   unwrapCommand(commands.searchBlocksFts(query, limit, tokenMode));
 
-export function search(mode: SearchMode, query: string, limit = 20) {
-  return unwrapCommand(commands.searchNotes(mode, query, limit));
+export function search(mode: SearchMode, query: string, limit = 20, rerank?: boolean) {
+  return unwrapCommand(commands.searchNotes(mode, query, limit, rerank ?? null));
 }

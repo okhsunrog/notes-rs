@@ -35,7 +35,7 @@ import { queryKeys } from "@/lib/query";
 import { cn } from "@/lib/utils";
 import { DataSettingsSections } from "./data-settings-sections";
 import { ServerAiSettingsSection } from "./server-ai-settings-section";
-import { Field, FieldGroup, ModeButton, SettingsSection } from "./settings-controls";
+import { Field, FieldGroup, ModeButton, SettingsSection, ToggleField } from "./settings-controls";
 import { toSettingsUpdate } from "./settings-update";
 
 type Props = {
@@ -302,6 +302,55 @@ export function SettingsPage({
           <p className="text-xs text-muted-foreground">
             On KDE Plasma Wayland, native mode uses KWin server-side decorations.
           </p>
+        </SettingsSection>
+
+        <SettingsSection
+          title="Search"
+          description="Control when server AI joins the always-available local full-text search."
+        >
+          <ToggleField
+            checked={settings.aiSearchEnabled}
+            label="AI search"
+            description="Allow the configured notes server to refine local search results. Local FTS stays enabled when this is off."
+            onChange={(checked) => update("aiSearchEnabled", checked)}
+          />
+          <Field
+            label="AI trigger"
+            hint="Enter-only avoids server requests while you are still typing. Press Enter once to request AI results, then again to open the selection."
+          >
+            <select
+              value={settings.aiSearchTrigger}
+              disabled={!settings.aiSearchEnabled}
+              onChange={(event) =>
+                update(
+                  "aiSearchTrigger",
+                  event.currentTarget.value as SettingsSnapshot["aiSearchTrigger"],
+                )
+              }
+              className="h-10 w-full rounded-xl border border-border/70 bg-background/70 px-3 text-sm shadow-none disabled:opacity-55"
+            >
+              <option value="as_you_type">As you type</option>
+              <option value="enter_only">Enter only</option>
+            </select>
+          </Field>
+          <ToggleField
+            checked={settings.aiSearchRerank}
+            disabled={!settings.aiSearchEnabled}
+            label="Reranker"
+            description="Let the server rerank its hybrid candidates. When disabled, the server keeps its original RRF order."
+            onChange={(checked) => update("aiSearchRerank", checked)}
+          />
+          <details className="rounded-2xl border border-border/60 bg-background/40 p-4">
+            <summary className="cursor-pointer text-sm font-medium">Advanced</summary>
+            <div className="mt-3">
+              <ToggleField
+                checked={settings.searchDebugSources}
+                label="Per-result source badges"
+                description="Show local FTS and server AI labels on every result for ranking diagnostics."
+                onChange={(checked) => update("searchDebugSources", checked)}
+              />
+            </div>
+          </details>
         </SettingsSection>
 
         <SettingsSection

@@ -17,7 +17,7 @@ use notes_core::db::SearchHit;
 use notes_protocol::{
     AcceptedOps, AiIndexStatus, AiProviderProbeResult, AiProviderSettingsUpdate, AiRuntimeSettings,
     ApiErrorCode, ApiErrorDetail, ApiErrorResponse, BootstrapRequest, ChatEvent, ChatTurn,
-    ClientMessage, OpsBatch, PushOps, ServerErrorCode, ServerInfo, ServerMessage,
+    ClientMessage, OpsBatch, PushOps, SearchRequest, ServerErrorCode, ServerInfo, ServerMessage,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path as FilePath, PathBuf};
@@ -68,14 +68,6 @@ struct OpsQuery {
 struct SyncQuery {
     #[serde(default)]
     since: u64,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SearchRequest {
-    query: String,
-    #[serde(default = "default_search_limit")]
-    limit: u32,
 }
 
 #[derive(Deserialize)]
@@ -306,10 +298,6 @@ async fn reindex_ai(
         .map_err(ApiError::internal)
 }
 
-const fn default_search_limit() -> u32 {
-    20
-}
-
 async fn search(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -327,7 +315,7 @@ async fn search(
         .ai
         .as_ref()
         .ok_or_else(|| ApiError::unavailable("server AI is not configured"))?;
-    ai.search(&user.0.id, request.query, request.limit)
+    ai.search(&user.0.id, request.query, request.limit, request.rerank)
         .await
         .map(Json)
         .map_err(ApiError::internal)

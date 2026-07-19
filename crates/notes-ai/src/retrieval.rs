@@ -86,6 +86,18 @@ impl RetrievalPipeline {
     }
 
     pub async fn retrieve(&self, query: String, limit: u32) -> Result<Vec<SearchHit>> {
+        self.retrieve_with_rerank(query, limit, true).await
+    }
+
+    pub async fn retrieve_with_rerank(
+        &self,
+        query: String,
+        limit: u32,
+        rerank: bool,
+    ) -> Result<Vec<SearchHit>> {
+        if !rerank {
+            return self.hybrid_candidates(query, limit).await;
+        }
         let pool = limit.saturating_mul(4).max(RERANK_POOL_MIN);
         let candidates = self.hybrid_candidates(query.clone(), pool).await?;
         if candidates.is_empty() {
@@ -157,4 +169,82 @@ pub fn content_documents(content: &[Content]) -> Vec<String> {
         .iter()
         .map(|content| content.text().to_owned())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct StubEmbedder;
+
+    #[async_trait]
+    impl EmbedderBackend for StubEmbedder {
+        fn ndims(&self) -> usize {
+            1
+        }
+
+        fn id(&self) -> String {
+            "stub:embedder".into()
+        }
+
+        async fn embed_passages(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
+            Ok(texts.into_iter().map(|_| vec![0.0]).collect())
+        }
+
+        async fn embed_query(&self, _text: String) -> Result<Vec<f32>> {
+            Ok(vec![0.0])
+        }
+    }
+
+    struct EmptyVectors;
+
+    #[async_trait]
+    impl VectorStore for EmptyVectors {
+        async fn search(
+            &self,
+            _embedding: Vec<f32>,
+            _limit: u32,
+        ) -> Result<Vec<crate::store::VectorMatch>> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct CountingReranker(AtomicUsize);
+
+    #[async_trait]
+    impl RerankBackend for CountingReranker {
+        async fn rerank(&self, _query: String, _docs: Vec<String>) -> Result<Vec<(usize, f32)>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn rerank_false_keeps_rrf_order_without_calling_the_reranker() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let notes = db::open(directory.path().join("notes.db"))
+            .await
+            .expect("open notes database");
+        let page = db::create_page(&notes, "Needle project".into())
+            .await
+            .expect("create searchable page");
+        let reranker = Arc::new(CountingReranker(AtomicUsize::new(0)));
+        let pipeline = RetrievalPipeline::new(
+            notes,
+            Arc::new(EmptyVectors),
+            Arc::new(StubEmbedder),
+            reranker.clone(),
+        );
+
+        let hits = pipeline
+            .retrieve_with_rerank("Needle".into(), 10, false)
+            .await
+            .expect("retrieve without reranking");
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].content.uuid(), page.uuid);
+        assert_eq!(reranker.0.load(Ordering::SeqCst), 0);
+    }
 }

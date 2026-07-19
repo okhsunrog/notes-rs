@@ -104,7 +104,12 @@ export function SearchCard({ variant = "card", hits, setHits, onOpenContent, onD
     queryKey: queryKeys.journals,
     queryFn: () => listJournals({ limit: 7 }),
   });
+  const aiSearchEnabled = settingsQuery.data?.aiSearchEnabled ?? true;
+  const aiSearchAsYouType = settingsQuery.data?.aiSearchTrigger !== "enter_only";
+  const aiSearchRerank = settingsQuery.data?.aiSearchRerank ?? true;
+  const showSearchSources = settingsQuery.data?.searchDebugSources ?? false;
   const serverConfigured = Boolean(
+    aiSearchEnabled &&
     settingsQuery.data?.syncServerUrl?.trim() &&
     settingsQuery.data.configuredKeys.includes("SYNC_TOKEN"),
   );
@@ -122,18 +127,24 @@ export function SearchCard({ variant = "card", hits, setHits, onOpenContent, onD
     }
   }, []);
 
-  const runServer = useCallback(async (value: string, epoch: number) => {
-    try {
-      const result = await withTimeout(search("semantic", value, 20), SERVER_TIMEOUT_MS);
-      if (epoch !== serverEpoch.current) return;
-      setServerHits(result);
-      setServerState("success");
-    } catch {
-      if (epoch !== serverEpoch.current) return;
-      setServerHits([]);
-      setServerState("failed");
-    }
-  }, []);
+  const runServer = useCallback(
+    async (value: string, epoch: number) => {
+      try {
+        const result = await withTimeout(
+          search("semantic", value, 20, aiSearchRerank),
+          SERVER_TIMEOUT_MS,
+        );
+        if (epoch !== serverEpoch.current) return;
+        setServerHits(result);
+        setServerState("success");
+      } catch {
+        if (epoch !== serverEpoch.current) return;
+        setServerHits([]);
+        setServerState("failed");
+      }
+    },
+    [aiSearchRerank],
+  );
 
   useEffect(() => {
     const value = query.trim();
@@ -157,7 +168,7 @@ export function SearchCard({ variant = "card", hits, setHits, onOpenContent, onD
       void runLocal(value, nextLocalEpoch);
     }, LOCAL_DEBOUNCE_MS);
 
-    if (serverConfigured && Array.from(value).length >= 3) {
+    if (serverConfigured && aiSearchAsYouType && Array.from(value).length >= 3) {
       setServerState("pending");
       serverTimer.current = setTimeout(() => {
         serverTimer.current = null;
@@ -173,7 +184,7 @@ export function SearchCard({ variant = "card", hits, setHits, onOpenContent, onD
       localEpoch.current += 1;
       serverEpoch.current += 1;
     };
-  }, [query, runLocal, runServer, serverConfigured]);
+  }, [aiSearchAsYouType, query, runLocal, runServer, serverConfigured]);
 
   const presented = useMemo(
     () => presentSearchResults({ localHits, serverHits, serverState }),
@@ -317,6 +328,24 @@ export function SearchCard({ variant = "card", hits, setHits, onOpenContent, onD
     [controller, onDismiss, onOpenContent],
   );
 
+  const triggerEnterOnlySearch = () => {
+    if (
+      aiSearchAsYouType ||
+      !serverConfigured ||
+      Array.from(queryValue).length < 3 ||
+      serverState !== "idle"
+    ) {
+      return false;
+    }
+    clearSearchTimer(serverTimer);
+    const nextServerEpoch = ++serverEpoch.current;
+    setResultsFrozen(false);
+    setServerHits([]);
+    setServerState("pending");
+    void runServer(queryValue, nextServerEpoch);
+    return true;
+  };
+
   const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
     if (event.nativeEvent.isComposing) return;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -335,6 +364,10 @@ export function SearchCard({ variant = "card", hits, setHits, onOpenContent, onD
       return;
     }
     if (event.key === "Enter") {
+      if (triggerEnterOnlySearch()) {
+        event.preventDefault();
+        return;
+      }
       const selected = rows.find((row) => row.key === selectedKey);
       if (!selected) return;
       event.preventDefault();
@@ -400,6 +433,7 @@ export function SearchCard({ variant = "card", hits, setHits, onOpenContent, onD
           optionId={`search-option-${rows.indexOf(row)}`}
           selected={row.key === selectedKey}
           parentPage={null}
+          showSource={showSearchSources}
           onActivate={activateRow}
           onSelect={setSelectedKey}
         />
@@ -411,6 +445,7 @@ export function SearchCard({ variant = "card", hits, setHits, onOpenContent, onD
           optionId={`search-option-${rows.indexOf(row)}`}
           selected={row.key === selectedKey}
           parentPage={parentPageForRow(row, parentPages)}
+          showSource={showSearchSources}
           onActivate={activateRow}
           onSelect={setSelectedKey}
         />
@@ -423,6 +458,7 @@ export function SearchCard({ variant = "card", hits, setHits, onOpenContent, onD
           optionId={`search-option-${rows.indexOf(row)}`}
           selected={row.key === selectedKey}
           parentPage={parentPageForRow(row, parentPages)}
+          showSource={showSearchSources}
           onActivate={activateRow}
           onSelect={setSelectedKey}
         />
@@ -434,6 +470,7 @@ export function SearchCard({ variant = "card", hits, setHits, onOpenContent, onD
           optionId={`search-option-${rows.indexOf(row)}`}
           selected={row.key === selectedKey}
           parentPage={null}
+          showSource={showSearchSources}
           onActivate={activateRow}
           onSelect={setSelectedKey}
         />
@@ -512,6 +549,7 @@ function PaletteResultRow({
   optionId,
   selected,
   parentPage,
+  showSource,
   onActivate,
   onSelect,
 }: {
@@ -519,6 +557,7 @@ function PaletteResultRow({
   optionId: string;
   selected: boolean;
   parentPage: Page | null;
+  showSource: boolean;
   onActivate: (row: PaletteRow, shiftKey: boolean) => void | Promise<void>;
   onSelect: (key: string) => void;
 }) {
@@ -541,7 +580,7 @@ function PaletteResultRow({
       <span className="min-w-0 flex-1">
         <span className="flex items-center gap-2">
           <span className="truncate font-medium">{rowTitle(row)}</span>
-          {row.kind === "content" && (
+          {row.kind === "content" && showSource && (
             <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{row.source}</span>
           )}
         </span>

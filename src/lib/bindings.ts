@@ -83,7 +83,7 @@ export const commands = {
 	updatedAt: number,
 } | null, CommandError>(__TAURI_INVOKE("get_containing_page", { blockUuid })),
 	neighbors: (uuid: string, depth: number) => typedError<Content[], CommandError>(__TAURI_INVOKE("neighbors", { uuid, depth })),
-	searchNotes: (mode: SearchMode, query: string, limit: number) => typedError<SearchHit[], CommandError>(__TAURI_INVOKE("search_notes", { mode, query, limit })),
+	searchNotes: (mode: SearchMode, query: string, limit: number, rerank: boolean | null) => typedError<SearchHit[], CommandError>(__TAURI_INVOKE("search_notes", { mode, query, limit, rerank })),
 	chatStream: (history: ChatTurn[], message: string, allowWrites: boolean, activeContentUuid: string | null, requestId: string, onEvent: Channel<ChatEvent>) => typedError<string, CommandError>(__TAURI_INVOKE("chat_stream", { history, message, allowWrites, activeContentUuid, requestId, onEvent })),
 	cancelChat: (requestId: string) => __TAURI_INVOKE<boolean>("cancel_chat", { requestId }),
 	listPages: (filter: "notes" | "journals" | "all" | null, limit: number | null) => typedError<Page[], CommandError>(__TAURI_INVOKE("list_pages", { filter, limit })),
@@ -211,6 +211,8 @@ export type AiRuntimeSettings = {
 	entityExtraction: boolean,
 	queryRewriting: boolean,
 };
+
+export type AiSearchTrigger = "as_you_type" | "enter_only";
 
 export type Attachment = {
 	uuid: string,
@@ -506,6 +508,10 @@ export type SecretKey = "SYNC_TOKEN";
 export type SettingsSnapshot = {
 	windowDecorationMode: WindowDecorationMode,
 	syncServerUrl: string | null,
+	aiSearchEnabled: boolean,
+	aiSearchTrigger: AiSearchTrigger,
+	aiSearchRerank: boolean,
+	searchDebugSources: boolean,
 	configuredKeys: SecretKey[],
 	configPath: string,
 };
@@ -513,6 +519,10 @@ export type SettingsSnapshot = {
 export type SettingsUpdate = {
 	windowDecorationMode: WindowDecorationMode,
 	syncServerUrl: string | null,
+	aiSearchEnabled: boolean,
+	aiSearchTrigger: AiSearchTrigger,
+	aiSearchRerank: boolean,
+	searchDebugSources: boolean,
 	apiKeys?: Partial<{ [key in SecretKey]: string }>,
 	clearKeys?: SecretKey[],
 };

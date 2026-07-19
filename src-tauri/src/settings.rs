@@ -50,6 +50,18 @@ settings_enum!(WindowDecorationMode {
     Borderless => "borderless",
 });
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum AiSearchTrigger {
+    #[default]
+    AsYouType,
+    EnterOnly,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, specta::Type,
 )]
@@ -63,6 +75,10 @@ pub enum SecretKey {
 pub struct SettingsSnapshot {
     pub window_decoration_mode: WindowDecorationMode,
     pub sync_server_url: Option<url::Url>,
+    pub ai_search_enabled: bool,
+    pub ai_search_trigger: AiSearchTrigger,
+    pub ai_search_rerank: bool,
+    pub search_debug_sources: bool,
     pub configured_keys: Vec<SecretKey>,
     pub config_path: PathBuf,
 }
@@ -72,6 +88,10 @@ pub struct SettingsSnapshot {
 pub struct SettingsUpdate {
     pub window_decoration_mode: WindowDecorationMode,
     pub sync_server_url: Option<url::Url>,
+    pub ai_search_enabled: bool,
+    pub ai_search_trigger: AiSearchTrigger,
+    pub ai_search_rerank: bool,
+    pub search_debug_sources: bool,
     #[serde(default)]
     pub api_keys: BTreeMap<SecretKey, String>,
     #[serde(default)]
@@ -84,6 +104,14 @@ struct StoredSettings {
     version: u32,
     window_decoration_mode: WindowDecorationMode,
     sync_server_url: Option<url::Url>,
+    #[serde(default = "default_true")]
+    ai_search_enabled: bool,
+    #[serde(default)]
+    ai_search_trigger: AiSearchTrigger,
+    #[serde(default = "default_true")]
+    ai_search_rerank: bool,
+    #[serde(default)]
+    search_debug_sources: bool,
     secrets: BTreeMap<SecretKey, String>,
 }
 
@@ -93,6 +121,10 @@ impl Default for StoredSettings {
             version: SETTINGS_VERSION,
             window_decoration_mode: WindowDecorationMode::Native,
             sync_server_url: None,
+            ai_search_enabled: true,
+            ai_search_trigger: AiSearchTrigger::AsYouType,
+            ai_search_rerank: true,
+            search_debug_sources: false,
             secrets: BTreeMap::new(),
         }
     }
@@ -149,6 +181,10 @@ fn snapshot(stored: StoredSettings, path: PathBuf) -> Result<SettingsSnapshot> {
     Ok(SettingsSnapshot {
         window_decoration_mode: stored.window_decoration_mode,
         sync_server_url: stored.sync_server_url,
+        ai_search_enabled: stored.ai_search_enabled,
+        ai_search_trigger: stored.ai_search_trigger,
+        ai_search_rerank: stored.ai_search_rerank,
+        search_debug_sources: stored.search_debug_sources,
         configured_keys,
         config_path: path,
     })
@@ -159,6 +195,10 @@ pub fn save(app: &AppHandle, update: SettingsUpdate) -> Result<SettingsSnapshot>
     let mut stored = load_stored(app)?;
     stored.window_decoration_mode = update.window_decoration_mode;
     stored.sync_server_url = update.sync_server_url;
+    stored.ai_search_enabled = update.ai_search_enabled;
+    stored.ai_search_trigger = update.ai_search_trigger;
+    stored.ai_search_rerank = update.ai_search_rerank;
+    stored.search_debug_sources = update.search_debug_sources;
     for key in update.clear_keys {
         stored.secrets.remove(&key);
     }
@@ -293,11 +333,49 @@ mod tests {
         assert_eq!(
             object.keys().map(String::as_str).collect::<Vec<_>>(),
             vec![
+                "aiSearchEnabled",
+                "aiSearchRerank",
+                "aiSearchTrigger",
+                "searchDebugSources",
                 "secrets",
                 "syncServerUrl",
                 "version",
                 "windowDecorationMode",
             ]
         );
+    }
+
+    #[test]
+    fn legacy_settings_default_new_search_preferences() {
+        let stored: StoredSettings = serde_json::from_value(serde_json::json!({
+            "version": SETTINGS_VERSION,
+            "windowDecorationMode": "native",
+            "syncServerUrl": null,
+            "secrets": {}
+        }))
+        .expect("read legacy settings");
+        assert!(stored.ai_search_enabled);
+        assert_eq!(stored.ai_search_trigger, AiSearchTrigger::AsYouType);
+        assert!(stored.ai_search_rerank);
+        assert!(!stored.search_debug_sources);
+    }
+
+    #[test]
+    fn search_preferences_round_trip_through_storage_and_snapshot() {
+        let stored = StoredSettings {
+            ai_search_enabled: false,
+            ai_search_trigger: AiSearchTrigger::EnterOnly,
+            ai_search_rerank: false,
+            search_debug_sources: true,
+            ..StoredSettings::default()
+        };
+        let body = serde_json::to_vec(&stored).expect("serialize settings");
+        let restored: StoredSettings = serde_json::from_slice(&body).expect("restore settings");
+        let snapshot = snapshot(restored, PathBuf::from("settings.json")).expect("snapshot");
+
+        assert!(!snapshot.ai_search_enabled);
+        assert_eq!(snapshot.ai_search_trigger, AiSearchTrigger::EnterOnly);
+        assert!(!snapshot.ai_search_rerank);
+        assert!(snapshot.search_debug_sources);
     }
 }

@@ -1,6 +1,6 @@
 use notes_protocol::{
     AiProviderSettingsUpdate, ApiErrorCode, ApiErrorDetail, ApiErrorResponse, CompletionProtocol,
-    ServerErrorCode, ServerMessage,
+    SearchRequest, ServerErrorCode, ServerMessage,
 };
 
 #[test]
@@ -48,6 +48,24 @@ fn error_codes_use_stable_snake_case_wire_values() {
             code
         );
     }
+}
+
+#[test]
+fn legacy_search_requests_default_to_reranking() {
+    let request: SearchRequest = serde_json::from_value(serde_json::json!({
+        "query": "project",
+        "limit": 8
+    }))
+    .expect("decode legacy search request");
+    assert!(request.rerank);
+
+    let without_reranking: SearchRequest = serde_json::from_value(serde_json::json!({
+        "query": "project",
+        "limit": 8,
+        "rerank": false
+    }))
+    .expect("decode explicit rerank preference");
+    assert!(!without_reranking.rerank);
 }
 
 #[test]

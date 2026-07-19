@@ -7,6 +7,7 @@ import {
   Cloud,
   KeyRound,
   Palette,
+  Search,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -31,6 +32,7 @@ export function SettingsSection({
       "Realtime sync": Cloud,
       "Background indexing": Activity,
       "Server AI": BrainCircuit,
+      Search,
     }[title] ?? Palette;
   return (
     <section className="space-y-5 rounded-3xl border border-border/60 bg-card/70 p-5 shadow-sm backdrop-blur sm:p-6">
