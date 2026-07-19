@@ -12,6 +12,8 @@ use std::path::Path;
 use std::sync::Once;
 use unicode_categories::UnicodeCategories;
 
+use crate::chunking::{SINGLE_VECTOR_MAX_CHARS, TextChunk, split_for_embedding};
+
 const INPUT_FORMAT_VERSION: u32 = 2;
 const MAX_ATTEMPTS: i64 = 8;
 const BACKOFF_BASE_SECS: i64 = 5;
@@ -93,6 +95,44 @@ pub struct VectorMatch {
     pub distance: f64,
     pub chunk_index: u32,
     pub chunk_text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexedContentKind {
+    Page,
+    Block,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexInspectionItem {
+    pub content_uuid: uuid::Uuid,
+    pub kind: IndexedContentKind,
+    pub composed_chars: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexLengthBucket {
+    pub label: &'static str,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InspectedDocument {
+    pub item: IndexInspectionItem,
+    pub composed_text: String,
+    pub chunks: Vec<TextChunk>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexInspection {
+    pub document_count: usize,
+    pub skipped_content_free_blocks: usize,
+    pub tier_two_blocks: usize,
+    pub composed_chars: usize,
+    pub estimated_tokens: usize,
+    pub histogram: Vec<IndexLengthBucket>,
+    pub longest: Vec<IndexInspectionItem>,
+    pub selected: Option<InspectedDocument>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1058,6 +1098,7 @@ struct IndexDocument {
     text: String,
     header: String,
     input_hash: String,
+    kind: IndexedContentKind,
 }
 
 struct IndexSourceCursor {
@@ -1227,7 +1268,10 @@ async fn index_documents(notes: &Connection) -> Result<BTreeMap<uuid::Uuid, Inde
         .filter_map(|(uuid, input)| {
             let text = compose_text(&input)?;
             let header = composition_header(&input);
-            Some((uuid, index_document(text, header)))
+            Some((
+                uuid,
+                index_document(text, header, IndexedContentKind::Block),
+            ))
         })
         .collect::<BTreeMap<_, _>>();
     let mut current_page = None;
@@ -1237,7 +1281,10 @@ async fn index_documents(notes: &Connection) -> Result<BTreeMap<uuid::Uuid, Inde
             if let Some(page_uuid) = current_page
                 && let Some(text) = compose_page_preview(&preview_rows)
             {
-                documents.insert(page_uuid, index_document(text, String::new()));
+                documents.insert(
+                    page_uuid,
+                    index_document(text, String::new(), IndexedContentKind::Page),
+                );
             }
             current_page = Some(row.page_uuid);
             preview_rows.clear();
@@ -1247,12 +1294,107 @@ async fn index_documents(notes: &Connection) -> Result<BTreeMap<uuid::Uuid, Inde
     if let Some(page_uuid) = current_page
         && let Some(text) = compose_page_preview(&preview_rows)
     {
-        documents.insert(page_uuid, index_document(text, String::new()));
+        documents.insert(
+            page_uuid,
+            index_document(text, String::new(), IndexedContentKind::Page),
+        );
     }
     Ok(documents)
 }
 
-fn index_document(text: String, header: String) -> IndexDocument {
+pub async fn inspect_index(
+    notes: &Connection,
+    selected_uuid: Option<uuid::Uuid>,
+) -> Result<IndexInspection> {
+    let documents = index_documents(notes).await?;
+    let total_blocks = notes
+        .call(|database| {
+            database.query_row("SELECT COUNT(*) FROM blocks", [], |row| {
+                row.get::<_, i64>(0)
+            })
+        })
+        .await? as usize;
+    let mut histogram = [0_usize; 7];
+    let mut composed_chars = 0;
+    let mut provider_chars = 0;
+    let mut tier_two_blocks = 0;
+    let mut block_documents = 0;
+    let mut longest = Vec::with_capacity(documents.len());
+    for (content_uuid, document) in &documents {
+        let chars = document.text.chars().count();
+        composed_chars += chars;
+        histogram[length_bucket(chars)] += 1;
+        let chunks = split_for_embedding(&document.text, &document.header);
+        provider_chars += chunks
+            .iter()
+            .map(|chunk| chunk.text.chars().count())
+            .sum::<usize>();
+        if document.kind == IndexedContentKind::Block {
+            block_documents += 1;
+            tier_two_blocks += usize::from(chars > SINGLE_VECTOR_MAX_CHARS);
+        }
+        longest.push(IndexInspectionItem {
+            content_uuid: *content_uuid,
+            kind: document.kind,
+            composed_chars: chars,
+        });
+    }
+    longest.sort_by(|left, right| {
+        right
+            .composed_chars
+            .cmp(&left.composed_chars)
+            .then_with(|| left.content_uuid.cmp(&right.content_uuid))
+    });
+    longest.truncate(20);
+    let selected = selected_uuid.and_then(|content_uuid| {
+        let document = documents.get(&content_uuid)?;
+        Some(InspectedDocument {
+            item: IndexInspectionItem {
+                content_uuid,
+                kind: document.kind,
+                composed_chars: document.text.chars().count(),
+            },
+            composed_text: document.text.clone(),
+            chunks: split_for_embedding(&document.text, &document.header),
+        })
+    });
+    Ok(IndexInspection {
+        document_count: documents.len(),
+        skipped_content_free_blocks: total_blocks.saturating_sub(block_documents),
+        tier_two_blocks,
+        composed_chars,
+        estimated_tokens: provider_chars.div_ceil(4),
+        histogram: [
+            "0-255",
+            "256-511",
+            "512-1023",
+            "1024-1999",
+            "2000-3999",
+            "4000-7999",
+            "8000+",
+        ]
+        .into_iter()
+        .zip(histogram)
+        .map(|(label, count)| IndexLengthBucket { label, count })
+        .collect(),
+        longest,
+        selected,
+    })
+}
+
+fn length_bucket(chars: usize) -> usize {
+    match chars {
+        0..=255 => 0,
+        256..=511 => 1,
+        512..=1_023 => 2,
+        1_024..=1_999 => 3,
+        2_000..=3_999 => 4,
+        4_000..=7_999 => 5,
+        _ => 6,
+    }
+}
+
+fn index_document(text: String, header: String, kind: IndexedContentKind) -> IndexDocument {
     let mut digest = Sha256::new();
     digest.update(INPUT_FORMAT_VERSION.to_le_bytes());
     digest.update(text.as_bytes());
@@ -1260,6 +1402,7 @@ fn index_document(text: String, header: String) -> IndexDocument {
         input_hash: format!("{:x}", digest.finalize()),
         text,
         header,
+        kind,
     }
 }
 
@@ -1367,6 +1510,7 @@ fn extraction_input(title: Option<&str>, content: &str) -> IndexDocument {
         text,
         header: String::new(),
         input_hash: format!("{:x}", digest.finalize()),
+        kind: IndexedContentKind::Block,
     }
 }
 
@@ -1696,6 +1840,61 @@ mod tests {
 
         let documents = index_documents(&notes).await.expect("compose documents");
         assert_eq!(documents[&page.uuid].text, "Preorder\nroot\nchild\nsibling");
+    }
+
+    #[tokio::test]
+    async fn index_inspection_reports_skips_tier_two_and_exact_chunks() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let notes = notes_core::db::open(directory.path().join("notes.db"))
+            .await
+            .expect("notes database");
+        let page = notes_core::db::create_page(&notes, "Inspection".into())
+            .await
+            .expect("create page");
+        let long = notes_core::db::create_block(
+            &notes,
+            page.uuid,
+            None,
+            None,
+            BlockStyle::Paragraph,
+            "Ж".repeat(3_000),
+        )
+        .await
+        .expect("create long block");
+        notes_core::db::create_block(
+            &notes,
+            page.uuid,
+            None,
+            Some(long.uuid),
+            BlockStyle::Paragraph,
+            "*** — []()".into(),
+        )
+        .await
+        .expect("create content-free block");
+
+        let report = inspect_index(&notes, Some(long.uuid))
+            .await
+            .expect("inspect index");
+        assert_eq!(report.document_count, 2);
+        assert_eq!(report.skipped_content_free_blocks, 1);
+        assert_eq!(report.tier_two_blocks, 1);
+        assert_eq!(
+            report
+                .histogram
+                .iter()
+                .map(|bucket| bucket.count)
+                .sum::<usize>(),
+            2
+        );
+        assert_eq!(report.longest[0].content_uuid, long.uuid);
+        let selected = report.selected.expect("selected block");
+        assert_eq!(selected.item.kind, IndexedContentKind::Block);
+        assert_eq!(
+            selected.composed_text,
+            format!("Inspection\n{}", "Ж".repeat(3_000))
+        );
+        assert!(selected.chunks.len() > 1);
+        assert!(report.estimated_tokens > 0);
     }
 
     #[tokio::test]
