@@ -292,6 +292,14 @@ mod tests {
     }
 
     #[test]
+    fn relaxed_prefix_quotes_fts_operators_as_plain_tokens() {
+        assert_eq!(
+            relaxed_stem_prefix_search_query("покупок OR NEAR"),
+            "(\"покупок\" OR \"покупо\"* OR \"покуп\"*) AND \"or\" AND \"near\"*"
+        );
+    }
+
+    #[test]
     fn mixed() {
         let a = stem("Programming в Москве");
         let b = stem("программ in москва");
