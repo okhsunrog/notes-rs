@@ -156,7 +156,7 @@ function App() {
                 className={`mr-1 flex h-8 items-center gap-1.5 rounded-xl border px-2.5 text-xs ${
                   syncQuery.data?.state === "online"
                     ? "border-emerald-500/20 bg-emerald-500/8 text-emerald-600"
-                    : syncQuery.data?.state === "error"
+                    : syncQuery.data?.state === "error" || syncQuery.data?.state === "conflict"
                       ? "border-destructive/20 bg-destructive/5 text-destructive"
                       : "border-border/60 bg-card/55 text-muted-foreground"
                 }`}

@@ -223,6 +223,7 @@ export const restartApp = commands.restartApp;
 export const chatStream = checkedCommand(commands.chatStream);
 export const cancelChat = commands.cancelChat;
 export const getSyncStatus = commands.syncStatus;
+export const retrySync = commands.retrySync;
 export const getServerAiStatus = checkedCommand(commands.serverAiStatus);
 export const saveServerAiSettings = checkedCommand(commands.saveServerAiSettings);
 export const saveServerAiProvider = checkedCommand(commands.saveServerAiProvider);

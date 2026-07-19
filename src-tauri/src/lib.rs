@@ -24,6 +24,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::load_settings,
             commands::save_settings,
             commands::reset_settings,
+            commands::retry_sync,
             commands::restart_app,
             commands::history_status,
             commands::undo,
@@ -152,6 +153,7 @@ pub fn run() {
             });
             let sync_runtime = sync::SyncRuntime::disabled();
             let sync_status = sync_runtime.status.clone();
+            let sync_retries = sync_runtime.subscribe_retries();
             app.manage(sync_runtime);
 
             #[cfg(not(mobile))]
@@ -211,6 +213,7 @@ pub fn run() {
                                 token,
                                 blob_store,
                                 sync_status,
+                                sync_retries,
                             )
                         }
                         *startup.write().unwrap_or_else(|e| e.into_inner()) =

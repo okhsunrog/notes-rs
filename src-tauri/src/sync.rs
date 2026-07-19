@@ -9,6 +9,7 @@ use serde::Serialize;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tauri::AppHandle;
+use tokio::sync::watch;
 use tokio_tungstenite::tungstenite::Message;
 
 const SYNC_BATCH_SIZE: u32 = 256;
@@ -70,6 +71,7 @@ pub enum SyncConnectionState {
     Syncing,
     Online,
     Offline,
+    Conflict,
     Error,
 }
 
@@ -85,10 +87,12 @@ pub struct SyncStatus {
 
 pub struct SyncRuntime {
     pub status: Arc<RwLock<SyncStatus>>,
+    retry: watch::Sender<u64>,
 }
 
 impl SyncRuntime {
     pub fn disabled() -> Self {
+        let (retry, _) = watch::channel(0);
         Self {
             status: Arc::new(RwLock::new(SyncStatus {
                 state: SyncConnectionState::Disabled,
@@ -97,7 +101,22 @@ impl SyncRuntime {
                 pending_operations: 0,
                 message: None,
             })),
+            retry,
         }
+    }
+
+    pub fn request_retry(&self) {
+        self.retry.send_modify(|generation| {
+            *generation = generation.wrapping_add(1);
+        });
+    }
+
+    pub fn sync_settings_changed(&self) {
+        self.request_retry();
+    }
+
+    pub fn subscribe_retries(&self) -> watch::Receiver<u64> {
+        self.retry.subscribe()
     }
 }
 
@@ -108,11 +127,45 @@ pub fn spawn_worker(
     token: String,
     blob_store: BlobStore,
     status: Arc<RwLock<SyncStatus>>,
+    mut retries: watch::Receiver<u64>,
 ) {
     tauri::async_runtime::spawn(async move {
-        let transport = match HttpTransport::new(server_url.clone(), token) {
-            Ok(transport) => transport,
-            Err(error) => {
+        let mut credentials = Some((server_url, token));
+        'configuration: loop {
+            let Some((server_url, token)) = credentials.take() else {
+                replace_status(
+                    &app,
+                    &status,
+                    SyncStatus {
+                        state: SyncConnectionState::Disabled,
+                        server_url: None,
+                        last_server_seq: notes_core::sync_cursor(&connection).await.unwrap_or(0),
+                        pending_operations: 0,
+                        message: None,
+                    },
+                );
+                return;
+            };
+            let transport = match HttpTransport::new(server_url.clone(), token) {
+                Ok(transport) => transport,
+                Err(error) => {
+                    replace_status(
+                        &app,
+                        &status,
+                        SyncStatus {
+                            state: SyncConnectionState::Error,
+                            server_url: Some(server_url),
+                            last_server_seq: 0,
+                            pending_operations: 0,
+                            message: Some(error.to_string()),
+                        },
+                    );
+                    return;
+                }
+            };
+            if let Err(error) =
+                notes_core::configure_sync(&connection, transport.base_url().as_str()).await
+            {
                 replace_status(
                     &app,
                     &status,
@@ -126,67 +179,107 @@ pub fn spawn_worker(
                 );
                 return;
             }
-        };
-        if let Err(error) =
-            notes_core::configure_sync(&connection, transport.base_url().as_str()).await
-        {
-            replace_status(
-                &app,
-                &status,
-                SyncStatus {
-                    state: SyncConnectionState::Error,
-                    server_url: Some(server_url),
-                    last_server_seq: 0,
-                    pending_operations: 0,
-                    message: Some(error.to_string()),
-                },
-            );
-            return;
-        }
 
-        let mut delay = Duration::from_secs(1);
-        loop {
-            set_connection_state(
-                &app,
-                &status,
-                &connection,
-                &server_url,
-                SyncConnectionState::Connecting,
-                None,
-            )
-            .await;
-            let result = synchronize_session(
-                &app,
-                &connection,
-                &transport,
-                &status,
-                &server_url,
-                &blob_store,
-            )
-            .await;
-            let message = result
-                .as_ref()
-                .err()
-                .map(|error| error.to_string())
-                .unwrap_or_else(|| "sync connection closed".into());
-            let permanent = result.as_ref().is_err_and(is_permanent_failure);
-            set_connection_state(
-                &app,
-                &status,
-                &connection,
-                &server_url,
-                if permanent {
-                    SyncConnectionState::Error
-                } else {
-                    SyncConnectionState::Offline
-                },
-                Some(message),
-            )
-            .await;
-            tokio::time::sleep(delay).await;
-            delay = (delay * 2).min(Duration::from_secs(30));
+            let mut delay = Duration::from_secs(1);
+            loop {
+                let retry_generation = *retries.borrow_and_update();
+                set_connection_state(
+                    &app,
+                    &status,
+                    &connection,
+                    &server_url,
+                    SyncConnectionState::Connecting,
+                    None,
+                )
+                .await;
+                let result = synchronize_session(
+                    &app,
+                    &connection,
+                    &transport,
+                    &status,
+                    &server_url,
+                    &blob_store,
+                )
+                .await;
+                let message = result
+                    .as_ref()
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "sync connection closed".into());
+                let failure_state = result
+                    .as_ref()
+                    .err()
+                    .map_or(SyncConnectionState::Offline, failure_state);
+                if failure_state == SyncConnectionState::Conflict {
+                    set_connection_state(
+                        &app,
+                        &status,
+                        &connection,
+                        &server_url,
+                        failure_state,
+                        Some(format!(
+                            "{message}; update sync settings or retry explicitly"
+                        )),
+                    )
+                    .await;
+                    if !wait_for_retry(&mut retries, retry_generation).await {
+                        return;
+                    }
+                    credentials = match crate::settings::runtime(&app)
+                        .and_then(|settings| settings.sync_credentials())
+                    {
+                        Ok(credentials) => credentials,
+                        Err(error) => {
+                            set_connection_state(
+                                &app,
+                                &status,
+                                &connection,
+                                &server_url,
+                                SyncConnectionState::Error,
+                                Some(error.to_string()),
+                            )
+                            .await;
+                            return;
+                        }
+                    };
+                    continue 'configuration;
+                }
+                set_connection_state(
+                    &app,
+                    &status,
+                    &connection,
+                    &server_url,
+                    failure_state,
+                    Some(message),
+                )
+                .await;
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(30));
+            }
         }
     });
+}
+
+fn failure_state(error: &anyhow::Error) -> SyncConnectionState {
+    if matches!(
+        error.downcast_ref::<SyncSessionError>(),
+        Some(SyncSessionError::WorkspaceConflict)
+    ) {
+        SyncConnectionState::Conflict
+    } else if is_permanent_failure(error) {
+        SyncConnectionState::Error
+    } else {
+        SyncConnectionState::Offline
+    }
+}
+
+async fn wait_for_retry(retries: &mut watch::Receiver<u64>, generation: u64) -> bool {
+    while *retries.borrow_and_update() == generation {
+        if retries.changed().await.is_err() {
+            return false;
+        }
+    }
+    true
 }
 
 async fn synchronize_session(
@@ -559,6 +652,32 @@ fn emit_workspace_changed(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn workspace_conflict_parks_until_settings_or_explicit_retry_changes_generation() {
+        let conflict = anyhow::Error::from(SyncSessionError::WorkspaceConflict);
+        assert_eq!(failure_state(&conflict), SyncConnectionState::Conflict);
+
+        let runtime = SyncRuntime::disabled();
+        let mut retries = runtime.subscribe_retries();
+        let generation = *retries.borrow_and_update();
+        let mut parked =
+            tokio::spawn(async move { wait_for_retry(&mut retries, generation).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut parked)
+                .await
+                .is_err(),
+            "workspace conflict must park the loop",
+        );
+
+        runtime.sync_settings_changed();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), parked)
+                .await
+                .expect("retry generation resumes the parked loop")
+                .expect("parked task completes")
+        );
+    }
 
     #[test]
     fn sequence_gaps_are_retriable_but_other_sync_conflicts_are_permanent() {

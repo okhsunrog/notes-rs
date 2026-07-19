@@ -26,6 +26,7 @@ import {
   loadSettings,
   resetSettings,
   restartApp,
+  retrySync,
   saveSettings,
   type SecretKey,
   type SettingsSnapshot,
@@ -150,6 +151,19 @@ export function SettingsPage({
       setSettings(restored);
       setError("");
       setMessage("Device settings reset. Restart the app after configuring the server.");
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function retrySyncConnection() {
+    setBusy(true);
+    setError("");
+    try {
+      await retrySync();
+      setMessage("Sync retry requested.");
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -408,7 +422,7 @@ export function SettingsPage({
                 className={cn(
                   syncQuery.data?.state === "online"
                     ? "text-emerald-600"
-                    : syncQuery.data?.state === "error"
+                    : syncQuery.data?.state === "error" || syncQuery.data?.state === "conflict"
                       ? "text-destructive"
                       : "text-muted-foreground",
                 )}
@@ -421,6 +435,18 @@ export function SettingsPage({
                 seq {syncQuery.data.lastServerSeq} · {syncQuery.data.pendingOperations} pending
                 {syncQuery.data.message ? ` · ${syncQuery.data.message}` : ""}
               </p>
+            )}
+            {syncQuery.data?.state === "conflict" && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="mt-3"
+                disabled={busy}
+                onClick={() => void retrySyncConnection()}
+              >
+                Retry sync
+              </Button>
             )}
           </div>
           <p className="text-xs break-all text-muted-foreground">

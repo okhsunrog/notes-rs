@@ -105,19 +105,45 @@ pub fn load_settings(app: AppHandle) -> CommandResult<crate::settings::SettingsS
 #[specta::specta]
 pub fn save_settings(
     app: AppHandle,
+    sync: State<'_, crate::sync::SyncRuntime>,
     update: crate::settings::SettingsUpdate,
 ) -> CommandResult<crate::settings::SettingsSnapshot> {
+    let previous_sync = crate::settings::runtime(&app)
+        .and_then(|settings| settings.sync_credentials())
+        .map_err(err)?;
     let settings = crate::settings::save(&app, update).map_err(err)?;
+    let current_sync = crate::settings::runtime(&app)
+        .and_then(|settings| settings.sync_credentials())
+        .map_err(err)?;
+    if previous_sync != current_sync {
+        sync.sync_settings_changed();
+    }
     emit_domain(&app, DomainEvent::SettingsChanged);
     Ok(settings)
 }
 
 #[tauri::command]
 #[specta::specta]
-pub fn reset_settings(app: AppHandle) -> CommandResult<crate::settings::SettingsSnapshot> {
+pub fn reset_settings(
+    app: AppHandle,
+    sync: State<'_, crate::sync::SyncRuntime>,
+) -> CommandResult<crate::settings::SettingsSnapshot> {
+    let previous_sync = crate::settings::runtime(&app)
+        .and_then(|settings| settings.sync_credentials())
+        .ok()
+        .flatten();
     let settings = crate::settings::reset(&app).map_err(err)?;
+    if previous_sync.is_some() {
+        sync.sync_settings_changed();
+    }
     emit_domain(&app, DomainEvent::SettingsChanged);
     Ok(settings)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn retry_sync(sync: State<'_, crate::sync::SyncRuntime>) {
+    sync.request_retry();
 }
 
 #[tauri::command]

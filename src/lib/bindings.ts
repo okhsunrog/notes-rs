@@ -24,6 +24,7 @@ export const commands = {
 	loadSettings: () => typedError<SettingsSnapshot, CommandError>(__TAURI_INVOKE("load_settings")),
 	saveSettings: (update: SettingsUpdate) => typedError<SettingsSnapshot, CommandError>(__TAURI_INVOKE("save_settings", { update })),
 	resetSettings: () => typedError<SettingsSnapshot, CommandError>(__TAURI_INVOKE("reset_settings")),
+	retrySync: () => __TAURI_INVOKE<void>("retry_sync"),
 	restartApp: () => __TAURI_INVOKE<void>("restart_app"),
 	historyStatus: () => typedError<HistoryStatus, CommandError>(__TAURI_INVOKE("history_status")),
 	undo: () => typedError<HistoryMoveResult, CommandError>(__TAURI_INVOKE("undo")),
@@ -551,7 +552,7 @@ export type StartupReadyEvent = null;
 
 export type StartupStatus = { state: "starting"; message: string } | { state: "ready" } | { state: "error"; message: string };
 
-export type SyncConnectionState = "disabled" | "connecting" | "syncing" | "online" | "offline" | "error";
+export type SyncConnectionState = "disabled" | "connecting" | "syncing" | "online" | "offline" | "conflict" | "error";
 
 export type SyncStatus = {
 	state: SyncConnectionState,
