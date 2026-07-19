@@ -26,9 +26,11 @@ fn hash(byte: u8) -> BlobHash {
 #[tokio::test]
 async fn task_state_updates_are_typed_undoable_and_reject_non_tasks() {
     let database = database().await;
-    let note = db::create_note(&database.connection)
+    let note = db::create_note(&database.connection, None)
         .await
-        .expect("create note");
+        .expect("create note")
+        .into_created()
+        .expect("untitled note is created");
 
     let error = db::set_task_state(
         &database.connection,
@@ -86,9 +88,11 @@ async fn task_state_updates_are_typed_undoable_and_reject_non_tasks() {
 #[tokio::test]
 async fn archive_roundtrip_preserves_task_state_inside_block_style() {
     let source = database().await;
-    let note = db::create_note(&source.connection)
+    let note = db::create_note(&source.connection, None)
         .await
-        .expect("create note");
+        .expect("create note")
+        .into_created()
+        .expect("untitled note is created");
     db::set_block_style(
         &source.connection,
         note.initial_block.uuid,
@@ -131,7 +135,11 @@ async fn archive_roundtrip_preserves_task_state_inside_block_style() {
 async fn undo_and_redo_restore_a_deleted_page_subtree_and_attachments_exactly() {
     let database = database().await;
     let connection = &database.connection;
-    let note = db::create_note(connection).await.expect("create note");
+    let note = db::create_note(connection, None)
+        .await
+        .expect("create note")
+        .into_created()
+        .expect("untitled note is created");
     let root = db::set_block_style(connection, note.initial_block.uuid, BlockStyle::Heading1)
         .await
         .expect("style root");
@@ -519,9 +527,11 @@ async fn large_archive_restore_reconciles_deleted_and_created_trees_once() {
         })
         .await
         .expect("align destination workspace");
-    let existing = db::create_note(&destination.connection)
+    let existing = db::create_note(&destination.connection, None)
         .await
-        .expect("create existing destination tree");
+        .expect("create existing destination tree")
+        .into_created()
+        .expect("untitled note is created");
     let mut existing_parent = existing.initial_block.uuid;
     for _ in 1..EXISTING_BLOCKS {
         existing_parent = db::create_block(
@@ -571,7 +581,11 @@ async fn large_archive_restore_reconciles_deleted_and_created_trees_once() {
 #[tokio::test]
 async fn orphan_blob_cleanup_is_deduplicated_and_serialized_against_metadata() {
     let database = database().await;
-    let note = db::create_note(&database.connection).await.unwrap();
+    let note = db::create_note(&database.connection, None)
+        .await
+        .unwrap()
+        .into_created()
+        .expect("untitled note is created");
     let referenced = hash(0x31);
     let orphan = hash(0x32);
     db::create_attachment(

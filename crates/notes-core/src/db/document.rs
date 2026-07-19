@@ -661,7 +661,11 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("notes.db");
         let connection = db::open(&path).await.expect("open database");
-        let note = db::create_note(&connection).await.expect("create note");
+        let note = db::create_note(&connection, None)
+            .await
+            .expect("create note")
+            .into_created()
+            .expect("untitled note is created");
         let block_uuid = note.initial_block.uuid;
         let page_uuid = note.page.uuid;
         let path_for_writer = path.clone();

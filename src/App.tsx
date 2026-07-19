@@ -296,7 +296,10 @@ function App() {
         onAssistantWidthChange={(width) => dispatchWorkspace({ type: "set_dock_width", width })}
       />
       <Dialog open={searchOpen} onOpenChange={setSearchOpen}>
-        <DialogContent className="search-dialog top-[18%] max-w-2xl translate-y-0 rounded-2xl border-border/60 bg-background/95 p-3 shadow-2xl backdrop-blur-xl">
+        <DialogContent
+          showCloseButton={false}
+          className="search-dialog top-[18%] max-w-2xl translate-y-0 gap-0 overflow-hidden rounded-2xl border-border/60 bg-background/95 p-0 shadow-2xl backdrop-blur-xl"
+        >
           <div className="sr-only">
             <DialogTitle>Search notes</DialogTitle>
             <DialogDescription>Search all notes and blocks.</DialogDescription>
@@ -305,10 +308,8 @@ function App() {
             variant="dialog"
             hits={workspace.hits}
             setHits={workspace.setHits}
-            onOpenContent={async (content, disposition) => {
-              await workspace.openContent(content, disposition);
-              setSearchOpen(false);
-            }}
+            onOpenContent={workspace.openContent}
+            onDismiss={() => setSearchOpen(false)}
           />
         </DialogContent>
       </Dialog>

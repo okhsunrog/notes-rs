@@ -368,9 +368,11 @@ async fn identical_replicas_produce_the_same_document_revision() {
 #[tokio::test]
 async fn exact_document_replace_is_a_zero_mutation_noop() {
     let database = database().await;
-    let note = db::create_note(&database.connection)
+    let note = db::create_note(&database.connection, None)
         .await
-        .expect("create note");
+        .expect("create note")
+        .into_created()
+        .expect("untitled note is created");
     db::set_block_content(
         &database.connection,
         note.initial_block.uuid,

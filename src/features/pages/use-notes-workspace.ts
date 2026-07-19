@@ -49,9 +49,11 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
   const [hits, setHits] = useState<SearchHit[]>([]);
   const activePane = useWorkspaceStore(getActivePane);
   const dispatchWorkspace = useWorkspaceStore((state) => state.dispatch);
-  const [newNote, setNewNote] = useState<{ pageUuid: string; blockUuid: string | null } | null>(
-    null,
-  );
+  const [newNote, setNewNote] = useState<{
+    pageUuid: string;
+    blockUuid: string | null;
+    autoFocusTitle: boolean;
+  } | null>(null);
   const [creatingNote, setCreatingNote] = useState(false);
   const [journalBusy, setJournalBusy] = useState(false);
   const creatingNoteRef = useRef(false);
@@ -100,32 +102,48 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
     pageSessions,
   ]);
 
-  const createNewNote = useCallback(async () => {
-    if (creatingNoteRef.current) return;
-    const navigationEpoch = ++navigationEpochRef.current;
-    creatingNoteRef.current = true;
-    setCreatingNote(true);
-    try {
-      const note = await createNote();
-      queryClient.setQueryData(queryKeys.page(note.page.uuid), note.page);
-      queryClient.setQueryData(queryKeys.children(note.page.uuid), [note.initialBlock]);
-      await queryClient.invalidateQueries({ queryKey: queryKeys.pages });
-      if (navigationEpoch !== navigationEpochRef.current) return;
-      setNewNote({ pageUuid: note.page.uuid, blockUuid: note.initialBlock.uuid });
-      openTarget(
-        pageTarget(note.page.uuid, { blockUuid: note.initialBlock.uuid }),
-        currentDisposition,
-      );
-      setHits([]);
-      notifyInfo("New note ready — name it, then press Enter to write.");
-      showEditor();
-    } catch (error) {
-      notifyError("create", error);
-    } finally {
-      creatingNoteRef.current = false;
-      setCreatingNote(false);
-    }
-  }, [openTarget, queryClient, showEditor]);
+  const createNewNote = useCallback(
+    async (title?: string, disposition: OpenDisposition = currentDisposition) => {
+      if (creatingNoteRef.current) return;
+      const navigationEpoch = ++navigationEpochRef.current;
+      creatingNoteRef.current = true;
+      setCreatingNote(true);
+      try {
+        const result = await createNote(title ?? null);
+        if (result.status === "existing") {
+          if (navigationEpoch !== navigationEpochRef.current) return;
+          queryClient.setQueryData(queryKeys.page(result.page.uuid), result.page);
+          setNewNote(null);
+          openTarget(pageTarget(result.page.uuid), disposition);
+          setHits([]);
+          showEditor();
+          return;
+        }
+        const note = result.note;
+        queryClient.setQueryData(queryKeys.page(note.page.uuid), note.page);
+        queryClient.setQueryData(queryKeys.children(note.page.uuid), [note.initialBlock]);
+        await queryClient.invalidateQueries({ queryKey: queryKeys.pages });
+        if (navigationEpoch !== navigationEpochRef.current) return;
+        setNewNote({
+          pageUuid: note.page.uuid,
+          blockUuid: note.initialBlock.uuid,
+          autoFocusTitle: note.page.title === null,
+        });
+        openTarget(pageTarget(note.page.uuid, { blockUuid: note.initialBlock.uuid }), disposition);
+        setHits([]);
+        if (note.page.title === null) {
+          notifyInfo("New note ready — name it, then press Enter to write.");
+        }
+        showEditor();
+      } catch (error) {
+        notifyError("create", error);
+      } finally {
+        creatingNoteRef.current = false;
+        setCreatingNote(false);
+      }
+    },
+    [openTarget, queryClient, showEditor],
+  );
 
   const moveHistory = useCallback(
     async (direction: "undo" | "redo") => {
@@ -208,7 +226,7 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
             return true;
           }
           queryClient.setQueryData(queryKeys.page(page.uuid), page);
-          setNewNote({ pageUuid: page.uuid, blockUuid: block.uuid });
+          setNewNote({ pageUuid: page.uuid, blockUuid: block.uuid, autoFocusTitle: false });
           openTarget(pageTarget(page.uuid, { blockUuid: block.uuid }), currentDisposition);
           setHits([]);
           showEditor();

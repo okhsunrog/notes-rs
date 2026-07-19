@@ -28,7 +28,11 @@ import { useWorkspaceStore } from "./workspace-store";
 type WorkbenchProps = {
   creatingNote: boolean;
   journalBusy: boolean;
-  newNote: { pageUuid: string; blockUuid: string | null } | null;
+  newNote: {
+    pageUuid: string;
+    blockUuid: string | null;
+    autoFocusTitle: boolean;
+  } | null;
   hits: SearchHit[];
   setHits: React.Dispatch<React.SetStateAction<SearchHit[]>>;
 };
@@ -330,7 +334,9 @@ function PagePane({
       initialBlockUuid={
         props.newNote?.pageUuid === page.uuid ? props.newNote.blockUuid : content.blockUuid
       }
-      autoFocusTitle={active && props.newNote?.pageUuid === page.uuid}
+      autoFocusTitle={
+        active && props.newNote?.pageUuid === page.uuid && props.newNote.autoFocusTitle
+      }
       presentation={content.presentation}
       onPresentationChange={(presentation) =>
         dispatch({ type: "set_page_presentation", paneId, presentation })

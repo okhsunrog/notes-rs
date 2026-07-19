@@ -30,7 +30,7 @@ export const commands = {
 	redo: () => typedError<boolean, CommandError>(__TAURI_INVOKE("redo")),
 	renamePage: (uuid: string, title: string | null, expectedRevision: ContentRevision) => typedError<Page, CommandError>(__TAURI_INVOKE("rename_page", { uuid, title, expectedRevision })),
 	setPageLayout: (uuid: string, layout: PageLayout) => typedError<Page, CommandError>(__TAURI_INVOKE("set_page_layout", { uuid, layout })),
-	createNote: () => typedError<CreatedNote, CommandError>(__TAURI_INVOKE("create_note")),
+	createNote: (title: string | null) => typedError<CreateNoteResult, CommandError>(__TAURI_INVOKE("create_note", { title })),
 	ensureJournal: (date: JournalDate) => typedError<Page, CommandError>(__TAURI_INVOKE("ensure_journal", { date })),
 	getJournal: (date: JournalDate) => typedError<{
 	uuid: string,
@@ -279,6 +279,8 @@ export type Content = { kind: "page"; record: Page } | { kind: "block"; record: 
  *  optimistic-concurrency checks typed without exposing HLC parsing to UI code.
  */
 export type ContentRevision = string;
+
+export type CreateNoteResult = { status: "created"; note: CreatedNote } | { status: "existing"; page: Page };
 
 export type CreatedNote = {
 	page: Page,

@@ -201,41 +201,93 @@ pub struct CreatedNote {
     pub initial_block: Block,
 }
 
-pub async fn create_note(conn: &Connection) -> Result<CreatedNote> {
-    let page_uuid = uuid::Uuid::now_v7();
-    let block_uuid = uuid::Uuid::now_v7();
-    let now = chrono::Utc::now().timestamp();
-    apply_local_action(
-        conn,
-        "create note",
-        vec![
-            OpKind::PageCreate(PageCreate {
-                uuid: page_uuid,
-                kind: PageKind::Note,
-                title: None,
-                layout: PageLayout::Outline,
-                created_at: now,
-            }),
-            OpKind::BlockCreate(BlockCreate {
-                uuid: block_uuid,
-                page_uuid,
-                parent_uuid: None,
-                order_key: OrderKey::first(),
-                style: BlockStyle::Paragraph,
-                markdown: String::new(),
-                created_at: now,
-            }),
-        ],
-    )
-    .await?;
-    Ok(CreatedNote {
-        page: get_page(conn, page_uuid)
-            .await?
-            .context("created page disappeared")?,
-        initial_block: get_block(conn, block_uuid)
-            .await?
-            .context("created initial block disappeared")?,
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(
+    tag = "status",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum CreateNoteResult {
+    Created { note: CreatedNote },
+    Existing { page: Page },
+}
+
+impl CreateNoteResult {
+    pub fn into_created(self) -> Option<CreatedNote> {
+        match self {
+            Self::Created { note } => Some(note),
+            Self::Existing { .. } => None,
+        }
+    }
+}
+
+pub async fn create_note(conn: &Connection, title: Option<String>) -> Result<CreateNoteResult> {
+    let title = title
+        .map(|title| title.trim().to_owned())
+        .filter(|title| !title.is_empty());
+    conn.call_domain(move |database| -> crate::CoreResult<CreateNoteResult> {
+        let transaction = database.transaction()?;
+        if let Some(normalized_title) = title.as_deref().map(crate::model::normalize_title) {
+            let sql = format!("SELECT {PAGE_COLUMNS} FROM pages WHERE normalized_title = ?1");
+            if let Some(page) = transaction
+                .query_row(&sql, [&normalized_title], row_to_page)
+                .optional()?
+            {
+                transaction.commit()?;
+                return Ok(CreateNoteResult::Existing { page });
+            }
+        }
+
+        let page_uuid = uuid::Uuid::now_v7();
+        let block_uuid = uuid::Uuid::now_v7();
+        let now = chrono::Utc::now().timestamp();
+        apply_local_action_in_transaction(
+            &transaction,
+            "create note",
+            vec![
+                OpKind::PageCreate(PageCreate {
+                    uuid: page_uuid,
+                    kind: PageKind::Note,
+                    title,
+                    layout: PageLayout::Outline,
+                    created_at: now,
+                }),
+                OpKind::BlockCreate(BlockCreate {
+                    uuid: block_uuid,
+                    page_uuid,
+                    parent_uuid: None,
+                    order_key: OrderKey::first(),
+                    style: BlockStyle::Paragraph,
+                    markdown: String::new(),
+                    created_at: now,
+                }),
+            ],
+        )?;
+        let page = transaction
+            .query_row(
+                &format!("SELECT {PAGE_COLUMNS} FROM pages WHERE uuid = ?1"),
+                [page_uuid],
+                row_to_page,
+            )
+            .optional()?
+            .ok_or_else(|| crate::CoreError::not_found("created page disappeared"))?;
+        let initial_block = transaction
+            .query_row(
+                &format!("SELECT {BLOCK_COLUMNS} FROM blocks WHERE uuid = ?1"),
+                [block_uuid],
+                row_to_block,
+            )
+            .optional()?
+            .ok_or_else(|| crate::CoreError::not_found("created initial block disappeared"))?;
+        transaction.commit()?;
+        Ok(CreateNoteResult::Created {
+            note: CreatedNote {
+                page,
+                initial_block,
+            },
+        })
     })
+    .await
 }
 
 pub struct DeletedPage {

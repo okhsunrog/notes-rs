@@ -45,9 +45,9 @@ pub use journals::{
     JournalListLimit, append_to_journal, ensure_journal, get_journal, list_journals,
 };
 pub use pages::{
-    CreatedNote, DeletedPage, create_note, create_page, delete_page, get_containing_page,
-    get_or_create_page_by_title, get_page, get_page_by_title, list_pages, list_pages_filtered,
-    rename_page, rename_page_if_revision, set_page_layout,
+    CreateNoteResult, CreatedNote, DeletedPage, create_note, create_page, delete_page,
+    get_containing_page, get_or_create_page_by_title, get_page, get_page_by_title, list_pages,
+    list_pages_filtered, rename_page, rename_page_if_revision, set_page_layout,
 };
 pub use search::{search_blocks_fts, search_fts, search_pages_by_title};
 pub(crate) use workspace::transaction_workspace_uuid;

@@ -38,12 +38,15 @@ pub async fn set_page_layout(
 pub async fn create_note(
     app: AppHandle,
     state: State<'_, AppState>,
-) -> CommandResult<db::CreatedNote> {
-    let note = db::create_note(&state.conn).await.map_err(err)?;
-    emit_pages_changed(&app, std::slice::from_ref(&note.page));
-    emit_blocks_changed(&app, std::slice::from_ref(&note.initial_block), []);
-    emit_domain(&app, DomainEvent::HistoryChanged);
-    Ok(note)
+    title: Option<String>,
+) -> CommandResult<db::CreateNoteResult> {
+    let result = db::create_note(&state.conn, title).await.map_err(err)?;
+    if let db::CreateNoteResult::Created { note } = &result {
+        emit_pages_changed(&app, std::slice::from_ref(&note.page));
+        emit_blocks_changed(&app, std::slice::from_ref(&note.initial_block), []);
+        emit_domain(&app, DomainEvent::HistoryChanged);
+    }
+    Ok(result)
 }
 
 #[tauri::command]

@@ -924,7 +924,7 @@ mod tests {
                 .unwrap()
         );
 
-        db::create_note(&connection).await.unwrap();
+        db::create_note(&connection, None).await.unwrap();
         assert!(
             !external_import_destination_is_empty(&connection)
                 .await

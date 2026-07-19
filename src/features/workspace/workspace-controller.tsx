@@ -4,7 +4,7 @@ import type { Content, JournalDate, Page } from "@/lib/api";
 import type { OpenDisposition } from "./workspace-model";
 
 export type WorkspaceController = {
-  createNewNote: () => void | Promise<void>;
+  createNewNote: (title?: string, disposition?: OpenDisposition) => void | Promise<void>;
   openContent: (content: Content, disposition?: OpenDisposition) => void | Promise<void>;
   openJournal: (date: JournalDate, disposition?: OpenDisposition) => void | Promise<void>;
   captureJournal: (
