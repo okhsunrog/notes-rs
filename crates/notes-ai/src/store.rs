@@ -522,8 +522,17 @@ impl AiStore {
         Ok(source_documents)
     }
 
-    pub async fn source_document_count(&self, notes: &Connection) -> Result<u64> {
-        Ok(index_documents(notes).await?.len() as u64)
+    pub async fn cached_source_document_count(&self) -> Result<u64> {
+        let generation_id = self.generation_id;
+        self.connection
+            .call(move |database| {
+                database.query_row(
+                    "SELECT source_documents FROM index_generations WHERE id = ?1",
+                    [generation_id],
+                    |row| row.get::<_, i64>(0).map(|count| count as u64),
+                )
+            })
+            .await
     }
 
     #[cfg(test)]
@@ -2097,6 +2106,32 @@ mod tests {
         let matches = store.search(vec![0.25, 0.75], 4).await.expect("search");
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].content_uuid, page.uuid);
+    }
+
+    #[tokio::test]
+    async fn cached_source_count_never_recomposes_documents_for_status() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let notes = notes_core::db::open(directory.path().join("notes.db"))
+            .await
+            .expect("notes database");
+        notes_core::db::create_page(&notes, "First".into())
+            .await
+            .expect("create first page");
+        let store = AiStore::open(directory.path().join("ai.db"), "identity".into(), 2)
+            .await
+            .expect("AI store");
+
+        assert_eq!(store.cached_source_document_count().await.unwrap(), 0);
+        assert_eq!(store.reconcile_scan_count(), 0);
+        assert_eq!(store.reconcile(&notes).await.unwrap(), 1);
+        assert_eq!(store.cached_source_document_count().await.unwrap(), 1);
+        assert_eq!(store.reconcile_scan_count(), 1);
+
+        notes_core::db::create_page(&notes, "Second".into())
+            .await
+            .expect("create second page");
+        assert_eq!(store.cached_source_document_count().await.unwrap(), 1);
+        assert_eq!(store.reconcile_scan_count(), 1);
     }
 
     #[tokio::test]

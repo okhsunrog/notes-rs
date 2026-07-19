@@ -457,7 +457,7 @@ pub async fn open_eval_pipeline(
 
 async fn status_for(active: &ActiveAi, user_id: &str) -> Result<AiIndexStatus> {
     let user = active.user(user_id)?;
-    let source_documents = user.store.source_document_count(&user.notes).await?;
+    let source_documents = user.store.cached_source_document_count().await?;
     let status = user.store.status(source_documents).await?;
     Ok(AiIndexStatus {
         provider: active.config.public_settings(),
