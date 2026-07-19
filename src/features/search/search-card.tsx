@@ -45,8 +45,6 @@ const RECENT_JOURNAL_LIMIT = 4;
 
 type Props = {
   variant?: "card" | "inline" | "dialog";
-  hits: SearchHit[];
-  setHits: React.Dispatch<React.SetStateAction<SearchHit[]>>;
   onOpenContent: (content: Content, disposition?: OpenDisposition) => void | Promise<void>;
   onDismiss?: () => void;
 };
@@ -74,16 +72,16 @@ type CreateNoteRow = {
 
 type PaletteRow = ContentRow | JournalRow | CreateNoteRow;
 
-export function SearchCard({ variant = "card", hits, setHits, onOpenContent, onDismiss }: Props) {
+export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props) {
   const controller = useWorkspaceController();
   const [query, setQuery] = useState("");
-  const [localHits, setLocalHits] = useState(hits);
+  const [localHits, setLocalHits] = useState<SearchHit[]>([]);
   const [serverHits, setServerHits] = useState<SearchHit[]>([]);
   const [serverState, setServerState] = useState<ServerSearchState>("absent");
   const [localPending, setLocalPending] = useState(false);
   const [resultsFrozen, setResultsFrozen] = useState(false);
   const [frozenPresentation, setFrozenPresentation] = useState<SearchPresentation>({
-    primary: hits,
+    primary: [],
     localExtras: [],
   });
   const [frozenSearchSettled, setFrozenSearchSettled] = useState(false);
@@ -206,11 +204,23 @@ export function SearchCard({ variant = "card", hits, setHits, onOpenContent, onD
     [displayedPresentation],
   );
 
-  useEffect(() => {
-    setHits(displayedHits);
-  }, [displayedHits, setHits]);
-
   const queryValue = query.trim();
+  const activeQuery = useRef(queryValue);
+  activeQuery.current = queryValue;
+  const observedPages = useRef(pagesQuery.data);
+  useEffect(() => {
+    if (observedPages.current === pagesQuery.data) return;
+    observedPages.current = pagesQuery.data;
+    const value = activeQuery.current;
+    if (!value) return;
+
+    clearSearchTimer(localTimer);
+    const nextLocalEpoch = ++localEpoch.current;
+    setResultsFrozen(false);
+    setLocalPending(true);
+    void runLocal(value, nextLocalEpoch);
+  }, [pagesQuery.data, runLocal]);
+
   const searchSettled = !localPending && serverState !== "pending";
   const displayedSearchSettled = resultsFrozen ? frozenSearchSettled : searchSettled;
   const exactTitleMatch = hasExactPageTitle(queryValue, displayedHits);

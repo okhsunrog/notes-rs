@@ -10,7 +10,7 @@ import { HomeView } from "@/features/home/home-view";
 import { PagePresentation } from "@/features/pages/page-presentation";
 import { PageView } from "@/features/pages/page-view";
 import { usePageSessionRegistry } from "@/features/pages/page-session";
-import { getPage, type SearchHit } from "@/lib/api";
+import { getPage } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
 import { cn } from "@/lib/utils";
 import {
@@ -33,8 +33,6 @@ type WorkbenchProps = {
     blockUuid: string | null;
     autoFocusTitle: boolean;
   } | null;
-  hits: SearchHit[];
-  setHits: React.Dispatch<React.SetStateAction<SearchHit[]>>;
 };
 
 export function Workbench(props: WorkbenchProps) {
@@ -266,8 +264,6 @@ function PaneSurface({
         <HomeView
           creating={props.creatingNote}
           journalBusy={props.journalBusy}
-          hits={props.hits}
-          setHits={props.setHits}
           onCreate={controller.createNewNote}
           onOpenJournal={controller.openJournal}
           onOpenContent={controller.openContent}

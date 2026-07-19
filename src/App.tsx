@@ -276,8 +276,6 @@ function App() {
             creatingNote={workspace.creatingNote}
             journalBusy={workspace.journalBusy}
             newNote={workspace.newNote}
-            hits={workspace.hits}
-            setHits={workspace.setHits}
           />
         }
         assistant={
@@ -306,8 +304,6 @@ function App() {
           </div>
           <SearchCard
             variant="dialog"
-            hits={workspace.hits}
-            setHits={workspace.setHits}
             onOpenContent={workspace.openContent}
             onDismiss={() => setSearchOpen(false)}
           />

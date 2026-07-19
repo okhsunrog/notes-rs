@@ -2,7 +2,7 @@ import { ArrowRight, CalendarDays, FilePlus2, Link2, Search, Sparkles } from "lu
 import { Button } from "@/components/ui/button";
 import { todayJournalDate } from "@/features/journal/journal-date";
 import { SearchCard } from "@/features/search/search-card";
-import type { Content, JournalDate, SearchHit } from "@/lib/api";
+import type { Content, JournalDate } from "@/lib/api";
 import {
   dispositionFromShiftKey,
   type OpenDisposition,
@@ -11,22 +11,12 @@ import {
 type Props = {
   creating: boolean;
   journalBusy: boolean;
-  hits: SearchHit[];
-  setHits: React.Dispatch<React.SetStateAction<SearchHit[]>>;
   onCreate: () => void | Promise<void>;
   onOpenJournal: (date: JournalDate, disposition?: OpenDisposition) => void | Promise<void>;
   onOpenContent: (content: Content, disposition?: OpenDisposition) => void | Promise<void>;
 };
 
-export function HomeView({
-  creating,
-  journalBusy,
-  hits,
-  setHits,
-  onCreate,
-  onOpenJournal,
-  onOpenContent,
-}: Props) {
+export function HomeView({ creating, journalBusy, onCreate, onOpenJournal, onOpenContent }: Props) {
   return (
     <div className="mx-auto flex min-h-full max-w-4xl flex-col justify-center px-8 py-16 sm:px-12">
       <div className="max-w-2xl">
@@ -85,7 +75,7 @@ export function HomeView({
       </div>
 
       <div className="mt-10">
-        <SearchCard variant="inline" hits={hits} setHits={setHits} onOpenContent={onOpenContent} />
+        <SearchCard variant="inline" onOpenContent={onOpenContent} />
       </div>
     </div>
   );

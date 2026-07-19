@@ -22,7 +22,6 @@ import {
   type Content,
   type JournalDate,
   type Page,
-  type SearchHit,
 } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
 import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify";
@@ -46,7 +45,6 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
   const confirm = useConfirmation();
   const pageSessions = usePageSessionRegistry();
   const queryClient = useQueryClient();
-  const [hits, setHits] = useState<SearchHit[]>([]);
   const activePane = useWorkspaceStore(getActivePane);
   const dispatchWorkspace = useWorkspaceStore((state) => state.dispatch);
   const [newNote, setNewNote] = useState<{
@@ -115,7 +113,6 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
           queryClient.setQueryData(queryKeys.page(result.page.uuid), result.page);
           setNewNote(null);
           openTarget(pageTarget(result.page.uuid), disposition);
-          setHits([]);
           showEditor();
           return;
         }
@@ -130,7 +127,6 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
           autoFocusTitle: note.page.title === null,
         });
         openTarget(pageTarget(note.page.uuid, { blockUuid: note.initialBlock.uuid }), disposition);
-        setHits([]);
         if (note.page.title === null) {
           notifyInfo("New note ready — name it, then press Enter to write.");
         }
@@ -152,7 +148,6 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
         const changed = direction === "undo" ? await undo() : await redo();
         if (changed && navigationEpoch === navigationEpochRef.current) {
           dispatchWorkspace({ type: "reset" });
-          setHits([]);
           notifyInfo(
             direction === "undo" ? "Undid structural change." : "Redid structural change.",
           );
@@ -184,7 +179,6 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
         } else {
           openTarget(journalDayTarget(date), disposition);
         }
-        setHits([]);
         showEditor();
       } catch (error) {
         if (navigationEpoch === navigationEpochRef.current) {
@@ -228,7 +222,6 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
           queryClient.setQueryData(queryKeys.page(page.uuid), page);
           setNewNote({ pageUuid: page.uuid, blockUuid: block.uuid, autoFocusTitle: false });
           openTarget(pageTarget(page.uuid, { blockUuid: block.uuid }), currentDisposition);
-          setHits([]);
           showEditor();
         }
         notifySuccess(`Captured in journal ${date}.`);
@@ -251,13 +244,6 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
 
   const applyUpdated = useCallback(
     (updated: Page) => {
-      setHits((current) =>
-        current.map((hit) =>
-          hit.content.kind === "page" && hit.content.record.uuid === updated.uuid
-            ? { ...hit, content: { kind: "page", record: updated } }
-            : hit,
-        ),
-      );
       queryClient.setQueryData(queryKeys.page(updated.uuid), updated);
       void queryClient.invalidateQueries({ queryKey: queryKeys.pages });
     },
@@ -367,11 +353,6 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
           dispatchWorkspace({ type: "forget_page", pageUuid: page.uuid });
           pageSessions.discardPage(page.uuid);
           queryClient.removeQueries({ queryKey: queryKeys.page(page.uuid), exact: true });
-          setHits((current) =>
-            current.filter(
-              (hit) => !(hit.content.kind === "page" && hit.content.record.uuid === page.uuid),
-            ),
-          );
           notifySuccess("Page deleted; a recovery backup was created.");
         }
       } catch (error) {
@@ -395,7 +376,6 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
   const resetWorkspace = useCallback(() => {
     navigationEpochRef.current += 1;
     dispatchWorkspace({ type: "reset" });
-    setHits([]);
     void queryClient.invalidateQueries({ queryKey: queryKeys.root });
   }, [dispatchWorkspace, queryClient]);
 
@@ -434,7 +414,6 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
     createNewNote,
     creatingNote,
     history: historyQuery.data ?? { undoCount: 0, redoCount: 0 },
-    hits,
     moveHistory,
     journalBusy,
     newNote,
@@ -445,7 +424,6 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
     removePage,
     resetWorkspace,
     selectPage,
-    setHits,
     quickCapture,
   };
 }
