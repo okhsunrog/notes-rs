@@ -15,6 +15,7 @@ use unicode_categories::UnicodeCategories;
 const INPUT_FORMAT_VERSION: u32 = 2;
 const MAX_ATTEMPTS: i64 = 8;
 const BACKOFF_BASE_SECS: i64 = 5;
+const PAGE_VECTOR_MAX_CHARS: usize = 1_000;
 
 static VEC_INIT: Once = Once::new();
 
@@ -1034,6 +1035,14 @@ struct DocumentChainRow {
     content: String,
 }
 
+struct PagePreviewRow {
+    page_uuid: uuid::Uuid,
+    page_title: Option<String>,
+    journal_date: Option<String>,
+    block_style: Option<BlockStyle>,
+    content: Option<String>,
+}
+
 struct CompositionInput {
     page_title: Option<String>,
     journal_date: Option<String>,
@@ -1044,10 +1053,12 @@ struct CompositionInput {
 }
 
 async fn index_documents(notes: &Connection) -> Result<BTreeMap<uuid::Uuid, IndexDocument>> {
-    let rows = notes
+    let (rows, page_rows) = notes
         .call(|database| {
-            let mut statement = database.prepare(
-                "WITH RECURSIVE chain(
+            let transaction = database.transaction()?;
+            let rows = {
+                let mut statement = transaction.prepare(
+                    "WITH RECURSIVE chain(
                    qid, parent_uuid, page_title, journal_date, block_style,
                    section_heading, content, depth
                  ) AS (
@@ -1075,20 +1086,56 @@ async fn index_documents(notes: &Connection) -> Result<BTreeMap<uuid::Uuid, Inde
                  SELECT qid, depth, page_title, journal_date, block_style,
                         section_heading, content
                    FROM chain ORDER BY qid, depth",
-            )?;
-            statement
-                .query_map([], |row| {
-                    Ok(DocumentChainRow {
-                        content_uuid: row.get(0)?,
-                        depth: row.get(1)?,
-                        page_title: row.get(2)?,
-                        journal_date: row.get(3)?,
-                        block_style: row.get(4)?,
-                        section_heading: row.get(5)?,
-                        content: row.get(6)?,
-                    })
-                })?
-                .collect::<Result<Vec<DocumentChainRow>, _>>()
+                )?;
+                statement
+                    .query_map([], |row| {
+                        Ok(DocumentChainRow {
+                            content_uuid: row.get(0)?,
+                            depth: row.get(1)?,
+                            page_title: row.get(2)?,
+                            journal_date: row.get(3)?,
+                            block_style: row.get(4)?,
+                            section_heading: row.get(5)?,
+                            content: row.get(6)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<DocumentChainRow>, _>>()?
+            };
+            let page_rows = {
+                let mut statement = transaction.prepare(
+                    "WITH RECURSIVE page_tree(
+                       page_uuid, uuid, path, block_style, content
+                     ) AS (
+                       SELECT page_uuid, uuid, order_key, style, markdown
+                         FROM blocks WHERE parent_uuid IS NULL
+                       UNION ALL
+                       SELECT child.page_uuid, child.uuid,
+                              page_tree.path || '/' || child.order_key,
+                              child.style, child.markdown
+                         FROM page_tree JOIN blocks child
+                           ON child.parent_uuid = page_tree.uuid
+                     )
+                     SELECT page.uuid, page.title, identity.journal_date,
+                            page_tree.block_style, page_tree.content
+                       FROM pages page
+                       JOIN page_identities identity ON identity.page_uuid = page.uuid
+                       LEFT JOIN page_tree ON page_tree.page_uuid = page.uuid
+                      ORDER BY page.uuid, page_tree.path, page_tree.uuid",
+                )?;
+                statement
+                    .query_map([], |row| {
+                        Ok(PagePreviewRow {
+                            page_uuid: row.get(0)?,
+                            page_title: row.get(1)?,
+                            journal_date: row.get(2)?,
+                            block_style: row.get(3)?,
+                            content: row.get(4)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<PagePreviewRow>, _>>()?
+            };
+            transaction.commit()?;
+            Ok((rows, page_rows))
         })
         .await?;
     let mut inputs = BTreeMap::<uuid::Uuid, CompositionInput>::new();
@@ -1109,24 +1156,96 @@ async fn index_documents(notes: &Connection) -> Result<BTreeMap<uuid::Uuid, Inde
             input.ancestors.push((row.depth, row.content));
         }
     }
-    Ok(inputs
+    let mut documents = inputs
         .into_iter()
         .filter_map(|(uuid, input)| {
             let text = compose_text(&input)?;
             let header = composition_header(&input);
-            let mut digest = Sha256::new();
-            digest.update(INPUT_FORMAT_VERSION.to_le_bytes());
-            digest.update(text.as_bytes());
-            Some((
-                uuid,
-                IndexDocument {
-                    input_hash: format!("{:x}", digest.finalize()),
-                    text,
-                    header,
-                },
-            ))
+            Some((uuid, index_document(text, header)))
         })
-        .collect())
+        .collect::<BTreeMap<_, _>>();
+    let mut current_page = None;
+    let mut preview_rows = Vec::new();
+    for row in page_rows {
+        if current_page != Some(row.page_uuid) {
+            if let Some(page_uuid) = current_page
+                && let Some(text) = compose_page_preview(&preview_rows)
+            {
+                documents.insert(page_uuid, index_document(text, String::new()));
+            }
+            current_page = Some(row.page_uuid);
+            preview_rows.clear();
+        }
+        preview_rows.push(row);
+    }
+    if let Some(page_uuid) = current_page
+        && let Some(text) = compose_page_preview(&preview_rows)
+    {
+        documents.insert(page_uuid, index_document(text, String::new()));
+    }
+    Ok(documents)
+}
+
+fn index_document(text: String, header: String) -> IndexDocument {
+    let mut digest = Sha256::new();
+    digest.update(INPUT_FORMAT_VERSION.to_le_bytes());
+    digest.update(text.as_bytes());
+    IndexDocument {
+        input_hash: format!("{:x}", digest.finalize()),
+        text,
+        header,
+    }
+}
+
+fn compose_page_preview(rows: &[PagePreviewRow]) -> Option<String> {
+    let first = rows.first()?;
+    let mut parts = Vec::new();
+    if let Some(title) = page_heading(first.page_title.as_deref(), first.journal_date.as_deref()) {
+        push_page_preview_part(&mut parts, &title);
+    }
+    for row in rows {
+        let (Some(style), Some(content)) = (row.block_style, row.content.as_deref()) else {
+            continue;
+        };
+        if !has_meaningful_content(style, content) {
+            continue;
+        }
+        let content = normalize_whitespace(content);
+        if content.is_empty() || !push_page_preview_part(&mut parts, &content) {
+            break;
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
+fn push_page_preview_part(parts: &mut Vec<String>, value: &str) -> bool {
+    let used = parts.iter().map(|part| part.chars().count()).sum::<usize>()
+        + parts.len().saturating_sub(1);
+    let separator = usize::from(!parts.is_empty());
+    let available = PAGE_VECTOR_MAX_CHARS.saturating_sub(used + separator);
+    if available == 0 {
+        return false;
+    }
+    let complete = value.chars().count() <= available;
+    parts.push(if complete {
+        value.to_owned()
+    } else {
+        truncate_excerpt(value, available)
+    });
+    complete
+}
+
+fn page_heading(title: Option<&str>, journal_date: Option<&str>) -> Option<String> {
+    title
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            journal_date
+                .map(str::trim)
+                .filter(|date| !date.is_empty())
+                .map(|date| format!("Journal {date}"))
+        })
 }
 
 async fn extraction_documents(notes: &Connection) -> Result<BTreeMap<uuid::Uuid, IndexDocument>> {
@@ -1200,20 +1319,9 @@ fn compose_text(input: &CompositionInput) -> Option<String> {
 
 fn composition_header(input: &CompositionInput) -> String {
     let mut parts = Vec::new();
-    if let Some(title) = input
-        .page_title
-        .as_deref()
-        .map(str::trim)
-        .filter(|title| !title.is_empty())
+    if let Some(heading) = page_heading(input.page_title.as_deref(), input.journal_date.as_deref())
     {
-        parts.push(title.to_owned());
-    } else if let Some(date) = input
-        .journal_date
-        .as_deref()
-        .map(str::trim)
-        .filter(|date| !date.is_empty())
-    {
-        parts.push(format!("Journal {date}"));
+        parts.push(heading);
     }
     if let Some(section_heading) = input
         .section_heading
@@ -1453,6 +1561,77 @@ mod tests {
         assert_eq!(compose_text(&short).as_deref(), Some("Project Atlas\nx"));
     }
 
+    #[test]
+    fn page_preview_stops_at_the_shared_character_budget() {
+        let rows = vec![
+            PagePreviewRow {
+                page_uuid: uuid::Uuid::nil(),
+                page_title: Some("Budgeted page".into()),
+                journal_date: None,
+                block_style: Some(BlockStyle::Paragraph),
+                content: Some("semantic ".repeat(300)),
+            },
+            PagePreviewRow {
+                page_uuid: uuid::Uuid::nil(),
+                page_title: Some("Budgeted page".into()),
+                journal_date: None,
+                block_style: Some(BlockStyle::Paragraph),
+                content: Some("must not appear".into()),
+            },
+        ];
+
+        let preview = compose_page_preview(&rows).expect("page preview");
+        assert!(preview.chars().count() <= PAGE_VECTOR_MAX_CHARS);
+        assert!(preview.chars().count() > PAGE_VECTOR_MAX_CHARS - 16);
+        assert!(preview.starts_with("Budgeted page\nsemantic"));
+        assert!(preview.ends_with('…'));
+        assert!(!preview.contains("must not appear"));
+    }
+
+    #[tokio::test]
+    async fn page_preview_uses_full_tree_preorder() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let notes = notes_core::db::open(directory.path().join("notes.db"))
+            .await
+            .expect("notes database");
+        let page = notes_core::db::create_page(&notes, "Preorder".into())
+            .await
+            .expect("create page");
+        let root = notes_core::db::create_block(
+            &notes,
+            page.uuid,
+            None,
+            None,
+            BlockStyle::Paragraph,
+            "root".into(),
+        )
+        .await
+        .expect("create root");
+        notes_core::db::create_block(
+            &notes,
+            page.uuid,
+            Some(root.uuid),
+            None,
+            BlockStyle::Paragraph,
+            "child".into(),
+        )
+        .await
+        .expect("create child");
+        notes_core::db::create_block(
+            &notes,
+            page.uuid,
+            None,
+            Some(root.uuid),
+            BlockStyle::Paragraph,
+            "sibling".into(),
+        )
+        .await
+        .expect("create sibling");
+
+        let documents = index_documents(&notes).await.expect("compose documents");
+        assert_eq!(documents[&page.uuid].text, "Preorder\nroot\nchild\nsibling");
+    }
+
     #[tokio::test]
     async fn document_composition_uses_only_the_nearest_preceding_heading() {
         let directory = tempfile::tempdir().expect("temporary directory");
@@ -1567,20 +1746,31 @@ mod tests {
             .expect("AI store");
         let source_documents = store.reconcile(&notes, 1).await.expect("reconcile");
         let jobs = store.take_jobs(16).await.expect("jobs");
-        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs.len(), 2);
         store
             .write_embeddings(
                 source_documents,
-                vec![one_chunk_embedding(&jobs[0], vec![0.25, 0.75])],
+                jobs.iter()
+                    .map(|job| one_chunk_embedding(job, vec![0.25, 0.75]))
+                    .collect(),
             )
             .await
             .expect("write embedding");
         let status = store.status(source_documents).await.expect("status");
         assert_eq!(status.generation_status, GenerationStatus::Active);
-        assert_eq!(status.indexed, 1);
+        assert_eq!(status.indexed, 2);
         let matches = store.search(vec![0.25, 0.75], 4).await.expect("search");
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].content_uuid, block.uuid);
+        assert_eq!(matches.len(), 2);
+        assert!(
+            matches
+                .iter()
+                .any(|matched| matched.content_uuid == page.uuid)
+        );
+        assert!(
+            matches
+                .iter()
+                .any(|matched| matched.content_uuid == block.uuid)
+        );
 
         store.reset_index().await.expect("reset index");
         let status = store.status(source_documents).await.expect("reset status");
@@ -1606,6 +1796,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn title_only_page_is_a_searchable_semantic_document() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let notes = notes_core::db::open(directory.path().join("notes.db"))
+            .await
+            .expect("notes database");
+        let page = notes_core::db::create_page(&notes, "Semantic landing page".into())
+            .await
+            .expect("create title-only page");
+        let store = AiStore::open(directory.path().join("ai.db"), "identity".into(), 2)
+            .await
+            .expect("AI store");
+
+        let source_documents = store.reconcile(&notes, 1).await.expect("reconcile");
+        let jobs = store.take_jobs(16).await.expect("jobs");
+        assert_eq!(source_documents, 1);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].content_uuid, page.uuid);
+        assert_eq!(jobs[0].input_text, "Semantic landing page");
+        store
+            .write_embeddings(
+                source_documents,
+                vec![one_chunk_embedding(&jobs[0], vec![0.25, 0.75])],
+            )
+            .await
+            .expect("write page embedding");
+
+        let matches = store.search(vec![0.25, 0.75], 4).await.expect("search");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].content_uuid, page.uuid);
+    }
+
+    #[tokio::test]
     async fn stale_embedding_result_cannot_replace_a_newer_job() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let notes = notes_core::db::open(directory.path().join("notes.db"))
@@ -1628,7 +1850,13 @@ mod tests {
             .await
             .expect("AI store");
         let source_documents = store.reconcile(&notes, 1).await.expect("first reconcile");
-        let stale_job = store.take_jobs(1).await.expect("old job").remove(0);
+        let stale_job = store
+            .take_jobs(16)
+            .await
+            .expect("old jobs")
+            .into_iter()
+            .find(|job| job.content_uuid == block.uuid)
+            .expect("old block job");
 
         notes_core::db::set_block_content(
             &notes,
@@ -1640,7 +1868,13 @@ mod tests {
         .await
         .expect("change note");
         store.reconcile(&notes, 2).await.expect("second reconcile");
-        let current_job = store.take_jobs(1).await.expect("new job").remove(0);
+        let current_job = store
+            .take_jobs(16)
+            .await
+            .expect("new jobs")
+            .into_iter()
+            .find(|job| job.content_uuid == block.uuid)
+            .expect("new block job");
         assert_ne!(stale_job.input_hash, current_job.input_hash);
 
         store
@@ -1652,7 +1886,7 @@ mod tests {
             .expect("ignore stale result");
         let status = store.status(source_documents).await.expect("status");
         assert_eq!(status.indexed, 0);
-        assert_eq!(status.pending, 1);
+        assert_eq!(status.pending, 2);
         assert_eq!(status.generation_status, GenerationStatus::Building);
     }
 

@@ -1035,11 +1035,11 @@ mod tests {
             .await
             .expect("create page");
         let mut previous = None;
-        for index in 0..16 {
+        for index in 0..15 {
             let markdown = if index == 7 {
                 "POISON".into()
             } else {
-                format!("healthy document {index}")
+                format!("healthy document {index} {}", "x".repeat(150))
             };
             let block = notes_core::db::create_block(
                 &notes,
@@ -1109,9 +1109,9 @@ mod tests {
                 .expect("embedding tick")
         );
 
-        let status = store.status(1).await.expect("AI status");
+        let status = store.status(2).await.expect("AI status");
         assert_eq!(
-            status.indexed, 1,
+            status.indexed, 2,
             "indexed counts retrieval units, not chunks"
         );
         assert_eq!(
@@ -1119,16 +1119,20 @@ mod tests {
             crate::store::GenerationStatus::Active
         );
         let matches = store.search(vec![1.0, 0.0], 32).await.expect("KNN query");
-        assert!(matches.len() > 1);
+        let block_matches = matches
+            .iter()
+            .filter(|matched| matched.content_uuid == block.uuid)
+            .collect::<Vec<_>>();
+        assert!(block_matches.len() > 1);
         assert!(
-            matches
+            block_matches
                 .iter()
-                .all(|matched| matched.content_uuid == block.uuid)
+                .all(|matched| matched.chunk_text.starts_with("Large table\n"))
         );
         assert!(
             matches
                 .iter()
-                .all(|matched| matched.chunk_text.starts_with("Large table\n"))
+                .any(|matched| matched.content_uuid == page.uuid)
         );
     }
 
@@ -1165,10 +1169,16 @@ mod tests {
                 .expect("embedding tick")
         );
 
-        let status = store.status(1).await.expect("AI status");
+        let status = store.status(2).await.expect("AI status");
         assert_eq!(status.indexed, 0);
-        assert_eq!(status.pending, 1);
-        let current = store.take_jobs(1).await.expect("current job").remove(0);
+        assert_eq!(status.pending, 2);
+        let current = store
+            .take_jobs(16)
+            .await
+            .expect("current jobs")
+            .into_iter()
+            .find(|job| job.content_uuid == block.uuid)
+            .expect("current block job");
         assert_eq!(current.content_uuid, block.uuid);
         assert!(
             current
