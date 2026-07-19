@@ -17,6 +17,9 @@ use tokio::sync::Notify;
 use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 
+const MAX_PROVIDER_INPUT_CHARS: usize = 8_000;
+const PROVIDER_TRUNCATION_MARKER: &str = "\n[notes-rs: input truncated]";
+
 // ───────────────────────── embedder: trait + factory ─────────────────────────
 
 #[async_trait]
@@ -364,6 +367,7 @@ impl VoyageEmbedder {
                 "model": self.model,
                 "input_type": input_type,
                 "output_dimension": self.ndims,
+                "truncation": true,
             }))
             .send()
             .await
@@ -701,50 +705,30 @@ async fn tick(notes: &Connection, store: &AiStore, embedder: &dyn EmbedderBacken
     }
     let texts = jobs
         .iter()
-        .map(|job| job.input_text.clone())
+        .map(|job| cap_provider_input(&job.input_text))
         .collect::<Vec<_>>();
-    let embs = match embedder.embed_passages(texts).await {
-        Ok(embeddings) => embeddings,
+    let items = match embedder.embed_passages(texts.clone()).await {
+        Ok(embeddings) => {
+            match validate_embedding_response(embeddings, jobs.len(), embedder.ndims()) {
+                Ok(embeddings) => jobs
+                    .iter()
+                    .zip(embeddings)
+                    .map(|(job, embedding)| (job.content_uuid, job.input_hash.clone(), embedding))
+                    .collect(),
+                Err(error) => {
+                    tracing::warn!(
+                        ?error,
+                        "embedding batch response was invalid; retrying per item"
+                    );
+                    embed_individually(store, embedder, &jobs, texts).await?
+                }
+            }
+        }
         Err(error) => {
-            store
-                .record_failure(
-                    jobs.iter()
-                        .map(|job| (job.content_uuid, job.input_hash.clone()))
-                        .collect(),
-                    &error.to_string(),
-                    crate::failure::provider_failure_is_terminal(&error),
-                )
-                .await?;
-            return Err(error.context("embedding batch failed; retry scheduled with backoff"));
+            tracing::warn!(?error, "embedding batch failed; retrying per item");
+            embed_individually(store, embedder, &jobs, texts).await?
         }
     };
-    let valid = embs.len() == jobs.len()
-        && embs
-            .iter()
-            .all(|embedding| embedding.len() == embedder.ndims());
-    if !valid {
-        let error = format!(
-            "embedding provider returned {} vectors for {} documents or an unexpected dimension (expected {})",
-            embs.len(),
-            jobs.len(),
-            embedder.ndims()
-        );
-        store
-            .record_failure(
-                jobs.iter()
-                    .map(|job| (job.content_uuid, job.input_hash.clone()))
-                    .collect(),
-                &error,
-                true,
-            )
-            .await?;
-        anyhow::bail!(error);
-    }
-    let items = jobs
-        .into_iter()
-        .zip(embs)
-        .map(|(job, embedding)| (job.content_uuid, job.input_hash, embedding))
-        .collect();
     // The provider call above can be slow enough for source content to change while it is in
     // flight. Reconciliation atomically replaces those jobs with their new input hashes, so
     // `write_embeddings` will ignore stale results instead of removing the newer work item.
@@ -755,13 +739,129 @@ async fn tick(notes: &Connection, store: &AiStore, embedder: &dyn EmbedderBacken
     Ok(true)
 }
 
+fn cap_provider_input(input: &str) -> String {
+    if input.chars().count() <= MAX_PROVIDER_INPUT_CHARS {
+        return input.to_owned();
+    }
+    let marker_chars = PROVIDER_TRUNCATION_MARKER.chars().count();
+    let content_chars = MAX_PROVIDER_INPUT_CHARS.saturating_sub(marker_chars);
+    let byte_limit = input
+        .char_indices()
+        .nth(content_chars)
+        .map_or(input.len(), |(index, _)| index);
+    format!(
+        "{}{}",
+        input[..byte_limit].trim_end(),
+        PROVIDER_TRUNCATION_MARKER
+    )
+}
+
+fn validate_embedding_response(
+    embeddings: Vec<Vec<f32>>,
+    expected_count: usize,
+    expected_dimensions: usize,
+) -> Result<Vec<Vec<f32>>> {
+    if embeddings.len() != expected_count {
+        bail!(
+            "embedding provider returned {} vectors for {expected_count} documents",
+            embeddings.len()
+        );
+    }
+    if let Some((index, dimensions)) =
+        embeddings
+            .iter()
+            .enumerate()
+            .find_map(|(index, embedding)| {
+                (embedding.len() != expected_dimensions).then_some((index, embedding.len()))
+            })
+    {
+        bail!(
+            "embedding provider returned {dimensions} dimensions for item {index}, expected {expected_dimensions}"
+        );
+    }
+    Ok(embeddings)
+}
+
+async fn embed_individually(
+    store: &AiStore,
+    embedder: &dyn EmbedderBackend,
+    jobs: &[crate::store::IndexJob],
+    texts: Vec<String>,
+) -> Result<Vec<(uuid::Uuid, String, Vec<f32>)>> {
+    let mut items = Vec::with_capacity(jobs.len());
+    for (job, text) in jobs.iter().zip(texts) {
+        let result = match embedder.embed_passages(vec![text]).await {
+            Ok(embeddings) => validate_embedding_response(embeddings, 1, embedder.ndims())
+                .map(|mut embeddings| embeddings.remove(0))
+                .map_err(|error| (error, true)),
+            Err(error) => {
+                let terminal = crate::failure::provider_failure_is_terminal(&error);
+                Err((error, terminal))
+            }
+        };
+        match result {
+            Ok(embedding) => {
+                items.push((job.content_uuid, job.input_hash.clone(), embedding));
+            }
+            Err((error, terminal)) => {
+                tracing::warn!(
+                    content_uuid = %job.content_uuid,
+                    ?error,
+                    terminal,
+                    "individual embedding failed"
+                );
+                store
+                    .record_failure(
+                        vec![(job.content_uuid, job.input_hash.clone())],
+                        &error.to_string(),
+                        terminal,
+                    )
+                    .await?;
+            }
+        }
+    }
+    Ok(items)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex as StdMutex;
 
     struct MutatingEmbedder {
         notes: Connection,
         block_uuid: uuid::Uuid,
+    }
+
+    #[derive(Default)]
+    struct PoisonBatchEmbedder {
+        call_sizes: StdMutex<Vec<usize>>,
+    }
+
+    #[async_trait]
+    impl EmbedderBackend for PoisonBatchEmbedder {
+        fn ndims(&self) -> usize {
+            2
+        }
+
+        fn id(&self) -> String {
+            "test:poison-batch".into()
+        }
+
+        async fn embed_passages(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
+            self.call_sizes.lock().unwrap().push(texts.len());
+            if texts.len() > 1 {
+                bail!("simulated batch rejection");
+            }
+            if texts[0].contains("POISON") {
+                bail!("simulated poison input rejection");
+            }
+            Ok(vec![vec![1.0, 0.0]])
+        }
+
+        async fn embed_query(&self, _text: String) -> Result<Vec<f32>> {
+            Ok(vec![1.0, 0.0])
+        }
     }
 
     #[async_trait]
@@ -848,6 +948,65 @@ mod tests {
         )
         .expect("valid results");
         assert_eq!(results, vec![(1, 0.8), (0, 0.2)]);
+    }
+
+    #[test]
+    fn oversized_provider_input_is_utf8_safe_capped_and_marked() {
+        let input = format!("prefix {}", "Ж".repeat(MAX_PROVIDER_INPUT_CHARS + 100));
+        let capped = cap_provider_input(&input);
+
+        assert_eq!(capped.chars().count(), MAX_PROVIDER_INPUT_CHARS);
+        assert!(capped.ends_with(PROVIDER_TRUNCATION_MARKER));
+        assert!(capped.starts_with("prefix Ж"));
+    }
+
+    #[tokio::test]
+    async fn failed_batch_retries_items_and_isolates_the_poison_input() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let notes = notes_core::db::open(directory.path().join("notes.db"))
+            .await
+            .expect("notes database");
+        let page = notes_core::db::create_page(&notes, "Batch".into())
+            .await
+            .expect("create page");
+        let mut previous = None;
+        for index in 0..16 {
+            let markdown = if index == 7 {
+                "POISON".into()
+            } else {
+                format!("healthy document {index}")
+            };
+            let block = notes_core::db::create_block(
+                &notes,
+                page.uuid,
+                None,
+                previous,
+                notes_core::BlockStyle::Paragraph,
+                markdown,
+            )
+            .await
+            .expect("create block");
+            previous = Some(block.uuid);
+        }
+        let store = AiStore::open(directory.path().join("ai.db"), "identity".into(), 2)
+            .await
+            .expect("AI store");
+        let embedder = PoisonBatchEmbedder::default();
+
+        assert!(
+            tick(&notes, &store, &embedder)
+                .await
+                .expect("embedding tick")
+        );
+
+        let status = store.status(16).await.expect("AI status");
+        assert_eq!(status.indexed, 15);
+        assert_eq!(status.pending, 1);
+        assert_eq!(status.failed, 1);
+        let calls = embedder.call_sizes.lock().unwrap().clone();
+        assert_eq!(calls.first(), Some(&16));
+        assert_eq!(calls.len(), 17);
+        assert!(calls[1..].iter().all(|size| *size == 1));
     }
 
     #[tokio::test]
