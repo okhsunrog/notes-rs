@@ -730,8 +730,23 @@ async fn tick(notes: &Connection, store: &AiStore, embedder: &dyn EmbedderBacken
             }
         }
         Err(error) => {
-            tracing::warn!(?error, "embedding batch failed; retrying per item");
-            embed_individually(store, embedder, &jobs, &prepared, texts).await?
+            let terminal = crate::failure::provider_failure_is_terminal(&error);
+            if terminal {
+                tracing::warn!(?error, "embedding batch failed; retrying per item");
+                embed_individually(store, embedder, &jobs, &prepared, texts).await?
+            } else {
+                tracing::warn!(?error, "embedding batch failed; deferring the batch retry");
+                store
+                    .record_failure(
+                        jobs.iter()
+                            .map(|job| (job.content_uuid, job.input_hash.clone()))
+                            .collect(),
+                        &error.to_string(),
+                        false,
+                    )
+                    .await?;
+                Vec::new()
+            }
         }
     };
     // The provider call above can be slow enough for source content to change while it is in
@@ -783,6 +798,10 @@ async fn embed_individually(
     let mut embeddings = Vec::with_capacity(prepared.len());
     let mut failures = HashMap::<usize, (String, bool)>::new();
     for (prepared_chunk, text) in prepared.iter().zip(texts) {
+        if failures.contains_key(&prepared_chunk.job_index) {
+            embeddings.push(Vec::new());
+            continue;
+        }
         let job = &jobs[prepared_chunk.job_index];
         let result = match embedder.embed_passages(vec![text]).await {
             Ok(embeddings) => validate_embedding_response(embeddings, 1, embedder.ndims())
@@ -873,6 +892,11 @@ mod tests {
         call_sizes: StdMutex<Vec<usize>>,
     }
 
+    #[derive(Default)]
+    struct TransientBatchEmbedder {
+        call_sizes: StdMutex<Vec<usize>>,
+    }
+
     struct UniformEmbedder;
 
     #[async_trait]
@@ -907,12 +931,40 @@ mod tests {
         async fn embed_passages(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
             self.call_sizes.lock().unwrap().push(texts.len());
             if texts.len() > 1 {
-                bail!("simulated batch rejection");
+                return Err(llm_relay::LlmError::ApiError {
+                    status: 400,
+                    body: "simulated batch rejection".into(),
+                }
+                .into());
             }
             if texts[0].contains("POISON") {
                 bail!("simulated poison input rejection");
             }
             Ok(vec![vec![1.0, 0.0]])
+        }
+
+        async fn embed_query(&self, _text: String) -> Result<Vec<f32>> {
+            Ok(vec![1.0, 0.0])
+        }
+    }
+
+    #[async_trait]
+    impl EmbedderBackend for TransientBatchEmbedder {
+        fn ndims(&self) -> usize {
+            2
+        }
+
+        fn id(&self) -> String {
+            "test:transient-batch".into()
+        }
+
+        async fn embed_passages(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
+            self.call_sizes.lock().unwrap().push(texts.len());
+            Err(llm_relay::LlmError::ApiError {
+                status: 429,
+                body: "simulated rate limit".into(),
+            }
+            .into())
         }
 
         async fn embed_query(&self, _text: String) -> Result<Vec<f32>> {
@@ -1069,6 +1121,83 @@ mod tests {
         assert_eq!(calls.first(), Some(&16));
         assert_eq!(calls.len(), 17);
         assert!(calls[1..].iter().all(|size| *size == 1));
+    }
+
+    #[tokio::test]
+    async fn transient_batch_failure_does_not_fan_out_to_individual_requests() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let notes = notes_core::db::open(directory.path().join("notes.db"))
+            .await
+            .expect("notes database");
+        let page = notes_core::db::create_page(&notes, "Rate limited".into())
+            .await
+            .expect("create page");
+        notes_core::db::create_block(
+            &notes,
+            page.uuid,
+            None,
+            None,
+            notes_core::BlockStyle::Paragraph,
+            "one document".into(),
+        )
+        .await
+        .expect("create block");
+        let store = AiStore::open(directory.path().join("ai.db"), "identity".into(), 2)
+            .await
+            .expect("AI store");
+        let embedder = TransientBatchEmbedder::default();
+
+        assert!(
+            tick(&notes, &store, &embedder)
+                .await
+                .expect("embedding tick")
+        );
+
+        assert_eq!(*embedder.call_sizes.lock().unwrap(), vec![2]);
+        let status = store.status(2).await.expect("AI status");
+        assert_eq!(status.indexed, 0);
+        assert_eq!(status.pending, 2);
+        assert_eq!(status.failed, 2);
+    }
+
+    #[tokio::test]
+    async fn individual_retry_stops_after_a_chunk_failure_for_the_same_job() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let notes = notes_core::db::open(directory.path().join("notes.db"))
+            .await
+            .expect("notes database");
+        let page = notes_core::db::create_page(&notes, "Chunk failure".into())
+            .await
+            .expect("create page");
+        let markdown = format!("{} POISON\n{}", "x".repeat(1_100), "y".repeat(2_000));
+        notes_core::db::create_block(
+            &notes,
+            page.uuid,
+            None,
+            None,
+            notes_core::BlockStyle::Paragraph,
+            markdown,
+        )
+        .await
+        .expect("create block");
+        let store = AiStore::open(directory.path().join("ai.db"), "identity".into(), 2)
+            .await
+            .expect("AI store");
+        let embedder = PoisonBatchEmbedder::default();
+
+        assert!(
+            tick(&notes, &store, &embedder)
+                .await
+                .expect("embedding tick")
+        );
+
+        let calls = embedder.call_sizes.lock().unwrap().clone();
+        assert!(calls[0] > 2, "the block must be split into multiple chunks");
+        assert_eq!(calls[1..], [1, 1]);
+        let status = store.status(2).await.expect("AI status");
+        assert_eq!(status.indexed, 1);
+        assert_eq!(status.pending, 1);
+        assert_eq!(status.failed, 1);
     }
 
     #[tokio::test]
