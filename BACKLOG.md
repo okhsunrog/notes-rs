@@ -32,6 +32,12 @@ Findings from the 2026-07-19 multi-agent review that are **deliberately not in a
 
 - **Rewrite-on-rename** (approved 2026-07-19): renaming a page rewrites all inbound `[[old title]]` links to the new title (find them via the `page_links` index on `target_title`; ordinary synced block-edit ops), behind a confirmation showing the link count. This frees old names safely (no dangling links, no silent capture when the old name is reused) and makes auto-aliasing unnecessary. Manual aliases stay as-is — they are for deliberate synonyms, not rename history. Journals unaffected (no titles). _Trigger: promote into a plan before rename sees real use — i.e. shortly after the Logseq import._
 
+## History/undo polish (B6F4 verification leftovers, 2026-07-19 — all minor, no data-loss paths)
+
+- Subset-apply of destructive undo scopes is shadowed by B6F2 field guards (disappeared content Skips conservatively instead of applying) — add a code comment and a test pinning whichever semantics is intended.
+- Redo-direction and recursion-depth scope scenarios verified by review probes but have no committed tests.
+- Theoretical downgrade hole: pre-B6F4 binaries silently drop `scope_guards` on read (same accepted class as the legacy-v1 single unguarded apply). _Trigger for all three: next time anyone touches `history.rs`._
+
 ## Design debt (needs a design session, not a task)
 
 - **Undo boundary is inconsistent**: document edits and structure are in persistent history; outline typing undo is editor-local and dies on blur/restart (`db/blocks.rs:198` bypasses `record_action`). _Trigger: after B6 (sync-safe undo) lands — same subsystem, decide the model once._
