@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { CalendarDays, FilePlus2, FileText, Loader2, Search, TextQuote } from "lucide-react";
 import { Input } from "@/components/ui/input";
@@ -24,6 +24,7 @@ import {
 } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
 import { notifyError } from "@/lib/notify";
+import { DebouncedAction } from "@/lib/debounced-action";
 import { cn } from "@/lib/utils";
 import {
   hasExactPageTitle,
@@ -31,7 +32,6 @@ import {
   movePaletteSelection,
   preservePaletteSelection,
   resolvePendingPaletteEnter,
-  stablePaletteItems,
 } from "./search-palette";
 import {
   presentSearchResults,
@@ -74,6 +74,13 @@ type CreateNoteRow = {
 
 type PaletteRow = ContentRow | JournalRow | CreateNoteRow;
 
+type FrozenSearchSnapshot = {
+  presentation: SearchPresentation;
+  searchSettled: boolean;
+  recentPages: Page[];
+  recentJournals: Page[];
+};
+
 export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props) {
   const controller = useWorkspaceController();
   const [query, setQuery] = useState("");
@@ -82,22 +89,14 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
   const [serverState, setServerState] = useState<ServerSearchState>("absent");
   const [localPending, setLocalPending] = useState(false);
   const [localError, setLocalError] = useState(false);
-  const [resultsFrozen, setResultsFrozen] = useState(false);
-  const [frozenPresentation, setFrozenPresentation] = useState<SearchPresentation>({
-    primary: [],
-    localExtras: [],
-  });
-  const [frozenSearchSettled, setFrozenSearchSettled] = useState(false);
-  const [frozenPrimarySource, setFrozenPrimarySource] = useState("local FTS");
-  const [frozenRecentPages, setFrozenRecentPages] = useState<Page[]>([]);
-  const [frozenRecentJournals, setFrozenRecentJournals] = useState<Page[]>([]);
+  const [frozenSnapshot, setFrozenSnapshot] = useState<FrozenSearchSnapshot | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [pendingEnter, setPendingEnter] = useState<{
     query: string;
     shiftKey: boolean;
   } | null>(null);
-  const localTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const serverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const localDebounce = useRef(new DebouncedAction()).current;
+  const serverDebounce = useRef(new DebouncedAction()).current;
   const localEpoch = useRef(0);
   const serverEpoch = useRef(0);
   const settingsQuery = useQuery({ queryKey: queryKeys.settings, queryFn: loadSettings });
@@ -153,8 +152,8 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
     const value = query.trim();
     const nextLocalEpoch = ++localEpoch.current;
     const nextServerEpoch = ++serverEpoch.current;
-    clearSearchTimer(localTimer);
-    clearSearchTimer(serverTimer);
+    localDebounce.cancel();
+    serverDebounce.cancel();
     setServerHits([]);
 
     if (!value) {
@@ -168,15 +167,13 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
     setLocalHits([]);
     setLocalPending(true);
     setLocalError(false);
-    localTimer.current = setTimeout(() => {
-      localTimer.current = null;
+    localDebounce.schedule(() => {
       void runLocal(value, nextLocalEpoch);
     }, LOCAL_DEBOUNCE_MS);
 
     if (serverConfigured && aiSearchAsYouType && Array.from(value).length >= 3) {
       setServerState("pending");
-      serverTimer.current = setTimeout(() => {
-        serverTimer.current = null;
+      serverDebounce.schedule(() => {
         void runServer(value, nextServerEpoch, false);
       }, SERVER_DEBOUNCE_MS);
     } else {
@@ -184,28 +181,26 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
     }
 
     return () => {
-      clearSearchTimer(localTimer);
-      clearSearchTimer(serverTimer);
+      localDebounce.cancel();
+      serverDebounce.cancel();
       localEpoch.current += 1;
       serverEpoch.current += 1;
     };
-  }, [aiSearchAsYouType, query, runLocal, runServer, serverConfigured]);
+  }, [
+    aiSearchAsYouType,
+    localDebounce,
+    query,
+    runLocal,
+    runServer,
+    serverConfigured,
+    serverDebounce,
+  ]);
 
   const presented = useMemo(
     () => presentSearchResults({ localHits, serverHits, serverState }),
     [localHits, serverHits, serverState],
   );
-  const displayedPresentation = useMemo<SearchPresentation>(
-    () => ({
-      primary: [
-        ...stablePaletteItems(frozenPresentation.primary, presented.primary, resultsFrozen),
-      ],
-      localExtras: [
-        ...stablePaletteItems(frozenPresentation.localExtras, presented.localExtras, resultsFrozen),
-      ],
-    }),
-    [frozenPresentation, presented, resultsFrozen],
-  );
+  const displayedPresentation = frozenSnapshot?.presentation ?? presented;
   const displayedHits = useMemo(
     () => [...displayedPresentation.primary, ...displayedPresentation.localExtras],
     [displayedPresentation],
@@ -221,27 +216,25 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
     const value = activeQuery.current;
     if (!value) return;
 
-    clearSearchTimer(localTimer);
+    localDebounce.cancel();
     const nextLocalEpoch = ++localEpoch.current;
-    setResultsFrozen(false);
+    setFrozenSnapshot(null);
     setLocalPending(true);
     setLocalError(false);
     void runLocal(value, nextLocalEpoch);
-  }, [pagesQuery.data, runLocal]);
+  }, [localDebounce, pagesQuery.data, runLocal]);
 
   const searchSettled = !localPending && serverState !== "pending";
-  const displayedSearchSettled = resultsFrozen ? frozenSearchSettled : searchSettled;
+  const displayedSearchSettled = frozenSnapshot?.searchSettled ?? searchSettled;
   const exactTitleMatch = hasExactPageTitle(queryValue, displayedHits);
   const journalDate = journalDateFromSearchQuery(queryValue);
-  const primarySource =
-    serverState === "success" && serverHits.length > 0 ? "server AI" : "local FTS";
-  const displayedPrimarySource = resultsFrozen ? frozenPrimarySource : primarySource;
+  const displayedPrimarySource = displayedPresentation.primarySource;
   const recentPages = (pagesQuery.data ?? []).slice(0, RECENT_PAGE_LIMIT);
   const recentJournals = (journalsQuery.data ?? [])
     .filter((page) => page.kind.kind !== "journal" || page.kind.date !== todayJournalDate())
     .slice(0, RECENT_JOURNAL_LIMIT);
-  const displayedRecentPages = resultsFrozen ? frozenRecentPages : recentPages;
-  const displayedRecentJournals = resultsFrozen ? frozenRecentJournals : recentJournals;
+  const displayedRecentPages = frozenSnapshot?.recentPages ?? recentPages;
+  const displayedRecentJournals = frozenSnapshot?.recentJournals ?? recentJournals;
 
   const primaryRows = useMemo<ContentRow[]>(() => {
     if (!queryValue) {
@@ -315,16 +308,13 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
   }, [rowKeys]);
 
   const blockPageUuids = useMemo(
-    () =>
-      [
-        ...new Set(
-          [...primaryRows, ...localRows]
-            .filter((row) => row.hit.content.kind === "block")
-            .map((row) =>
-              row.hit.content.kind === "block" ? row.hit.content.record.pageUuid : "",
-            ),
+    () => [
+      ...new Set(
+        [...primaryRows, ...localRows].flatMap((row) =>
+          row.hit.content.kind === "block" ? [row.hit.content.record.pageUuid] : [],
         ),
-      ].filter(Boolean),
+      ),
+    ],
     [localRows, primaryRows],
   );
   const blockPageQueries = useQueries({
@@ -373,9 +363,9 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
     ) {
       return false;
     }
-    clearSearchTimer(serverTimer);
+    serverDebounce.cancel();
     const nextServerEpoch = ++serverEpoch.current;
-    setResultsFrozen(false);
+    setFrozenSnapshot(null);
     setServerHits([]);
     setServerState("pending");
     void runServer(queryValue, nextServerEpoch, aiSearchRerank);
@@ -386,14 +376,10 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
     if (event.nativeEvent.isComposing) return;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
-      if (!resultsFrozen) {
-        setFrozenPresentation(presented);
-        setFrozenSearchSettled(searchSettled);
-        setFrozenPrimarySource(primarySource);
-        setFrozenRecentPages(recentPages);
-        setFrozenRecentJournals(recentJournals);
-      }
-      setResultsFrozen(true);
+      setFrozenSnapshot(
+        (current) =>
+          current ?? { presentation: presented, searchSettled, recentPages, recentJournals },
+      );
       setSelectedKey((current) =>
         movePaletteSelection(current, rows, event.key === "ArrowDown" ? 1 : -1),
       );
@@ -417,7 +403,7 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
   };
 
   const handleQueryChange = (value: string) => {
-    setResultsFrozen(false);
+    setFrozenSnapshot(null);
     setSelectedKey(null);
     setPendingEnter(null);
     setQuery(value);
@@ -473,54 +459,21 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
       )}
     >
       {!queryValue && <SectionLabel>Recent</SectionLabel>}
-      {leadingRows.map((row) => (
-        <PaletteResultRow
-          key={row.key}
-          row={row}
-          optionId={`search-option-${rows.indexOf(row)}`}
-          selected={row.key === selectedKey}
-          parentPage={null}
-          showSource={showSearchSources}
-          onActivate={activateRow}
-          onSelect={setSelectedKey}
-        />
-      ))}
-      {primaryRows.map((row) => (
-        <PaletteResultRow
-          key={row.key}
-          row={row}
-          optionId={`search-option-${rows.indexOf(row)}`}
-          selected={row.key === selectedKey}
-          parentPage={parentPageForRow(row, parentPages)}
-          showSource={showSearchSources}
-          onActivate={activateRow}
-          onSelect={setSelectedKey}
-        />
-      ))}
-      {localRows.length > 0 && <SectionLabel>Found locally</SectionLabel>}
-      {localRows.map((row) => (
-        <PaletteResultRow
-          key={row.key}
-          row={row}
-          optionId={`search-option-${rows.indexOf(row)}`}
-          selected={row.key === selectedKey}
-          parentPage={parentPageForRow(row, parentPages)}
-          showSource={showSearchSources}
-          onActivate={activateRow}
-          onSelect={setSelectedKey}
-        />
-      ))}
-      {trailingRows.map((row) => (
-        <PaletteResultRow
-          key={row.key}
-          row={row}
-          optionId={`search-option-${rows.indexOf(row)}`}
-          selected={row.key === selectedKey}
-          parentPage={null}
-          showSource={showSearchSources}
-          onActivate={activateRow}
-          onSelect={setSelectedKey}
-        />
+      {rows.map((row, index) => (
+        <Fragment key={row.key}>
+          {localRows.length > 0 && index === leadingRows.length + primaryRows.length && (
+            <SectionLabel>Found locally</SectionLabel>
+          )}
+          <PaletteResultRow
+            row={row}
+            optionId={`search-option-${index}`}
+            selected={row.key === selectedKey}
+            parentPage={row.kind === "content" ? parentPageForRow(row, parentPages) : null}
+            showSource={showSearchSources}
+            onActivate={activateRow}
+            onSelect={setSelectedKey}
+          />
+        </Fragment>
       ))}
       {queryValue && localPending && rows.length === 0 && (
         <p aria-live="polite" className="px-3 py-6 text-center text-sm text-muted-foreground">
@@ -693,11 +646,6 @@ function ResultSnippet({ hit }: { hit: SearchHit }) {
       })}
     </span>
   );
-}
-
-function clearSearchTimer(timer: React.MutableRefObject<ReturnType<typeof setTimeout> | null>) {
-  if (timer.current !== null) clearTimeout(timer.current);
-  timer.current = null;
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {

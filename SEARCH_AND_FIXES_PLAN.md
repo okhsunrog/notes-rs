@@ -140,7 +140,7 @@ Superseded semantic requests run the full pipeline to completion (no cancellatio
 
 The blocks-first interleave plus exact-only title priority ranks the A2 morphology case ("проекта" → page «Проекты») below ANY block containing "проект". Approved fix: promote **stemmed-token-set equality** matches into the priority tier — if the stemmed token set of the query equals the stemmed token set of the page title (order-insensitive), treat it like `exact_title` in the partition. This preserves the existing guarantees: "Rust scratchpad" for query "rust" stays non-priority ({rust} ≠ {rust, scratchpad}), so the strong-body-beats-weak-title test is unaffected. Tests: «проекта» ranks page «Проекты» above a block containing "проект"; existing exact-title and strong-body fixtures unchanged.
 
-### AF12 (optional — skip if session context runs low). Cleanup batch
+### AF12. Cleanup batch
 
 In one commit, in `search-card.tsx` unless noted: collapse the six `frozen*` states into one nullable snapshot object set atomically on first arrow key; merge the four copy-pasted row-render map blocks into one indexed map (drop the O(n²) `rows.indexOf`); have `presentSearchResults` return `primarySource` instead of the mirrored condition in the card; replace raw timer refs with the existing `DebouncedAction` (`src/lib/debounced-action.ts`); simplify `blockPageUuids` to a single flatMap; in `db/search.rs` remove (or re-justify with a comment) the dead cross-tier dedup `retain` in `search_pages_ranked`.
 

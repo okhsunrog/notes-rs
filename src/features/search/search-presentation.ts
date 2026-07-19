@@ -5,6 +5,7 @@ export type ServerSearchState = "absent" | "idle" | "pending" | "success" | "fai
 export type SearchPresentation = {
   primary: SearchHit[];
   localExtras: SearchHit[];
+  primarySource: "local FTS" | "server AI";
 };
 
 export function presentSearchResults({
@@ -17,12 +18,13 @@ export function presentSearchResults({
   serverState: ServerSearchState;
 }): SearchPresentation {
   if (serverHits.length === 0 || serverState === "failed" || serverState === "absent") {
-    return { primary: localHits, localExtras: [] };
+    return { primary: localHits, localExtras: [], primarySource: "local FTS" };
   }
 
   const serverUuids = new Set(serverHits.map((hit) => contentUuid(hit.content)));
   return {
     primary: serverHits,
     localExtras: localHits.filter((hit) => !serverUuids.has(contentUuid(hit.content))).slice(0, 5),
+    primarySource: "server AI",
   };
 }

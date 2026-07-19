@@ -48,8 +48,6 @@ async fn search_pages_ranked(
         if pages.is_empty() && !relaxed_query.is_empty() {
             pages = query_pages_fts(database, &relaxed_query, &normalized_query, limit)?;
         }
-        let mut seen = std::collections::HashSet::new();
-        pages.retain(|ranked| seen.insert(ranked.page.uuid));
         Ok(pages)
     })
     .await

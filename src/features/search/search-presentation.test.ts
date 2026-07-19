@@ -27,26 +27,26 @@ describe("presentSearchResults", () => {
   it("uses local results when no server is configured", () => {
     expect(
       presentSearchResults({ localHits: local, serverHits: [], serverState: "absent" }),
-    ).toEqual({ primary: local, localExtras: [] });
+    ).toEqual({ primary: local, localExtras: [], primarySource: "local FTS" });
   });
 
   it("keeps local results while the server is pending or failed", () => {
     expect(
       presentSearchResults({ localHits: local, serverHits: [], serverState: "pending" }),
-    ).toEqual({ primary: local, localExtras: [] });
+    ).toEqual({ primary: local, localExtras: [], primarySource: "local FTS" });
     expect(
       presentSearchResults({
         localHits: local,
         serverHits: [hit("stale-server")],
         serverState: "failed",
       }),
-    ).toEqual({ primary: local, localExtras: [] });
+    ).toEqual({ primary: local, localExtras: [], primarySource: "local FTS" });
   });
 
   it("uses local results when the authoritative server list is empty", () => {
     expect(
       presentSearchResults({ localHits: local, serverHits: [], serverState: "success" }),
-    ).toEqual({ primary: local, localExtras: [] });
+    ).toEqual({ primary: local, localExtras: [], primarySource: "local FTS" });
   });
 
   it("preserves server order and appends at most five UUID-deduplicated local extras", () => {
@@ -66,6 +66,7 @@ describe("presentSearchResults", () => {
       serverState: "success",
     });
     expect(presented.primary).toEqual(server);
+    expect(presented.primarySource).toBe("server AI");
     expect(presented.localExtras.map((item) => item.content.record.uuid)).toEqual([
       "local-1",
       "local-2",
