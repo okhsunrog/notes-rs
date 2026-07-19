@@ -189,6 +189,30 @@ The sync loop keeps retrying a permanent `WorkspaceConflict` (divergent-workspac
 
 ---
 
+## B6-fix — CRITICAL, interrupt Track C and do this first
+
+Adversarial review of 48b8621 (2026-07-19, verified by repro tests): the guard mechanism, all-or-nothing entry semantics, pipeline integration (outbox/HLC/effects), and redo symmetry are all sound — but two defects ship-block:
+
+### B6F1. Sibling-guard refresh (CRITICAL)
+
+Applying an undo writes a fresh HLC to the field, but guards of the remaining entries in both stacks are never refreshed (`move_history` only rewrites the moved entry's own opposite payload, `history.rs:601-607`). Confirmed repro: `set_block_style` → `set_task_state` → undo (Applied) → undo → **Skipped**, entry deleted, "changed on another device" toast with sync disabled. Any same-field action sequence kills the rest of the stack after one undo.
+
+Fix: after a successful apply in `move_history`, refresh the guards of all remaining entries (both stacks) whose guarded fields overlap the fields just written (`next_guards`) to the new HLCs, in the same transaction. Tests: consecutive undo of two same-field actions both apply; three-deep stack; undo→redo→undo cycles.
+
+### B6F2. Guard the inverse's dependencies, not just the forward's fields (HIGH)
+
+`capture_history_guards(transaction, &forward)` guards forward-op fields only; a `BlockDelete` entry carries just `BlockExistence{uuid}`, but its inverse `BlockCreate` also requires the _page_ to be alive. Confirmed repro: local block delete → remote `PageDelete` → undo returns **Applied** while `BlockCreate` writes a tombstone (operation.rs:1643-1652) — nothing restored, fake success toast, plus a redo entry whose forward re-deletes a nonexistent block. Fix: capture guards for the inverse ops' dependencies (page existence for block restore; audit the other inverse kinds for analogous dependencies). Test: the repro above must return Skipped.
+
+### B6F3. Test batch + copy
+
+Add the missing coverage named by the review: redo-after-remote-skip; multi-op entry where only one field changed remotely (all-or-nothing pinned); structural guard (`BlockMove`); undo-of-delete-after-remote-parent-delete; a legacy v1 entry facing a real remote conflict. Also neutralize the skip message ("Undo skipped — the content changed since" instead of unconditionally blaming another device). Accepted as documented tradeoffs, no action: legacy v1 entries get one unguarded apply; one-skip-per-keypress UX.
+
+## B-polish — after B6-fix, one commit
+
+1. **B4 graph gating**: `BlockSetMarkdown` now unconditionally emits GraphChanged → `graphRoot`+`backlinksRoot` refetch on every autosave while typing. Restore gating on actual reference change (the old local path used the DB's `graph_changed` signal; thread that through `events_for_ops` input rather than re-diffing).
+2. **append_to_journal**: subsequent captures no longer emit PagesChanged — verify nothing depends on the `journals` query refetch (journal list previews); if something does, emit it; if not, leave a comment.
+3. Remove orphaned `stablePaletteItems` (production references gone after AF12; delete with its test).
+
 ## Track C — Server security hardening
 
 _(single-user today; these close the holes before any second token exists)_

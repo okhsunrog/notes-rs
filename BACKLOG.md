@@ -22,6 +22,8 @@ Findings from the 2026-07-19 multi-agent review that are **deliberately not in a
 
 ## UX / product
 
+- **Enabling sync from disabled-at-startup requires an app restart**: `spawn_worker` runs once at startup only when credentials exist; `sync_settings_changed()` bumps a watch nobody loops on in that state (observed during B8 review — pre-existing, not a regression; B8's park/resume works for an already-running worker). _Trigger: first time it annoys during real use; fix = spawn the worker lazily on credential save._
+
 - **RU/EN translated near-duplicates** both surface in semantic results (no translation-dedup anywhere). _Trigger: eval harness shows it hurting real queries; otherwise accept._
 - **No sub-space/namespace filtering**: repo docs + blog + personal notes share one retrieval space; dense technical pages will dominate related queries. _Trigger: after MD import lands and pollution is felt; ties into the roadmap's properties/saved-queries plans._
 - **`outliner.collapsed.<uuid>` localStorage keys accumulate forever** (`block-node.tsx:110-111`), surviving page deletion. _Trigger: trivial janitor task any time — prune keys whose UUID no longer exists at startup._
