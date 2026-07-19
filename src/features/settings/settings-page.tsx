@@ -337,7 +337,7 @@ export function SettingsPage({
             checked={settings.aiSearchRerank}
             disabled={!settings.aiSearchEnabled}
             label="Reranker"
-            description="Let the server rerank its hybrid candidates. When disabled, the server keeps its original RRF order."
+            description="Applies when AI search runs on Enter. When disabled, the server keeps its original RRF order."
             onChange={(checked) => update("aiSearchRerank", checked)}
           />
           <details className="rounded-2xl border border-border/60 bg-background/40 p-4">

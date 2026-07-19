@@ -136,24 +136,18 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
     }
   }, []);
 
-  const runServer = useCallback(
-    async (value: string, epoch: number) => {
-      try {
-        const result = await withTimeout(
-          search("semantic", value, 20, aiSearchRerank),
-          SERVER_TIMEOUT_MS,
-        );
-        if (epoch !== serverEpoch.current) return;
-        setServerHits(result);
-        setServerState("success");
-      } catch {
-        if (epoch !== serverEpoch.current) return;
-        setServerHits([]);
-        setServerState("failed");
-      }
-    },
-    [aiSearchRerank],
-  );
+  const runServer = useCallback(async (value: string, epoch: number, rerank: boolean) => {
+    try {
+      const result = await withTimeout(search("semantic", value, 20, rerank), SERVER_TIMEOUT_MS);
+      if (epoch !== serverEpoch.current) return;
+      setServerHits(result);
+      setServerState("success");
+    } catch {
+      if (epoch !== serverEpoch.current) return;
+      setServerHits([]);
+      setServerState("failed");
+    }
+  }, []);
 
   useEffect(() => {
     const value = query.trim();
@@ -183,7 +177,7 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
       setServerState("pending");
       serverTimer.current = setTimeout(() => {
         serverTimer.current = null;
-        void runServer(value, nextServerEpoch);
+        void runServer(value, nextServerEpoch, false);
       }, SERVER_DEBOUNCE_MS);
     } else {
       setServerState(serverConfigured ? "idle" : "absent");
@@ -384,7 +378,7 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
     setResultsFrozen(false);
     setServerHits([]);
     setServerState("pending");
-    void runServer(queryValue, nextServerEpoch);
+    void runServer(queryValue, nextServerEpoch, aiSearchRerank);
     return true;
   };
 

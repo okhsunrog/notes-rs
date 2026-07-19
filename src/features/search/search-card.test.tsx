@@ -133,7 +133,29 @@ describe("SearchCard page-list refreshes", () => {
 
     await pressEnter(container);
     expect(semanticAttempts).toBe(2);
+    expect(
+      api.search.mock.calls.filter(([mode]) => mode === "semantic").map((call) => call[3]),
+    ).toEqual([true, true]);
     expect(container.textContent).not.toContain("AI search failed — press Enter to retry");
+  });
+
+  it("disables reranking for as-you-type semantic requests", async () => {
+    api.settings = {
+      ...api.settings,
+      aiSearchEnabled: true,
+      aiSearchRerank: true,
+      aiSearchTrigger: "as_you_type",
+      configuredKeys: ["SYNC_TOKEN"],
+      syncServerUrl: "https://sync.example.test",
+    };
+    const { container } = await renderSearchCard([]);
+
+    await enterQuery(container, "semantic");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+    });
+
+    expect(api.search).toHaveBeenCalledWith("semantic", "semantic", 20, false);
   });
 
   it("reports local failures and withholds Create until a successful empty search", async () => {
