@@ -207,6 +207,14 @@ Fix: after a successful apply in `move_history`, refresh the guards of all remai
 
 Add the missing coverage named by the review: redo-after-remote-skip; multi-op entry where only one field changed remotely (all-or-nothing pinned); structural guard (`BlockMove`); undo-of-delete-after-remote-parent-delete; a legacy v1 entry facing a real remote conflict. Also neutralize the skip message ("Undo skipped — the content changed since" instead of unconditionally blaming another device). Accepted as documented tradeoffs, no action: legacy v1 entries get one unguarded apply; one-skip-per-keypress UX.
 
+### B6F4. Guard destructive-scope inverses on content (MEDIUM — final B6 follow-up, 2026-07-19 verification)
+
+Repro'd gap of the B6F2 class: inverse `PageDelete` (undo of note creation) guards the page's own fields but not its **contents**. Local create-note → remote `BlockCreate` on that page → undo returns Applied, deletes the page including the remote block, and the local tombstones out-HLC the remote op so the loss propagates on sync. Same class: undo of a block-create after a remote child was added under it.
+
+Fix: for destructive inverse ops (`PageDelete`/`BlockDelete` appearing as inverses of creates), capture a **scope guard** at record time (post-forward-apply, same transaction): the set of child/descendant block uuids the destructive inverse is entitled to remove. At undo time, skip the entry if the target now contains blocks outside the captured set. Tests: the two repros above return Skipped; normal create→undo (no remote additions) still Applies; a legacy v1 entry stays on its documented single unguarded apply.
+
+Accepted as documented semantics, no action (from the same verification): mid-history guard laundering by sibling refresh (linear-undo semantics — add one code comment); dependency-field over-refresh (no data-loss path constructed); ~200 bounded JSON decodes per move.
+
 ## B-polish — after B6-fix, one commit
 
 1. **B4 graph gating**: `BlockSetMarkdown` now unconditionally emits GraphChanged → `graphRoot`+`backlinksRoot` refetch on every autosave while typing. Restore gating on actual reference change (the old local path used the DB's `graph_changed` signal; thread that through `events_for_ops` input rather than re-diffing).
