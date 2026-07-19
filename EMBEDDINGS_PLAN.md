@@ -70,6 +70,32 @@ The golden-set template (ship an example `eval-queries.example.toml`) must inclu
 
 ---
 
+## E8 — review findings (2026-07-20; E8.1 GATES THE IMPORT, do first)
+
+### E8.1. Splitter must use line boundaries below min_chars before hard-cutting (moderate — import blocker)
+
+`chunking.rs:107` filters boundaries to `(min_chars..=max_chars)`, discarding every line boundary below 1200 — a body of ~899-char lines splits mid-line/mid-word (empirically confirmed: 700/199/500-char fragments with clean boundaries available). Chunk boundaries are frozen format: fixing this later re-embeds nothing (hash covers the composition, not chunks) and would force another INPUT_FORMAT_VERSION bump + full paid re-embed. Fix now, before anything is embedded: when no boundary lands in `[min, max]`, take the **largest boundary ≤ max of the best available kind** before falling back to a hard cut. In the same commit fix the sibling defect: `natural_boundaries` resets `in_code_fence = false` for each `remaining` tail, inverting fence parity after an in-fence split (and blank lines inside fences classify as top-preference BlankLine). Golden tests: the 899-char-lines case splits at line boundaries; fence parity survives an in-fence split. NO version bump needed — nothing is embedded yet.
+
+### E8.2. Gate the status path (efficiency — hot in daily use)
+
+`server/src/ai.rs:460` `status_for` → `source_document_count` runs a full ungated `index_documents` (recursive CTE + full composition) just for `.len()`, and the settings panel polls it every 2 s — with settings open, a full-corpus scan every 2 seconds, defeating E5. Fix: read the cached `index_generations.source_documents` (or apply the same composite-cursor gate).
+
+### E8.3. Don't fan out on transient batch errors
+
+`embed.rs:732` calls `embed_individually` on ANY batch error; a 429/outage turns 1 failed call into 1+N sequential failing calls against a rate-limiter. Gate the fan-out on `provider_failure_is_terminal(&batch_error)` (isolate only when the error looks per-item); add the missing test that a transient batch error does NOT fan out. Also stop embedding a job's remaining chunks after one of its chunks failed (cost-only nit from the E3 review).
+
+### E8.4. KNN pool: count unique blocks, not chunks
+
+`retrieval.rs:60` fetches `limit*4` chunk matches then dedups — multi-chunk blocks shrink the effective RRF/rerank pool. Over-fetch (or dedup in SQL) so the post-dedup pool targets `limit*4` unique content UUIDs. Retrieval-side only, no re-embed.
+
+### E8.5. Test gaps
+
+Positive reconcile re-open: a local edit between ticks bumps `reconcile_scan_count` to 2 (the E5 gate's other direction).
+
+### E8.6. Decision record — section heading does not cross parent boundaries
+
+`store.rs:1177` matches headings among same-parent siblings only; a block nested in a list on a document page misses the top-level section heading. Default (recommended, pending user confirmation): KEEP this semantics — nested blocks already carry ancestor excerpts, and sibling-scope is simpler. Add a code comment documenting the choice either way. Do NOT change behavior without explicit approval.
+
 ## Out of scope (do not attempt)
 
 - Overlap chunking, semantic/embedding-based chunkers, chunks spanning block boundaries.
