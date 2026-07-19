@@ -217,24 +217,38 @@ pub async fn history_status(state: State<'_, AppState>) -> CommandResult<db::His
 
 #[tauri::command]
 #[specta::specta]
-pub async fn undo(app: AppHandle, state: State<'_, AppState>) -> CommandResult<bool> {
-    let changed = db::undo_history(&state.conn).await.map_err(err)?;
-    if changed {
-        emit_domain(&app, DomainEvent::WorkspaceChanged);
-        emit_domain(&app, DomainEvent::HistoryChanged);
+pub async fn undo(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CommandResult<db::HistoryMoveResult> {
+    let result = db::undo_history(&state.conn).await.map_err(err)?;
+    match result {
+        db::HistoryMoveResult::Applied => {
+            emit_domain(&app, DomainEvent::WorkspaceChanged);
+            emit_domain(&app, DomainEvent::HistoryChanged);
+        }
+        db::HistoryMoveResult::Skipped => emit_domain(&app, DomainEvent::HistoryChanged),
+        db::HistoryMoveResult::Empty => {}
     }
-    Ok(changed)
+    Ok(result)
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn redo(app: AppHandle, state: State<'_, AppState>) -> CommandResult<bool> {
-    let changed = db::redo_history(&state.conn).await.map_err(err)?;
-    if changed {
-        emit_domain(&app, DomainEvent::WorkspaceChanged);
-        emit_domain(&app, DomainEvent::HistoryChanged);
+pub async fn redo(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CommandResult<db::HistoryMoveResult> {
+    let result = db::redo_history(&state.conn).await.map_err(err)?;
+    match result {
+        db::HistoryMoveResult::Applied => {
+            emit_domain(&app, DomainEvent::WorkspaceChanged);
+            emit_domain(&app, DomainEvent::HistoryChanged);
+        }
+        db::HistoryMoveResult::Skipped => emit_domain(&app, DomainEvent::HistoryChanged),
+        db::HistoryMoveResult::Empty => {}
     }
-    Ok(changed)
+    Ok(result)
 }
 
 #[tauri::command]

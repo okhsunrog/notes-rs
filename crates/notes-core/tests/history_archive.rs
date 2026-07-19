@@ -1,6 +1,7 @@
 use notes_core::db::{self, DataArchive};
 use notes_core::{
-    AttachmentOwner, BlobHash, BlockStyle, Connection, OrderKey, PageLayout, TaskState,
+    AttachmentOwner, BlobHash, BlockSetMarkdown, BlockStyle, Connection, Hlc, Op, OpKind, OrderKey,
+    Origin, PageLayout, TaskState,
 };
 
 struct TestDatabase {
@@ -24,6 +25,62 @@ fn hash(byte: u8) -> BlobHash {
 }
 
 #[tokio::test]
+async fn undo_is_skipped_after_a_remote_field_wins() {
+    let database = database().await;
+    let note = db::create_note(&database.connection, None)
+        .await
+        .expect("create note")
+        .into_created()
+        .expect("untitled note is created");
+    let workspace_uuid = db::workspace_uuid(&database.connection)
+        .await
+        .expect("read workspace identity");
+    let remote_device = uuid::Uuid::from_u128(0xD3A1CE);
+    let remote = Op {
+        op_id: uuid::Uuid::from_u128(0xA11CE),
+        workspace_uuid,
+        device_id: remote_device,
+        hlc: Hlc::new(u64::MAX - 1, 0, remote_device),
+        format_version: notes_core::operation::FORMAT_VERSION,
+        kind: OpKind::BlockSetMarkdown(BlockSetMarkdown {
+            uuid: note.initial_block.uuid,
+            markdown: "remote edit".into(),
+        }),
+    };
+    assert!(
+        notes_core::apply(&database.connection, &remote, Origin::Remote)
+            .await
+            .expect("apply remote edit")
+            .applied
+    );
+
+    assert_eq!(
+        db::undo_history(&database.connection)
+            .await
+            .expect("attempt guarded undo"),
+        db::HistoryMoveResult::Skipped
+    );
+    let block = db::get_block(&database.connection, note.initial_block.uuid)
+        .await
+        .expect("read remotely edited block")
+        .expect("skipped undo keeps the block");
+    assert_eq!(block.markdown, "remote edit");
+    assert!(
+        db::get_page(&database.connection, note.page.uuid)
+            .await
+            .expect("read page")
+            .is_some()
+    );
+    assert_eq!(
+        db::history_status(&database.connection).await.unwrap(),
+        db::HistoryStatus {
+            undo_count: 0,
+            redo_count: 0,
+        }
+    );
+}
+
+#[tokio::test]
 async fn history_writes_tagged_envelopes_and_reads_legacy_entries() {
     let database = database().await;
     let note = db::create_note(&database.connection, None)
@@ -44,7 +101,7 @@ async fn history_writes_tagged_envelopes_and_reads_legacy_entries() {
         .expect("read stored history envelope");
     let tagged: serde_json::Value = serde_json::from_str(&inverse).unwrap();
     assert_eq!(tagged["format_version"], 2);
-    let legacy = serde_json::to_string(&tagged["payload"]).unwrap();
+    let legacy = serde_json::to_string(&tagged["payload"]["operations"]).unwrap();
     database
         .connection
         .call(move |database| {
@@ -59,10 +116,11 @@ async fn history_writes_tagged_envelopes_and_reads_legacy_entries() {
         .await
         .expect("replace inverse with legacy v1 JSON");
 
-    assert!(
+    assert_eq!(
         db::undo_history(&database.connection)
             .await
-            .expect("undo legacy entry")
+            .expect("undo legacy entry"),
+        db::HistoryMoveResult::Applied
     );
     assert!(
         db::get_page(&database.connection, note.page.uuid)
@@ -121,10 +179,11 @@ async fn task_state_updates_are_typed_undoable_and_reject_non_tasks() {
     .expect("complete task");
     assert_eq!(completed.style, BlockStyle::task(TaskState::Done));
 
-    assert!(
+    assert_eq!(
         db::undo_history(&database.connection)
             .await
-            .expect("undo state")
+            .expect("undo state"),
+        db::HistoryMoveResult::Applied
     );
     assert_eq!(
         db::get_block(&database.connection, note.initial_block.uuid)
@@ -134,10 +193,11 @@ async fn task_state_updates_are_typed_undoable_and_reject_non_tasks() {
             .style,
         BlockStyle::task(TaskState::Now)
     );
-    assert!(
+    assert_eq!(
         db::redo_history(&database.connection)
             .await
-            .expect("redo state")
+            .expect("redo state"),
+        db::HistoryMoveResult::Applied
     );
     assert_eq!(
         db::get_block(&database.connection, note.initial_block.uuid)
@@ -261,7 +321,10 @@ async fn undo_and_redo_restore_a_deleted_page_subtree_and_attachments_exactly() 
             .is_none()
     );
 
-    assert!(db::undo_history(connection).await.expect("undo deletion"));
+    assert_eq!(
+        db::undo_history(connection).await.expect("undo deletion"),
+        db::HistoryMoveResult::Applied
+    );
     let restored_page = db::get_page(connection, note.page.uuid)
         .await
         .expect("read restored page")
@@ -296,7 +359,10 @@ async fn undo_and_redo_restore_a_deleted_page_subtree_and_attachments_exactly() 
         vec![block_attachment.uuid]
     );
 
-    assert!(db::redo_history(connection).await.expect("redo deletion"));
+    assert_eq!(
+        db::redo_history(connection).await.expect("redo deletion"),
+        db::HistoryMoveResult::Applied
+    );
     assert!(
         db::get_page(connection, note.page.uuid)
             .await

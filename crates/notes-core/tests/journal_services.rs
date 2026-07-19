@@ -200,8 +200,11 @@ async fn append_is_atomic_ordered_and_one_history_action_per_capture() {
         })
         .await
         .unwrap();
-    let latest_operations: Vec<notes_core::OpKind> =
+    let latest_payload: serde_json::Value =
         notes_core::decode_persisted_envelope(&latest_forward).unwrap();
+    assert_eq!(latest_payload["history_format_version"], 2);
+    let latest_operations: Vec<notes_core::OpKind> =
+        serde_json::from_value(latest_payload["operations"].clone()).unwrap();
     assert_eq!(latest_operations.len(), 1);
     assert!(matches!(
         latest_operations.as_slice(),
@@ -219,14 +222,20 @@ async fn append_is_atomic_ordered_and_one_history_action_per_capture() {
     );
     assert!(children[0].order_key < children[1].order_key);
 
-    assert!(db::undo_history(&database.connection).await.unwrap());
+    assert_eq!(
+        db::undo_history(&database.connection).await.unwrap(),
+        db::HistoryMoveResult::Applied
+    );
     let children = db::list_block_children(&database.connection, first.page_uuid, None)
         .await
         .unwrap();
     assert_eq!(children.len(), 1);
     assert_eq!(children[0].uuid, first.uuid);
 
-    assert!(db::undo_history(&database.connection).await.unwrap());
+    assert_eq!(
+        db::undo_history(&database.connection).await.unwrap(),
+        db::HistoryMoveResult::Applied
+    );
     assert!(
         db::get_journal(&database.connection, journal_date)
             .await

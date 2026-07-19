@@ -26,8 +26,8 @@ export const commands = {
 	resetSettings: () => typedError<SettingsSnapshot, CommandError>(__TAURI_INVOKE("reset_settings")),
 	restartApp: () => __TAURI_INVOKE<void>("restart_app"),
 	historyStatus: () => typedError<HistoryStatus, CommandError>(__TAURI_INVOKE("history_status")),
-	undo: () => typedError<boolean, CommandError>(__TAURI_INVOKE("undo")),
-	redo: () => typedError<boolean, CommandError>(__TAURI_INVOKE("redo")),
+	undo: () => typedError<HistoryMoveResult, CommandError>(__TAURI_INVOKE("undo")),
+	redo: () => typedError<HistoryMoveResult, CommandError>(__TAURI_INVOKE("redo")),
 	renamePage: (uuid: string, title: string | null, expectedRevision: ContentRevision) => typedError<Page, CommandError>(__TAURI_INVOKE("rename_page", { uuid, title, expectedRevision })),
 	setPageLayout: (uuid: string, layout: PageLayout) => typedError<Page, CommandError>(__TAURI_INVOKE("set_page_layout", { uuid, layout })),
 	createNote: (title: string | null) => typedError<CreateNoteResult, CommandError>(__TAURI_INVOKE("create_note", { title })),
@@ -342,6 +342,8 @@ export type GraphSnapshot = {
 	items: GraphItem[],
 	edges: GraphEdge[],
 };
+
+export type HistoryMoveResult = "applied" | "empty" | "skipped";
 
 export type HistoryStatus = {
 	undoCount: number,

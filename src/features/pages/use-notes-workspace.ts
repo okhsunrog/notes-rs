@@ -145,8 +145,16 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
     async (direction: "undo" | "redo") => {
       const navigationEpoch = ++navigationEpochRef.current;
       try {
-        const changed = direction === "undo" ? await undo() : await redo();
-        if (changed && navigationEpoch === navigationEpochRef.current) {
+        const result = direction === "undo" ? await undo() : await redo();
+        if (result === "skipped") {
+          notifyInfo(
+            direction === "undo"
+              ? "Undo skipped — changed on another device."
+              : "Redo skipped — changed on another device.",
+          );
+          return;
+        }
+        if (result === "applied" && navigationEpoch === navigationEpochRef.current) {
           dispatchWorkspace({ type: "reset" });
           notifyInfo(
             direction === "undo" ? "Undid structural change." : "Redid structural change.",

@@ -3,15 +3,107 @@ use crate::operation::{
     AttachmentAdd, AttachmentRemove, BlockCreate, BlockDelete, BlockMove, BlockSetMarkdown,
     BlockSetStyle, PageAliasSet, PageCreate, PageDelete, PageSetLayout, PageSetTitle,
 };
+use crate::{Hlc, PageAlias};
 use rusqlite::OptionalExtension;
+use std::collections::HashSet;
 
 type HistoryRow = (i64, uuid::Uuid, String, String, String);
+const HISTORY_PAYLOAD_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryStatus {
     pub undo_count: i64,
     pub redo_count: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryMoveResult {
+    Applied,
+    Empty,
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "field", rename_all = "snake_case")]
+enum HistoryField {
+    PageExistence {
+        uuid: uuid::Uuid,
+    },
+    PageTitle {
+        uuid: uuid::Uuid,
+    },
+    PageLayout {
+        uuid: uuid::Uuid,
+    },
+    PageAlias {
+        uuid: uuid::Uuid,
+        alias: PageAlias,
+    },
+    BlockExistence {
+        uuid: uuid::Uuid,
+    },
+    BlockMarkdown {
+        uuid: uuid::Uuid,
+    },
+    BlockStyle {
+        uuid: uuid::Uuid,
+    },
+    BlockStructure {
+        uuid: uuid::Uuid,
+    },
+    Attachment {
+        owner: AttachmentOwner,
+        blob_hash: notes_blob::BlobHash,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HistoryGuard {
+    field: HistoryField,
+    expected_hlc: Option<Hlc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GuardedHistoryPayload {
+    history_format_version: u32,
+    operations: Vec<OpKind>,
+    guards: Vec<HistoryGuard>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredHistoryPayload {
+    Guarded(GuardedHistoryPayload),
+    Legacy(Vec<OpKind>),
+}
+
+fn encode_history_payload(payload: &GuardedHistoryPayload) -> serde_json::Result<String> {
+    operation::encode_persisted_envelope(payload)
+}
+
+fn decode_history_payload(value: &str) -> serde_json::Result<GuardedHistoryPayload> {
+    match operation::decode_persisted_envelope::<StoredHistoryPayload>(value)? {
+        StoredHistoryPayload::Guarded(payload)
+            if payload.history_format_version == HISTORY_PAYLOAD_VERSION =>
+        {
+            Ok(payload)
+        }
+        StoredHistoryPayload::Guarded(payload) => {
+            Err(<serde_json::Error as serde::de::Error>::custom(format!(
+                "unsupported history payload format version {}",
+                payload.history_format_version
+            )))
+        }
+        StoredHistoryPayload::Legacy(operations) => Ok(GuardedHistoryPayload {
+            history_format_version: HISTORY_PAYLOAD_VERSION,
+            operations,
+            // Pre-guard history cannot be checked retroactively. Preserve its existing
+            // behavior once; the entry becomes guarded when moved to the opposite stack.
+            guards: Vec::new(),
+        }),
+    }
 }
 
 pub(crate) fn capture_inverse_kinds(
@@ -248,6 +340,163 @@ fn attachment_intent(
         .optional()
 }
 
+fn capture_history_guards(
+    database: &rusqlite::Connection,
+    operations: &[OpKind],
+) -> rusqlite::Result<Vec<HistoryGuard>> {
+    let mut fields = Vec::new();
+    let mut seen = HashSet::new();
+    for operation in operations {
+        for field in history_fields(operation) {
+            if seen.insert(field.clone()) {
+                fields.push(field);
+            }
+        }
+    }
+    fields
+        .into_iter()
+        .map(|field| {
+            Ok(HistoryGuard {
+                expected_hlc: current_field_hlc(database, &field)?,
+                field,
+            })
+        })
+        .collect()
+}
+
+fn history_fields(operation: &OpKind) -> Vec<HistoryField> {
+    match operation {
+        OpKind::PageCreate(payload) => vec![
+            HistoryField::PageExistence { uuid: payload.uuid },
+            HistoryField::PageTitle { uuid: payload.uuid },
+            HistoryField::PageLayout { uuid: payload.uuid },
+        ],
+        OpKind::PageAliasSet(payload) => vec![HistoryField::PageAlias {
+            uuid: payload.uuid,
+            alias: payload.alias.clone(),
+        }],
+        OpKind::PageSetTitle(payload) => vec![HistoryField::PageTitle { uuid: payload.uuid }],
+        OpKind::PageSetLayout(payload) => vec![HistoryField::PageLayout { uuid: payload.uuid }],
+        OpKind::PageDelete(payload) => {
+            vec![HistoryField::PageExistence { uuid: payload.uuid }]
+        }
+        OpKind::BlockCreate(payload) => vec![
+            HistoryField::BlockExistence { uuid: payload.uuid },
+            HistoryField::BlockMarkdown { uuid: payload.uuid },
+            HistoryField::BlockStyle { uuid: payload.uuid },
+            HistoryField::BlockStructure { uuid: payload.uuid },
+        ],
+        OpKind::BlockSetMarkdown(payload) => {
+            vec![HistoryField::BlockMarkdown { uuid: payload.uuid }]
+        }
+        OpKind::BlockSetStyle(payload) => {
+            vec![HistoryField::BlockStyle { uuid: payload.uuid }]
+        }
+        OpKind::BlockMove(payload) => {
+            vec![HistoryField::BlockStructure { uuid: payload.uuid }]
+        }
+        OpKind::BlockDelete(payload) => {
+            vec![HistoryField::BlockExistence { uuid: payload.uuid }]
+        }
+        OpKind::AttachmentAdd(payload) => vec![HistoryField::Attachment {
+            owner: payload.owner,
+            blob_hash: payload.blob_hash,
+        }],
+        OpKind::AttachmentRemove(payload) => vec![HistoryField::Attachment {
+            owner: payload.owner,
+            blob_hash: payload.blob_hash,
+        }],
+    }
+}
+
+fn current_field_hlc(
+    database: &rusqlite::Connection,
+    field: &HistoryField,
+) -> rusqlite::Result<Option<Hlc>> {
+    let value = match field {
+        HistoryField::PageExistence { uuid } => database.query_row(
+            "SELECT MAX(value) FROM (
+               SELECT existence_hlc AS value FROM pages WHERE uuid = ?1
+               UNION ALL
+               SELECT deleted_hlc AS value FROM tombstones
+                WHERE uuid = ?1 AND object_kind = 'page'
+             )",
+            [uuid],
+            |row| row.get::<_, Option<String>>(0),
+        )?,
+        HistoryField::PageTitle { uuid } => query_nullable_hlc(
+            database,
+            "SELECT title_hlc FROM pages WHERE uuid = ?1",
+            [uuid],
+        )?,
+        HistoryField::PageLayout { uuid } => query_nullable_hlc(
+            database,
+            "SELECT layout_hlc FROM pages WHERE uuid = ?1",
+            [uuid],
+        )?,
+        HistoryField::PageAlias { uuid, alias } => query_nullable_hlc(
+            database,
+            "SELECT hlc FROM page_alias_lww WHERE page_uuid = ?1 AND alias = ?2",
+            rusqlite::params![uuid, alias],
+        )?,
+        HistoryField::BlockExistence { uuid } => database.query_row(
+            "SELECT MAX(value) FROM (
+               SELECT existence_hlc AS value FROM blocks WHERE uuid = ?1
+               UNION ALL
+               SELECT deleted_hlc AS value FROM tombstones
+                WHERE uuid = ?1 AND object_kind = 'block'
+             )",
+            [uuid],
+            |row| row.get::<_, Option<String>>(0),
+        )?,
+        HistoryField::BlockMarkdown { uuid } => query_nullable_hlc(
+            database,
+            "SELECT markdown_hlc FROM blocks WHERE uuid = ?1",
+            [uuid],
+        )?,
+        HistoryField::BlockStyle { uuid } => query_nullable_hlc(
+            database,
+            "SELECT style_hlc FROM blocks WHERE uuid = ?1",
+            [uuid],
+        )?,
+        HistoryField::BlockStructure { uuid } => query_nullable_hlc(
+            database,
+            "SELECT hlc FROM block_structure_lww WHERE block_uuid = ?1",
+            [uuid],
+        )?,
+        HistoryField::Attachment { owner, blob_hash } => query_nullable_hlc(
+            database,
+            "SELECT hlc FROM attachment_lww
+              WHERE owner_kind = ?1 AND owner_uuid = ?2 AND blob_hash = ?3",
+            rusqlite::params![owner.kind(), owner.uuid(), blob_hash_bytes(blob_hash)],
+        )?,
+    };
+    value.map(|value| operation::sql_hlc(value, 0)).transpose()
+}
+
+fn query_nullable_hlc<P: rusqlite::Params>(
+    database: &rusqlite::Connection,
+    sql: &str,
+    params: P,
+) -> rusqlite::Result<Option<String>> {
+    Ok(database
+        .query_row(sql, params, |row| row.get::<_, Option<String>>(0))
+        .optional()?
+        .flatten())
+}
+
+fn guards_match(
+    database: &rusqlite::Connection,
+    guards: &[HistoryGuard],
+) -> rusqlite::Result<bool> {
+    for guard in guards {
+        if current_field_hlc(database, &guard.field)? != guard.expected_hlc {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 pub(crate) fn record_action(
     transaction: &rusqlite::Transaction<'_>,
     action: &str,
@@ -259,10 +508,19 @@ pub(crate) fn record_action(
     }
     let action_uuid = uuid::Uuid::now_v7();
     let action = action.to_owned();
-    let forward_json = operation::encode_persisted_envelope(&forward)
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    let inverse_json = operation::encode_persisted_envelope(&inverse)
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let inverse_guards = capture_history_guards(transaction, &forward)?;
+    let forward_json = encode_history_payload(&GuardedHistoryPayload {
+        history_format_version: HISTORY_PAYLOAD_VERSION,
+        operations: forward,
+        guards: Vec::new(),
+    })
+    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let inverse_json = encode_history_payload(&GuardedHistoryPayload {
+        history_format_version: HISTORY_PAYLOAD_VERSION,
+        operations: inverse,
+        guards: inverse_guards,
+    })
+    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     transaction.execute(
         "INSERT INTO history_undo(action_uuid, action, forward_json, inverse_json, created_at)
          VALUES (?1, ?2, ?3, ?4, unixepoch())",
@@ -296,16 +554,16 @@ pub async fn history_status(conn: &Connection) -> Result<HistoryStatus> {
     .await
 }
 
-pub async fn undo_history(conn: &Connection) -> Result<bool> {
+pub async fn undo_history(conn: &Connection) -> Result<HistoryMoveResult> {
     move_history(conn, true).await
 }
 
-pub async fn redo_history(conn: &Connection) -> Result<bool> {
+pub async fn redo_history(conn: &Connection) -> Result<HistoryMoveResult> {
     move_history(conn, false).await
 }
 
-async fn move_history(conn: &Connection, undo: bool) -> Result<bool> {
-    conn.call_domain(move |database| -> anyhow::Result<bool> {
+async fn move_history(conn: &Connection, undo: bool) -> Result<HistoryMoveResult> {
+    conn.call_domain(move |database| -> anyhow::Result<HistoryMoveResult> {
         let source = if undo { "history_undo" } else { "history_redo" };
         let target = if undo { "history_redo" } else { "history_undo" };
         let transaction = database.transaction()?;
@@ -328,18 +586,26 @@ async fn move_history(conn: &Connection, undo: bool) -> Result<bool> {
             )
             .optional()?;
         let Some((entry_id, action_uuid, action, forward_json, inverse_json)) = entry else {
-            return Ok(false);
+            return Ok(HistoryMoveResult::Empty);
         };
-        let forward: Vec<OpKind> = operation::decode_persisted_envelope(&forward_json)?;
-        let inverse: Vec<OpKind> = operation::decode_persisted_envelope(&inverse_json)?;
-        let kinds = if undo {
-            inverse.clone()
+        let mut forward = decode_history_payload(&forward_json)?;
+        let mut inverse = decode_history_payload(&inverse_json)?;
+        let selected = if undo { &inverse } else { &forward };
+        if !guards_match(&transaction, &selected.guards)? {
+            transaction.execute(&format!("DELETE FROM {source} WHERE id = ?1"), [entry_id])?;
+            transaction.commit()?;
+            return Ok(HistoryMoveResult::Skipped);
+        }
+        let kinds = selected.operations.clone();
+        operation::apply_local_kinds_in_transaction(&transaction, kinds.clone())?;
+        let next_guards = capture_history_guards(&transaction, &kinds)?;
+        if undo {
+            forward.guards = next_guards;
         } else {
-            forward.clone()
-        };
-        operation::apply_local_kinds_in_transaction(&transaction, kinds)?;
-        let forward_json = operation::encode_persisted_envelope(&forward)?;
-        let inverse_json = operation::encode_persisted_envelope(&inverse)?;
+            inverse.guards = next_guards;
+        }
+        let forward_json = encode_history_payload(&forward)?;
+        let inverse_json = encode_history_payload(&inverse)?;
         transaction.execute(&format!("DELETE FROM {source} WHERE id = ?1"), [entry_id])?;
         transaction.execute(
             &format!(
@@ -349,7 +615,7 @@ async fn move_history(conn: &Connection, undo: bool) -> Result<bool> {
             rusqlite::params![action_uuid, action, forward_json, inverse_json],
         )?;
         transaction.commit()?;
-        Ok(true)
+        Ok(HistoryMoveResult::Applied)
     })
     .await
 }

@@ -614,10 +614,11 @@ async fn mixed_replace_assigns_uuidv7_and_undo_restores_the_exact_semantic_tree(
         counts_after_edit
     );
 
-    assert!(
+    assert_eq!(
         db::undo_history(&database.connection)
             .await
-            .expect("undo replacement")
+            .expect("undo replacement"),
+        db::HistoryMoveResult::Applied
     );
     let restored = db::get_page_document(&database.connection, page.uuid)
         .await
