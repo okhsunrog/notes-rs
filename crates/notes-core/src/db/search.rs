@@ -145,7 +145,7 @@ async fn search_blocks_ranked(
             .query_map(rusqlite::params![fts_query, limit], |row| {
                 let block = row_to_block(row)?;
                 Ok(RankedBlock {
-                    snippet: raw_markdown_snippet(&block.markdown, &display_query),
+                    snippet: raw_markdown_snippet(&block.markdown, &display_query, token_mode),
                     block,
                     bm25: row.get(9)?,
                 })
@@ -155,17 +155,39 @@ async fn search_blocks_ranked(
     .await
 }
 
-fn raw_markdown_snippet(markdown: &str, query: &str) -> String {
+fn raw_markdown_snippet(
+    markdown: &str,
+    query: &str,
+    token_mode: crate::stem::SearchTokenMode,
+) -> String {
     const CONTEXT_CHARS: usize = 60;
 
-    let query_stems = token_spans(query)
+    let query_tokens = token_spans(query)
         .into_iter()
-        .map(|(start, end)| crate::stem::stem(&query[start..end]))
-        .collect::<std::collections::HashSet<_>>();
+        .map(|(start, end)| {
+            let raw = query[start..end].to_lowercase();
+            let stem = crate::stem::stem(&raw);
+            (raw, stem)
+        })
+        .collect::<Vec<_>>();
     let tokens = token_spans(markdown);
     let matches = tokens
         .iter()
-        .map(|&(start, end)| query_stems.contains(&crate::stem::stem(&markdown[start..end])))
+        .map(|&(start, end)| {
+            let raw = markdown[start..end].to_lowercase();
+            let stem = crate::stem::stem(&raw);
+            query_tokens
+                .iter()
+                .enumerate()
+                .any(|(index, (query_raw, query_stem))| {
+                    let is_last = index + 1 == query_tokens.len();
+                    if token_mode == crate::stem::SearchTokenMode::Prefix && is_last {
+                        raw.starts_with(query_raw) || stem.starts_with(query_stem)
+                    } else {
+                        stem == *query_stem
+                    }
+                })
+        })
         .collect::<Vec<_>>();
     let Some(first_match) = matches.iter().position(|matched| *matched) else {
         return markdown.to_string();
@@ -241,7 +263,7 @@ fn token_spans(text: &str) -> Vec<(usize, usize)> {
 pub async fn search_fts(conn: &Connection, query: String, limit: u32) -> Result<Vec<SearchHit>> {
     let pages = search_pages_ranked(conn, query.clone(), limit).await?;
     let blocks =
-        search_blocks_ranked(conn, query, limit, crate::stem::SearchTokenMode::Plain).await?;
+        search_blocks_ranked(conn, query, limit, crate::stem::SearchTokenMode::Prefix).await?;
 
     let (exact_pages, pages): (Vec<_>, Vec<_>) =
         pages.into_iter().partition(|ranked| ranked.exact_title);

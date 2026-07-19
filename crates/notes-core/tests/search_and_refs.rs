@@ -475,6 +475,37 @@ async fn fused_search_builds_snippets_from_raw_stem_variant_markdown() {
 }
 
 #[tokio::test]
+async fn fused_search_matches_an_incomplete_trailing_word_in_blocks() {
+    let database = database().await;
+    let connection = &database.connection;
+    let page = db::create_page(connection, "Engineering".into())
+        .await
+        .expect("create block page");
+    let block = db::create_block(
+        connection,
+        page.uuid,
+        None,
+        None,
+        BlockStyle::Paragraph,
+        "Notes about programming languages".into(),
+    )
+    .await
+    .expect("create prefix fixture");
+
+    let hit = db::search_fts(connection, "prog".into(), 10)
+        .await
+        .expect("search incomplete trailing word")
+        .into_iter()
+        .find(|hit| hit.content.uuid() == block.uuid)
+        .expect("partial word finds block through fused search");
+
+    assert_eq!(
+        hit.snippet.as_deref(),
+        Some("Notes about <mark>programming</mark> languages")
+    );
+}
+
+#[tokio::test]
 async fn search_normalizes_unicode_treats_wildcards_literally_and_stems_russian() {
     let database = database().await;
     let connection = &database.connection;
