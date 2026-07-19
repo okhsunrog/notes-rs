@@ -36,6 +36,7 @@ fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
         M::up(include_str!("store/migrations/V001__initial.sql")),
         M::up(include_str!("store/migrations/V002__chunked_vectors.sql")),
+        M::up(include_str!("store/migrations/V003__reconcile_cursor.sql")),
     ])
 }
 
@@ -156,6 +157,8 @@ pub struct AiStore {
     dimensions: usize,
     generation_id: uuid::Uuid,
     table_name: String,
+    #[cfg(test)]
+    reconcile_scans: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl AiStore {
@@ -228,6 +231,8 @@ impl AiStore {
             dimensions,
             generation_id,
             table_name,
+            #[cfg(test)]
+            reconcile_scans: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         if initialize_control {
             store.set_control(default_control).await?;
@@ -328,7 +333,9 @@ impl AiStore {
                     [generation_id],
                 )?;
                 transaction.execute(
-                    "UPDATE index_generations SET status = 'building', activated_at = NULL
+                    "UPDATE index_generations
+                     SET status = 'building', activated_at = NULL,
+                         last_reconciled_cursor = NULL, source_documents = 0
                      WHERE id = ?1",
                     [generation_id],
                 )?;
@@ -337,10 +344,28 @@ impl AiStore {
             .await
     }
 
-    pub async fn reconcile(&self, notes: &Connection, source_seq: u64) -> Result<u64> {
+    pub async fn reconcile(&self, notes: &Connection) -> Result<u64> {
+        let source = index_source_cursor(notes).await?;
+        let generation_id = self.generation_id;
+        let reconciled = self
+            .connection
+            .call(move |database| {
+                database.query_row(
+                    "SELECT last_reconciled_cursor, source_documents
+                     FROM index_generations WHERE id = ?1",
+                    [generation_id],
+                    |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?)),
+                )
+            })
+            .await?;
+        if reconciled.0.as_deref() == Some(source.token.as_str()) {
+            return Ok(reconciled.1 as u64);
+        }
+        #[cfg(test)]
+        self.reconcile_scans
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let documents = index_documents(notes).await?;
         let source_documents = documents.len() as u64;
-        let generation_id = self.generation_id;
         let table_name = self.table_name.clone();
         self.connection
             .call(move |database| {
@@ -397,7 +422,7 @@ impl AiStore {
                             document.input_hash,
                             document.text,
                             document.header,
-                            source_seq as i64
+                            source.server_seq
                         ],
                     )?;
                 }
@@ -443,6 +468,12 @@ impl AiStore {
                         rusqlite::params![generation_id, content_uuid],
                     )?;
                 }
+                transaction.execute(
+                    "UPDATE index_generations
+                     SET last_reconciled_cursor = ?2, source_documents = ?3
+                     WHERE id = ?1",
+                    rusqlite::params![generation_id, source.token, source_documents as i64],
+                )?;
                 activate_generation_if_complete(&transaction, generation_id, source_documents)?;
                 transaction.commit()?;
                 Ok(())
@@ -453,6 +484,12 @@ impl AiStore {
 
     pub async fn source_document_count(&self, notes: &Connection) -> Result<u64> {
         Ok(index_documents(notes).await?.len() as u64)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reconcile_scan_count(&self) -> usize {
+        self.reconcile_scans
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub async fn take_jobs(&self, limit: u32) -> Result<Vec<IndexJob>> {
@@ -1021,6 +1058,35 @@ struct IndexDocument {
     text: String,
     header: String,
     input_hash: String,
+}
+
+struct IndexSourceCursor {
+    server_seq: i64,
+    token: String,
+}
+
+async fn index_source_cursor(notes: &Connection) -> Result<IndexSourceCursor> {
+    // `last_server_seq` alone does not move for local edits. Pair it with the operation clock so
+    // both local writes and newly applied remote writes invalidate the full-corpus reconcile.
+    let (server_seq, last_hlc) = notes
+        .call(|database| {
+            database.query_row(
+                "SELECT
+                   COALESCE((SELECT value FROM sync_meta WHERE key = 'last_server_seq'), '0'),
+                   COALESCE((SELECT value FROM sync_meta WHERE key = 'last_hlc'), '')",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+        })
+        .await?;
+    let server_seq = server_seq
+        .parse::<u64>()
+        .context("invalid last_server_seq in sync_meta")?;
+    let server_seq = i64::try_from(server_seq).context("sync cursor exceeds SQLite range")?;
+    Ok(IndexSourceCursor {
+        server_seq,
+        token: format!("{server_seq}:{last_hlc}"),
+    })
 }
 
 const ANCESTOR_EXCERPT_CHARS: usize = 150;
@@ -1744,7 +1810,7 @@ mod tests {
         let store = AiStore::open(directory.path().join("ai.db"), "identity".into(), 2)
             .await
             .expect("AI store");
-        let source_documents = store.reconcile(&notes, 1).await.expect("reconcile");
+        let source_documents = store.reconcile(&notes).await.expect("reconcile");
         let jobs = store.take_jobs(16).await.expect("jobs");
         assert_eq!(jobs.len(), 2);
         store
@@ -1776,6 +1842,13 @@ mod tests {
         let status = store.status(source_documents).await.expect("reset status");
         assert_eq!(status.generation_status, GenerationStatus::Building);
         assert_eq!(status.indexed, 0);
+
+        let rebuilt_documents = store
+            .reconcile(&notes)
+            .await
+            .expect("reconcile after reset at unchanged cursor");
+        assert_eq!(rebuilt_documents, 2);
+        assert_eq!(store.take_jobs(16).await.expect("rebuilt jobs").len(), 2);
     }
 
     #[tokio::test]
@@ -1788,7 +1861,7 @@ mod tests {
             .await
             .expect("AI store");
 
-        let source_documents = store.reconcile(&notes, 0).await.expect("reconcile");
+        let source_documents = store.reconcile(&notes).await.expect("reconcile");
         let status = store.status(source_documents).await.expect("status");
 
         assert_eq!(source_documents, 0);
@@ -1808,7 +1881,7 @@ mod tests {
             .await
             .expect("AI store");
 
-        let source_documents = store.reconcile(&notes, 1).await.expect("reconcile");
+        let source_documents = store.reconcile(&notes).await.expect("reconcile");
         let jobs = store.take_jobs(16).await.expect("jobs");
         assert_eq!(source_documents, 1);
         assert_eq!(jobs.len(), 1);
@@ -1849,7 +1922,7 @@ mod tests {
         let store = AiStore::open(directory.path().join("ai.db"), "identity".into(), 2)
             .await
             .expect("AI store");
-        let source_documents = store.reconcile(&notes, 1).await.expect("first reconcile");
+        let source_documents = store.reconcile(&notes).await.expect("first reconcile");
         let stale_job = store
             .take_jobs(16)
             .await
@@ -1867,7 +1940,7 @@ mod tests {
         )
         .await
         .expect("change note");
-        store.reconcile(&notes, 2).await.expect("second reconcile");
+        store.reconcile(&notes).await.expect("second reconcile");
         let current_job = store
             .take_jobs(16)
             .await

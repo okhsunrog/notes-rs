@@ -696,8 +696,7 @@ pub fn spawn_worker(
 }
 
 async fn tick(notes: &Connection, store: &AiStore, embedder: &dyn EmbedderBackend) -> Result<bool> {
-    let source_seq = notes_core::sync_cursor(notes).await?;
-    store.reconcile(notes, source_seq).await?;
+    store.reconcile(notes).await?;
     let jobs = store.take_jobs(16).await?;
     if jobs.is_empty() {
         return Ok(false);
@@ -738,9 +737,7 @@ async fn tick(notes: &Connection, store: &AiStore, embedder: &dyn EmbedderBacken
     // The provider call above can be slow enough for source content to change while it is in
     // flight. Reconciliation atomically replaces those jobs with their new input hashes, so
     // `write_embeddings` will ignore stale results instead of removing the newer work item.
-    let source_documents = store
-        .reconcile(notes, notes_core::sync_cursor(notes).await?)
-        .await?;
+    let source_documents = store.reconcile(notes).await?;
     store.write_embeddings(source_documents, items).await?;
     Ok(true)
 }
@@ -1072,6 +1069,33 @@ mod tests {
         assert_eq!(calls.first(), Some(&16));
         assert_eq!(calls.len(), 17);
         assert!(calls[1..].iter().all(|size| *size == 1));
+    }
+
+    #[tokio::test]
+    async fn consecutive_ticks_without_oplog_movement_reconcile_once() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let notes = notes_core::db::open(directory.path().join("notes.db"))
+            .await
+            .expect("notes database");
+        notes_core::db::create_page(&notes, "Stable page".into())
+            .await
+            .expect("create page");
+        let store = AiStore::open(directory.path().join("ai.db"), "identity".into(), 2)
+            .await
+            .expect("AI store");
+
+        assert!(
+            tick(&notes, &store, &UniformEmbedder)
+                .await
+                .expect("first tick")
+        );
+        assert_eq!(store.reconcile_scan_count(), 1);
+        assert!(
+            !tick(&notes, &store, &UniformEmbedder)
+                .await
+                .expect("second tick")
+        );
+        assert_eq!(store.reconcile_scan_count(), 1);
     }
 
     #[tokio::test]
