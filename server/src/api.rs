@@ -11,7 +11,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use futures::{SinkExt, StreamExt};
-use notes_blob::{BlobStore, BlobStoreError, InstallOutcome, VerifiedBlob};
+use notes_blob::{BlobStore, BlobStoreError, VerifiedBlob};
 use notes_core::BlobHash;
 use notes_core::db::SearchHit;
 use notes_protocol::{
@@ -20,6 +20,7 @@ use notes_protocol::{
     ClientMessage, OpsBatch, PushOps, SearchRequest, ServerErrorCode, ServerInfo, ServerMessage,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::{Path as FilePath, PathBuf};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
@@ -36,6 +37,8 @@ pub struct AppState {
     pub registry: UserRegistry,
     pub data_dir: PathBuf,
     pub max_blob_bytes: u64,
+    pub max_user_blob_bytes: u64,
+    pub(crate) blob_ownership: crate::blob_ownership::BlobOwnership,
     pub ai: Option<Arc<crate::ai::AiRuntime>>,
     pub shutdown: CancellationToken,
 }
@@ -609,30 +612,48 @@ async fn send_server_error(
 
 async fn put_blob(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
     Path(raw_hash): Path<String>,
     body: Body,
 ) -> Result<StatusCode, ApiError> {
     let hash = parse_blob_hash(&raw_hash)?;
     let staging = stage_blob(&state.data_dir, body, state.max_blob_bytes).await?;
-    let staging_path = staging.to_path_buf();
+    if staging.hash != hash {
+        return Err(ApiError::bad_request(
+            "request body SHA-256 does not match the blob URL",
+        ));
+    }
+    let claim = state
+        .blob_ownership
+        .claim(&user.0.id, hash, staging.size, state.max_user_blob_bytes)
+        .await
+        .map_err(map_blob_ownership_error)?;
+    let staging_path = staging.path.to_path_buf();
     let store = BlobStore::new(state.data_dir.clone());
     let maximum = state.max_blob_bytes;
     let installed =
         tokio::task::spawn_blocking(move || store.install_file(&staging_path, hash, maximum))
             .await
-            .map_err(|error| ApiError::internal(error.into()))?
-            .map_err(map_blob_install_error)?;
-    Ok(match installed.outcome {
-        InstallOutcome::Installed => StatusCode::CREATED,
-        InstallOutcome::AlreadyPresent => StatusCode::NO_CONTENT,
-    })
+            .map_err(|error| ApiError::internal(error.into()))?;
+    if let Err(error) = installed {
+        if claim == crate::blob_ownership::ClaimOutcome::Claimed
+            && let Err(release_error) = state.blob_ownership.release(&user.0.id, hash).await
+        {
+            tracing::error!(?release_error, user = %user.0.id, %hash, "rolling back blob ownership failed");
+        }
+        return Err(map_blob_install_error(error));
+    }
+    // Deliberately uniform for both physical installation and deduplication.
+    Ok(StatusCode::CREATED)
 }
 
-async fn stage_blob(
-    data_dir: &FilePath,
-    body: Body,
-    maximum: u64,
-) -> Result<tempfile::TempPath, ApiError> {
+struct StagedBlob {
+    path: tempfile::TempPath,
+    size: u64,
+    hash: BlobHash,
+}
+
+async fn stage_blob(data_dir: &FilePath, body: Body, maximum: u64) -> Result<StagedBlob, ApiError> {
     let staging_dir = data_dir.join("blob-staging");
     let (file, staging) = tokio::task::spawn_blocking(move || {
         std::fs::create_dir_all(&staging_dir)?;
@@ -647,6 +668,7 @@ async fn stage_blob(
     let mut file = tokio::fs::File::from_std(file);
     let mut stream = body.into_data_stream();
     let mut size = 0_u64;
+    let mut hasher = Sha256::new();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|error| ApiError::bad_request(error.to_string()))?;
         size = size
@@ -657,6 +679,7 @@ async fn stage_blob(
                 "blob exceeds the configured {maximum} byte limit"
             )));
         }
+        hasher.update(&chunk);
         file.write_all(&chunk)
             .await
             .map_err(|error| ApiError::internal(error.into()))?;
@@ -665,7 +688,11 @@ async fn stage_blob(
         .await
         .map_err(|error| ApiError::internal(error.into()))?;
     drop(file);
-    Ok(staging)
+    Ok(StagedBlob {
+        path: staging,
+        size,
+        hash: BlobHash::from_bytes(hasher.finalize().into()),
+    })
 }
 
 async fn head_blob(
@@ -854,6 +881,16 @@ fn map_blob_install_error(error: BlobStoreError) -> ApiError {
     }
 }
 
+fn map_blob_ownership_error(error: anyhow::Error) -> ApiError {
+    if let Some(quota) = error.downcast_ref::<crate::blob_ownership::QuotaExceeded>() {
+        return ApiError::too_large(format!(
+            "blob quota exceeded: {} of {} bytes used; upload needs {} bytes",
+            quota.used, quota.limit, quota.requested
+        ));
+    }
+    ApiError::internal(error)
+}
+
 fn map_blob_open_error(error: BlobStoreError) -> ApiError {
     match error {
         BlobStoreError::NotFound { .. } => ApiError::not_found("blob not found"),
@@ -899,6 +936,7 @@ mod tests {
             data_dir: directory.path().to_owned(),
             snapshot_every_ops: 2,
             max_blob_bytes: 1024,
+            max_user_blob_bytes: 1024,
             ai: None,
             users: vec![
                 UserConfig {
@@ -943,6 +981,7 @@ mod tests {
             data_dir: directory.path().to_owned(),
             snapshot_every_ops: 2,
             max_blob_bytes: 1024,
+            max_user_blob_bytes: 1024,
             ai: Some(ai),
             users: vec![UserConfig {
                 id: "owner".into(),
@@ -1053,10 +1092,7 @@ mod tests {
             )
             .await
             .expect("blob upload response");
-        assert!(matches!(
-            response.status(),
-            StatusCode::CREATED | StatusCode::NO_CONTENT
-        ));
+        assert_eq!(response.status(), StatusCode::CREATED);
         hash
     }
 
@@ -1622,20 +1658,7 @@ mod tests {
             }
         });
         let statuses = futures::future::join_all(uploads).await;
-        assert_eq!(
-            statuses
-                .iter()
-                .filter(|status| **status == StatusCode::CREATED)
-                .count(),
-            1
-        );
-        assert_eq!(
-            statuses
-                .iter()
-                .filter(|status| **status == StatusCode::NO_CONTENT)
-                .count(),
-            7
-        );
+        assert_eq!(statuses, vec![StatusCode::CREATED; 8]);
         let verified = BlobStore::new(directory.path())
             .open_verified(hash, 1_024)
             .expect("published blob verifies");
@@ -1655,6 +1678,99 @@ mod tests {
             .expect("mismatched upload response");
         assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
         assert_no_blob_temporaries(&directory, wrong_hash);
+    }
+
+    #[tokio::test]
+    async fn uploads_record_per_user_ownership_enforce_quota_and_hide_deduplication() {
+        let (directory, app) = test_app().await;
+        let shared = vec![b'a'; 600];
+        let shared_hash = BlobHash::digest(&shared);
+        let over_quota = vec![b'b'; 500];
+        let over_quota_hash = BlobHash::digest(&over_quota);
+
+        let owner_upload = app
+            .clone()
+            .oneshot(
+                authorized(Request::builder())
+                    .method("PUT")
+                    .uri(format!("/v1/blobs/{shared_hash}"))
+                    .body(Body::from(shared.clone()))
+                    .expect("owner upload"),
+            )
+            .await
+            .expect("owner upload response");
+        assert_eq!(owner_upload.status(), StatusCode::CREATED);
+
+        let hidden_from_other = app
+            .clone()
+            .oneshot(
+                authorized_as(Request::builder(), OTHER_TOKEN)
+                    .uri(format!("/v1/blobs/{shared_hash}"))
+                    .body(Body::empty())
+                    .expect("unowned download"),
+            )
+            .await
+            .expect("unowned response");
+        assert_eq!(hidden_from_other.status(), StatusCode::NOT_FOUND);
+
+        let duplicate = app
+            .clone()
+            .oneshot(
+                authorized(Request::builder())
+                    .method("PUT")
+                    .uri(format!("/v1/blobs/{shared_hash}"))
+                    .body(Body::from(shared.clone()))
+                    .expect("duplicate upload"),
+            )
+            .await
+            .expect("duplicate response");
+        assert_eq!(duplicate.status(), StatusCode::CREATED);
+
+        let rejected = app
+            .clone()
+            .oneshot(
+                authorized(Request::builder())
+                    .method("PUT")
+                    .uri(format!("/v1/blobs/{over_quota_hash}"))
+                    .body(Body::from(over_quota.clone()))
+                    .expect("over-quota upload"),
+            )
+            .await
+            .expect("over-quota response");
+        assert_eq!(rejected.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            typed_error(rejected).await.error.code,
+            ApiErrorCode::PayloadTooLarge
+        );
+        assert!(
+            !BlobStore::new(directory.path())
+                .path_for(over_quota_hash)
+                .exists(),
+            "quota rejection must happen before physical installation"
+        );
+
+        let other_upload = app
+            .clone()
+            .oneshot(
+                authorized_as(Request::builder(), OTHER_TOKEN)
+                    .method("PUT")
+                    .uri(format!("/v1/blobs/{shared_hash}"))
+                    .body(Body::from(shared))
+                    .expect("other owner upload"),
+            )
+            .await
+            .expect("other owner response");
+        assert_eq!(other_upload.status(), StatusCode::CREATED);
+        let unreferenced_download = app
+            .oneshot(
+                authorized_as(Request::builder(), OTHER_TOKEN)
+                    .uri(format!("/v1/blobs/{shared_hash}"))
+                    .body(Body::empty())
+                    .expect("owned download"),
+            )
+            .await
+            .expect("unreferenced response");
+        assert_eq!(unreferenced_download.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

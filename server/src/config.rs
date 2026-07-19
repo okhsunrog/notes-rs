@@ -18,6 +18,8 @@ pub struct ServerConfig {
     pub snapshot_every_ops: u64,
     #[serde(default = "default_max_blob_bytes")]
     pub max_blob_bytes: u64,
+    #[serde(default = "default_max_user_blob_bytes")]
+    pub max_user_blob_bytes: u64,
     pub ai: Option<AiConfig>,
     pub users: Vec<UserConfig>,
 }
@@ -102,6 +104,9 @@ impl ServerConfig {
             .context("log_filter must be a valid tracing filter")?;
         if self.max_blob_bytes == 0 {
             bail!("max_blob_bytes must be positive");
+        }
+        if self.max_user_blob_bytes == 0 {
+            bail!("max_user_blob_bytes must be positive");
         }
         if let Some(ai) = &self.ai {
             ai.validate()?;
@@ -284,6 +289,10 @@ const fn default_max_blob_bytes() -> u64 {
     1024 * 1024 * 1024
 }
 
+const fn default_max_user_blob_bytes() -> u64 {
+    10 * 1024 * 1024 * 1024
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,6 +314,7 @@ mod tests {
             data_dir: "/tmp/notes".into(),
             snapshot_every_ops: 10_000,
             max_blob_bytes: 1,
+            max_user_blob_bytes: 1,
             ai: None,
             users: vec![UserConfig {
                 id: "../owner".into(),
@@ -330,6 +340,7 @@ mod tests {
             data_dir: "/tmp/notes".into(),
             snapshot_every_ops: 10_000,
             max_blob_bytes: 1,
+            max_user_blob_bytes: 1,
             ai: Some(AiConfig {
                 embedding_dimensions: 0,
                 ..ai
@@ -453,6 +464,7 @@ token = "a-token-with-at-least-thirty-two-characters"
             data_dir: "/tmp/notes".into(),
             snapshot_every_ops: 10_000,
             max_blob_bytes: 1,
+            max_user_blob_bytes: 1,
             ai: None,
             users: vec![
                 UserConfig {

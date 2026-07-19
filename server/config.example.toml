@@ -3,6 +3,7 @@ log_filter = "info"
 data_dir = "/var/lib/notes-rs"
 snapshot_every_ops = 10000
 max_blob_bytes = 1073741824
+max_user_blob_bytes = 10737418240
 
 [ai]
 retrieval_api_key = "replace-with-an-openrouter-key"
