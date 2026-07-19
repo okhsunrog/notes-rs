@@ -118,22 +118,26 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
     settingsQuery.data.configuredKeys.includes("SYNC_TOKEN"),
   );
 
-  const runLocal = useCallback(async (value: string, epoch: number) => {
-    try {
-      const result = await search("fts", value, 20);
-      if (epoch !== localEpoch.current) return;
-      setLocalHits(result);
-      setLocalError(false);
-    } catch (error) {
-      if (epoch !== localEpoch.current) return;
-      setLocalHits([]);
-      setLocalError(true);
-      setPendingEnter(null);
-      notifyError("search", error);
-    } finally {
-      if (epoch === localEpoch.current) setLocalPending(false);
-    }
-  }, []);
+  const runLocal = useCallback(
+    async (value: string, epoch: number, onSuccess?: (result: SearchHit[]) => void) => {
+      try {
+        const result = await search("fts", value, 20);
+        if (epoch !== localEpoch.current) return;
+        setLocalHits(result);
+        setLocalError(false);
+        onSuccess?.(result);
+      } catch (error) {
+        if (epoch !== localEpoch.current) return;
+        setLocalHits([]);
+        setLocalError(true);
+        setPendingEnter(null);
+        notifyError("search", error);
+      } finally {
+        if (epoch === localEpoch.current) setLocalPending(false);
+      }
+    },
+    [],
+  );
 
   const runServer = useCallback(async (value: string, epoch: number, rerank: boolean) => {
     try {
@@ -210,6 +214,8 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
   const activeQuery = useRef(queryValue);
   activeQuery.current = queryValue;
   const observedPages = useRef(pagesQuery.data);
+  // Page list invalidation is the clean title/delete refresh signal. Block events do not yet
+  // expose a search revision query; coupling this to unrelated history state would be misleading.
   useEffect(() => {
     if (observedPages.current === pagesQuery.data) return;
     observedPages.current = pagesQuery.data;
@@ -218,11 +224,22 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
 
     localDebounce.cancel();
     const nextLocalEpoch = ++localEpoch.current;
-    setFrozenSnapshot(null);
     setLocalPending(true);
     setLocalError(false);
-    void runLocal(value, nextLocalEpoch);
-  }, [localDebounce, pagesQuery.data, runLocal]);
+    void runLocal(value, nextLocalEpoch, (result) => {
+      const refreshed = presentSearchResults({ localHits: result, serverHits, serverState });
+      setFrozenSnapshot((current) =>
+        current === null
+          ? null
+          : {
+              ...current,
+              presentation: refreshed,
+              searchSettled: serverState !== "pending",
+              recentPages: (pagesQuery.data ?? []).slice(0, RECENT_PAGE_LIMIT),
+            },
+      );
+    });
+  }, [localDebounce, pagesQuery.data, runLocal, serverHits, serverState]);
 
   const searchSettled = !localPending && serverState !== "pending";
   const displayedSearchSettled = frozenSnapshot?.searchSettled ?? searchSettled;
@@ -386,13 +403,14 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
       return;
     }
     if (event.key === "Enter") {
+      if (triggerEnterOnlySearch()) {
+        event.preventDefault();
+        setPendingEnter(null);
+        return;
+      }
       if (queryValue && !displayedSearchSettled) {
         event.preventDefault();
         setPendingEnter({ query: queryValue, shiftKey: event.shiftKey });
-        return;
-      }
-      if (triggerEnterOnlySearch()) {
-        event.preventDefault();
         return;
       }
       const selected = rows.find((row) => row.key === selectedKey);

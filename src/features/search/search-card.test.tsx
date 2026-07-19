@@ -14,6 +14,7 @@ const api = vi.hoisted(() => ({
   searchResults: [] as SearchHit[],
   search: vi.fn(),
   notifyError: vi.fn(),
+  createNewNote: vi.fn(),
   settings: {
     aiSearchEnabled: false,
     aiSearchRerank: true,
@@ -49,6 +50,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   api.search.mockReset();
   api.notifyError.mockReset();
+  api.createNewNote.mockReset();
   api.search.mockImplementation(async () => api.searchResults);
   api.searchResults = [];
   api.settings = {
@@ -139,6 +141,69 @@ describe("SearchCard page-list refreshes", () => {
     expect(container.textContent).not.toContain("AI search failed — press Enter to retry");
   });
 
+  it("starts enter-only AI search before the local debounce settles", async () => {
+    api.settings = {
+      ...api.settings,
+      aiSearchEnabled: true,
+      aiSearchTrigger: "enter_only",
+      configuredKeys: ["SYNC_TOKEN"],
+      syncServerUrl: "https://sync.example.test",
+    };
+    api.search.mockResolvedValue([]);
+    const { container } = await renderSearchCard([]);
+
+    await typeQuery(container, "instant");
+    await pressEnter(container);
+
+    expect(api.search).toHaveBeenCalledWith("semantic", "instant", 20, true);
+    expect(api.search).not.toHaveBeenCalledWith("fts", "instant", 20);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    expect(api.createNewNote).not.toHaveBeenCalled();
+  });
+
+  it("refreshes a frozen result snapshot without exposing later server reordering", async () => {
+    api.settings = {
+      ...api.settings,
+      aiSearchEnabled: true,
+      aiSearchTrigger: "as_you_type",
+      configuredKeys: ["SYNC_TOKEN"],
+      syncServerUrl: "https://sync.example.test",
+    };
+    const alpha = page("page-a", "Alpha");
+    const renamed = page("page-a", "Alpha renamed");
+    const beta = page("page-b", "Beta");
+    const serverOnly = page("page-server", "Server reordered");
+    let localResults = [pageHit(alpha), pageHit(beta)];
+    let resolveSemantic: ((hits: SearchHit[]) => void) | undefined;
+    api.search.mockImplementation(async (mode: string) => {
+      if (mode === "fts") return localResults;
+      return new Promise<SearchHit[]>((resolve) => {
+        resolveSemantic = resolve;
+      });
+    });
+    const { container, queryClient } = await renderSearchCard([alpha, beta]);
+
+    await enterQuery(container, "alpha");
+    await pressArrowDown(container);
+    localResults = [pageHit(renamed), pageHit(beta)];
+    await act(async () => {
+      queryClient.setQueryData(queryKeys.pages, [renamed, beta]);
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(container.textContent).toContain("Alpha renamed");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+      resolveSemantic?.([pageHit(serverOnly)]);
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("Alpha renamed");
+    expect(container.textContent).not.toContain("Server reordered");
+  });
+
   it("disables reranking for as-you-type semantic requests", async () => {
     api.settings = {
       ...api.settings,
@@ -194,6 +259,13 @@ async function renderSearchCard(initialPages: Page[]) {
 }
 
 async function enterQuery(container: HTMLDivElement, value: string) {
+  await typeQuery(container, value);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(150);
+  });
+}
+
+async function typeQuery(container: HTMLDivElement, value: string) {
   const input = container.querySelector<HTMLInputElement>('input[role="combobox"]');
   if (!input) throw new Error("search input was not rendered");
   await act(async () => {
@@ -201,9 +273,6 @@ async function enterQuery(container: HTMLDivElement, value: string) {
     if (!descriptor?.set) throw new Error("input value setter is unavailable");
     descriptor.set.call(input, value);
     input.dispatchEvent(new Event("input", { bubbles: true }));
-  });
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(150);
   });
 }
 
@@ -213,6 +282,14 @@ async function pressEnter(container: HTMLDivElement) {
   await act(async () => {
     input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }));
     await Promise.resolve();
+  });
+}
+
+async function pressArrowDown(container: HTMLDivElement) {
+  const input = container.querySelector<HTMLInputElement>('input[role="combobox"]');
+  if (!input) throw new Error("search input was not rendered");
+  await act(async () => {
+    input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "ArrowDown" }));
   });
 }
 
@@ -233,7 +310,7 @@ function pageHit(record: Page): SearchHit {
 }
 
 const controller: WorkspaceController = {
-  createNewNote: () => undefined,
+  createNewNote: api.createNewNote,
   openContent: () => undefined,
   openJournal: () => undefined,
   captureJournal: async () => true,

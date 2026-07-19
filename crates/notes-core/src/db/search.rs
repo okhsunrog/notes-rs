@@ -188,7 +188,7 @@ fn raw_markdown_snippet(
         })
         .collect::<Vec<_>>();
     let Some(first_match) = matches.iter().position(|matched| *matched) else {
-        return markdown.to_string();
+        return bounded_fallback_snippet(markdown, CONTEXT_CHARS * 2);
     };
 
     let match_start = tokens[first_match].0;
@@ -239,6 +239,26 @@ fn raw_markdown_snippet(
     if window_end < markdown.len() {
         snippet.push('…');
     }
+    snippet
+}
+
+fn bounded_fallback_snippet(markdown: &str, max_chars: usize) -> String {
+    if markdown.chars().count() <= max_chars {
+        return markdown.to_string();
+    }
+
+    let token_end = token_spans(markdown)
+        .into_iter()
+        .map(|(_, end)| end)
+        .take_while(|end| markdown[..*end].chars().count() <= max_chars)
+        .last();
+    let fallback_end = markdown
+        .char_indices()
+        .nth(max_chars)
+        .map_or(markdown.len(), |(index, _)| index);
+    let end = token_end.unwrap_or(fallback_end);
+    let mut snippet = markdown[..end].trim_end().to_string();
+    snippet.push('…');
     snippet
 }
 
@@ -324,7 +344,7 @@ fn block_search_hit(ranked: RankedBlock) -> SearchHit {
 
 #[cfg(test)]
 mod tests {
-    use super::stemmed_token_set;
+    use super::{raw_markdown_snippet, stemmed_token_set};
 
     #[test]
     fn navigational_title_tokens_are_stemmed_order_independent_sets() {
@@ -336,5 +356,16 @@ mod tests {
             stemmed_token_set("ESP32 Прошивка"),
             stemmed_token_set("прошивки esp32 draft")
         );
+    }
+
+    #[test]
+    fn unmatched_raw_snippet_fallback_is_bounded_at_a_word_boundary() {
+        let markdown = format!("abc123 {}", "additional context ".repeat(20));
+        let snippet = raw_markdown_snippet(&markdown, "abc", crate::stem::SearchTokenMode::Plain);
+
+        assert!(snippet.ends_with('…'));
+        assert!(snippet.chars().count() <= 121, "{snippet}");
+        assert!(!snippet.contains("<mark>"));
+        assert_ne!(snippet, markdown);
     }
 }
