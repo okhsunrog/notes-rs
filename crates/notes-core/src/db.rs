@@ -27,12 +27,17 @@ pub use archive::{
 };
 pub use attachments::{
     attachment_path_ref_count, cleanup_unreferenced_attachment_blobs, create_attachment,
-    delete_attachment, get_attachment, list_attachments,
+    create_attachment_with_ops, delete_attachment, delete_attachment_with_ops, get_attachment,
+    list_attachments,
 };
 pub use blocks::{
-    BlockContent, create_block, delete_block, get_block, get_blocks, indent_block,
-    list_block_children, move_block, move_block_in_direction, outdent_block, reorder_block,
-    set_block_content, set_block_content_if_revision, set_block_style, set_task_state, split_block,
+    BlockContent, create_block, create_block_with_ops, delete_block, delete_block_with_ops,
+    get_block, get_blocks, indent_block, indent_block_with_ops, list_block_children, move_block,
+    move_block_in_direction, move_block_in_direction_with_ops, move_block_with_ops, outdent_block,
+    outdent_block_with_ops, reorder_block, reorder_block_with_ops, set_block_content,
+    set_block_content_if_revision, set_block_content_if_revision_with_ops, set_block_style,
+    set_block_style_with_ops, set_task_state, set_task_state_with_ops, split_block,
+    split_block_with_ops,
 };
 pub use document::{
     DocumentUnitDraft, MAX_DOCUMENT_DEPTH, MAX_DOCUMENT_MARKDOWN_BYTES, MAX_DOCUMENT_UNITS,
@@ -42,12 +47,15 @@ pub use document::{
 pub use graph::{find_backlinks, graph_snapshot, neighbors, read_ancestors, read_subtree};
 pub use history::{HistoryStatus, history_status, redo_history, undo_history};
 pub use journals::{
-    JournalListLimit, append_to_journal, ensure_journal, get_journal, list_journals,
+    JournalListLimit, append_to_journal, append_to_journal_with_ops, ensure_journal,
+    ensure_journal_with_ops, get_journal, list_journals,
 };
 pub use pages::{
-    CreateNoteResult, CreatedNote, DeletedPage, create_note, create_page, delete_page,
-    get_containing_page, get_or_create_page_by_title, get_page, get_page_by_title, list_pages,
-    list_pages_filtered, rename_page, rename_page_if_revision, set_page_layout,
+    CreateNoteResult, CreatedNote, DeletedPage, create_note, create_note_with_ops, create_page,
+    create_page_with_ops, delete_page, get_containing_page, get_or_create_page_by_title,
+    get_or_create_page_by_title_with_ops, get_page, get_page_by_title, list_pages,
+    list_pages_filtered, rename_page, rename_page_if_revision, rename_page_if_revision_with_ops,
+    set_page_layout, set_page_layout_with_ops,
 };
 pub use search::{search_blocks_fts, search_fts, search_pages_by_title};
 pub(crate) use workspace::transaction_workspace_uuid;
@@ -216,20 +224,32 @@ pub async fn get_contents(conn: &Connection, uuids: Vec<uuid::Uuid>) -> Result<V
     Ok(records)
 }
 
-async fn apply_local(conn: &Connection, kinds: Vec<OpKind>) -> Result<()> {
-    operation::apply_local_kinds(conn, kinds).await
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct AppliedMutation<T> {
+    pub value: T,
+    pub operations: Vec<OpKind>,
 }
 
-async fn apply_local_action(conn: &Connection, action: &str, kinds: Vec<OpKind>) -> Result<()> {
+async fn apply_local(conn: &Connection, kinds: Vec<OpKind>) -> Result<Vec<OpKind>> {
+    operation::apply_local_kinds(conn, kinds.clone()).await?;
+    Ok(kinds)
+}
+
+async fn apply_local_action(
+    conn: &Connection,
+    action: &str,
+    kinds: Vec<OpKind>,
+) -> Result<Vec<OpKind>> {
     if kinds.is_empty() {
-        return Ok(());
+        return Ok(kinds);
     }
     let action = action.to_owned();
-    conn.call_domain(move |database| -> crate::CoreResult<()> {
+    conn.call_domain(move |database| -> crate::CoreResult<Vec<OpKind>> {
         let transaction = database.transaction()?;
-        apply_local_action_in_transaction(&transaction, &action, kinds)?;
+        apply_local_action_in_transaction(&transaction, &action, kinds.clone())?;
         transaction.commit()?;
-        Ok(())
+        Ok(kinds)
     })
     .await
 }

@@ -1,6 +1,6 @@
 use anyhow::Context;
 use notes_core::Connection;
-use notes_core::db::{self, Block, Page, SearchHit};
+use notes_core::db::{self, SearchHit};
 use notes_core::{
     BlockStyle, ContentRevision, DocumentRevision, PageLayout, ReorderDirection, TaskState,
 };
@@ -26,6 +26,8 @@ mod attachments;
 pub use attachments::*;
 mod data;
 pub use data::*;
+mod domain_events;
+pub(crate) use domain_events::*;
 mod lifecycle;
 pub use lifecycle::*;
 mod journals;
@@ -108,7 +110,7 @@ pub struct AppState {
 /// The single frontend invalidation stream for persisted Rust state.
 /// Payloads carry affected IDs when a command can identify them; whole-workspace
 /// replacements (import/sync) deliberately request a full cache refresh.
-#[derive(Debug, Clone, Serialize, specta::Type)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DomainEvent {
     PagesChanged {
@@ -160,36 +162,6 @@ pub(crate) fn emit_domain(app: &AppHandle, event: DomainEvent) {
     if let Err(error) = DomainEventMessage(event).emit(app) {
         tracing::warn!(%error, "failed to emit domain event");
     }
-}
-
-pub(crate) fn emit_pages_changed(app: &AppHandle, pages: &[Page]) {
-    emit_domain(
-        app,
-        DomainEvent::PagesChanged {
-            page_uuids: pages.iter().map(|page| page.uuid).collect(),
-        },
-    );
-}
-
-pub(crate) fn emit_blocks_changed(
-    app: &AppHandle,
-    blocks: &[Block],
-    additional_container_uuids: impl IntoIterator<Item = uuid::Uuid>,
-) {
-    let container_uuids = blocks
-        .iter()
-        .map(|block| block.parent_uuid.unwrap_or(block.page_uuid))
-        .chain(additional_container_uuids)
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    emit_domain(
-        app,
-        DomainEvent::BlocksChanged {
-            block_uuids: blocks.iter().map(|block| block.uuid).collect(),
-            container_uuids,
-        },
-    );
 }
 
 /// Registered immediately in setup so the frontend can ask whether the heavy

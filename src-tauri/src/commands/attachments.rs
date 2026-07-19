@@ -73,7 +73,7 @@ pub async fn attach_file(
         (filename, mime, installed)
     };
 
-    let attachment = db::create_attachment(
+    let applied = db::create_attachment_with_ops(
         &state.conn,
         location,
         installed.blob.hash,
@@ -83,13 +83,8 @@ pub async fn attach_file(
     )
     .await
     .map_err(err)?;
-    emit_domain(
-        &app,
-        DomainEvent::AttachmentsChanged {
-            owner_uuids: vec![attachment.owner.uuid()],
-        },
-    );
-    Ok(Some(attachment))
+    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
+    Ok(Some(applied.value))
 }
 
 #[tauri::command]
@@ -164,18 +159,13 @@ pub async fn delete_attachment(
     )
     .await
     .map_err(err)?;
-    let Some(attachment) = db::delete_attachment(&state.conn, uuid)
+    let applied = db::delete_attachment_with_ops(&state.conn, uuid)
         .await
-        .map_err(err)?
-    else {
+        .map_err(err)?;
+    let Some(_attachment) = applied.value else {
         return Ok(false);
     };
-    emit_domain(
-        &app,
-        DomainEvent::AttachmentsChanged {
-            owner_uuids: vec![attachment.owner.uuid()],
-        },
-    );
+    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
     Ok(true)
 }
 

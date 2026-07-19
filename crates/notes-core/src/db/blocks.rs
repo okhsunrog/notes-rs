@@ -81,6 +81,22 @@ pub async fn create_block(
     style: BlockStyle,
     markdown: String,
 ) -> Result<Block> {
+    Ok(
+        create_block_with_ops(conn, page_uuid, parent_uuid, after_uuid, style, markdown)
+            .await?
+            .value,
+    )
+}
+
+#[doc(hidden)]
+pub async fn create_block_with_ops(
+    conn: &Connection,
+    page_uuid: uuid::Uuid,
+    parent_uuid: Option<uuid::Uuid>,
+    after_uuid: Option<uuid::Uuid>,
+    style: BlockStyle,
+    markdown: String,
+) -> Result<AppliedMutation<Block>> {
     if get_page(conn, page_uuid).await?.is_none() {
         return Err(crate::CoreError::not_found("page was not found").into());
     }
@@ -134,10 +150,11 @@ pub async fn create_block(
             })
         }));
     }
-    apply_local_action(conn, "create block", kinds).await?;
-    get_block(conn, uuid)
+    let operations = apply_local_action(conn, "create block", kinds).await?;
+    let value = get_block(conn, uuid)
         .await?
-        .context("created block disappeared")
+        .context("created block disappeared")?;
+    Ok(AppliedMutation { value, operations })
 }
 
 pub async fn set_block_content(
@@ -175,35 +192,54 @@ pub async fn set_block_content_if_revision(
     content: BlockContent,
     expected_revision: ContentRevision,
 ) -> Result<(Block, bool, bool)> {
-    conn.call_domain(move |database| -> crate::CoreResult<(Block, bool, bool)> {
-        let transaction = database.transaction()?;
-        let sql = format!("SELECT {BLOCK_COLUMNS} FROM blocks WHERE uuid = ?1");
-        let block = transaction
-            .query_row(&sql, [uuid], row_to_block)
-            .optional()?
-            .ok_or_else(|| crate::CoreError::not_found("block was not found"))?;
-        if block.markdown == content.markdown {
-            transaction.commit()?;
-            return Ok((block, false, false));
-        }
-        if block.markdown_revision != expected_revision {
-            return Err(crate::CoreError::conflict(
-                "block content changed since editing began",
-            ));
-        }
-        let graph_changed =
-            operation::content_references_changed(&block.markdown, &content.markdown);
-        operation::apply_local_kinds_in_transaction(
-            &transaction,
-            vec![OpKind::BlockSetMarkdown(BlockSetMarkdown {
+    let applied =
+        set_block_content_if_revision_with_ops(conn, uuid, content, expected_revision).await?;
+    let changed = !applied.operations.is_empty();
+    Ok((applied.value.0, changed, applied.value.1))
+}
+
+#[doc(hidden)]
+pub async fn set_block_content_if_revision_with_ops(
+    conn: &Connection,
+    uuid: uuid::Uuid,
+    content: BlockContent,
+    expected_revision: ContentRevision,
+) -> Result<AppliedMutation<(Block, bool)>> {
+    conn.call_domain(
+        move |database| -> crate::CoreResult<AppliedMutation<(Block, bool)>> {
+            let transaction = database.transaction()?;
+            let sql = format!("SELECT {BLOCK_COLUMNS} FROM blocks WHERE uuid = ?1");
+            let block = transaction
+                .query_row(&sql, [uuid], row_to_block)
+                .optional()?
+                .ok_or_else(|| crate::CoreError::not_found("block was not found"))?;
+            if block.markdown == content.markdown {
+                transaction.commit()?;
+                return Ok(AppliedMutation {
+                    value: (block, false),
+                    operations: Vec::new(),
+                });
+            }
+            if block.markdown_revision != expected_revision {
+                return Err(crate::CoreError::conflict(
+                    "block content changed since editing began",
+                ));
+            }
+            let graph_changed =
+                operation::content_references_changed(&block.markdown, &content.markdown);
+            let operations = vec![OpKind::BlockSetMarkdown(BlockSetMarkdown {
                 uuid,
                 markdown: content.markdown,
-            })],
-        )?;
-        let block = transaction.query_row(&sql, [uuid], row_to_block)?;
-        transaction.commit()?;
-        Ok((block, true, graph_changed))
-    })
+            })];
+            operation::apply_local_kinds_in_transaction(&transaction, operations.clone())?;
+            let block = transaction.query_row(&sql, [uuid], row_to_block)?;
+            transaction.commit()?;
+            Ok(AppliedMutation {
+                value: (block, graph_changed),
+                operations,
+            })
+        },
+    )
     .await
 }
 
@@ -212,20 +248,32 @@ pub async fn set_block_style(
     uuid: uuid::Uuid,
     style: BlockStyle,
 ) -> Result<Block> {
+    Ok(set_block_style_with_ops(conn, uuid, style).await?.value)
+}
+
+#[doc(hidden)]
+pub async fn set_block_style_with_ops(
+    conn: &Connection,
+    uuid: uuid::Uuid,
+    style: BlockStyle,
+) -> Result<AppliedMutation<Block>> {
     let block = get_block(conn, uuid)
         .await?
         .ok_or_else(|| crate::CoreError::not_found("block was not found"))?;
-    if block.style != style {
+    let operations = if block.style != style {
         apply_local_action(
             conn,
             "set block style",
             vec![OpKind::BlockSetStyle(BlockSetStyle { uuid, style })],
         )
-        .await?;
-    }
-    get_block(conn, uuid)
         .await?
-        .context("updated block disappeared")
+    } else {
+        Vec::new()
+    };
+    let value = get_block(conn, uuid)
+        .await?
+        .context("updated block disappeared")?;
+    Ok(AppliedMutation { value, operations })
 }
 
 pub async fn set_task_state(
@@ -233,13 +281,22 @@ pub async fn set_task_state(
     uuid: uuid::Uuid,
     state: TaskState,
 ) -> Result<Block> {
+    Ok(set_task_state_with_ops(conn, uuid, state).await?.value)
+}
+
+#[doc(hidden)]
+pub async fn set_task_state_with_ops(
+    conn: &Connection,
+    uuid: uuid::Uuid,
+    state: TaskState,
+) -> Result<AppliedMutation<Block>> {
     let block = get_block(conn, uuid)
         .await?
         .ok_or_else(|| crate::CoreError::not_found("block was not found"))?;
     if block.style.task_state().is_none() {
         return Err(crate::CoreError::invalid("task state requires a task block").into());
     }
-    set_block_style(conn, uuid, BlockStyle::task(state)).await
+    set_block_style_with_ops(conn, uuid, BlockStyle::task(state)).await
 }
 
 pub async fn split_block(
@@ -248,86 +305,103 @@ pub async fn split_block(
     parts: Vec<BlockContent>,
     expected_revision: ContentRevision,
 ) -> Result<Vec<Block>> {
+    Ok(split_block_with_ops(conn, uuid, parts, expected_revision)
+        .await?
+        .value)
+}
+
+#[doc(hidden)]
+pub async fn split_block_with_ops(
+    conn: &Connection,
+    uuid: uuid::Uuid,
+    parts: Vec<BlockContent>,
+    expected_revision: ContentRevision,
+) -> Result<AppliedMutation<Vec<Block>>> {
     if parts.is_empty() {
         return Err(crate::CoreError::invalid("split requires at least one part").into());
     }
-    conn.call_domain(move |database| -> crate::CoreResult<Vec<Block>> {
-        let transaction = database.transaction()?;
-        let block_sql = format!("SELECT {BLOCK_COLUMNS} FROM blocks WHERE uuid = ?1");
-        let source = transaction
-            .query_row(&block_sql, [uuid], row_to_block)
-            .optional()?
-            .ok_or_else(|| crate::CoreError::not_found("block was not found"))?;
+    conn.call_domain(
+        move |database| -> crate::CoreResult<AppliedMutation<Vec<Block>>> {
+            let transaction = database.transaction()?;
+            let block_sql = format!("SELECT {BLOCK_COLUMNS} FROM blocks WHERE uuid = ?1");
+            let source = transaction
+                .query_row(&block_sql, [uuid], row_to_block)
+                .optional()?
+                .ok_or_else(|| crate::CoreError::not_found("block was not found"))?;
 
-        // A split is a non-idempotent structural intent: even when its first
-        // part equals the current Markdown, retrying against a stale revision
-        // would create another set of sibling blocks.
-        if source.markdown_revision != expected_revision {
-            return Err(crate::CoreError::conflict(
-                "block content changed since split began",
-            ));
-        }
+            // A split is a non-idempotent structural intent: even when its first
+            // part equals the current Markdown, retrying against a stale revision
+            // would create another set of sibling blocks.
+            if source.markdown_revision != expected_revision {
+                return Err(crate::CoreError::conflict(
+                    "block content changed since split began",
+                ));
+            }
 
-        let siblings = {
-            let sql = format!(
-                "SELECT {BLOCK_COLUMNS} FROM blocks
+            let siblings = {
+                let sql = format!(
+                    "SELECT {BLOCK_COLUMNS} FROM blocks
                   WHERE page_uuid = ?1 AND parent_uuid IS ?2
                   ORDER BY order_key, uuid"
+                );
+                transaction
+                    .prepare(&sql)?
+                    .query_map(
+                        rusqlite::params![source.page_uuid, source.parent_uuid],
+                        row_to_block,
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let source_index = siblings
+                .iter()
+                .position(|block| block.uuid == uuid)
+                .ok_or_else(|| {
+                    crate::CoreError::conflict("split source is absent from its siblings")
+                })?;
+            let now = chrono::Utc::now().timestamp();
+            let mut result_uuids = vec![uuid];
+            let mut kinds = vec![OpKind::BlockSetMarkdown(BlockSetMarkdown {
+                uuid,
+                markdown: parts[0].markdown.clone(),
+            })];
+            for part in parts.into_iter().skip(1) {
+                let block_uuid = uuid::Uuid::now_v7();
+                result_uuids.push(block_uuid);
+                kinds.push(OpKind::BlockCreate(BlockCreate {
+                    uuid: block_uuid,
+                    page_uuid: source.page_uuid,
+                    parent_uuid: source.parent_uuid,
+                    order_key: OrderKey::first(),
+                    style: source.style,
+                    markdown: part.markdown,
+                    created_at: now,
+                }));
+            }
+            let mut ordered = siblings.iter().map(|block| block.uuid).collect::<Vec<_>>();
+            ordered.splice(
+                source_index + 1..source_index + 1,
+                result_uuids.iter().skip(1).copied(),
             );
-            transaction
-                .prepare(&sql)?
-                .query_map(
-                    rusqlite::params![source.page_uuid, source.parent_uuid],
-                    row_to_block,
-                )?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        let source_index = siblings
-            .iter()
-            .position(|block| block.uuid == uuid)
-            .ok_or_else(|| {
-                crate::CoreError::conflict("split source is absent from its siblings")
-            })?;
-        let now = chrono::Utc::now().timestamp();
-        let mut result_uuids = vec![uuid];
-        let mut kinds = vec![OpKind::BlockSetMarkdown(BlockSetMarkdown {
-            uuid,
-            markdown: parts[0].markdown.clone(),
-        })];
-        for part in parts.into_iter().skip(1) {
-            let block_uuid = uuid::Uuid::now_v7();
-            result_uuids.push(block_uuid);
-            kinds.push(OpKind::BlockCreate(BlockCreate {
-                uuid: block_uuid,
-                page_uuid: source.page_uuid,
-                parent_uuid: source.parent_uuid,
-                order_key: OrderKey::first(),
-                style: source.style,
-                markdown: part.markdown,
-                created_at: now,
+            kinds.extend(ordered.into_iter().enumerate().map(|(index, block_uuid)| {
+                OpKind::BlockMove(BlockMove {
+                    uuid: block_uuid,
+                    page_uuid: source.page_uuid,
+                    parent_uuid: source.parent_uuid,
+                    order_key: OrderKey::from_ordinal(index + 1),
+                })
             }));
-        }
-        let mut ordered = siblings.iter().map(|block| block.uuid).collect::<Vec<_>>();
-        ordered.splice(
-            source_index + 1..source_index + 1,
-            result_uuids.iter().skip(1).copied(),
-        );
-        kinds.extend(ordered.into_iter().enumerate().map(|(index, block_uuid)| {
-            OpKind::BlockMove(BlockMove {
-                uuid: block_uuid,
-                page_uuid: source.page_uuid,
-                parent_uuid: source.parent_uuid,
-                order_key: OrderKey::from_ordinal(index + 1),
+            apply_local_action_in_transaction(&transaction, "split block", kinds.clone())?;
+            let blocks = result_uuids
+                .into_iter()
+                .map(|uuid| transaction.query_row(&block_sql, [uuid], row_to_block))
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            transaction.commit()?;
+            Ok(AppliedMutation {
+                value: blocks,
+                operations: kinds,
             })
-        }));
-        apply_local_action_in_transaction(&transaction, "split block", kinds)?;
-        let blocks = result_uuids
-            .into_iter()
-            .map(|uuid| transaction.query_row(&block_sql, [uuid], row_to_block))
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        transaction.commit()?;
-        Ok(blocks)
-    })
+        },
+    )
     .await
 }
 
@@ -337,6 +411,18 @@ pub async fn move_block(
     new_parent_uuid: Option<uuid::Uuid>,
     after_uuid: Option<uuid::Uuid>,
 ) -> Result<Block> {
+    Ok(move_block_with_ops(conn, uuid, new_parent_uuid, after_uuid)
+        .await?
+        .value)
+}
+
+#[doc(hidden)]
+pub async fn move_block_with_ops(
+    conn: &Connection,
+    uuid: uuid::Uuid,
+    new_parent_uuid: Option<uuid::Uuid>,
+    after_uuid: Option<uuid::Uuid>,
+) -> Result<AppliedMutation<Block>> {
     let block = get_block(conn, uuid)
         .await?
         .ok_or_else(|| crate::CoreError::not_found("block was not found"))?;
@@ -403,10 +489,11 @@ pub async fn move_block(
             })
         })
         .collect();
-    apply_local_action(conn, "move block", kinds).await?;
-    get_block(conn, uuid)
+    let operations = apply_local_action(conn, "move block", kinds).await?;
+    let value = get_block(conn, uuid)
         .await?
-        .context("moved block disappeared")
+        .context("moved block disappeared")?;
+    Ok(AppliedMutation { value, operations })
 }
 
 pub async fn reorder_block(
@@ -414,6 +501,15 @@ pub async fn reorder_block(
     uuid: uuid::Uuid,
     direction: ReorderDirection,
 ) -> Result<Block> {
+    Ok(reorder_block_with_ops(conn, uuid, direction).await?.value)
+}
+
+#[doc(hidden)]
+pub async fn reorder_block_with_ops(
+    conn: &Connection,
+    uuid: uuid::Uuid,
+    direction: ReorderDirection,
+) -> Result<AppliedMutation<Block>> {
     let block = get_block(conn, uuid)
         .await?
         .ok_or_else(|| crate::CoreError::not_found("block was not found"))?;
@@ -428,7 +524,10 @@ pub async fn reorder_block(
         ReorderDirection::Up | ReorderDirection::Down => None,
     };
     let Some(target) = target else {
-        return Ok(block);
+        return Ok(AppliedMutation {
+            value: block,
+            operations: Vec::new(),
+        });
     };
     siblings.swap(index, target);
     let kinds = siblings
@@ -443,13 +542,22 @@ pub async fn reorder_block(
             })
         })
         .collect();
-    apply_local_action(conn, "reorder block", kinds).await?;
-    get_block(conn, uuid)
+    let operations = apply_local_action(conn, "reorder block", kinds).await?;
+    let value = get_block(conn, uuid)
         .await?
-        .context("reordered block disappeared")
+        .context("reordered block disappeared")?;
+    Ok(AppliedMutation { value, operations })
 }
 
 pub async fn indent_block(conn: &Connection, uuid: uuid::Uuid) -> Result<Block> {
+    Ok(indent_block_with_ops(conn, uuid).await?.value)
+}
+
+#[doc(hidden)]
+pub async fn indent_block_with_ops(
+    conn: &Connection,
+    uuid: uuid::Uuid,
+) -> Result<AppliedMutation<Block>> {
     let block = get_block(conn, uuid)
         .await?
         .ok_or_else(|| crate::CoreError::not_found("block was not found"))?;
@@ -459,12 +567,23 @@ pub async fn indent_block(conn: &Connection, uuid: uuid::Uuid) -> Result<Block> 
         .position(|sibling| sibling.uuid == uuid)
         .context("block is absent from its parent")?;
     let Some(previous) = index.checked_sub(1).and_then(|index| siblings.get(index)) else {
-        return Ok(block);
+        return Ok(AppliedMutation {
+            value: block,
+            operations: Vec::new(),
+        });
     };
-    move_block(conn, uuid, Some(previous.uuid), None).await
+    move_block_with_ops(conn, uuid, Some(previous.uuid), None).await
 }
 
 pub async fn outdent_block(conn: &Connection, uuid: uuid::Uuid) -> Result<Block> {
+    Ok(outdent_block_with_ops(conn, uuid).await?.value)
+}
+
+#[doc(hidden)]
+pub async fn outdent_block_with_ops(
+    conn: &Connection,
+    uuid: uuid::Uuid,
+) -> Result<AppliedMutation<Block>> {
     let block = get_block(conn, uuid)
         .await?
         .ok_or_else(|| crate::CoreError::not_found("block was not found"))?;
@@ -474,7 +593,7 @@ pub async fn outdent_block(conn: &Connection, uuid: uuid::Uuid) -> Result<Block>
     let parent = get_block(conn, parent_uuid)
         .await?
         .context("parent block disappeared")?;
-    move_block(conn, uuid, parent.parent_uuid, Some(parent.uuid)).await
+    move_block_with_ops(conn, uuid, parent.parent_uuid, Some(parent.uuid)).await
 }
 
 pub async fn move_block_in_direction(
@@ -482,12 +601,34 @@ pub async fn move_block_in_direction(
     uuid: uuid::Uuid,
     direction: ReorderDirection,
 ) -> Result<Block> {
-    reorder_block(conn, uuid, direction).await
+    Ok(move_block_in_direction_with_ops(conn, uuid, direction)
+        .await?
+        .value)
+}
+
+#[doc(hidden)]
+pub async fn move_block_in_direction_with_ops(
+    conn: &Connection,
+    uuid: uuid::Uuid,
+    direction: ReorderDirection,
+) -> Result<AppliedMutation<Block>> {
+    reorder_block_with_ops(conn, uuid, direction).await
 }
 
 pub async fn delete_block(conn: &Connection, uuid: uuid::Uuid) -> Result<bool> {
+    Ok(delete_block_with_ops(conn, uuid).await?.value)
+}
+
+#[doc(hidden)]
+pub async fn delete_block_with_ops(
+    conn: &Connection,
+    uuid: uuid::Uuid,
+) -> Result<AppliedMutation<bool>> {
     let Some(block) = get_block(conn, uuid).await? else {
-        return Ok(false);
+        return Ok(AppliedMutation {
+            value: false,
+            operations: Vec::new(),
+        });
     };
     let child_count = conn
         .call(move |database| {
@@ -499,9 +640,12 @@ pub async fn delete_block(conn: &Connection, uuid: uuid::Uuid) -> Result<bool> {
         })
         .await?;
     if child_count != 0 {
-        return Ok(false);
+        return Ok(AppliedMutation {
+            value: false,
+            operations: Vec::new(),
+        });
     }
-    apply_local_action(
+    let operations = apply_local_action(
         conn,
         "delete block",
         vec![OpKind::BlockDelete(BlockDelete {
@@ -510,5 +654,8 @@ pub async fn delete_block(conn: &Connection, uuid: uuid::Uuid) -> Result<bool> {
         })],
     )
     .await?;
-    Ok(true)
+    Ok(AppliedMutation {
+        value: true,
+        operations,
+    })
 }

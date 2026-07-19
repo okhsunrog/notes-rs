@@ -2,13 +2,9 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use notes_blob::{BlobHash, BlobStore, BlobStoreError};
-use notes_core::{
-    Connection, OpKind, acknowledge_server_ops, apply_sequenced_batch, export_sync_snapshot,
-};
+use notes_core::{Connection, acknowledge_server_ops, apply_sequenced_batch, export_sync_snapshot};
 use notes_protocol::{ClientMessage, SequencedOp, ServerErrorCode, ServerMessage};
-use notes_sync::{
-    AppliedRemoteOperation, HttpTransport, SyncClient, SyncSnapshot, SyncTransport, TransportError,
-};
+use notes_sync::{HttpTransport, SyncClient, SyncSnapshot, SyncTransport, TransportError};
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -330,7 +326,12 @@ async fn synchronize_http(
         .with_batch_size(SYNC_BATCH_SIZE)
         .sync_until_idle(&mut transport)
         .await?;
-    emit_operation_changes(app, connection, &stats.applied_operations).await;
+    let operations = stats
+        .applied_operations
+        .iter()
+        .map(|applied| applied.operation.kind.clone())
+        .collect::<Vec<_>>();
+    crate::commands::emit_events_for_ops(app, connection, &operations).await;
     Ok(())
 }
 
@@ -374,7 +375,6 @@ async fn apply_server_operations(
     for operation in &operations {
         download_operation_blob(transport, blob_store, &operation.envelope).await?;
     }
-    let previous_contents = previous_operation_contents(connection, &operations).await?;
     let sequenced = operations
         .iter()
         .map(|operation| (operation.seq, operation.envelope.clone()))
@@ -384,192 +384,10 @@ async fn apply_server_operations(
         .into_iter()
         .zip(outcomes)
         .filter(|(_, outcome)| outcome.applied)
-        .map(|(operation, _)| AppliedRemoteOperation {
-            previous_content: previous_contents
-                .get(&operation.envelope.op_id)
-                .cloned()
-                .flatten(),
-            operation: operation.envelope,
-        })
+        .map(|(operation, _)| operation.envelope.kind)
         .collect::<Vec<_>>();
-    emit_operation_changes(app, connection, &applied).await;
+    crate::commands::emit_events_for_ops(app, connection, &applied).await;
     Ok(())
-}
-
-async fn previous_operation_contents(
-    connection: &Connection,
-    operations: &[SequencedOp],
-) -> Result<std::collections::HashMap<uuid::Uuid, Option<String>>> {
-    let content_ops = operations
-        .iter()
-        .filter_map(|operation| match &operation.envelope.kind {
-            OpKind::BlockSetMarkdown(payload) => Some((operation.envelope.op_id, payload.uuid)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if content_ops.is_empty() {
-        return Ok(std::collections::HashMap::new());
-    }
-    let blocks = notes_core::db::get_blocks(
-        connection,
-        content_ops.iter().map(|(_, uuid)| *uuid).collect(),
-    )
-    .await?;
-    let contents = blocks
-        .into_iter()
-        .map(|block| (block.uuid, block.markdown))
-        .collect::<std::collections::HashMap<_, _>>();
-    Ok(content_ops
-        .into_iter()
-        .map(|(op_id, uuid)| (op_id, contents.get(&uuid).cloned()))
-        .collect())
-}
-
-async fn emit_operation_changes(
-    app: &AppHandle,
-    connection: &Connection,
-    operations: &[AppliedRemoteOperation],
-) {
-    use std::collections::BTreeSet;
-
-    if operations.is_empty() {
-        return;
-    }
-    let mut changed_pages = BTreeSet::new();
-    let mut deleted_pages = BTreeSet::new();
-    let mut changed_blocks = BTreeSet::new();
-    let mut deleted_blocks = BTreeSet::new();
-    let mut containers = BTreeSet::new();
-    let mut structure = BTreeSet::new();
-    let mut graph = BTreeSet::new();
-    let mut attachment_owners = BTreeSet::new();
-
-    for applied in operations {
-        match &applied.operation.kind {
-            OpKind::PageCreate(payload) => {
-                changed_pages.insert(payload.uuid);
-                // Creating a canonical page may adopt an existing wikilink stub.
-                graph.insert(payload.uuid);
-            }
-            OpKind::PageAliasSet(payload) => {
-                changed_pages.insert(payload.uuid);
-                graph.insert(payload.uuid);
-            }
-            OpKind::PageSetTitle(payload) => {
-                changed_pages.insert(payload.uuid);
-                graph.insert(payload.uuid);
-            }
-            OpKind::PageSetLayout(payload) => {
-                changed_pages.insert(payload.uuid);
-            }
-            OpKind::PageDelete(payload) => {
-                deleted_pages.insert(payload.uuid);
-                graph.insert(payload.uuid);
-            }
-            OpKind::BlockCreate(payload) => {
-                changed_blocks.insert(payload.uuid);
-                containers.insert(payload.parent_uuid.unwrap_or(payload.page_uuid));
-                if notes_core::content_references_changed("", &payload.markdown) {
-                    graph.insert(payload.uuid);
-                }
-            }
-            OpKind::BlockSetMarkdown(payload) => {
-                changed_blocks.insert(payload.uuid);
-                if applied.previous_content.as_deref().is_none_or(|previous| {
-                    notes_core::content_references_changed(previous, &payload.markdown)
-                }) {
-                    graph.insert(payload.uuid);
-                }
-            }
-            OpKind::BlockSetStyle(payload) => {
-                changed_blocks.insert(payload.uuid);
-            }
-            OpKind::BlockMove(payload) => {
-                changed_blocks.insert(payload.uuid);
-                containers.insert(payload.parent_uuid.unwrap_or(payload.page_uuid));
-                // The old parent is not part of the operation envelope. A structure
-                // event deliberately invalidates the whole children-query family.
-                structure.insert(payload.uuid);
-            }
-            OpKind::BlockDelete(payload) => {
-                deleted_blocks.insert(payload.uuid);
-                containers.insert(payload.page_uuid);
-                structure.insert(payload.uuid);
-                graph.insert(payload.uuid);
-            }
-            OpKind::AttachmentAdd(payload) => {
-                attachment_owners.insert(payload.owner.uuid());
-            }
-            OpKind::AttachmentRemove(payload) => {
-                attachment_owners.insert(payload.owner.uuid());
-            }
-        }
-    }
-
-    if !changed_pages.is_empty() {
-        match notes_core::db::get_contents(connection, changed_pages.into_iter().collect()).await {
-            Ok(contents) => {
-                let pages = contents
-                    .into_iter()
-                    .filter_map(|content| match content {
-                        notes_core::db::Content::Page(page) => Some(page),
-                        notes_core::db::Content::Block(_) => None,
-                    })
-                    .collect::<Vec<_>>();
-                crate::commands::emit_pages_changed(app, &pages);
-            }
-            Err(error) => tracing::warn!(%error, "resolving remotely changed pages failed"),
-        }
-    }
-    if !changed_blocks.is_empty() {
-        match notes_core::db::get_blocks(connection, changed_blocks.into_iter().collect()).await {
-            Ok(blocks) => {
-                crate::commands::emit_blocks_changed(app, &blocks, containers.iter().copied())
-            }
-            Err(error) => tracing::warn!(%error, "resolving remotely changed blocks failed"),
-        }
-    }
-    if !deleted_pages.is_empty() {
-        crate::commands::emit_domain(
-            app,
-            crate::commands::DomainEvent::PagesDeleted {
-                page_uuids: deleted_pages.into_iter().collect(),
-            },
-        );
-    }
-    if !deleted_blocks.is_empty() {
-        crate::commands::emit_domain(
-            app,
-            crate::commands::DomainEvent::BlocksDeleted {
-                block_uuids: deleted_blocks.into_iter().collect(),
-                container_uuids: containers.into_iter().collect(),
-            },
-        );
-    }
-    if !structure.is_empty() {
-        crate::commands::emit_domain(
-            app,
-            crate::commands::DomainEvent::StructureChanged {
-                block_uuids: structure.into_iter().collect(),
-            },
-        );
-    }
-    if !graph.is_empty() {
-        crate::commands::emit_domain(
-            app,
-            crate::commands::DomainEvent::GraphChanged {
-                content_uuids: graph.into_iter().collect(),
-            },
-        );
-    }
-    if !attachment_owners.is_empty() {
-        crate::commands::emit_domain(
-            app,
-            crate::commands::DomainEvent::AttachmentsChanged {
-                owner_uuids: attachment_owners.into_iter().collect(),
-            },
-        );
-    }
 }
 
 async fn upload_operation_blobs(

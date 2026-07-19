@@ -9,13 +9,11 @@ pub async fn rename_page(
     title: Option<String>,
     expected_revision: ContentRevision,
 ) -> CommandResult<db::Page> {
-    let (page, changed) = db::rename_page_if_revision(&state.conn, uuid, title, expected_revision)
+    let applied = db::rename_page_if_revision_with_ops(&state.conn, uuid, title, expected_revision)
         .await
         .map_err(err)?;
-    if changed {
-        emit_pages_changed(&app, std::slice::from_ref(&page));
-    }
-    Ok(page)
+    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
+    Ok(applied.value)
 }
 
 #[tauri::command]
@@ -26,11 +24,11 @@ pub async fn set_page_layout(
     uuid: uuid::Uuid,
     layout: PageLayout,
 ) -> CommandResult<db::Page> {
-    let page = db::set_page_layout(&state.conn, uuid, layout)
+    let applied = db::set_page_layout_with_ops(&state.conn, uuid, layout)
         .await
         .map_err(err)?;
-    emit_pages_changed(&app, std::slice::from_ref(&page));
-    Ok(page)
+    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
+    Ok(applied.value)
 }
 
 #[tauri::command]
@@ -40,13 +38,14 @@ pub async fn create_note(
     state: State<'_, AppState>,
     title: Option<String>,
 ) -> CommandResult<db::CreateNoteResult> {
-    let result = db::create_note(&state.conn, title).await.map_err(err)?;
-    if let db::CreateNoteResult::Created { note } = &result {
-        emit_pages_changed(&app, std::slice::from_ref(&note.page));
-        emit_blocks_changed(&app, std::slice::from_ref(&note.initial_block), []);
+    let applied = db::create_note_with_ops(&state.conn, title)
+        .await
+        .map_err(err)?;
+    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
+    if !applied.operations.is_empty() {
         emit_domain(&app, DomainEvent::HistoryChanged);
     }
-    Ok(result)
+    Ok(applied.value)
 }
 
 #[tauri::command]
@@ -56,10 +55,14 @@ pub async fn create_page(
     state: State<'_, AppState>,
     title: String,
 ) -> CommandResult<db::Page> {
-    let page = db::create_page(&state.conn, title).await.map_err(err)?;
-    emit_pages_changed(&app, std::slice::from_ref(&page));
-    emit_domain(&app, DomainEvent::HistoryChanged);
-    Ok(page)
+    let applied = db::create_page_with_ops(&state.conn, title)
+        .await
+        .map_err(err)?;
+    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
+    if !applied.operations.is_empty() {
+        emit_domain(&app, DomainEvent::HistoryChanged);
+    }
+    Ok(applied.value)
 }
 
 #[tauri::command]
@@ -109,52 +112,8 @@ pub async fn replace_page_document(
         db::replace_page_document_with_outcome(&state.conn, page_uuid, expected_revision, units)
             .await
             .map_err(err)?;
-    if outcome.changed {
-        let deleted = outcome
-            .deleted_block_uuids
-            .iter()
-            .copied()
-            .collect::<std::collections::HashSet<_>>();
-        let changed = outcome
-            .block_uuids
-            .iter()
-            .copied()
-            .filter(|uuid| !deleted.contains(uuid))
-            .collect::<Vec<_>>();
-        if !changed.is_empty() {
-            emit_domain(
-                &app,
-                DomainEvent::BlocksChanged {
-                    block_uuids: changed,
-                    container_uuids: outcome.container_uuids.clone(),
-                },
-            );
-        }
-        if !outcome.deleted_block_uuids.is_empty() {
-            emit_domain(
-                &app,
-                DomainEvent::BlocksDeleted {
-                    block_uuids: outcome.deleted_block_uuids.clone(),
-                    container_uuids: outcome.container_uuids.clone(),
-                },
-            );
-        }
-        if outcome.structure_changed {
-            emit_domain(
-                &app,
-                DomainEvent::StructureChanged {
-                    block_uuids: outcome.block_uuids.clone(),
-                },
-            );
-        }
-        if outcome.graph_changed {
-            emit_domain(
-                &app,
-                DomainEvent::GraphChanged {
-                    content_uuids: outcome.block_uuids.clone(),
-                },
-            );
-        }
+    emit_events_for_ops(&app, &state.conn, &outcome.operations).await;
+    if !outcome.operations.is_empty() {
         emit_domain(&app, DomainEvent::HistoryChanged);
     }
     Ok(outcome.snapshot)
@@ -187,11 +146,11 @@ pub async fn get_or_create_page_by_title(
     state: State<'_, AppState>,
     title: String,
 ) -> CommandResult<db::Page> {
-    let page = db::get_or_create_page_by_title(&state.conn, title)
+    let applied = db::get_or_create_page_by_title_with_ops(&state.conn, title)
         .await
         .map_err(err)?;
-    emit_pages_changed(&app, std::slice::from_ref(&page));
-    Ok(page)
+    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
+    Ok(applied.value)
 }
 
 #[tauri::command]
@@ -206,19 +165,7 @@ pub async fn delete_page(
         .map_err(err)?;
     let deleted = db::delete_page(&state.conn, uuid).await.map_err(err)?;
     if let Some(deleted) = &deleted {
-        emit_domain(
-            &app,
-            DomainEvent::PagesDeleted {
-                page_uuids: vec![deleted.page_uuid],
-            },
-        );
-        emit_domain(
-            &app,
-            DomainEvent::BlocksDeleted {
-                block_uuids: deleted.block_uuids.clone(),
-                container_uuids: vec![deleted.page_uuid],
-            },
-        );
+        emit_events_for_ops(&app, &state.conn, &deleted.operations).await;
         emit_domain(&app, DomainEvent::HistoryChanged);
     }
     Ok(deleted.is_some())

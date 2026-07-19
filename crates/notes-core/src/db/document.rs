@@ -51,6 +51,7 @@ pub struct PageDocumentReplaceOutcome {
     pub container_uuids: Vec<uuid::Uuid>,
     pub structure_changed: bool,
     pub graph_changed: bool,
+    pub operations: Vec<OpKind>,
 }
 
 #[derive(Debug)]
@@ -125,10 +126,11 @@ pub async fn replace_page_document_with_outcome(
                 container_uuids: Vec::new(),
                 structure_changed: false,
                 graph_changed: false,
+                operations: Vec::new(),
             });
         }
 
-        apply_local_action_in_transaction(&transaction, "edit document", plan.kinds)?;
+        apply_local_action_in_transaction(&transaction, "edit document", plan.kinds.clone())?;
         let snapshot = read_page_document(&transaction, page_uuid)?
             .ok_or_else(|| CoreError::not_found("edited page disappeared"))?;
         transaction.commit()?;
@@ -140,6 +142,7 @@ pub async fn replace_page_document_with_outcome(
             container_uuids: plan.container_uuids.into_iter().collect(),
             structure_changed: plan.structure_changed,
             graph_changed: plan.graph_changed,
+            operations: plan.kinds,
         })
     })
     .await

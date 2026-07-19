@@ -32,7 +32,7 @@ pub async fn create_block(
     style: BlockStyle,
     markdown: String,
 ) -> CommandResult<db::Block> {
-    let block = db::create_block(
+    let applied = db::create_block_with_ops(
         &state.conn,
         page_uuid,
         parent_uuid,
@@ -42,9 +42,9 @@ pub async fn create_block(
     )
     .await
     .map_err(err)?;
-    emit_blocks_changed(&app, std::slice::from_ref(&block), []);
+    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
     emit_domain(&app, DomainEvent::HistoryChanged);
-    Ok(block)
+    Ok(applied.value)
 }
 
 #[tauri::command]
@@ -56,22 +56,12 @@ pub async fn set_block_content(
     content: db::BlockContent,
     expected_revision: ContentRevision,
 ) -> CommandResult<db::Block> {
-    let (block, changed, graph_changed) =
-        db::set_block_content_if_revision(&state.conn, uuid, content, expected_revision)
+    let applied =
+        db::set_block_content_if_revision_with_ops(&state.conn, uuid, content, expected_revision)
             .await
             .map_err(err)?;
-    if changed {
-        emit_blocks_changed(&app, std::slice::from_ref(&block), []);
-    }
-    if graph_changed {
-        emit_domain(
-            &app,
-            DomainEvent::GraphChanged {
-                content_uuids: vec![block.uuid],
-            },
-        );
-    }
-    Ok(block)
+    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
+    Ok(applied.value.0)
 }
 
 #[tauri::command]
@@ -82,12 +72,14 @@ pub async fn set_block_style(
     uuid: uuid::Uuid,
     style: BlockStyle,
 ) -> CommandResult<db::Block> {
-    let block = db::set_block_style(&state.conn, uuid, style)
+    let applied = db::set_block_style_with_ops(&state.conn, uuid, style)
         .await
         .map_err(err)?;
-    emit_blocks_changed(&app, std::slice::from_ref(&block), []);
-    emit_domain(&app, DomainEvent::HistoryChanged);
-    Ok(block)
+    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
+    if !applied.operations.is_empty() {
+        emit_domain(&app, DomainEvent::HistoryChanged);
+    }
+    Ok(applied.value)
 }
 
 #[tauri::command]
@@ -98,12 +90,14 @@ pub async fn set_task_state(
     uuid: uuid::Uuid,
     task_state: TaskState,
 ) -> CommandResult<db::Block> {
-    let block = db::set_task_state(&state.conn, uuid, task_state)
+    let applied = db::set_task_state_with_ops(&state.conn, uuid, task_state)
         .await
         .map_err(err)?;
-    emit_blocks_changed(&app, std::slice::from_ref(&block), []);
-    emit_domain(&app, DomainEvent::HistoryChanged);
-    Ok(block)
+    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
+    if !applied.operations.is_empty() {
+        emit_domain(&app, DomainEvent::HistoryChanged);
+    }
+    Ok(applied.value)
 }
 
 #[tauri::command]
@@ -115,12 +109,12 @@ pub async fn split_block(
     parts: Vec<db::BlockContent>,
     expected_revision: ContentRevision,
 ) -> CommandResult<Vec<db::Block>> {
-    let blocks = db::split_block(&state.conn, uuid, parts, expected_revision)
+    let applied = db::split_block_with_ops(&state.conn, uuid, parts, expected_revision)
         .await
         .map_err(err)?;
-    emit_blocks_changed(&app, &blocks, []);
+    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
     emit_domain(&app, DomainEvent::HistoryChanged);
-    Ok(blocks)
+    Ok(applied.value)
 }
 
 async fn change_indent(
@@ -129,19 +123,17 @@ async fn change_indent(
     uuid: uuid::Uuid,
     indent: bool,
 ) -> CommandResult<db::Block> {
-    let old_container = db::get_block(&state.conn, uuid)
-        .await
-        .map_err(err)?
-        .map(|block| block.parent_uuid.unwrap_or(block.page_uuid));
-    let block = if indent {
-        db::indent_block(&state.conn, uuid).await
+    let applied = if indent {
+        db::indent_block_with_ops(&state.conn, uuid).await
     } else {
-        db::outdent_block(&state.conn, uuid).await
+        db::outdent_block_with_ops(&state.conn, uuid).await
     }
     .map_err(err)?;
-    emit_blocks_changed(app, std::slice::from_ref(&block), old_container);
-    emit_domain(app, DomainEvent::HistoryChanged);
-    Ok(block)
+    emit_events_for_ops(app, &state.conn, &applied.operations).await;
+    if !applied.operations.is_empty() {
+        emit_domain(app, DomainEvent::HistoryChanged);
+    }
+    Ok(applied.value)
 }
 
 #[tauri::command]
@@ -170,12 +162,14 @@ async fn move_direction(
     uuid: uuid::Uuid,
     direction: ReorderDirection,
 ) -> CommandResult<db::Block> {
-    let block = db::move_block_in_direction(&state.conn, uuid, direction)
+    let applied = db::move_block_in_direction_with_ops(&state.conn, uuid, direction)
         .await
         .map_err(err)?;
-    emit_blocks_changed(app, std::slice::from_ref(&block), []);
-    emit_domain(app, DomainEvent::HistoryChanged);
-    Ok(block)
+    emit_events_for_ops(app, &state.conn, &applied.operations).await;
+    if !applied.operations.is_empty() {
+        emit_domain(app, DomainEvent::HistoryChanged);
+    }
+    Ok(applied.value)
 }
 
 #[tauri::command]
@@ -205,22 +199,14 @@ pub async fn delete_block(
     state: State<'_, AppState>,
     uuid: uuid::Uuid,
 ) -> CommandResult<bool> {
-    let previous = db::get_block(&state.conn, uuid).await.map_err(err)?;
-    let deleted = db::delete_block(&state.conn, uuid).await.map_err(err)?;
-    if deleted {
-        emit_domain(
-            &app,
-            DomainEvent::BlocksDeleted {
-                block_uuids: vec![uuid],
-                container_uuids: previous
-                    .map(|block| block.parent_uuid.unwrap_or(block.page_uuid))
-                    .into_iter()
-                    .collect(),
-            },
-        );
+    let applied = db::delete_block_with_ops(&state.conn, uuid)
+        .await
+        .map_err(err)?;
+    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
+    if applied.value {
         emit_domain(&app, DomainEvent::HistoryChanged);
     }
-    Ok(deleted)
+    Ok(applied.value)
 }
 
 #[tauri::command]

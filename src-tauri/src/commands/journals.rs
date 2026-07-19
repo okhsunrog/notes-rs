@@ -7,15 +7,14 @@ pub async fn ensure_journal(
     state: State<'_, AppState>,
     date: notes_core::JournalDate,
 ) -> CommandResult<db::Page> {
-    let journal = db::ensure_journal(&state.conn, date).await.map_err(err)?;
-    emit_domain(
-        &app,
-        DomainEvent::PagesChanged {
-            page_uuids: vec![journal.uuid],
-        },
-    );
-    emit_domain(&app, DomainEvent::HistoryChanged);
-    Ok(journal)
+    let applied = db::ensure_journal_with_ops(&state.conn, date)
+        .await
+        .map_err(err)?;
+    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
+    if !applied.operations.is_empty() {
+        emit_domain(&app, DomainEvent::HistoryChanged);
+    }
+    Ok(applied.value)
 }
 
 #[tauri::command]
@@ -48,24 +47,10 @@ pub async fn append_to_journal(
     content: db::BlockContent,
     style: BlockStyle,
 ) -> CommandResult<db::Block> {
-    let block = db::append_to_journal(&state.conn, date, content, style)
+    let applied = db::append_to_journal_with_ops(&state.conn, date, content, style)
         .await
         .map_err(err)?;
-    emit_domain(
-        &app,
-        DomainEvent::PagesChanged {
-            page_uuids: vec![block.page_uuid],
-        },
-    );
-    emit_blocks_changed(&app, std::slice::from_ref(&block), []);
-    if notes_core::content_references_changed("", &block.markdown) {
-        emit_domain(
-            &app,
-            DomainEvent::GraphChanged {
-                content_uuids: vec![block.uuid],
-            },
-        );
-    }
+    emit_events_for_ops(&app, &state.conn, &applied.operations).await;
     emit_domain(&app, DomainEvent::HistoryChanged);
-    Ok(block)
+    Ok(applied.value)
 }

@@ -61,15 +61,26 @@ pub async fn list_pages_filtered(
 }
 
 pub async fn create_page(conn: &Connection, title: String) -> Result<Page> {
+    Ok(create_page_with_ops(conn, title).await?.value)
+}
+
+#[doc(hidden)]
+pub async fn create_page_with_ops(
+    conn: &Connection,
+    title: String,
+) -> Result<AppliedMutation<Page>> {
     let title = title.trim().to_owned();
     if title.is_empty() {
         return Err(crate::CoreError::invalid("title is required").into());
     }
     if let Some(page) = get_page_by_title(conn, title.clone()).await? {
-        return Ok(page);
+        return Ok(AppliedMutation {
+            value: page,
+            operations: Vec::new(),
+        });
     }
     let uuid = uuid::Uuid::now_v7();
-    apply_local_action(
+    let operations = apply_local_action(
         conn,
         "create page",
         vec![OpKind::PageCreate(PageCreate {
@@ -81,16 +92,30 @@ pub async fn create_page(conn: &Connection, title: String) -> Result<Page> {
         })],
     )
     .await?;
-    get_page(conn, uuid)
+    let value = get_page(conn, uuid)
         .await?
-        .context("created page disappeared")
+        .context("created page disappeared")?;
+    Ok(AppliedMutation { value, operations })
 }
 
 pub async fn get_or_create_page_by_title(conn: &Connection, title: String) -> Result<Page> {
+    Ok(get_or_create_page_by_title_with_ops(conn, title)
+        .await?
+        .value)
+}
+
+#[doc(hidden)]
+pub async fn get_or_create_page_by_title_with_ops(
+    conn: &Connection,
+    title: String,
+) -> Result<AppliedMutation<Page>> {
     if let Some(page) = get_page_by_title(conn, title.clone()).await? {
-        return Ok(page);
+        return Ok(AppliedMutation {
+            value: page,
+            operations: Vec::new(),
+        });
     }
-    create_page(conn, title).await
+    create_page_with_ops(conn, title).await
 }
 
 pub async fn rename_page(
@@ -129,48 +154,66 @@ pub async fn rename_page_if_revision(
     title: Option<String>,
     expected_revision: ContentRevision,
 ) -> Result<(Page, bool)> {
+    let applied = rename_page_if_revision_with_ops(conn, uuid, title, expected_revision).await?;
+    let changed = !applied.operations.is_empty();
+    Ok((applied.value, changed))
+}
+
+#[doc(hidden)]
+pub async fn rename_page_if_revision_with_ops(
+    conn: &Connection,
+    uuid: uuid::Uuid,
+    title: Option<String>,
+    expected_revision: ContentRevision,
+) -> Result<AppliedMutation<Page>> {
     let title = title
         .map(|title| title.trim().to_owned())
         .filter(|title| !title.is_empty());
-    conn.call_domain(move |database| -> crate::CoreResult<(Page, bool)> {
-        let transaction = database.transaction()?;
-        let sql = format!("SELECT {PAGE_COLUMNS} FROM pages WHERE uuid = ?1");
-        let page = transaction
-            .query_row(&sql, [uuid], row_to_page)
-            .optional()?
-            .ok_or_else(|| crate::CoreError::not_found("page not found"))?;
-        if page.kind.is_journal() {
-            return Err(crate::CoreError::invalid(
-                "journal page titles are derived from their date",
-            ));
-        }
-        if page.title == title {
-            transaction.commit()?;
-            return Ok((page, false));
-        }
-        if page.title_revision != expected_revision {
-            return Err(crate::CoreError::conflict(
-                "page title changed since editing began",
-            ));
-        }
-        if let Some(title) = title.as_deref() {
-            let normalized_title = crate::model::normalize_title(title);
-            if operation::resolve_page_alias(&transaction, &normalized_title)?
-                .is_some_and(|owner_uuid| owner_uuid != uuid)
-            {
-                return Err(crate::CoreError::conflict(
-                    "another page already owns this title",
+    conn.call_domain(
+        move |database| -> crate::CoreResult<AppliedMutation<Page>> {
+            let transaction = database.transaction()?;
+            let sql = format!("SELECT {PAGE_COLUMNS} FROM pages WHERE uuid = ?1");
+            let page = transaction
+                .query_row(&sql, [uuid], row_to_page)
+                .optional()?
+                .ok_or_else(|| crate::CoreError::not_found("page not found"))?;
+            if page.kind.is_journal() {
+                return Err(crate::CoreError::invalid(
+                    "journal page titles are derived from their date",
                 ));
             }
-        }
-        operation::apply_local_kinds_in_transaction(
-            &transaction,
-            vec![OpKind::PageSetTitle(PageSetTitle { uuid, title })],
-        )?;
-        let page = transaction.query_row(&sql, [uuid], row_to_page)?;
-        transaction.commit()?;
-        Ok((page, true))
-    })
+            if page.title == title {
+                transaction.commit()?;
+                return Ok(AppliedMutation {
+                    value: page,
+                    operations: Vec::new(),
+                });
+            }
+            if page.title_revision != expected_revision {
+                return Err(crate::CoreError::conflict(
+                    "page title changed since editing began",
+                ));
+            }
+            if let Some(title) = title.as_deref() {
+                let normalized_title = crate::model::normalize_title(title);
+                if operation::resolve_page_alias(&transaction, &normalized_title)?
+                    .is_some_and(|owner_uuid| owner_uuid != uuid)
+                {
+                    return Err(crate::CoreError::conflict(
+                        "another page already owns this title",
+                    ));
+                }
+            }
+            let operations = vec![OpKind::PageSetTitle(PageSetTitle { uuid, title })];
+            operation::apply_local_kinds_in_transaction(&transaction, operations.clone())?;
+            let page = transaction.query_row(&sql, [uuid], row_to_page)?;
+            transaction.commit()?;
+            Ok(AppliedMutation {
+                value: page,
+                operations,
+            })
+        },
+    )
     .await
 }
 
@@ -179,19 +222,31 @@ pub async fn set_page_layout(
     uuid: uuid::Uuid,
     layout: PageLayout,
 ) -> Result<Page> {
+    Ok(set_page_layout_with_ops(conn, uuid, layout).await?.value)
+}
+
+#[doc(hidden)]
+pub async fn set_page_layout_with_ops(
+    conn: &Connection,
+    uuid: uuid::Uuid,
+    layout: PageLayout,
+) -> Result<AppliedMutation<Page>> {
     let page = get_page(conn, uuid)
         .await?
         .ok_or_else(|| crate::CoreError::not_found("page not found"))?;
-    if page.layout != layout {
+    let operations = if page.layout != layout {
         apply_local(
             conn,
             vec![OpKind::PageSetLayout(PageSetLayout { uuid, layout })],
         )
-        .await?;
-    }
-    get_page(conn, uuid)
         .await?
-        .context("updated page disappeared")
+    } else {
+        Vec::new()
+    };
+    let value = get_page(conn, uuid)
+        .await?
+        .context("updated page disappeared")?;
+    Ok(AppliedMutation { value, operations })
 }
 
 #[derive(Debug, Clone, Serialize, specta::Type)]
@@ -222,27 +277,37 @@ impl CreateNoteResult {
 }
 
 pub async fn create_note(conn: &Connection, title: Option<String>) -> Result<CreateNoteResult> {
+    Ok(create_note_with_ops(conn, title).await?.value)
+}
+
+#[doc(hidden)]
+pub async fn create_note_with_ops(
+    conn: &Connection,
+    title: Option<String>,
+) -> Result<AppliedMutation<CreateNoteResult>> {
     let title = title
         .map(|title| title.trim().to_owned())
         .filter(|title| !title.is_empty());
-    conn.call_domain(move |database| -> crate::CoreResult<CreateNoteResult> {
-        let transaction = database.transaction()?;
-        if let Some(normalized_title) = title.as_deref().map(crate::model::normalize_title)
-            && let Some(page_uuid) = operation::resolve_page_alias(&transaction, &normalized_title)?
-        {
-            let sql = format!("SELECT {PAGE_COLUMNS} FROM pages WHERE uuid = ?1");
-            let page = transaction.query_row(&sql, [page_uuid], row_to_page)?;
-            transaction.commit()?;
-            return Ok(CreateNoteResult::Existing { page });
-        }
+    conn.call_domain(
+        move |database| -> crate::CoreResult<AppliedMutation<CreateNoteResult>> {
+            let transaction = database.transaction()?;
+            if let Some(normalized_title) = title.as_deref().map(crate::model::normalize_title)
+                && let Some(page_uuid) =
+                    operation::resolve_page_alias(&transaction, &normalized_title)?
+            {
+                let sql = format!("SELECT {PAGE_COLUMNS} FROM pages WHERE uuid = ?1");
+                let page = transaction.query_row(&sql, [page_uuid], row_to_page)?;
+                transaction.commit()?;
+                return Ok(AppliedMutation {
+                    value: CreateNoteResult::Existing { page },
+                    operations: Vec::new(),
+                });
+            }
 
-        let page_uuid = uuid::Uuid::now_v7();
-        let block_uuid = uuid::Uuid::now_v7();
-        let now = chrono::Utc::now().timestamp();
-        apply_local_action_in_transaction(
-            &transaction,
-            "create note",
-            vec![
+            let page_uuid = uuid::Uuid::now_v7();
+            let block_uuid = uuid::Uuid::now_v7();
+            let now = chrono::Utc::now().timestamp();
+            let operations = vec![
                 OpKind::PageCreate(PageCreate {
                     uuid: page_uuid,
                     kind: PageKind::Note,
@@ -259,32 +324,36 @@ pub async fn create_note(conn: &Connection, title: Option<String>) -> Result<Cre
                     markdown: String::new(),
                     created_at: now,
                 }),
-            ],
-        )?;
-        let page = transaction
-            .query_row(
-                &format!("SELECT {PAGE_COLUMNS} FROM pages WHERE uuid = ?1"),
-                [page_uuid],
-                row_to_page,
-            )
-            .optional()?
-            .ok_or_else(|| crate::CoreError::not_found("created page disappeared"))?;
-        let initial_block = transaction
-            .query_row(
-                &format!("SELECT {BLOCK_COLUMNS} FROM blocks WHERE uuid = ?1"),
-                [block_uuid],
-                row_to_block,
-            )
-            .optional()?
-            .ok_or_else(|| crate::CoreError::not_found("created initial block disappeared"))?;
-        transaction.commit()?;
-        Ok(CreateNoteResult::Created {
-            note: CreatedNote {
-                page,
-                initial_block,
-            },
-        })
-    })
+            ];
+            apply_local_action_in_transaction(&transaction, "create note", operations.clone())?;
+            let page = transaction
+                .query_row(
+                    &format!("SELECT {PAGE_COLUMNS} FROM pages WHERE uuid = ?1"),
+                    [page_uuid],
+                    row_to_page,
+                )
+                .optional()?
+                .ok_or_else(|| crate::CoreError::not_found("created page disappeared"))?;
+            let initial_block = transaction
+                .query_row(
+                    &format!("SELECT {BLOCK_COLUMNS} FROM blocks WHERE uuid = ?1"),
+                    [block_uuid],
+                    row_to_block,
+                )
+                .optional()?
+                .ok_or_else(|| crate::CoreError::not_found("created initial block disappeared"))?;
+            transaction.commit()?;
+            Ok(AppliedMutation {
+                value: CreateNoteResult::Created {
+                    note: CreatedNote {
+                        page,
+                        initial_block,
+                    },
+                },
+                operations,
+            })
+        },
+    )
     .await
 }
 
@@ -292,6 +361,7 @@ pub struct DeletedPage {
     pub page_uuid: uuid::Uuid,
     pub block_uuids: Vec<uuid::Uuid>,
     pub attachments: Vec<Attachment>,
+    pub operations: Vec<OpKind>,
 }
 
 pub async fn delete_page(conn: &Connection, uuid: uuid::Uuid) -> Result<Option<DeletedPage>> {
@@ -351,11 +421,12 @@ pub async fn delete_page(conn: &Connection, uuid: uuid::Uuid) -> Result<Option<D
             })
         }));
         kinds.push(OpKind::PageDelete(PageDelete { uuid }));
-        apply_local_action_in_transaction(&transaction, "delete page", kinds)?;
+        apply_local_action_in_transaction(&transaction, "delete page", kinds.clone())?;
         let deleted = DeletedPage {
             page_uuid: uuid,
             block_uuids: blocks.into_iter().map(|block| block.uuid).collect(),
             attachments,
+            operations: kinds,
         };
         transaction.commit()?;
         Ok(Some(deleted))
