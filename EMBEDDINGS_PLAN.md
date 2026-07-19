@@ -96,6 +96,10 @@ Positive reconcile re-open: a local edit between ticks bumps `reconcile_scan_cou
 
 `store.rs:1177` matches headings among same-parent siblings only; a block nested in a list on a document page misses the top-level section heading. Default (recommended, pending user confirmation): KEEP this semantics — nested blocks already carry ancestor excerpts, and sibling-scope is simpler. Add a code comment documenting the choice either way. Do NOT change behavior without explicit approval.
 
+### E8.7 (done, ef90ac4 — implemented reviewer-side). Fallback boundary: distance over kind
+
+Follow-up to E8.1 from its verification: the fallback preferred boundary _kind_ over distance, so a BlankLine at 300 chars beat a plain Line at 1100 (emitting a 299-char chunk), and a lone fence opener produced a 3-char chunk. Fixed: the fallback takes the furthest natural boundary ≤ max regardless of kind (char_index is strictly increasing, so kinds cannot tie), and boundaries below `FALLBACK_MIN_CHUNK_CHARS` (64) are rejected in favor of a hard cut. The primary [min, max] window keeps kind-first preference unchanged. Fence-parity golden test extended to three consecutive in-fence splits. No version bump (nothing embedded yet).
+
 ## Out of scope (do not attempt)
 
 - Overlap chunking, semantic/embedding-based chunkers, chunks spanning block boundaries.
