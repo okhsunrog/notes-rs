@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 const RRF_K: f64 = 60.0;
+const HYBRID_POOL_MULTIPLIER: u32 = 4;
+const VECTOR_CHUNK_OVERFETCH_MULTIPLIER: u32 = 4;
 pub const RERANK_POOL_MIN: u32 = 32;
 pub const RELEVANCE_FLOOR: f64 = 0.30;
 const LOW_CONFIDENCE_FALLBACK_LIMIT: usize = 4;
@@ -55,11 +57,13 @@ impl RetrievalPipeline {
     ) -> Result<Vec<RankedCandidate>> {
         validate(&query, limit)?;
         let embedding = self.embedder.embed_query(query.clone()).await?;
+        let pool_limit = limit.saturating_mul(HYBRID_POOL_MULTIPLIER);
+        let vector_chunk_limit = pool_limit.saturating_mul(VECTOR_CHUNK_OVERFETCH_MULTIPLIER);
         let (fts, vector_chunks) = tokio::try_join!(
-            db::search_fts(&self.notes, query, limit.saturating_mul(4)),
-            self.vectors.search(embedding, limit.saturating_mul(4))
+            db::search_fts(&self.notes, query, pool_limit),
+            self.vectors.search(embedding, vector_chunk_limit)
         )?;
-        let vectors = dedup_vector_matches(vector_chunks);
+        let vectors = dedup_vector_matches(vector_chunks, pool_limit as usize);
         let vector_uuids = vectors
             .iter()
             .map(|result| result.content_uuid)
@@ -153,7 +157,7 @@ impl RetrievalPipeline {
     }
 }
 
-fn dedup_vector_matches(matches: Vec<VectorMatch>) -> Vec<VectorMatch> {
+fn dedup_vector_matches(matches: Vec<VectorMatch>, limit: usize) -> Vec<VectorMatch> {
     let mut best = HashMap::<uuid::Uuid, VectorMatch>::new();
     for candidate in matches {
         match best.entry(candidate.content_uuid) {
@@ -170,6 +174,7 @@ fn dedup_vector_matches(matches: Vec<VectorMatch>) -> Vec<VectorMatch> {
     }
     let mut matches = best.into_values().collect::<Vec<_>>();
     matches.sort_by(|left, right| left.distance.total_cmp(&right.distance));
+    matches.truncate(limit);
     matches
 }
 
@@ -228,7 +233,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
     struct StubEmbedder;
 
@@ -268,10 +273,21 @@ mod tests {
 
     struct StaticVectors(Vec<VectorMatch>);
 
+    #[derive(Default)]
+    struct CapturingVectors(AtomicU32);
+
     #[async_trait]
     impl VectorStore for StaticVectors {
         async fn search(&self, _embedding: Vec<f32>, _limit: u32) -> Result<Vec<VectorMatch>> {
             Ok(self.0.clone())
+        }
+    }
+
+    #[async_trait]
+    impl VectorStore for CapturingVectors {
+        async fn search(&self, _embedding: Vec<f32>, limit: u32) -> Result<Vec<VectorMatch>> {
+            self.0.store(limit, Ordering::SeqCst);
+            Ok(Vec::new())
         }
     }
 
@@ -290,32 +306,68 @@ mod tests {
     fn vector_chunk_dedup_keeps_the_best_distance_and_matched_text() {
         let first = uuid::Uuid::from_u128(1);
         let second = uuid::Uuid::from_u128(2);
-        let deduped = dedup_vector_matches(vec![
-            VectorMatch {
-                content_uuid: first,
-                distance: 0.4,
-                chunk_index: 0,
-                chunk_text: "weaker chunk".into(),
-            },
-            VectorMatch {
-                content_uuid: second,
-                distance: 0.2,
-                chunk_index: 0,
-                chunk_text: "second document".into(),
-            },
-            VectorMatch {
-                content_uuid: first,
-                distance: 0.1,
-                chunk_index: 3,
-                chunk_text: "best chunk".into(),
-            },
-        ]);
+        let deduped = dedup_vector_matches(
+            vec![
+                VectorMatch {
+                    content_uuid: first,
+                    distance: 0.4,
+                    chunk_index: 0,
+                    chunk_text: "weaker chunk".into(),
+                },
+                VectorMatch {
+                    content_uuid: second,
+                    distance: 0.2,
+                    chunk_index: 0,
+                    chunk_text: "second document".into(),
+                },
+                VectorMatch {
+                    content_uuid: first,
+                    distance: 0.1,
+                    chunk_index: 3,
+                    chunk_text: "best chunk".into(),
+                },
+            ],
+            2,
+        );
 
         assert_eq!(deduped.len(), 2);
         assert_eq!(deduped[0].content_uuid, first);
         assert_eq!(deduped[0].chunk_index, 3);
         assert_eq!(deduped[0].chunk_text, "best chunk");
         assert_eq!(deduped[1].content_uuid, second);
+    }
+
+    #[test]
+    fn vector_chunk_dedup_truncates_only_after_selecting_unique_content() {
+        let repeated = uuid::Uuid::from_u128(1);
+        let matches = (0..8)
+            .map(|chunk_index| VectorMatch {
+                content_uuid: repeated,
+                distance: 0.01 + f64::from(chunk_index) / 100.0,
+                chunk_index,
+                chunk_text: format!("repeated chunk {chunk_index}"),
+            })
+            .chain((2..=6).map(|id| VectorMatch {
+                content_uuid: uuid::Uuid::from_u128(id),
+                distance: id as f64 / 10.0,
+                chunk_index: 0,
+                chunk_text: format!("document {id}"),
+            }))
+            .collect();
+
+        let deduped = dedup_vector_matches(matches, 4);
+
+        assert_eq!(deduped.len(), 4);
+        assert_eq!(deduped[0].content_uuid, repeated);
+        assert_eq!(deduped[0].chunk_index, 0);
+        assert_eq!(
+            deduped
+                .iter()
+                .map(|candidate| candidate.content_uuid)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            4
+        );
     }
 
     #[async_trait]
@@ -351,6 +403,32 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].content.uuid(), page.uuid);
         assert_eq!(reranker.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn knn_overfetches_chunks_for_the_unique_hybrid_pool() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let notes = db::open(directory.path().join("notes.db"))
+            .await
+            .expect("open notes database");
+        let vectors = Arc::new(CapturingVectors::default());
+        let pipeline = RetrievalPipeline::new(
+            notes,
+            vectors.clone(),
+            Arc::new(StubEmbedder),
+            Arc::new(CountingReranker(AtomicUsize::new(0))),
+        );
+
+        let hits = pipeline
+            .hybrid_candidates("absent query".into(), 5)
+            .await
+            .expect("hybrid candidates");
+
+        assert!(hits.is_empty());
+        assert_eq!(
+            vectors.0.load(Ordering::SeqCst),
+            5 * HYBRID_POOL_MULTIPLIER * VECTOR_CHUNK_OVERFETCH_MULTIPLIER
+        );
     }
 
     #[tokio::test]
