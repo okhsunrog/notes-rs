@@ -59,4 +59,50 @@ describe("Mermaid SVG image boundary", () => {
       /external|network/i,
     );
   });
+
+  it("allows only local fragments across URL-bearing SVG attributes", () => {
+    const local = sanitize(
+      '<defs><path id="shape" d="M0 0L1 1"/><filter id="blur"><feGaussianBlur stdDeviation="1"/></filter></defs><use href="#shape"/><rect filter="url(#blur)"/>',
+    );
+    expect(local).toContain('filter="url(#blur)"');
+
+    for (const vector of [
+      '<use href="https://tracker.example/shape.svg#id"/>',
+      '<use xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="//tracker.example/shape.svg#id"/>',
+      '<rect mask="url(ftp://tracker.example/mask.svg#id)"/>',
+      '<rect cursor="url(file:///tmp/cursor.svg), auto"/>',
+    ]) {
+      let clean: string | null = null;
+      let rejected = false;
+      try {
+        clean = sanitize(vector);
+      } catch {
+        rejected = true;
+      }
+      expect(
+        rejected ||
+          (clean !== null && !/(?:tracker\.example|file:|ftp:|href=|mask=|cursor=)/i.test(clean)),
+      ).toBe(true);
+    }
+  });
+
+  it("rejects CSS URL smuggling and malformed nested functions", () => {
+    for (const vector of [
+      '<rect style="fill:uRl(\\68ttps://tracker.example/pixel)"/>',
+      "<style>.node{fill:image-set(url(https://tracker.example/a) 1x)}</style>",
+      '<style>.node{filter:url("#safe"/**/</style>',
+      "<style>@font-face{font-family:x;src:url(#local)}</style>",
+    ]) {
+      expect(() => sanitize(vector)).toThrow(/external|network|malformed/i);
+    }
+  });
+
+  it("removes deeply nested foreignObject payloads", () => {
+    const svg = sanitize(
+      '<defs><g><switch><foreignObject width="100" height="40"><body xmlns="http://www.w3.org/1999/xhtml"><svg><foreignObject><iframe srcdoc="<script>alert(1)</script>"></iframe></foreignObject></svg></body></foreignObject></switch></g></defs><text>Visible</text>',
+    );
+
+    expect(svg).toContain(">Visible</text>");
+    expect(svg).not.toMatch(/foreignObject|iframe|srcdoc|script|alert/i);
+  });
 });
