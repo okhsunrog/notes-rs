@@ -66,10 +66,25 @@ struct HistoryGuard {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "scope", rename_all = "snake_case")]
+enum HistoryScopeGuard {
+    PageBlocks {
+        page_uuid: uuid::Uuid,
+        expected_block_uuids: Vec<uuid::Uuid>,
+    },
+    BlockDescendants {
+        block_uuid: uuid::Uuid,
+        expected_block_uuids: Vec<uuid::Uuid>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct GuardedHistoryPayload {
     history_format_version: u32,
     operations: Vec<OpKind>,
     guards: Vec<HistoryGuard>,
+    #[serde(default)]
+    scope_guards: Vec<HistoryScopeGuard>,
 }
 
 #[derive(Deserialize)]
@@ -102,6 +117,7 @@ fn decode_history_payload(value: &str) -> serde_json::Result<GuardedHistoryPaylo
             // Pre-guard history cannot be checked retroactively. Preserve its existing
             // behavior once; the entry becomes guarded when moved to the opposite stack.
             guards: Vec::new(),
+            scope_guards: Vec::new(),
         }),
     }
 }
@@ -364,6 +380,65 @@ fn capture_history_guards(
         .collect()
 }
 
+fn capture_history_scope_guards(
+    database: &rusqlite::Connection,
+    operations: &[OpKind],
+) -> rusqlite::Result<Vec<HistoryScopeGuard>> {
+    let mut scopes = Vec::new();
+    let mut seen_pages = HashSet::new();
+    let mut seen_blocks = HashSet::new();
+    for operation in operations {
+        match operation {
+            OpKind::PageDelete(payload) if seen_pages.insert(payload.uuid) => {
+                scopes.push(HistoryScopeGuard::PageBlocks {
+                    page_uuid: payload.uuid,
+                    expected_block_uuids: page_block_uuids(database, payload.uuid)?,
+                });
+            }
+            OpKind::BlockDelete(payload) if seen_blocks.insert(payload.uuid) => {
+                scopes.push(HistoryScopeGuard::BlockDescendants {
+                    block_uuid: payload.uuid,
+                    expected_block_uuids: block_descendant_uuids(database, payload.uuid)?,
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(scopes)
+}
+
+fn page_block_uuids(
+    database: &rusqlite::Connection,
+    page_uuid: uuid::Uuid,
+) -> rusqlite::Result<Vec<uuid::Uuid>> {
+    let mut statement = database.prepare("SELECT uuid FROM blocks WHERE page_uuid = ?1")?;
+    let mut uuids = statement
+        .query_map([page_uuid], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    uuids.sort_unstable();
+    Ok(uuids)
+}
+
+fn block_descendant_uuids(
+    database: &rusqlite::Connection,
+    block_uuid: uuid::Uuid,
+) -> rusqlite::Result<Vec<uuid::Uuid>> {
+    let mut statement = database.prepare(
+        "WITH RECURSIVE descendants(uuid) AS (
+           SELECT uuid FROM blocks WHERE parent_uuid = ?1
+           UNION
+           SELECT block.uuid FROM blocks block
+             JOIN descendants parent ON block.parent_uuid = parent.uuid
+         )
+         SELECT uuid FROM descendants",
+    )?;
+    let mut uuids = statement
+        .query_map([block_uuid], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    uuids.sort_unstable();
+    Ok(uuids)
+}
+
 fn history_guard_fields(operation: &OpKind) -> Vec<HistoryField> {
     match operation {
         OpKind::PageCreate(payload) => vec![
@@ -548,10 +623,42 @@ fn guards_match(
     Ok(true)
 }
 
+fn scope_guards_match(
+    database: &rusqlite::Connection,
+    guards: &[HistoryScopeGuard],
+) -> rusqlite::Result<bool> {
+    for guard in guards {
+        let (current, expected) = match guard {
+            HistoryScopeGuard::PageBlocks {
+                page_uuid,
+                expected_block_uuids,
+            } => (
+                page_block_uuids(database, *page_uuid)?,
+                expected_block_uuids,
+            ),
+            HistoryScopeGuard::BlockDescendants {
+                block_uuid,
+                expected_block_uuids,
+            } => (
+                block_descendant_uuids(database, *block_uuid)?,
+                expected_block_uuids,
+            ),
+        };
+        let expected = expected.iter().copied().collect::<HashSet<_>>();
+        if current.iter().any(|uuid| !expected.contains(uuid)) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn refresh_sibling_guards(
     transaction: &rusqlite::Transaction<'_>,
     next_guards: &[HistoryGuard],
 ) -> anyhow::Result<()> {
+    // Linear undo intentionally adopts HLCs written by a successful neighboring move.
+    // This can launder an earlier same-field change into the local history timeline;
+    // scope guards stay fixed so newly introduced content is never adopted implicitly.
     let replacements = next_guards
         .iter()
         .map(|guard| (guard.field.clone(), guard.expected_hlc.clone()))
@@ -624,16 +731,19 @@ pub(crate) fn record_action(
     let action_uuid = uuid::Uuid::now_v7();
     let action = action.to_owned();
     let inverse_guards = capture_history_guards(transaction, &inverse)?;
+    let inverse_scope_guards = capture_history_scope_guards(transaction, &inverse)?;
     let forward_json = encode_history_payload(&GuardedHistoryPayload {
         history_format_version: HISTORY_PAYLOAD_VERSION,
         operations: forward,
         guards: Vec::new(),
+        scope_guards: Vec::new(),
     })
     .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let inverse_json = encode_history_payload(&GuardedHistoryPayload {
         history_format_version: HISTORY_PAYLOAD_VERSION,
         operations: inverse,
         guards: inverse_guards,
+        scope_guards: inverse_scope_guards,
     })
     .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     transaction.execute(
@@ -706,7 +816,9 @@ async fn move_history(conn: &Connection, undo: bool) -> Result<HistoryMoveResult
         let mut forward = decode_history_payload(&forward_json)?;
         let mut inverse = decode_history_payload(&inverse_json)?;
         let selected = if undo { &inverse } else { &forward };
-        if !guards_match(&transaction, &selected.guards)? {
+        if !guards_match(&transaction, &selected.guards)?
+            || !scope_guards_match(&transaction, &selected.scope_guards)?
+        {
             transaction.execute(&format!("DELETE FROM {source} WHERE id = ?1"), [entry_id])?;
             transaction.commit()?;
             return Ok(HistoryMoveResult::Skipped);
@@ -716,8 +828,10 @@ async fn move_history(conn: &Connection, undo: bool) -> Result<HistoryMoveResult
         let next_guards = capture_history_guards(&transaction, &kinds)?;
         if undo {
             forward.guards = next_guards;
+            forward.scope_guards = capture_history_scope_guards(&transaction, &forward.operations)?;
         } else {
             inverse.guards = next_guards;
+            inverse.scope_guards = capture_history_scope_guards(&transaction, &inverse.operations)?;
         }
         let forward_json = encode_history_payload(&forward)?;
         let inverse_json = encode_history_payload(&inverse)?;

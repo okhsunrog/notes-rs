@@ -1,7 +1,7 @@
 use notes_core::db::{self, DataArchive};
 use notes_core::{
-    AttachmentOwner, BlobHash, BlockMove, BlockSetMarkdown, BlockSetStyle, BlockStyle, Connection,
-    Hlc, Op, OpKind, OrderKey, Origin, PageDelete, PageLayout, TaskState,
+    AttachmentOwner, BlobHash, BlockCreate, BlockMove, BlockSetMarkdown, BlockSetStyle, BlockStyle,
+    Connection, Hlc, Op, OpKind, OrderKey, Origin, PageDelete, PageLayout, TaskState,
 };
 
 struct TestDatabase {
@@ -42,6 +42,186 @@ async fn apply_remote(connection: &Connection, index: u128, kind: OpKind) {
             .await
             .expect("apply remote operation")
             .applied
+    );
+}
+
+async fn create_remote_block(
+    connection: &Connection,
+    index: u128,
+    page_uuid: uuid::Uuid,
+    parent_uuid: Option<uuid::Uuid>,
+) -> uuid::Uuid {
+    let uuid = uuid::Uuid::from_u128(0xB10C_0000 + index);
+    apply_remote(
+        connection,
+        index,
+        OpKind::BlockCreate(BlockCreate {
+            uuid,
+            page_uuid,
+            parent_uuid,
+            order_key: OrderKey::from_ordinal(index as usize + 1),
+            style: BlockStyle::Paragraph,
+            markdown: "remote addition".into(),
+            created_at: 1,
+        }),
+    )
+    .await;
+    uuid
+}
+
+#[tokio::test]
+async fn undo_note_creation_is_skipped_after_remote_block_is_added() {
+    let database = database().await;
+    let note = db::create_note(&database.connection, None)
+        .await
+        .unwrap()
+        .into_created()
+        .unwrap();
+    let remote_block = create_remote_block(&database.connection, 101, note.page.uuid, None).await;
+
+    assert_eq!(
+        db::undo_history(&database.connection).await.unwrap(),
+        db::HistoryMoveResult::Skipped
+    );
+    assert!(
+        db::get_page(&database.connection, note.page.uuid)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        db::get_block(&database.connection, remote_block)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn undo_block_creation_is_skipped_after_remote_child_is_added() {
+    let database = database().await;
+    let note = db::create_note(&database.connection, None)
+        .await
+        .unwrap()
+        .into_created()
+        .unwrap();
+    let parent = db::create_block(
+        &database.connection,
+        note.page.uuid,
+        None,
+        Some(note.initial_block.uuid),
+        BlockStyle::Bullet,
+        "local parent".into(),
+    )
+    .await
+    .unwrap();
+    let remote_child =
+        create_remote_block(&database.connection, 102, note.page.uuid, Some(parent.uuid)).await;
+
+    assert_eq!(
+        db::undo_history(&database.connection).await.unwrap(),
+        db::HistoryMoveResult::Skipped
+    );
+    assert!(
+        db::get_block(&database.connection, parent.uuid)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        db::get_block(&database.connection, remote_child)
+            .await
+            .unwrap()
+            .unwrap()
+            .parent_uuid,
+        Some(parent.uuid)
+    );
+}
+
+#[tokio::test]
+async fn undo_note_creation_without_new_content_still_applies() {
+    let database = database().await;
+    let note = db::create_note(&database.connection, None)
+        .await
+        .unwrap()
+        .into_created()
+        .unwrap();
+
+    assert_eq!(
+        db::undo_history(&database.connection).await.unwrap(),
+        db::HistoryMoveResult::Applied
+    );
+    assert!(
+        db::get_page(&database.connection, note.page.uuid)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn legacy_history_gets_only_one_unguarded_destructive_scope_apply() {
+    let database = database().await;
+    let note = db::create_note(&database.connection, None)
+        .await
+        .unwrap()
+        .into_created()
+        .unwrap();
+    let inverse = database
+        .connection
+        .call(|database| {
+            database.query_row(
+                "SELECT inverse_json FROM history_undo ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+        })
+        .await
+        .unwrap();
+    let tagged: serde_json::Value = serde_json::from_str(&inverse).unwrap();
+    let legacy = serde_json::to_string(&tagged["payload"]["operations"]).unwrap();
+    database
+        .connection
+        .call(move |database| {
+            database.execute(
+                "UPDATE history_undo SET inverse_json = ?1 WHERE id = (
+                   SELECT id FROM history_undo ORDER BY id DESC LIMIT 1
+                 )",
+                [legacy],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    create_remote_block(&database.connection, 103, note.page.uuid, None).await;
+
+    assert_eq!(
+        db::undo_history(&database.connection).await.unwrap(),
+        db::HistoryMoveResult::Applied,
+        "legacy entries retain one unguarded apply because their original scope is unknowable"
+    );
+    assert_eq!(
+        db::redo_history(&database.connection).await.unwrap(),
+        db::HistoryMoveResult::Applied
+    );
+    let second_remote = create_remote_block(&database.connection, 0, note.page.uuid, None).await;
+    assert!(
+        db::get_block(&database.connection, second_remote)
+            .await
+            .unwrap()
+            .is_some(),
+        "the second remote operation must outrank the legacy delete tombstone"
+    );
+    assert_eq!(
+        db::undo_history(&database.connection).await.unwrap(),
+        db::HistoryMoveResult::Skipped,
+        "the moved legacy entry must be scope-guarded after its one compatibility apply"
+    );
+    assert!(
+        db::get_block(&database.connection, second_remote)
+            .await
+            .unwrap()
+            .is_some()
     );
 }
 
