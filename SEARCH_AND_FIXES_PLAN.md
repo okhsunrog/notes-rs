@@ -34,7 +34,7 @@ Tauri 2 note-taking app: Rust core (`crates/notes-core`, `notes-sync`, `notes-ai
 `pages_fts` is created and trigger-maintained (`V001__initial.sql:213`) but never queried; titles use an `instr()` substring scan (`crates/notes-core/src/db/search.rs:3`).
 
 1. Primary: query `pages_fts` with the stemmed+prefix query from A1, ranked by `bm25()`.
-2. Fallback order is strict and short-circuiting: run the existing `instr()` scan only when strict FTS yields zero rows (preserves mid-word substring matches); only when both strict FTS and `instr()` yield zero rows, run a relaxed-prefix FTS query. Relaxation applies only to Cyrillic tokens of at least 6 characters, shortens the query stem by at most 2 characters, and never below 4 characters. FTS results always rank above fallback results; dedup by page UUID. This is a deliberate narrow exception for common Russian inflections that Snowball does not reduce to the same stem.
+2. Fallback order is strict and short-circuiting: run the existing `instr()` scan only when strict FTS yields zero rows (preserves mid-word substring matches when no strict match exists — a coexisting strict hit intentionally suppresses infix-only matches, reviewed and accepted 2026-07-19); only when both strict FTS and `instr()` yield zero rows, run a relaxed-prefix FTS query. Relaxation applies only to Cyrillic tokens of at least 6 characters, shortens the query stem by at most 2 characters, and never below 4 characters. FTS results always rank above fallback results; dedup by page UUID. This is a deliberate narrow exception for common Russian inflections that Snowball does not reduce to the same stem.
 3. Verify what `pages_fts` indexes (stemmed title?) before writing the query; if it indexes raw titles, index the stemmed form via the migration + trigger update (new migration, per global rule 4).
 4. Tests: regular Snowball morphology uses a pair that actually shares a stem (for example, "проекта" finds "Проекты"); relaxed morphology separately proves "покупок" finds "Покупки"; a short token is never relaxed; an existing strict hit prevents relaxed results from being queried; word order ("esp32 прошивка" finds "Прошивка ESP32"), mid-word fallback still works, and exact-match still ranks first. The broader `покуп*` family, including "Покупатель", is relevant rather than an error at this fallback tier.
 
@@ -72,9 +72,10 @@ Restyle the search dialog into a palette (Base UI Dialog stays):
 1. Borderless top input (autofocus), results list with type icon (page/block/journal), title, snippet (from A3), parent-page breadcrumb for block hits; footer hints `↑↓ · ⏎ open · ⇧⏎ open beside · esc`.
 2. Keyboard: ↑/↓ selection, Enter opens, Shift+Enter opens with `adjacentDisposition` (use `dispositionFromShiftKey`), Esc closes.
 3. Empty query → recent pages (reuse existing pages/journals queries) + today's journal entry point. No blank screen.
-4. Zero results → action row "Create note "<query>"" wired to `createNewNote` + title prefill (verify what the create flow supports; if title prefill needs a backend change, stop and report instead of hacking it).
-5. List stability: once the user presses ↑/↓, freeze list updates until the next keystroke; when the server list replaces the local list, preserve selection by content UUID when possible.
-6. The inline/card variants of `SearchCard` on Home keep working (shared logic, different chrome).
+4. Zero results → action row "Create note "<query>"". **Approved backend change (2026-07-19, rev. 2 — supersedes the earlier "no dedup" wording, which contradicted the title-uniqueness pillar):** unique titles stay authoritative (they are what makes `[[title]]` links resolve unambiguously — do not touch the unique index, rename conflicts, or LWW title ownership). Extend `create_note` to `create_note(title: Option<String>)` with **create-or-open** semantics, atomic in one transaction: title free → create page + initial block, return `Created(note)`; title taken (normalized match) → change nothing, return `Existing(page)` as a typed result variant (not an error). Trim the title; empty/whitespace = `None`; same title validation as the rename path; regenerate bindings; backend tests for Created, Existing, and the `None` arm. Palette UX: on `Existing` → open that page; label the action row "Open "<query>"" when current results contain an exact title match, "Create "<query>"" otherwise (the atomic command covers the race either way). When a title was prefilled and the note was Created, skip title focus and place the caret in the first block (`autoFocusTitle` only for untitled notes). Ctrl+N keeps passing `None`.
+5. Date-like queries open journals: when the query parses as a journal date (reuse `parseJournalDate` from `src/features/journal/journal-date.ts`; also accept ISO `YYYY-MM-DD`), show an "Open journal <date>" action row above results, routed via the controller's `openJournal`. This is additive — normal search still runs. Unit-test the query→date detection as a pure function.
+6. List stability: once the user presses ↑/↓, freeze list updates until the next keystroke; when the server list replaces the local list, preserve selection by content UUID when possible.
+7. The inline/card variants of `SearchCard` on Home keep working (shared logic, different chrome).
 
 **Accept:** palette navigable entirely by keyboard; no layout jumps when server results arrive; existing search tests updated, new tests for freeze/selection-preservation logic (pure helpers, not DOM timing).
 
@@ -85,6 +86,63 @@ Settings → Search: (a) AI search on/off; (b) AI trigger: as-you-type vs Enter-
 **Accept:** toggles round-trip through settings; rerank=false verified by a server-side test; bindings regenerated.
 
 ---
+
+## Track A-fix — findings from the Track A review checkpoint (execute BEFORE B1)
+
+Multi-agent review of `f1c7dc3..562d687` (2026-07-19): 9 confirmed defects + hygiene + one approved ranking amendment. Same global rules and gates. One commit per task, in this order. Verifier-supplied fix directions below are starting points, not straitjackets — but scope stays per-task.
+
+### AF1. create_note must resolve aliases (Rust — data integrity, highest priority)
+
+`create_note`'s existing-title probe (`crates/notes-core/src/db/pages.rs:230`) is a raw `WHERE normalized_title = ?1` query; every other title path goes through `operation::resolve_page_alias` (see pages.rs:158), which also matches durable aliases. Creating a note titled with a renamed page's old title therefore creates a duplicate page AND makes `resolve_page_alias` ambiguous (2 candidates → `None`), breaking every existing `[[X]]` link.
+
+Fix: replace the probe with `operation::resolve_page_alias(&transaction, &normalized_title)` (drop-in; `Transaction` derefs to `Connection`), returning `Existing` with the resolved page. Ambiguous (`None` with candidates) falls through to create — consistent with navigation semantics. Tests: alias-owned title returns `Existing` (add beside `note_creation.rs:71`); current-title case still covered.
+
+### AF2. Snippets from real markdown, not the stemmed column (Rust)
+
+`snippet(blocks_fts, 0, …)` (`crates/notes-core/src/db/search.rs:136`) reads `body_stemmed` — users see mangled stemmed text ("заметк о программирован"). FTS5 snippet offsets are computed against the stemmed text and cannot be mapped back. Build the display snippet Rust-side from `block.markdown` (already selected via `QUALIFIED_BLOCK_COLUMNS`): tokenize the raw markdown with offsets, stem each token, mark tokens whose stem matches any stemmed query token, window ±~60 chars around the first match at word boundaries, wrap matches in `<mark>` (keep the existing `<mark>`/`…` contract with the TS renderer). Tests MUST use stem-variant fixtures (e.g. block "системах программирования", query "система" → snippet shows "систем**ах**…" raw text, not the stem).
+
+### AF3. Prefix mode for the as-you-type block channel (Rust)
+
+`search_fts` passes `SearchTokenMode::Plain` to `search_blocks_ranked` (`db/search.rs:160`) while the page channel hardcodes `Prefix` — partial trailing words match titles but zero blocks. Fix: use `Prefix` for the block channel too (matching `((` autocomplete). Test: partial word ("prog") matches a block containing "programming" via the `search_fts` path.
+
+### AF4. Delete the dead hits plumbing; restore live updates inside the card (TS)
+
+The workspace `hits`/`setHits` channel is fully dead (SearchCard owns and republishes its own state; nothing renders `workspace.hits`; even the seed is wiped on mount). Consequences: rename no longer updates titles in displayed results, delete leaves stale hits, and the publish effect re-renders the whole Workbench twice per keystroke behind the modal.
+
+Fix: remove `hits`/`setHits` from `useNotesWorkspace` (state, all 8 mutation sites, return), the props through App.tsx → workbench.tsx → home-view.tsx, and SearchCard's seed + publish effect. Restore live updates inside SearchCard: subscribe to the pages list query (`queryKeys.pages`, staleTime is Infinity so this is push-driven by domain events) and re-run the local channel when it updates while a non-empty query is active — this covers both rename and delete. Tests: rename/delete while results displayed refreshes the list (component-level, pure where possible).
+
+### AF5. Pending-Enter during the debounce window (TS)
+
+Enter within ~150–300 ms of typing is a silent no-op (selection nulled, rows empty, create/open rows settled-gated). Implement a pending-enter flag: in the Enter branch, when query is non-empty and search not settled, `preventDefault` and set the flag (capture `shiftKey` alongside); an effect fires `activateRow(rows[0], capturedShift)` once settled and rows exist; any further input clears the flag. Test the helper logic as pure functions where possible.
+
+### AF6. Enter-only mode must survive a failed request (TS)
+
+`triggerEnterOnlySearch` requires `serverState === "idle"`; failure sets `"failed"` and nothing transitions back without editing the query — one transient timeout permanently kills AI retry for that query, invisibly. Fix: allow triggering from `"failed"` too, and render a visible failed hint near the input ("AI search failed — press Enter to retry"). Test both.
+
+### AF7. Local-channel errors must not masquerade as empty results (TS)
+
+`runLocal`'s bare `catch` swallows FTS command failures; the settled-empty state then shows the `Create "<query>"` row — an IO failure invites creating a duplicate-intent note. Fix both halves: restore `notifyError("search", err)` in the catch, AND track a distinct local-error state that suppresses the Create/Open action rows until a successful (possibly empty) result. Plan rule A4.2's silence applies to the server channel only.
+
+### AF8. Wire compatibility for the rerank field (Rust)
+
+`SearchRequest.rerank` is always serialized; old servers use `deny_unknown_fields` → 400 on every semantic search during app-before-server version skew, silently. Fix: omit the field when it equals the default (`skip_serializing_if` with an is-true helper on `crates/notes-protocol/src/lib.rs:113`); add the new-client→old-server shape to `wire_contract.rs`; one README line documenting server-before-client deploy order.
+
+### AF9. Stop paying rerank for abandoned prefixes (TS + copy)
+
+Superseded semantic requests run the full pipeline to completion (no cancellation path; `withTimeout` doesn't abort), each billing a provider rerank over up to 80 docs — and as-you-type + rerank is the default config. Accepted product tradeoff for now: **as-you-type server requests always send `rerank: false`** (cheap hybrid results live), and full reranking applies when AI search fires via the Enter-only trigger; update the Settings copy for the rerank toggle accordingly ("applies when AI search runs on Enter"). If this tradeoff looks wrong mid-implementation, stop and report. Full request cancellation (à la `cancel_chat`) is explicitly out of scope for this task.
+
+### AF10. Test hygiene (TS + Rust)
+
+1. `search-palette.test.ts` and `search-presentation.test.ts`: import from `"vite-plus/test"` (repo convention, 42/45 files; `vitest` is an undeclared transitive dependency).
+2. Add one operator-laden test for `relaxed_stem_prefix_search_query` (e.g. input `покупок OR NEAR`) asserting FTS5 keywords are quoted — the relaxed path currently has zero operator coverage while its sibling does.
+
+### AF11. Navigational-title ranking tier (Rust — approved amendment to A3)
+
+The blocks-first interleave plus exact-only title priority ranks the A2 morphology case ("проекта" → page «Проекты») below ANY block containing "проект". Approved fix: promote **stemmed-token-set equality** matches into the priority tier — if the stemmed token set of the query equals the stemmed token set of the page title (order-insensitive), treat it like `exact_title` in the partition. This preserves the existing guarantees: "Rust scratchpad" for query "rust" stays non-priority ({rust} ≠ {rust, scratchpad}), so the strong-body-beats-weak-title test is unaffected. Tests: «проекта» ranks page «Проекты» above a block containing "проект"; existing exact-title and strong-body fixtures unchanged.
+
+### AF12 (optional — skip if session context runs low). Cleanup batch
+
+In one commit, in `search-card.tsx` unless noted: collapse the six `frozen*` states into one nullable snapshot object set atomically on first arrow key; merge the four copy-pasted row-render map blocks into one indexed map (drop the O(n²) `rows.indexOf`); have `presentSearchResults` return `primarySource` instead of the mirrored condition in the card; replace raw timer refs with the existing `DebouncedAction` (`src/lib/debounced-action.ts`); simplify `blockPageUuids` to a single flatMap; in `db/search.rs` remove (or re-justify with a comment) the dead cross-tier dedup `retain` in `search_pages_ranked`.
 
 ## Track B — Correctness fixes from review
 
@@ -115,6 +173,10 @@ Inverse ops replay verbatim with no revision check (`crates/notes-core/src/db/hi
 ### B7 (optional). Reclassify sync sequence-gap as retriable (Rust)
 
 A >1000-op WS backlog produces a sequence-gap `SyncConflict` mapped to permanent `Error` before HTTP catch-up self-heals (`server/src/api.rs:489`, client `is_permanent_failure`). Make sequence-gap retriable so the UI doesn't flap into Error; optionally page WS catch-up. Test with a synthetic gap.
+
+### B8. Park permanent workspace conflicts instead of retrying forever (Rust)
+
+The sync loop keeps retrying a permanent `WorkspaceConflict` (divergent-workspace bootstrap rejection) indefinitely (`src-tauri/src/sync.rs:152-192`) — endless error/retry flapping with no exit. Make it park: stop the retry loop, surface a distinct `SyncStatus` state (e.g. `conflict` with an action-required message shown by the existing sync badge), and resume only when sync settings change or the user explicitly retries from Settings. Do not auto-resolve or reset anything. Test with a synthetic workspace conflict: loop parks, status is `conflict`, settings change resumes.
 
 ---
 
