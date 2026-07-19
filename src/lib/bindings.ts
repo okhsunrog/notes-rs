@@ -492,6 +492,7 @@ export type SafeAreaInsets = {
 export type SearchHit = {
 	content: Content,
 	score: number | null,
+	snippet?: string | null,
 };
 
 export type SearchMode = "fts" | "semantic";

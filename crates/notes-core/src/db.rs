@@ -250,6 +250,8 @@ pub(crate) fn apply_local_action_in_transaction(
 pub struct SearchHit {
     pub content: Content,
     pub score: f64,
+    #[serde(default)]
+    pub snippet: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]

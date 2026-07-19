@@ -55,6 +55,14 @@ impl RetrievalPipeline {
                     .map(|content| (content.uuid(), content)),
             )
             .collect::<HashMap<_, _>>();
+        let mut snippets = fts
+            .iter()
+            .filter_map(|hit| {
+                hit.snippet
+                    .clone()
+                    .map(|snippet| (hit.content.uuid(), snippet))
+            })
+            .collect::<HashMap<_, _>>();
         let mut scores = HashMap::<uuid::Uuid, f64>::new();
         for (rank, hit) in fts.into_iter().enumerate() {
             *scores.entry(hit.content.uuid()).or_default() += 1.0 / (RRF_K + rank as f64 + 1.0);
@@ -65,9 +73,11 @@ impl RetrievalPipeline {
         let mut hits = scores
             .into_iter()
             .filter_map(|(uuid, score)| {
-                content
-                    .remove(&uuid)
-                    .map(|content| SearchHit { content, score })
+                content.remove(&uuid).map(|content| SearchHit {
+                    content,
+                    score,
+                    snippet: snippets.remove(&uuid),
+                })
             })
             .collect::<Vec<_>>();
         hits.sort_by(|left, right| right.score.total_cmp(&left.score));
@@ -112,6 +122,7 @@ pub fn select_reranked_hits(
             candidates.get(*index).map(|candidate| SearchHit {
                 content: candidate.content.clone(),
                 score: f64::from(*score),
+                snippet: candidate.snippet.clone(),
             })
         })
         .collect::<Vec<_>>();
@@ -125,6 +136,7 @@ pub fn select_reranked_hits(
             candidates.get(index).map(|candidate| SearchHit {
                 content: candidate.content.clone(),
                 score: f64::from(score),
+                snippet: candidate.snippet.clone(),
             })
         })
         .collect()

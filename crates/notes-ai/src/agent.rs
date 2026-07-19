@@ -346,6 +346,7 @@ impl Tool for SearchAndExpand {
             .map(|content| SearchHit {
                 content,
                 score: 0.0,
+                snippet: None,
             })
             .collect::<Vec<_>>();
         let content = candidates
@@ -978,15 +979,18 @@ mod tests {
         ];
         let candidates = candidates
             .into_iter()
-            .map(|content| SearchHit {
+            .enumerate()
+            .map(|(index, content)| SearchHit {
                 content,
                 score: 0.0,
+                snippet: (index == 1).then(|| "matching snippet".into()),
             })
             .collect::<Vec<_>>();
         let hits = select_reranked_hits(vec![(1, 0.02), (0, 0.01)], &candidates, 8);
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].content.uuid(), uuid::Uuid::from_u128(2));
         assert!(hits[0].score < crate::retrieval::RELEVANCE_FLOOR);
+        assert_eq!(hits[0].snippet.as_deref(), Some("matching snippet"));
     }
 
     #[tokio::test]

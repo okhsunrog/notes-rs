@@ -390,6 +390,54 @@ async fn title_search_relaxes_only_after_strict_and_substring_miss() {
 }
 
 #[tokio::test]
+async fn fused_search_surfaces_snippets_and_prioritizes_only_exact_titles() {
+    let database = database().await;
+    let connection = &database.connection;
+
+    db::create_page(connection, "Rust scratchpad".into())
+        .await
+        .expect("create weak title hit");
+    let body_page = db::create_page(connection, "Engineering".into())
+        .await
+        .expect("create body-hit page");
+    let markdown = format!(
+        "{}Rust rust rust systems programming{}",
+        "context ".repeat(24),
+        " details".repeat(24)
+    );
+    let block = db::create_block(
+        connection,
+        body_page.uuid,
+        None,
+        None,
+        BlockStyle::Paragraph,
+        markdown,
+    )
+    .await
+    .expect("create strong body hit");
+
+    let hits = db::search_fts(connection, "rust".into(), 10)
+        .await
+        .expect("fused search");
+    assert_eq!(hits.first().map(|hit| hit.content.uuid()), Some(block.uuid));
+    let snippet = hits
+        .first()
+        .and_then(|hit| hit.snippet.as_deref())
+        .expect("block hit snippet");
+    assert!(snippet.contains("<mark>rust</mark>"));
+    assert!(snippet.contains('…'));
+
+    let exact = db::create_page(connection, "Rust".into())
+        .await
+        .expect("create exact title hit");
+    let hits = db::search_fts(connection, "rust".into(), 10)
+        .await
+        .expect("fused search with exact title");
+    assert_eq!(hits.first().map(|hit| hit.content.uuid()), Some(exact.uuid));
+    assert!(hits.first().is_some_and(|hit| hit.snippet.is_none()));
+}
+
+#[tokio::test]
 async fn search_normalizes_unicode_treats_wildcards_literally_and_stems_russian() {
     let database = database().await;
     let connection = &database.connection;
