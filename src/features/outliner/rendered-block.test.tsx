@@ -1,8 +1,11 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vite-plus/test";
+import { beforeAll, describe, expect, it } from "vite-plus/test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { loadMathRuntime } from "@/features/markdown/math-runtime";
 import type { Block, BlockStyle } from "@/lib/api";
 import { RenderedBlock } from "./rendered-block";
+
+beforeAll(() => loadMathRuntime());
 
 function block(markdown: string, style: BlockStyle = { kind: "paragraph" }): Block {
   return {

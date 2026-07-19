@@ -1,7 +1,10 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vite-plus/test";
+import { beforeAll, describe, expect, it } from "vite-plus/test";
 import type { MarkdownImageResolver, MarkdownResolvedImage } from "./image-policy";
 import { MarkdownRenderer } from "./markdown-renderer";
+import { loadMathRuntime } from "./math-runtime";
+
+beforeAll(() => loadMathRuntime());
 
 const CONTEXT = {
   kind: "note",

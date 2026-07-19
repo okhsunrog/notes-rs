@@ -1,16 +1,22 @@
-import "katex/dist/katex.min.css";
 import "./markdown-video-card.css";
 
-import { useMemo } from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
-import rehypeKatex from "rehype-katex";
+import { useEffect, useMemo, useSyncExternalStore } from "react";
+import ReactMarkdown, {
+  type Components,
+  type Options as ReactMarkdownOptions,
+} from "react-markdown";
 import rehypeSanitize, {
   defaultSchema,
   type Options as MarkdownSanitizeSchema,
 } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
 import type { MarkdownImageResolver } from "./image-policy";
+import {
+  cachedMathRuntime,
+  loadMathRuntime,
+  markdownMayContainMath,
+  subscribeMathRuntime,
+} from "./math-runtime";
 import {
   MarkdownCode,
   MarkdownImage,
@@ -85,6 +91,15 @@ export function MarkdownRenderer({
   onOpenLink,
   resolveImage,
 }: MarkdownRendererProps) {
+  const mathRuntime = useSyncExternalStore(
+    subscribeMathRuntime,
+    cachedMathRuntime,
+    cachedMathRuntime,
+  );
+  const needsMath = markdownMayContainMath(markdown);
+  useEffect(() => {
+    if (needsMath && !mathRuntime) void loadMathRuntime();
+  }, [mathRuntime, needsMath]);
   const components = useMemo<Components>(
     () =>
       ({
@@ -119,25 +134,31 @@ export function MarkdownRenderer({
   ]
     .filter(Boolean)
     .join(" ");
+  const rehypePlugins: NonNullable<ReactMarkdownOptions["rehypePlugins"]> = [
+    [rehypeSanitize, MARKDOWN_SANITIZE_SCHEMA],
+  ];
+  const remarkPlugins: NonNullable<ReactMarkdownOptions["remarkPlugins"]> = [remarkGfm];
+  if (mathRuntime) {
+    rehypePlugins.push([
+      mathRuntime.rehypeKatex,
+      {
+        maxExpand: 1_000,
+        maxSize: 50,
+        output: "htmlAndMathml",
+        strict: "ignore",
+        trust: false,
+      },
+    ]);
+    remarkPlugins.push(mathRuntime.remarkMath, remarkMathLimits);
+  }
+  remarkPlugins.push(remarkLogseqVideo, remarkNotesLinks);
 
   const content = (
     <ReactMarkdown
       components={components}
       disallowedElements={inline ? INLINE_BLOCK_ELEMENTS : undefined}
-      rehypePlugins={[
-        [rehypeSanitize, MARKDOWN_SANITIZE_SCHEMA],
-        [
-          rehypeKatex,
-          {
-            maxExpand: 1_000,
-            maxSize: 50,
-            output: "htmlAndMathml",
-            strict: "ignore",
-            trust: false,
-          },
-        ],
-      ]}
-      remarkPlugins={[remarkGfm, remarkMath, remarkMathLimits, remarkLogseqVideo, remarkNotesLinks]}
+      rehypePlugins={rehypePlugins}
+      remarkPlugins={remarkPlugins}
       skipHtml
       unwrapDisallowed={inline}
       urlTransform={safeMarkdownUrlTransform}
