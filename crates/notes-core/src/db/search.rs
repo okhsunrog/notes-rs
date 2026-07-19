@@ -126,14 +126,14 @@ async fn search_blocks_ranked(
     limit: u32,
     token_mode: crate::stem::SearchTokenMode,
 ) -> Result<Vec<RankedBlock>> {
-    let query = crate::stem::stem_search_query_with_mode(&query, token_mode);
-    if query.is_empty() {
+    let display_query = query.clone();
+    let fts_query = crate::stem::stem_search_query_with_mode(&query, token_mode);
+    if fts_query.is_empty() {
         return Ok(Vec::new());
     }
     conn.call(move |database| {
         let sql = format!(
-            "SELECT {QUALIFIED_BLOCK_COLUMNS}, bm25(blocks_fts),
-                    snippet(blocks_fts, 0, '<mark>', '</mark>', '…', 16)
+            "SELECT {QUALIFIED_BLOCK_COLUMNS}, bm25(blocks_fts)
                FROM blocks
               JOIN blocks_fts ON blocks_fts.rowid = blocks.id
              WHERE blocks_fts MATCH ?1
@@ -142,16 +142,100 @@ async fn search_blocks_ranked(
         );
         database
             .prepare(&sql)?
-            .query_map(rusqlite::params![query, limit], |row| {
+            .query_map(rusqlite::params![fts_query, limit], |row| {
+                let block = row_to_block(row)?;
                 Ok(RankedBlock {
-                    block: row_to_block(row)?,
+                    snippet: raw_markdown_snippet(&block.markdown, &display_query),
+                    block,
                     bm25: row.get(9)?,
-                    snippet: row.get(10)?,
                 })
             })?
             .collect()
     })
     .await
+}
+
+fn raw_markdown_snippet(markdown: &str, query: &str) -> String {
+    const CONTEXT_CHARS: usize = 60;
+
+    let query_stems = token_spans(query)
+        .into_iter()
+        .map(|(start, end)| crate::stem::stem(&query[start..end]))
+        .collect::<std::collections::HashSet<_>>();
+    let tokens = token_spans(markdown);
+    let matches = tokens
+        .iter()
+        .map(|&(start, end)| query_stems.contains(&crate::stem::stem(&markdown[start..end])))
+        .collect::<Vec<_>>();
+    let Some(first_match) = matches.iter().position(|matched| *matched) else {
+        return markdown.to_string();
+    };
+
+    let match_start = tokens[first_match].0;
+    let match_end = tokens[first_match].1;
+    let mut first_token = first_match;
+    while first_token > 0
+        && markdown[tokens[first_token - 1].0..match_start]
+            .chars()
+            .count()
+            <= CONTEXT_CHARS
+    {
+        first_token -= 1;
+    }
+    let mut last_token = first_match;
+    while last_token + 1 < tokens.len()
+        && markdown[match_end..tokens[last_token + 1].1]
+            .chars()
+            .count()
+            <= CONTEXT_CHARS
+    {
+        last_token += 1;
+    }
+
+    let window_start = tokens[first_token].0;
+    let window_end = tokens[last_token].1;
+    let mut snippet = String::new();
+    if window_start > 0 {
+        snippet.push('…');
+    }
+    let mut cursor = window_start;
+    for (index, &(start, end)) in tokens
+        .iter()
+        .enumerate()
+        .take(last_token + 1)
+        .skip(first_token)
+    {
+        snippet.push_str(&markdown[cursor..start]);
+        if matches[index] {
+            snippet.push_str("<mark>");
+            snippet.push_str(&markdown[start..end]);
+            snippet.push_str("</mark>");
+        } else {
+            snippet.push_str(&markdown[start..end]);
+        }
+        cursor = end;
+    }
+    snippet.push_str(&markdown[cursor..window_end]);
+    if window_end < markdown.len() {
+        snippet.push('…');
+    }
+    snippet
+}
+
+fn token_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start = None;
+    for (index, character) in text.char_indices() {
+        if character.is_alphanumeric() {
+            start.get_or_insert(index);
+        } else if let Some(start) = start.take() {
+            spans.push((start, index));
+        }
+    }
+    if let Some(start) = start {
+        spans.push((start, text.len()));
+    }
+    spans
 }
 
 pub async fn search_fts(conn: &Connection, query: String, limit: u32) -> Result<Vec<SearchHit>> {

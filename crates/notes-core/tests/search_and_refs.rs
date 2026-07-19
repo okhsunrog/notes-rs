@@ -438,6 +438,43 @@ async fn fused_search_surfaces_snippets_and_prioritizes_only_exact_titles() {
 }
 
 #[tokio::test]
+async fn fused_search_builds_snippets_from_raw_stem_variant_markdown() {
+    let database = database().await;
+    let connection = &database.connection;
+    let page = db::create_page(connection, "Лингвистика".into())
+        .await
+        .expect("create snippet page");
+    let block = db::create_block(
+        connection,
+        page.uuid,
+        None,
+        None,
+        BlockStyle::Paragraph,
+        format!(
+            "{}системах программирования{}",
+            "далёкий контекст ".repeat(8),
+            " дополнительные сведения".repeat(8)
+        ),
+    )
+    .await
+    .expect("create stem-variant block");
+
+    let hit = db::search_fts(connection, "система".into(), 10)
+        .await
+        .expect("search stem variant")
+        .into_iter()
+        .find(|hit| hit.content.uuid() == block.uuid)
+        .expect("find block hit");
+    let snippet = hit.snippet.expect("block snippet");
+
+    assert!(snippet.contains("<mark>системах</mark>"), "{snippet}");
+    assert!(snippet.contains("программирования"), "{snippet}");
+    assert!(!snippet.contains("<mark>систем</mark>"), "{snippet}");
+    assert!(snippet.starts_with('…'));
+    assert!(snippet.ends_with('…'));
+}
+
+#[tokio::test]
 async fn search_normalizes_unicode_treats_wildcards_literally_and_stems_russian() {
     let database = database().await;
     let connection = &database.connection;
