@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
-use notes_core::Connection;
+use notes_core::{BlockStyle, Connection};
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use rusqlite::OptionalExtension;
 use rusqlite::ffi::sqlite3_auto_extension;
 use rusqlite_migration::{M, Migrations};
@@ -9,6 +10,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Once;
+use unicode_categories::UnicodeCategories;
 
 const INPUT_FORMAT_VERSION: u32 = 1;
 const MAX_ATTEMPTS: i64 = 8;
@@ -979,44 +981,97 @@ struct IndexDocument {
     input_hash: String,
 }
 
-type DocumentChainRow = (uuid::Uuid, i32, Option<String>, String);
+const ANCESTOR_EXCERPT_CHARS: usize = 150;
+
+struct DocumentChainRow {
+    content_uuid: uuid::Uuid,
+    depth: i32,
+    page_title: Option<String>,
+    journal_date: Option<String>,
+    block_style: BlockStyle,
+    section_heading: Option<String>,
+    content: String,
+}
+
+struct CompositionInput {
+    page_title: Option<String>,
+    journal_date: Option<String>,
+    block_style: BlockStyle,
+    section_heading: Option<String>,
+    body: String,
+    ancestors: Vec<(i32, String)>,
+}
 
 async fn index_documents(notes: &Connection) -> Result<BTreeMap<uuid::Uuid, IndexDocument>> {
     let rows = notes
         .call(|database| {
             let mut statement = database.prepare(
-                "WITH RECURSIVE chain(qid, uuid, parent_uuid, title, content, depth) AS (
-                   SELECT block.uuid, block.uuid, block.parent_uuid, page.title,
+                "WITH RECURSIVE chain(
+                   qid, parent_uuid, page_title, journal_date, block_style,
+                   section_heading, content, depth
+                 ) AS (
+                   SELECT block.uuid, block.parent_uuid, page.title,
+                          identity.journal_date, block.style,
+                          CASE WHEN page.layout = 'document' THEN (
+                            SELECT heading.markdown FROM blocks heading
+                             WHERE heading.page_uuid = block.page_uuid
+                               AND heading.parent_uuid IS block.parent_uuid
+                               AND heading.order_key < block.order_key
+                               AND heading.style IN ('heading_1', 'heading_2', 'heading_3')
+                             ORDER BY heading.order_key DESC, heading.uuid DESC
+                             LIMIT 1
+                          ) END,
                           block.markdown, 0
-                     FROM blocks block JOIN pages page ON page.uuid = block.page_uuid
+                     FROM blocks block
+                     JOIN pages page ON page.uuid = block.page_uuid
+                     JOIN page_identities identity ON identity.page_uuid = page.uuid
                    UNION ALL
-                   SELECT chain.qid, chain.uuid, parent.parent_uuid, NULL,
+                   SELECT chain.qid, parent.parent_uuid, chain.page_title,
+                          chain.journal_date, chain.block_style, chain.section_heading,
                           parent.markdown, chain.depth + 1
                      FROM chain JOIN blocks parent ON parent.uuid = chain.parent_uuid
                  )
-                 SELECT uuid, depth, title, content FROM chain ORDER BY uuid, depth",
+                 SELECT qid, depth, page_title, journal_date, block_style,
+                        section_heading, content
+                   FROM chain ORDER BY qid, depth",
             )?;
             statement
                 .query_map([], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                    Ok(DocumentChainRow {
+                        content_uuid: row.get(0)?,
+                        depth: row.get(1)?,
+                        page_title: row.get(2)?,
+                        journal_date: row.get(3)?,
+                        block_style: row.get(4)?,
+                        section_heading: row.get(5)?,
+                        content: row.get(6)?,
+                    })
                 })?
                 .collect::<Result<Vec<DocumentChainRow>, _>>()
         })
         .await?;
-    let mut chains = BTreeMap::<uuid::Uuid, Vec<(i32, Option<String>, String)>>::new();
-    for (uuid, depth, title, content) in rows {
-        chains
-            .entry(uuid)
-            .or_default()
-            .push((depth, title, content));
+    let mut inputs = BTreeMap::<uuid::Uuid, CompositionInput>::new();
+    for row in rows {
+        let input = inputs
+            .entry(row.content_uuid)
+            .or_insert_with(|| CompositionInput {
+                page_title: row.page_title,
+                journal_date: row.journal_date,
+                block_style: row.block_style,
+                section_heading: row.section_heading,
+                body: String::new(),
+                ancestors: Vec::new(),
+            });
+        if row.depth == 0 {
+            input.body = row.content;
+        } else {
+            input.ancestors.push((row.depth, row.content));
+        }
     }
-    Ok(chains
+    Ok(inputs
         .into_iter()
-        .filter_map(|(uuid, chain)| {
-            let text = compose_text(&chain);
-            if text.trim().is_empty() {
-                return None;
-            }
+        .filter_map(|(uuid, input)| {
+            let text = compose_text(&input)?;
             let mut digest = Sha256::new();
             digest.update(INPUT_FORMAT_VERSION.to_le_bytes());
             digest.update(text.as_bytes());
@@ -1086,51 +1141,101 @@ fn extraction_input(title: Option<&str>, content: &str) -> IndexDocument {
     }
 }
 
-fn compose_text(chain: &[(i32, Option<String>, String)]) -> String {
+fn compose_text(input: &CompositionInput) -> Option<String> {
+    if !has_meaningful_content(input.block_style, &input.body) {
+        return None;
+    }
     let mut parts = Vec::new();
-    let mut titles = chain
-        .iter()
-        .filter_map(|(depth, title, _)| {
-            (*depth > 0)
-                .then_some((*depth, title.as_deref()?.trim()))
-                .filter(|(_, title)| !title.is_empty())
-        })
-        .collect::<Vec<_>>();
-    titles.sort_by_key(|(depth, _)| std::cmp::Reverse(*depth));
-    if !titles.is_empty() {
-        parts.push(
-            titles
-                .into_iter()
-                .map(|(_, title)| title)
-                .collect::<Vec<_>>()
-                .join(" > "),
-        );
+    if let Some(title) = input
+        .page_title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+    {
+        parts.push(title.to_owned());
+    } else if let Some(date) = input
+        .journal_date
+        .as_deref()
+        .map(str::trim)
+        .filter(|date| !date.is_empty())
+    {
+        parts.push(format!("Journal {date}"));
     }
-    if let Some((_, _, parent_content)) = chain.iter().find(|(depth, _, _)| *depth == 1) {
-        let excerpt = parent_content
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .chars()
-            .take(200)
-            .collect::<String>();
-        if !excerpt.is_empty() {
-            parts.push(excerpt);
+    if let Some(section_heading) = input
+        .section_heading
+        .as_deref()
+        .map(normalize_whitespace)
+        .filter(|heading| !heading.is_empty())
+    {
+        parts.push(section_heading);
+    }
+    let mut ancestors = input.ancestors.iter().collect::<Vec<_>>();
+    ancestors.sort_by_key(|(depth, _)| std::cmp::Reverse(*depth));
+    parts.extend(
+        ancestors
+            .into_iter()
+            .map(|(_, content)| truncate_excerpt(content, ANCESTOR_EXCERPT_CHARS))
+            .filter(|excerpt| !excerpt.is_empty()),
+    );
+    parts.push(input.body.trim().to_owned());
+    Some(parts.join("\n"))
+}
+
+fn normalize_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn truncate_excerpt(value: &str, max_chars: usize) -> String {
+    let normalized = normalize_whitespace(value);
+    if normalized.chars().count() <= max_chars {
+        return normalized;
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+    let content_limit = max_chars.saturating_sub(1);
+    let byte_limit = normalized
+        .char_indices()
+        .nth(content_limit)
+        .map_or(normalized.len(), |(index, _)| index);
+    let prefix = &normalized[..byte_limit];
+    let boundary = prefix.rfind(char::is_whitespace).unwrap_or(byte_limit);
+    format!("{}…", normalized[..boundary].trim_end())
+}
+
+fn has_meaningful_content(style: BlockStyle, markdown: &str) -> bool {
+    if style == BlockStyle::Divider {
+        return false;
+    }
+    let mut code_block_depth = 0_u32;
+    for event in Parser::new_ext(markdown, Options::all()) {
+        match event {
+            Event::Start(Tag::CodeBlock(_)) => code_block_depth += 1,
+            Event::End(TagEnd::CodeBlock) => code_block_depth = code_block_depth.saturating_sub(1),
+            Event::Text(text) if code_block_depth > 0 => {
+                if text.chars().any(|character| !character.is_whitespace()) {
+                    return true;
+                }
+            }
+            Event::Text(text) => {
+                if text.chars().any(|character| {
+                    character.is_alphanumeric()
+                        || (!character.is_ascii()
+                            && !character.is_punctuation()
+                            && !character.is_separator())
+                }) {
+                    return true;
+                }
+            }
+            Event::Code(code) | Event::InlineMath(code) | Event::DisplayMath(code)
+                if code.chars().any(|character| !character.is_whitespace()) =>
+            {
+                return true;
+            }
+            _ => {}
         }
     }
-    if let Some((_, title, content)) = chain.iter().find(|(depth, _, _)| *depth == 0) {
-        if let Some(title) = title
-            .as_deref()
-            .map(str::trim)
-            .filter(|title| !title.is_empty())
-        {
-            parts.push(title.to_owned());
-        }
-        if !content.trim().is_empty() {
-            parts.push(content.clone());
-        }
-    }
-    parts.join("\n")
+    false
 }
 
 fn vector_table_name(generation_id: uuid::Uuid) -> String {
@@ -1182,7 +1287,126 @@ pub fn embedding_identity_fingerprint(endpoint: &str, model: &str, dimensions: u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notes_core::BlockStyle;
+    use notes_core::{BlockStyle, PageLayout};
+
+    fn composition_fixture(body: &str) -> CompositionInput {
+        CompositionInput {
+            page_title: Some("Project Atlas".into()),
+            journal_date: None,
+            block_style: BlockStyle::Paragraph,
+            section_heading: None,
+            body: body.into(),
+            ancestors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn composition_golden_keeps_the_frozen_header_order() {
+        let mut input = composition_fixture("Ship the embedding pipeline.");
+        input.ancestors = vec![
+            (1, "  Parent   planning notes ".into()),
+            (2, "Root objective".into()),
+        ];
+
+        assert_eq!(
+            compose_text(&input).as_deref(),
+            Some(
+                "Project Atlas\nRoot objective\nParent planning notes\nShip the embedding pipeline."
+            )
+        );
+    }
+
+    #[test]
+    fn journal_composition_uses_an_iso_pseudo_title() {
+        let mut input = composition_fixture("Captured thought");
+        input.page_title = None;
+        input.journal_date = Some("2026-07-19".into());
+
+        assert_eq!(
+            compose_text(&input).as_deref(),
+            Some("Journal 2026-07-19\nCaptured thought")
+        );
+    }
+
+    #[test]
+    fn ancestor_excerpts_render_root_to_parent_and_stop_at_a_word_boundary() {
+        let long_tail = format!("{} secondword thirdword", "a".repeat(140));
+        let mut input = composition_fixture("Leaf");
+        input.ancestors = vec![(1, long_tail), (3, "Root".into()), (2, "Middle".into())];
+
+        let text = compose_text(&input).expect("meaningful composition");
+        let lines = text.lines().collect::<Vec<_>>();
+        assert_eq!(lines[1], "Root");
+        assert_eq!(lines[2], "Middle");
+        assert_eq!(lines[3], format!("{}…", "a".repeat(140)));
+        assert!(!lines[3].contains("secondwor"));
+    }
+
+    #[test]
+    fn content_free_blocks_are_skipped_but_short_semantic_content_is_kept() {
+        let punctuation = composition_fixture("*** — []() <br>");
+        assert!(compose_text(&punctuation).is_none());
+
+        let mut divider = composition_fixture("horizontal divider");
+        divider.block_style = BlockStyle::Divider;
+        assert!(compose_text(&divider).is_none());
+
+        let emoji = composition_fixture("🧭");
+        assert_eq!(compose_text(&emoji).as_deref(), Some("Project Atlas\n🧭"));
+        let short = composition_fixture("x");
+        assert_eq!(compose_text(&short).as_deref(), Some("Project Atlas\nx"));
+    }
+
+    #[tokio::test]
+    async fn document_composition_uses_only_the_nearest_preceding_heading() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let notes = notes_core::db::open(directory.path().join("notes.db"))
+            .await
+            .expect("notes database");
+        let page = notes_core::db::create_page(&notes, "Document".into())
+            .await
+            .expect("create page");
+        notes_core::db::set_page_layout(&notes, page.uuid, PageLayout::Document)
+            .await
+            .expect("set document layout");
+        let before = notes_core::db::create_block(
+            &notes,
+            page.uuid,
+            None,
+            None,
+            BlockStyle::Paragraph,
+            "Before heading".into(),
+        )
+        .await
+        .expect("create leading paragraph");
+        let heading = notes_core::db::create_block(
+            &notes,
+            page.uuid,
+            None,
+            Some(before.uuid),
+            BlockStyle::Heading2,
+            "Deployment".into(),
+        )
+        .await
+        .expect("create heading");
+        let after = notes_core::db::create_block(
+            &notes,
+            page.uuid,
+            None,
+            Some(heading.uuid),
+            BlockStyle::Paragraph,
+            "Roll out gradually".into(),
+        )
+        .await
+        .expect("create trailing paragraph");
+
+        let documents = index_documents(&notes).await.expect("compose documents");
+        assert_eq!(documents[&before.uuid].text, "Document\nBefore heading");
+        assert_eq!(
+            documents[&after.uuid].text,
+            "Document\nDeployment\nRoll out gradually"
+        );
+    }
 
     #[test]
     fn ai_schema_migration_is_valid() {

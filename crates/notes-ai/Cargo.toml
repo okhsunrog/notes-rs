@@ -36,6 +36,8 @@ tokio-util.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+unicode_categories = "0.1.1"
+pulldown-cmark = { version = "=0.13.4", default-features = false }
 
 [dev-dependencies]
 tempfile.workspace = true

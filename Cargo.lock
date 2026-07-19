@@ -3382,6 +3382,7 @@ dependencies = [
  "llm-relay",
  "notes-core",
  "notes-protocol",
+ "pulldown-cmark",
  "reqwest 0.13.4",
  "rig-core",
  "rusqlite",
@@ -3398,6 +3399,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "unicode_categories",
  "uuid",
 ]
 
