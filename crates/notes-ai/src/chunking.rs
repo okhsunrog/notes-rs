@@ -78,6 +78,7 @@ struct Boundary {
     byte_index: usize,
     char_index: usize,
     kind: BoundaryKind,
+    in_code_fence_after: bool,
 }
 
 fn split_body_with_limits(
@@ -92,8 +93,9 @@ fn split_body_with_limits(
     }
     let mut chunks = Vec::new();
     let mut remaining = body.trim();
+    let mut in_code_fence = false;
     while remaining.chars().count() > max_chars {
-        let boundaries = natural_boundaries(remaining, max_chars);
+        let boundaries = natural_boundaries(remaining, max_chars, in_code_fence);
         let selected = [
             BoundaryKind::BlankLine,
             BoundaryKind::StructuredLine,
@@ -108,10 +110,29 @@ fn split_body_with_limits(
                 })
                 .min_by_key(|boundary| boundary.char_index.abs_diff(target_chars))
                 .copied()
+        })
+        .or_else(|| {
+            [
+                BoundaryKind::BlankLine,
+                BoundaryKind::StructuredLine,
+                BoundaryKind::Line,
+            ]
+            .into_iter()
+            .find_map(|kind| {
+                boundaries
+                    .iter()
+                    .filter(|boundary| boundary.kind == kind && boundary.char_index <= max_chars)
+                    .max_by_key(|boundary| boundary.char_index)
+                    .copied()
+            })
         });
-        let byte_index = selected
-            .map(|boundary| boundary.byte_index)
-            .unwrap_or_else(|| byte_index_at_char(remaining, max_chars));
+        let byte_index = selected.map_or_else(
+            || byte_index_at_char(remaining, max_chars),
+            |boundary| {
+                in_code_fence = boundary.in_code_fence_after;
+                boundary.byte_index
+            },
+        );
         let (chunk, tail) = remaining.split_at(byte_index);
         chunks.push(chunk.trim().to_owned());
         remaining = tail.trim_start();
@@ -122,11 +143,10 @@ fn split_body_with_limits(
     chunks
 }
 
-fn natural_boundaries(value: &str, max_chars: usize) -> Vec<Boundary> {
+fn natural_boundaries(value: &str, max_chars: usize, mut in_code_fence: bool) -> Vec<Boundary> {
     let mut boundaries = Vec::new();
     let mut byte_index = 0;
     let mut char_index = 0;
-    let mut in_code_fence = false;
     for line in value.split_inclusive('\n') {
         let line_chars = line.chars().count();
         if char_index + line_chars > max_chars {
@@ -137,21 +157,22 @@ fn natural_boundaries(value: &str, max_chars: usize) -> Vec<Boundary> {
         let trimmed = line.trim();
         let fence_line = trimmed.starts_with("```") || trimmed.starts_with("~~~");
         let structured = in_code_fence || fence_line || looks_like_table_row(trimmed);
-        let kind = if trimmed.is_empty() {
-            BoundaryKind::BlankLine
-        } else if structured {
+        let kind = if structured {
             BoundaryKind::StructuredLine
+        } else if trimmed.is_empty() {
+            BoundaryKind::BlankLine
         } else {
             BoundaryKind::Line
         };
+        if fence_line {
+            in_code_fence = !in_code_fence;
+        }
         boundaries.push(Boundary {
             byte_index,
             char_index,
             kind,
+            in_code_fence_after: in_code_fence,
         });
-        if fence_line {
-            in_code_fence = !in_code_fence;
-        }
     }
     boundaries
 }
@@ -196,6 +217,50 @@ mod tests {
             let chunk_body = chunk.text.strip_prefix("Roadmap\n").unwrap();
             assert!(chunk_body.lines().all(|line| line.starts_with("| row ")));
         }
+    }
+
+    #[test]
+    fn sub_minimum_line_boundaries_win_over_hard_cuts() {
+        let body = (0..4)
+            .map(|index| format!("{}-{index}", "x".repeat(897)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let chunks = split_for_embedding(&body, "");
+
+        assert_eq!(chunks.len(), 4);
+        assert!(chunks.iter().all(|chunk| chunk.text.lines().count() == 1));
+        assert!(
+            chunks
+                .iter()
+                .enumerate()
+                .all(|(index, chunk)| chunk.text.ends_with(&format!("-{index}")))
+        );
+    }
+
+    #[test]
+    fn fence_state_and_structured_blank_lines_survive_an_in_fence_split() {
+        let body = format!(
+            "```\n{}\n{}\n\n{}\n{}\n```",
+            "x".repeat(1_395),
+            "a".repeat(1_198),
+            "b".repeat(199),
+            "c".repeat(500),
+        );
+        let chunks = split_for_embedding(&body, "");
+
+        assert!(chunks.len() >= 3);
+        assert_eq!(chunks[0].text.chars().count(), 1_399);
+        assert_eq!(chunks[1].text.chars().count(), 1_399);
+        assert!(
+            chunks[1]
+                .text
+                .contains(&format!("{}\n\n{}", "a".repeat(1_198), "b".repeat(199)))
+        );
+
+        let inside_fence = natural_boundaries("\nnext\n```\n", 32, true);
+        assert_eq!(inside_fence[0].kind, BoundaryKind::StructuredLine);
+        assert!(inside_fence[0].in_code_fence_after);
+        assert!(!inside_fence.last().unwrap().in_code_fence_after);
     }
 
     #[test]
