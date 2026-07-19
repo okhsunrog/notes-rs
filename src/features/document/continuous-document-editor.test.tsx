@@ -126,6 +126,39 @@ describe("ContinuousDocumentEditor", () => {
     expect(secondEditor?.textContent).not.toContain("Document A");
   });
 
+  it("maps the caret through a remote insertion above its logical line", async () => {
+    const original = "Heading\nKeep caret on this line\nTail";
+    const updated = `Remote preface\n${original}`;
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    cleanup.push(() => {
+      act(() => root.unmount());
+      container.remove();
+    });
+    const render = (value: string) => (
+      <ContinuousDocumentEditor
+        value={value}
+        readOnly={false}
+        focusRequest={0}
+        onChange={() => undefined}
+        onCompositionEnd={() => undefined}
+        onBlur={() => undefined}
+      />
+    );
+    await act(async () => root.render(render(original)));
+    const view = editorView(container);
+    const caretOffset = original.indexOf("caret") + "caret".length;
+    act(() => view.dispatch({ selection: { anchor: caretOffset } }));
+
+    await act(async () => root.render(render(updated)));
+
+    expect(view.state.selection.main.anchor).toBe(updated.indexOf("caret") + "caret".length);
+    expect(view.state.doc.lineAt(view.state.selection.main.anchor).text).toBe(
+      "Keep caret on this line",
+    );
+  });
+
   it("navigates a decorated link on a plain click, Shift for adjacent", async () => {
     const source = "plain\nSee [[Project Aurora]] today";
     const container = document.createElement("div");
