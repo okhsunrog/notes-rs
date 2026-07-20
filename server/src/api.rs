@@ -30,6 +30,9 @@ use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
 const JSON_BODY_LIMIT: usize = 2 * 1024 * 1024;
+/// Bootstrap uploads a full workspace snapshot in one authenticated request;
+/// a real corpus (thousands of pages) far exceeds the ordinary JSON limit.
+const BOOTSTRAP_BODY_LIMIT: usize = 256 * 1024 * 1024;
 const MAX_OPS_PAGE: usize = 1_000;
 
 #[derive(Clone)]
@@ -194,7 +197,6 @@ pub fn router(state: AppState) -> Router {
     let json_routes = Router::new()
         .route("/v1/ops", get(get_ops).post(push_ops))
         .route("/v1/snapshot", get(get_snapshot))
-        .route("/v1/bootstrap", post(bootstrap))
         .route("/v1/info", get(info))
         .route("/v1/ai/status", get(ai_status).put(update_ai_settings))
         .route("/v1/ai/provider", put(update_ai_provider))
@@ -203,6 +205,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/search", post(search))
         .route("/v1/chat", post(chat))
         .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT));
+    let bootstrap_routes = Router::new()
+        .route("/v1/bootstrap", post(bootstrap))
+        .layer(DefaultBodyLimit::max(BOOTSTRAP_BODY_LIMIT));
     let stream_routes = Router::new()
         .route("/v1/sync", get(sync_socket))
         .route(
@@ -212,6 +217,7 @@ pub fn router(state: AppState) -> Router {
         .layer(DefaultBodyLimit::disable());
     let protected = Router::new()
         .merge(json_routes)
+        .merge(bootstrap_routes)
         .merge(stream_routes)
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
     Router::new()
@@ -2078,5 +2084,28 @@ mod tests {
         assert_eq!(snapshot.attachments.len(), 1);
         assert!(!snapshot.attachments[0].present);
         assert_eq!(snapshot.attachments[0].blob_hash, hash);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_accepts_bodies_larger_than_the_ordinary_json_limit() {
+        // Regression: a real-corpus bootstrap snapshot exceeds JSON_BODY_LIMIT
+        // (observed as HTTP 413 on the first ~17k-op workspace upload). The
+        // bootstrap route carries its own, much larger limit; a payload above
+        // the ordinary limit must reach the handler (any error must come from
+        // JSON parsing, never from the body-size layer).
+        let (_dir, app) = test_app().await;
+        let oversized = vec![b' '; JSON_BODY_LIMIT + 1024];
+        let response = app
+            .oneshot(
+                authorized(Request::builder())
+                    .method("POST")
+                    .uri("/v1/bootstrap")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(oversized))
+                    .expect("bootstrap request"),
+            )
+            .await
+            .expect("bootstrap response");
+        assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 }
