@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   CalendarDays,
   Check,
@@ -10,7 +10,6 @@ import {
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { DocumentPage } from "@/features/document/document-page";
 import { DocumentAuthoringControls } from "@/features/document/document-authoring-controls";
 import {
@@ -97,7 +96,7 @@ export function PageView({
   const authoringAvailability = documentAuthoringAvailability(paneId, writerPaneId);
 
   const autosave = useRef(new DebouncedAction()).current;
-  const titleInput = useRef<HTMLInputElement>(null);
+  const titleInput = useRef<HTMLTextAreaElement>(null);
   const pageRef = useRef(page);
   const titleRef = useRef(title);
   const titleSaveInFlight = useRef<Promise<boolean> | null>(null);
@@ -233,6 +232,31 @@ export function PageView({
     input?.select();
   }, [autoFocusTitle, canEdit, page.uuid]);
 
+  const resizeTitleInput = useCallback(() => {
+    const input = titleInput.current;
+    if (!input) return;
+    input.style.height = "0";
+    input.style.height = `${input.scrollHeight}px`;
+  }, []);
+
+  useLayoutEffect(() => {
+    resizeTitleInput();
+  }, [page.uuid, resizeTitleInput, title]);
+
+  useEffect(() => {
+    const input = titleInput.current;
+    if (!input) return;
+    let width = input.clientWidth;
+    const observer = new ResizeObserver(([entry]) => {
+      const nextWidth = entry.contentRect.width;
+      if (nextWidth === width) return;
+      width = nextWidth;
+      resizeTitleInput();
+    });
+    observer.observe(input);
+    return () => observer.disconnect();
+  }, [page.uuid, resizeTitleInput]);
+
   const changeLayout = async (layout: PageLayout) => {
     if (!canEdit || layout === pageRef.current.layout || layoutBusy) return;
     setLayoutBusy(true);
@@ -295,8 +319,9 @@ export function PageView({
             </h1>
           </div>
         ) : (
-          <Input
+          <textarea
             ref={titleInput}
+            rows={1}
             value={title}
             readOnly={!canEdit}
             onBlur={() => {
@@ -317,14 +342,15 @@ export function PageView({
             }}
             onChange={(e) => {
               if (!canEdit) return;
-              sessions.editTitle(page.uuid, e.currentTarget.value, {
+              sessions.editTitle(page.uuid, e.currentTarget.value.replace(/[\r\n]+/g, " "), {
                 text: pageRef.current.title ?? "",
                 revision: pageRef.current.titleRevision,
               });
               scheduleSave();
             }}
             placeholder="Untitled note"
-            className="h-20 min-w-0 appearance-none border-0 bg-transparent px-0 py-3 text-[2.6rem] leading-normal font-semibold tracking-[-0.045em] shadow-none placeholder:text-muted-foreground/35 focus-visible:ring-0"
+            aria-label="Note title"
+            className="min-h-14 w-full min-w-0 flex-1 resize-none appearance-none overflow-hidden border-0 bg-transparent px-0 py-2 text-[clamp(1.75rem,3vw,2.25rem)] leading-[1.15] font-semibold tracking-[-0.035em] text-foreground shadow-none outline-none transition-colors placeholder:text-muted-foreground/30 read-only:cursor-default selection:bg-primary/25"
           />
         )}
         <div className="mt-2 flex items-center gap-1">
