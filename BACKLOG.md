@@ -7,6 +7,7 @@ Findings from the 2026-07-19 multi-agent review that are **deliberately not in a
 - **`http://` server URLs accepted end-to-end** (`src-tauri/src/settings.rs:234`, `crates/notes-sync/src/transport.rs:425`): bearer token travels plaintext if the reverse proxy is misconfigured. _Trigger: cheap — require https unless host is localhost/LAN, or show a persistent warning badge; fold into the next server/security batch (Track C follow-up)._
 - **Startup `expect` panics before the friendly startup-error path exists** (`src-tauri/src/lib.rs:142-143`). _Trigger: first report of a blank-window crash; convert to the managed startup-error state._
 - **Server writes snapshot files nothing reads** (`server` snapshots/{seq}.json; `GET /v1/snapshot` always exports fresh). _Trigger: next server touch — either wire bootstrap to them or delete the write path._
+- **Server upgrade crash-loops on legacy replicas** (observed 2026-07-20 deploying V002 onto the Jul-17 server data: `V002 … no such table: pages` → systemd restart loop; resolved by the planned wipe). Pre-V002 server user replicas apparently existed in a state the fresh migration chain does not expect. Harmless while wipes are free; must be understood before the first non-wipe production upgrade. _Trigger: before importing data that cannot be re-synced from a client, or before any second user._
 
 ## Performance (post-import watch list)
 
