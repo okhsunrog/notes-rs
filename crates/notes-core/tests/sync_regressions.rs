@@ -214,6 +214,87 @@ async fn local_apply_is_idempotent_and_outbox_is_acknowledged_once() {
 }
 
 #[tokio::test]
+async fn sync_workspace_binding_is_durable_and_cleared_only_when_the_server_changes() {
+    let database = database().await;
+    let connection = &database.connection;
+
+    notes_core::configure_sync(connection, "https://notes.example.test/")
+        .await
+        .expect("configure sync");
+    notes_core::bind_sync_workspace(
+        connection,
+        "https://notes.example.test/",
+        TEST_WORKSPACE_UUID,
+        7,
+    )
+    .await
+    .expect("bind workspace");
+    assert_eq!(
+        notes_core::sync_bound_workspace(connection)
+            .await
+            .expect("read binding"),
+        Some(TEST_WORKSPACE_UUID)
+    );
+    assert_eq!(notes_core::sync_cursor(connection).await.unwrap(), 7);
+
+    notes_core::configure_sync(connection, "https://notes.example.test/")
+        .await
+        .expect("reconfigure same server");
+    assert_eq!(
+        notes_core::sync_bound_workspace(connection)
+            .await
+            .expect("read preserved binding"),
+        Some(TEST_WORKSPACE_UUID)
+    );
+
+    notes_core::configure_sync(connection, "https://other.example.test/")
+        .await
+        .expect("change server");
+    assert_eq!(
+        notes_core::sync_bound_workspace(connection)
+            .await
+            .expect("read cleared binding"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn sync_workspace_binding_rejects_a_foreign_or_stale_configuration() {
+    let database = database().await;
+    let connection = &database.connection;
+    notes_core::configure_sync(connection, "https://notes.example.test/")
+        .await
+        .expect("configure sync");
+
+    assert!(
+        notes_core::bind_sync_workspace(
+            connection,
+            "https://other.example.test/",
+            TEST_WORKSPACE_UUID,
+            0,
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        notes_core::bind_sync_workspace(
+            connection,
+            "https://notes.example.test/",
+            uuid::Uuid::from_u128(0xBAD),
+            0,
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        notes_core::sync_bound_workspace(connection)
+            .await
+            .expect("read absent binding"),
+        None
+    );
+}
+
+#[tokio::test]
 async fn sequenced_apply_rejects_gaps_and_conflicting_duplicates_atomically() {
     let database = database().await;
     let connection = &database.connection;

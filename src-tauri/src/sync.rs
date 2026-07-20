@@ -361,11 +361,20 @@ async fn initialize_replica(
     transport: &HttpTransport,
     blob_store: &BlobStore,
 ) -> Result<()> {
-    if notes_core::sync_cursor(connection).await? != 0 {
+    let local_workspace_uuid = notes_core::db::workspace_uuid(connection).await?;
+    if let Some(bound_workspace_uuid) = notes_core::sync_bound_workspace(connection).await? {
+        let server_workspace_uuid = transport.info().await?.workspace_uuid;
+        if bound_workspace_uuid != local_workspace_uuid
+            || bound_workspace_uuid != server_workspace_uuid
+        {
+            return Err(SyncSessionError::WorkspaceConflict.into());
+        }
         return Ok(());
     }
+
     let server = transport.snapshot().await?;
-    let mut local = export_sync_snapshot(connection, 0).await?;
+    let server_seq = server.seq;
+    let (local, pending) = capture_local_sync_state(connection, server.seq).await?;
     let server_empty = snapshot_is_empty(&server);
     let local_empty = snapshot_is_empty(&local);
     match (server_empty, local_empty) {
@@ -379,12 +388,13 @@ async fn initialize_replica(
             emit_workspace_changed(app);
         }
         (false, false) => {
-            local.seq = server.seq;
-            if local != server {
+            if local.workspace_uuid != server.workspace_uuid
+                || (local != server
+                    && !outbox_explains_snapshot_difference(&server, &local, &pending).await?)
+            {
                 return Err(SyncSessionError::WorkspaceConflict.into());
             }
             download_snapshot_blobs(transport, blob_store, &server).await?;
-            notes_core::import_sync_snapshot(connection, server.clone()).await?;
         }
         (true, true) => {
             // The server's durable empty workspace is canonical. This prevents
@@ -392,7 +402,46 @@ async fn initialize_replica(
             notes_core::import_sync_snapshot(connection, server).await?;
         }
     }
+
+    let server_info = transport.info().await?;
+    let local_workspace_uuid = notes_core::db::workspace_uuid(connection).await?;
+    if local_workspace_uuid != server_info.workspace_uuid {
+        return Err(SyncSessionError::WorkspaceConflict.into());
+    }
+    notes_core::bind_sync_workspace(
+        connection,
+        transport.base_url().as_str(),
+        local_workspace_uuid,
+        server_seq,
+    )
+    .await?;
     Ok(())
+}
+
+async fn capture_local_sync_state(
+    connection: &Connection,
+    seq: u64,
+) -> Result<(SyncSnapshot, Vec<notes_core::Op>)> {
+    for _ in 0..3 {
+        let before = notes_core::pending_outbox(connection, u32::MAX).await?;
+        let snapshot = export_sync_snapshot(connection, seq).await?;
+        let after = notes_core::pending_outbox(connection, u32::MAX).await?;
+        if before == after {
+            return Ok((snapshot, after));
+        }
+    }
+    bail!("local state kept changing while the sync baseline was inspected")
+}
+
+async fn outbox_explains_snapshot_difference(
+    server: &SyncSnapshot,
+    local: &SyncSnapshot,
+    pending: &[notes_core::Op],
+) -> Result<bool> {
+    if pending.is_empty() {
+        return Ok(false);
+    }
+    Ok(notes_core::project_sync_snapshot(server.clone(), pending).await? == *local)
 }
 
 fn snapshot_is_empty(snapshot: &SyncSnapshot) -> bool {
@@ -720,5 +769,80 @@ mod tests {
             tombstones: Vec::new(),
             attachments: Vec::new(),
         }));
+    }
+
+    #[tokio::test]
+    async fn seq_zero_snapshot_difference_is_accepted_only_when_the_outbox_explains_it() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let connection = notes_core::db::open(directory.path().join("notes.db"))
+            .await
+            .expect("notes database");
+        let page = notes_core::db::create_page(&connection, "Layout toggle".into())
+            .await
+            .expect("create page");
+        let server = notes_core::export_sync_snapshot(&connection, 0)
+            .await
+            .expect("server baseline");
+        notes_core::configure_sync(&connection, "https://notes.example.test/")
+            .await
+            .expect("configure sync");
+
+        notes_core::db::set_page_layout(&connection, page.uuid, notes_core::PageLayout::Document)
+            .await
+            .expect("switch to document");
+        notes_core::db::set_page_layout(&connection, page.uuid, notes_core::PageLayout::Outline)
+            .await
+            .expect("switch back to outline");
+        let local = notes_core::export_sync_snapshot(&connection, 0)
+            .await
+            .expect("local snapshot");
+
+        assert_ne!(
+            local, server,
+            "the newer layout HLC must change the snapshot"
+        );
+        assert_eq!(
+            notes_core::pending_outbox(&connection, u32::MAX)
+                .await
+                .expect("pending outbox")
+                .len(),
+            2
+        );
+        let pending = notes_core::pending_outbox(&connection, u32::MAX)
+            .await
+            .expect("pending outbox");
+        assert!(
+            outbox_explains_snapshot_difference(&server, &local, &pending)
+                .await
+                .expect("project outbox")
+        );
+        assert!(
+            !outbox_explains_snapshot_difference(&server, &local, &pending[..1])
+                .await
+                .expect("reject incomplete projection")
+        );
+
+        notes_core::bind_sync_workspace(
+            &connection,
+            "https://notes.example.test/",
+            server.workspace_uuid,
+            server.seq,
+        )
+        .await
+        .expect("bind verified baseline");
+        let mut transport = notes_sync::LoopbackServer::new();
+        let stats = notes_sync::SyncClient::new(connection.clone())
+            .sync_until_idle(&mut transport)
+            .await
+            .expect("push recovered outbox");
+        assert_eq!(stats.pushed, 2);
+        assert_eq!(stats.cursor, 2);
+        assert_eq!(transport.log().len(), 2);
+        assert!(
+            notes_core::pending_outbox(&connection, u32::MAX)
+                .await
+                .expect("drained outbox")
+                .is_empty()
+        );
     }
 }

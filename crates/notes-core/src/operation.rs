@@ -383,11 +383,89 @@ pub async fn apply(conn: &Connection, op: &Op, origin: Origin) -> Result<ApplyOu
 pub async fn configure_sync(conn: &Connection, server_url: &str) -> Result<()> {
     let server_url = server_url.trim().to_string();
     conn.call(move |database| {
-        database.execute(
+        let transaction = database.transaction()?;
+        let previous = transaction
+            .query_row(
+                "SELECT value FROM sync_meta WHERE key = 'server_url'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if previous.as_deref() != Some(server_url.as_str()) {
+            transaction.execute(
+                "DELETE FROM sync_meta WHERE key = 'bound_workspace_uuid'",
+                [],
+            )?;
+        }
+        transaction.execute(
             "INSERT INTO sync_meta(key, value) VALUES ('server_url', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             [server_url],
         )?;
+        transaction.commit()
+    })
+    .await
+}
+
+pub async fn sync_bound_workspace(conn: &Connection) -> Result<Option<uuid::Uuid>> {
+    let value = conn
+        .call(|database| {
+            database
+                .query_row(
+                    "SELECT value FROM sync_meta WHERE key = 'bound_workspace_uuid'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+        })
+        .await?;
+    value
+        .map(|value| {
+            value
+                .parse()
+                .context("invalid bound_workspace_uuid in sync_meta")
+        })
+        .transpose()
+}
+
+pub async fn bind_sync_workspace(
+    conn: &Connection,
+    server_url: &str,
+    workspace_uuid: uuid::Uuid,
+    server_seq: u64,
+) -> Result<()> {
+    let server_url = server_url.trim().to_string();
+    conn.call_domain(move |database| -> CoreResult<()> {
+        let transaction = database.transaction()?;
+        let configured_url = transaction
+            .query_row(
+                "SELECT value FROM sync_meta WHERE key = 'server_url'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if configured_url.as_deref() != Some(server_url.as_str()) {
+            return Err(CoreError::conflict(
+                "sync server changed while workspace binding was established",
+            ));
+        }
+        let local_workspace_uuid = crate::db::transaction_workspace_uuid(&transaction)?;
+        if local_workspace_uuid != workspace_uuid {
+            return Err(CoreError::conflict(format!(
+                "cannot bind workspace {local_workspace_uuid} to remote workspace {workspace_uuid}"
+            )));
+        }
+        transaction.execute(
+            "INSERT INTO sync_meta(key, value) VALUES ('bound_workspace_uuid', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [workspace_uuid.to_string()],
+        )?;
+        transaction.execute(
+            "INSERT INTO sync_meta(key, value) VALUES ('last_server_seq', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [server_seq.to_string()],
+        )?;
+        transaction.commit()?;
         Ok(())
     })
     .await
@@ -899,6 +977,20 @@ pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> 
         Ok(())
     })
     .await
+}
+
+/// Materialize a snapshot plus an ordered operation tail without mutating the
+/// caller's replica. Hosts use this to prove that an unacknowledged outbox is
+/// the complete explanation for a bootstrap-time snapshot difference.
+pub async fn project_sync_snapshot(
+    snapshot: SyncSnapshot,
+    operations: &[Op],
+) -> Result<SyncSnapshot> {
+    let seq = snapshot.seq;
+    let projected = crate::db::open_in_memory().await?;
+    import_sync_snapshot(&projected, snapshot).await?;
+    apply_batch(&projected, operations, Origin::Remote).await?;
+    export_sync_snapshot(&projected, seq).await
 }
 
 fn validate_snapshot(snapshot: &SyncSnapshot) -> CoreResult<()> {

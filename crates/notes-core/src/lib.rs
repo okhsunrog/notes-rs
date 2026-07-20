@@ -30,9 +30,10 @@ pub use operation::{
     PageSetLayout, PageSetTitle, SnapshotAttachment, SnapshotBlock, SnapshotBlockStructure,
     SnapshotPage, SnapshotPageAlias, SnapshotPageIdentity, SnapshotTombstone, SyncSnapshot,
     acknowledge_server_op, acknowledge_server_ops, apply, apply_batch, apply_sequenced,
-    apply_sequenced_batch, attachment_uuid, configure_sync, content_references_changed,
-    decode_persisted_envelope, encode_persisted_envelope, export_sync_snapshot,
-    import_sync_snapshot, pending_outbox, sync_cursor, validate_attachment_filename,
+    apply_sequenced_batch, attachment_uuid, bind_sync_workspace, configure_sync,
+    content_references_changed, decode_persisted_envelope, encode_persisted_envelope,
+    export_sync_snapshot, import_sync_snapshot, pending_outbox, project_sync_snapshot,
+    sync_bound_workspace, sync_cursor, validate_attachment_filename,
 };
 pub use sqlite::Connection;
 pub use stem::SearchTokenMode;

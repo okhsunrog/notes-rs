@@ -65,6 +65,17 @@ pub async fn open(path: impl AsRef<Path>) -> Result<Connection> {
     let conn = Connection::open(path.as_ref())
         .await
         .context("opening sqlite database")?;
+    initialize_connection(conn).await
+}
+
+pub(crate) async fn open_in_memory() -> Result<Connection> {
+    let conn = Connection::open_in_memory()
+        .await
+        .context("opening in-memory sqlite database")?;
+    initialize_connection(conn).await
+}
+
+async fn initialize_connection(conn: Connection) -> Result<Connection> {
     conn.call(|database| -> rusqlite::Result<()> {
         database.pragma_update(None, "journal_mode", "WAL")?;
         database.pragma_update(None, "synchronous", "NORMAL")?;

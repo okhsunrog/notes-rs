@@ -33,11 +33,21 @@ pub struct Connection {
 impl Connection {
     pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_owned();
+        Self::open_with(move || rusqlite::Connection::open(path)).await
+    }
+
+    pub(crate) async fn open_in_memory() -> Result<Self> {
+        Self::open_with(rusqlite::Connection::open_in_memory).await
+    }
+
+    async fn open_with(
+        opener: impl FnOnce() -> rusqlite::Result<rusqlite::Connection> + Send + 'static,
+    ) -> Result<Self> {
         let (sender, receiver) = mpsc::channel::<WorkerMessage>();
         let (opened_tx, opened_rx) = tokio::sync::oneshot::channel();
         std::thread::Builder::new()
             .name("notes-rs-sqlite".into())
-            .spawn(move || match rusqlite::Connection::open(path) {
+            .spawn(move || match opener() {
                 Ok(mut connection) => {
                     if opened_tx.send(Ok(())).is_err() {
                         return;
