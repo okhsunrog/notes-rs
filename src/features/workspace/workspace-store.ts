@@ -5,6 +5,10 @@ import {
   type WorkspaceState,
   workspaceReducer,
 } from "@/features/workspace/workspace-model";
+import {
+  loadWorkspaceSession,
+  persistWorkspaceSession,
+} from "@/features/workspace/workspace-session";
 
 export type WorkspaceStore = WorkspaceState & {
   dispatch: (action: WorkspaceAction) => void;
@@ -13,5 +17,16 @@ export type WorkspaceStore = WorkspaceState & {
 export const useWorkspaceStore = create<WorkspaceStore>()((set) => ({
   ...createInitialWorkspaceState(),
   dispatch: (action: WorkspaceAction) =>
-    set((state: WorkspaceStore) => workspaceReducer(state, action)),
+    set((state: WorkspaceStore) => {
+      const next = workspaceReducer(state, action);
+      persistWorkspaceSession(next);
+      return next;
+    }),
 }));
+
+export function restoreWorkspaceSession() {
+  const session = loadWorkspaceSession();
+  if (!session) return false;
+  useWorkspaceStore.setState(session);
+  return true;
+}

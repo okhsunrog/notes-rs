@@ -19,6 +19,7 @@ export enum SplitAxis {
 
 export enum PaneContentKind {
   Home = "home",
+  AllNotes = "all_notes",
   Page = "page",
   Graph = "graph",
   JournalDay = "journal_day",
@@ -45,6 +46,7 @@ export enum DockProjection {
 
 export type PaneContent =
   | { readonly kind: PaneContentKind.Home }
+  | { readonly kind: PaneContentKind.AllNotes }
   | {
       readonly kind: PaneContentKind.Page;
       readonly pageUuid: string;
@@ -144,6 +146,7 @@ export function dispositionFromShiftKey(shiftKey: boolean): OpenDisposition {
 }
 
 export const homeTarget: OpenTarget = { kind: PaneContentKind.Home };
+export const allNotesTarget: OpenTarget = { kind: PaneContentKind.AllNotes };
 
 export function pageTarget(
   pageUuid: string,
@@ -503,6 +506,7 @@ function paneContentEquals(left: PaneContent, right: PaneContent): boolean {
   if (left.kind !== right.kind) return false;
   switch (left.kind) {
     case PaneContentKind.Home:
+    case PaneContentKind.AllNotes:
       return true;
     case PaneContentKind.Page:
       return (

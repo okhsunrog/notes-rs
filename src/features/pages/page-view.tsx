@@ -6,7 +6,7 @@ import {
   FileText,
   ListTree,
   Loader2,
-  MoreHorizontal,
+  Star,
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -23,6 +23,7 @@ import type { MarkdownOpenHandler } from "@/features/markdown";
 import { AttachmentsCard } from "@/features/attachments/attachments-card";
 import { pageDisplayTitle, shiftJournalDate } from "@/features/journal/journal-date";
 import { notifyError } from "@/lib/notify";
+import { cn } from "@/lib/utils";
 import {
   CommandFailure,
   getPage,
@@ -45,12 +46,13 @@ import {
   type OpenDisposition,
   type PaneId,
 } from "@/features/workspace/workspace-model";
+import { usePageNavigationStore } from "./page-navigation-store";
 
 type Props = {
   paneId: PaneId;
   page: Page;
   onSaved: (updated: Page) => void;
-  onClose: () => void;
+  onOpenAllNotes: () => void;
   onDelete: (page: Page) => void | Promise<void>;
   onOpenMarkdownLink: MarkdownOpenHandler;
   onOpenJournalDate: (date: JournalDate, disposition?: OpenDisposition) => void | Promise<void>;
@@ -69,7 +71,7 @@ export function PageView({
   paneId,
   page,
   onSaved,
-  onClose,
+  onOpenAllNotes,
   onDelete,
   onOpenMarkdownLink,
   onOpenJournalDate,
@@ -94,6 +96,8 @@ export function PageView({
   const [bodyFocusRequest, setBodyFocusRequest] = useState(0);
   const [documentAuthoringMode, setDocumentAuthoringMode] = useDocumentAuthoringPreference();
   const authoringAvailability = documentAuthoringAvailability(paneId, writerPaneId);
+  const favorite = usePageNavigationStore((state) => state.favoritePageUuids.includes(page.uuid));
+  const toggleFavoritePage = usePageNavigationStore((state) => state.toggleFavoritePage);
 
   const autosave = useRef(new DebouncedAction()).current;
   const titleInput = useRef<HTMLTextAreaElement>(null);
@@ -293,7 +297,7 @@ export function PageView({
   return (
     <article className="editor-page mx-auto flex min-h-full max-w-[52rem] flex-col px-8 pt-12 pb-24 sm:px-12 lg:px-16">
       <div className="mb-8 flex items-center gap-2 text-[11px] font-medium text-muted-foreground">
-        <button type="button" onClick={onClose} className="transition hover:text-foreground">
+        <button type="button" onClick={onOpenAllNotes} className="transition hover:text-foreground">
           All notes
         </button>
         <span>/</span>
@@ -355,14 +359,20 @@ export function PageView({
         )}
         <div className="mt-2 flex items-center gap-1">
           <SaveIndicator state={saveState} />
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className="rounded-lg text-muted-foreground opacity-0 transition group-hover:opacity-100 focus:opacity-100"
-            aria-label="More note actions"
-          >
-            <MoreHorizontal className="size-4" />
-          </Button>
+          {!journalDate && (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className={cn(
+                "rounded-lg text-muted-foreground opacity-0 transition group-hover:opacity-100 focus:opacity-100",
+                favorite && "text-primary opacity-100",
+              )}
+              aria-label={favorite ? "Remove note from favorites" : "Add note to favorites"}
+              onClick={() => toggleFavoritePage(page.uuid)}
+            >
+              <Star className={cn("size-4", favorite && "fill-current")} />
+            </Button>
+          )}
         </div>
       </div>
 

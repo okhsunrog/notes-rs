@@ -6,6 +6,8 @@ const root = ["backend"] as const;
 export const queryKeys = {
   root,
   pages: [...root, "pages"] as const,
+  pageList: (filter: "notes" | "journals" | "all", limit: number) =>
+    [...root, "pages", filter, limit] as const,
   journals: [...root, "journals"] as const,
   journal: (date: string) => [...root, "journals", date] as const,
   pageRoot: [...root, "page"] as const,

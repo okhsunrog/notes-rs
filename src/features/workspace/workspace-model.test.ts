@@ -8,6 +8,7 @@ import {
   SplitAxis,
   WorkspaceNodeKind,
   adjacentDisposition,
+  allNotesTarget,
   createInitialWorkspaceState,
   getActivePane,
   leafPaneIds,
@@ -26,6 +27,19 @@ describe("window-local workspace model", () => {
     expect(state.tree.kind).toBe(WorkspaceNodeKind.Pane);
     expect(leafPaneIds(state.tree)).toEqual([state.primaryPaneId]);
     expect(validateWorkspaceState(state)).toEqual([]);
+  });
+
+  it("opens the All Notes catalog as a history-aware pane target", () => {
+    const initial = createInitialWorkspaceState();
+    const opened = workspaceReducer(initial, {
+      type: "open_target",
+      target: allNotesTarget,
+      disposition: { kind: OpenDispositionKind.Current },
+    });
+
+    expect(getActivePane(opened).content).toEqual({ kind: PaneContentKind.AllNotes });
+    expect(getActivePane(opened).back).toEqual([{ kind: PaneContentKind.Home }]);
+    expect(validateWorkspaceState(opened)).toEqual([]);
   });
 
   it("detects cyclic trees instead of recursing forever", () => {

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { onBackButtonPress } from "@tauri-apps/api/app";
 import { useTheme } from "next-themes";
 import {
   ArrowLeft,
@@ -14,6 +15,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { WindowControls } from "@/app/window-controls";
+import { useCompactLayout } from "@/app/use-compact-layout";
 import { PALETTES, useAppearance } from "@/app/appearance";
 import { useConfirmation } from "@/app/confirmation";
 import { Button } from "@/components/ui/button";
@@ -23,6 +25,7 @@ import {
   exportData,
   getSyncStatus,
   importData,
+  listPages,
   loadSettings,
   resetSettings,
   restartApp,
@@ -34,6 +37,7 @@ import {
 } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
 import { cn } from "@/lib/utils";
+import { presentSyncStatus } from "@/features/sync/sync-status-presentation";
 import { DataSettingsSections } from "./data-settings-sections";
 import { ServerAiSettingsSection } from "./server-ai-settings-section";
 import { Field, FieldGroup, ModeButton, SettingsSection, ToggleField } from "./settings-controls";
@@ -52,6 +56,7 @@ export function SettingsPage({
   dataAvailable,
   onDataChanged,
 }: Props) {
+  const compact = useCompactLayout();
   const confirm = useConfirmation();
   const { theme, setTheme } = useTheme();
   const { palette, setPalette } = useAppearance();
@@ -63,8 +68,29 @@ export function SettingsPage({
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
+  useEffect(() => {
+    if (!compact || !navigator.userAgent.toLocaleLowerCase().includes("android")) return;
+    let disposed = false;
+    let unlisten: (() => Promise<void>) | undefined;
+    void onBackButtonPress(onBack)
+      .then((listener) => {
+        if (disposed) void listener.unregister();
+        else unlisten = () => listener.unregister();
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      void unlisten?.();
+    };
+  }, [compact, onBack]);
+
   const settingsQuery = useQuery({ queryKey: queryKeys.settings, queryFn: loadSettings });
   const syncQuery = useQuery({ queryKey: queryKeys.syncStatus, queryFn: getSyncStatus });
+  const syncPresentation = syncQuery.data ? presentSyncStatus(syncQuery.data) : null;
+  const startupPagesQuery = useQuery({
+    queryKey: [...queryKeys.pages, "settings-startup"],
+    queryFn: () => listPages({ filter: "notes", limit: 10_000 }),
+  });
 
   useEffect(() => {
     if (settingsQuery.data) setSettings(settingsQuery.data);
@@ -91,7 +117,7 @@ export function SettingsPage({
       onDecorationModeChanged(saved.windowDecorationMode);
       setSecrets({});
       setClearKeys([]);
-      setMessage("Saved. Restart the app to apply server connection changes.");
+      setMessage("Saved. Startup and server connection changes apply on the next app launch.");
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -319,6 +345,66 @@ export function SettingsPage({
         </SettingsSection>
 
         <SettingsSection
+          title="Startup"
+          description="Choose what this device shows when notes-rs opens. Dashboard is the calm default; your notes are never changed by this choice."
+        >
+          <Field label="Open on launch">
+            <select
+              value={settings.startupView}
+              onChange={(event) => {
+                const startupView = event.currentTarget.value as SettingsSnapshot["startupView"];
+                setSettings((current) =>
+                  current
+                    ? {
+                        ...current,
+                        startupView,
+                        startupPageUuid:
+                          startupView === "specific_page"
+                            ? (current.startupPageUuid ?? startupPagesQuery.data?.[0]?.uuid ?? null)
+                            : current.startupPageUuid,
+                      }
+                    : current,
+                );
+                setMessage("");
+              }}
+              className="h-10 w-full rounded-xl border border-border/70 bg-background/70 px-3 text-sm shadow-none"
+            >
+              <option value="dashboard">Dashboard</option>
+              <option value="last_session">Restore last session</option>
+              <option value="today">Today&apos;s journal</option>
+              <option value="specific_page">A specific note</option>
+            </select>
+          </Field>
+          {settings.startupView === "specific_page" && (
+            <Field
+              label="Startup note"
+              hint={
+                startupPagesQuery.data?.length
+                  ? "If this note is deleted, notes-rs safely falls back to Dashboard."
+                  : "Create a note before choosing it as your startup page."
+              }
+            >
+              <select
+                value={settings.startupPageUuid ?? ""}
+                disabled={!startupPagesQuery.data?.length}
+                onChange={(event) => update("startupPageUuid", event.currentTarget.value || null)}
+                className="h-10 w-full rounded-xl border border-border/70 bg-background/70 px-3 text-sm shadow-none disabled:opacity-55"
+              >
+                {!startupPagesQuery.data?.length && <option value="">No notes available</option>}
+                {startupPagesQuery.data?.map((page) => (
+                  <option key={page.uuid} value={page.uuid}>
+                    {page.title ?? "Untitled note"}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            Favorites, recent notes, and the restored session stay on this device.
+          </p>
+        </SettingsSection>
+
+        <SettingsSection
           title="Search"
           description="Control when server AI joins the always-available local full-text search."
         >
@@ -420,23 +506,30 @@ export function SettingsPage({
               <span className="font-medium">Current state</span>
               <span
                 className={cn(
-                  syncQuery.data?.state === "online"
+                  syncPresentation?.tone === "success"
                     ? "text-emerald-600"
-                    : syncQuery.data?.state === "error" || syncQuery.data?.state === "conflict"
+                    : syncPresentation?.tone === "danger"
                       ? "text-destructive"
-                      : "text-muted-foreground",
+                      : syncPresentation?.tone === "warning"
+                        ? "text-amber-600 dark:text-amber-400"
+                        : "text-muted-foreground",
                 )}
               >
-                {(syncQuery.data?.state ?? "disabled").replace(/_/g, " ")}
+                {syncPresentation?.label ?? "Sync off"}
               </span>
             </div>
             {syncQuery.data && (
-              <p className="mt-1 text-muted-foreground">
-                seq {syncQuery.data.lastServerSeq} · {syncQuery.data.pendingOperations} pending
-                {syncQuery.data.message ? ` · ${syncQuery.data.message}` : ""}
-              </p>
+              <div className="mt-1 space-y-1 text-muted-foreground">
+                <p>{syncPresentation?.description}</p>
+                <p>
+                  seq {syncQuery.data.lastServerSeq} · {syncQuery.data.pendingOperations} pending
+                </p>
+                {syncQuery.data.message && (
+                  <p className="break-words text-destructive">{syncQuery.data.message}</p>
+                )}
+              </div>
             )}
-            {syncQuery.data?.state === "conflict" && (
+            {syncPresentation?.canRetry && (
               <Button
                 type="button"
                 variant="outline"

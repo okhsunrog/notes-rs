@@ -510,6 +510,8 @@ export type SecretKey = "SYNC_TOKEN";
 
 export type SettingsSnapshot = {
 	windowDecorationMode: WindowDecorationMode,
+	startupView: StartupView,
+	startupPageUuid: string | null,
 	syncServerUrl: string | null,
 	aiSearchEnabled: boolean,
 	aiSearchTrigger: AiSearchTrigger,
@@ -521,6 +523,8 @@ export type SettingsSnapshot = {
 
 export type SettingsUpdate = {
 	windowDecorationMode: WindowDecorationMode,
+	startupView: StartupView,
+	startupPageUuid: string | null,
 	syncServerUrl: string | null,
 	aiSearchEnabled: boolean,
 	aiSearchTrigger: AiSearchTrigger,
@@ -551,6 +555,8 @@ export type StartupErrorEvent = {
 export type StartupReadyEvent = null;
 
 export type StartupStatus = { state: "starting"; message: string } | { state: "ready" } | { state: "error"; message: string };
+
+export type StartupView = "dashboard" | "last_session" | "today" | "specific_page";
 
 export type SyncConnectionState = "disabled" | "connecting" | "syncing" | "online" | "offline" | "conflict" | "error";
 

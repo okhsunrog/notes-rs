@@ -354,8 +354,7 @@
   #root {
     box-sizing: border-box;
     overflow: hidden;
-    padding: var(--safe-area-inset-top) var(--safe-area-inset-right) var(--safe-area-inset-bottom)
-      var(--safe-area-inset-left);
+    padding: var(--safe-area-inset-top) var(--safe-area-inset-right) 0 var(--safe-area-inset-left);
   }
   body {
     @apply text-foreground;
@@ -372,12 +371,11 @@
   }
 }
 
-/* Android WebView does not populate env(safe-area-inset-*). Native insets are
-   copied into the variables above. These masks keep scrolling surfaces from
-   showing through transparent edge-to-edge system bars. Dialog portals stay
-   above them at z-50. */
-html::before,
-html::after {
+/* Android WebView does not populate env(safe-area-inset-*), so native insets
+   are copied into the variables above. The top mask protects the draggable
+   header. The bottom stays transparent: application surfaces extend beneath
+   the gesture/navigation area and individual screens pad interactive content. */
+html::before {
   position: fixed;
   z-index: 40;
   right: 0;
@@ -396,12 +394,6 @@ html::before {
   height: var(--safe-area-inset-top);
 }
 
-html::after {
-  bottom: 0;
-  background-position: bottom left;
-  height: var(--safe-area-inset-bottom);
-}
-
 [data-slot="dialog-content"] {
   max-height: calc(
     100dvh - 2rem - var(--safe-area-inset-top) - var(--safe-area-inset-bottom)
@@ -414,6 +406,10 @@ html::after {
     70vh,
     calc(100dvh - 2rem - var(--safe-area-inset-top) - var(--safe-area-inset-bottom))
   ) !important;
+}
+
+[data-slot="dialog-content"].search-dialog.search-dialog-compact {
+  max-height: calc(100dvh - var(--safe-area-inset-top)) !important;
 }
 
 @layer components {

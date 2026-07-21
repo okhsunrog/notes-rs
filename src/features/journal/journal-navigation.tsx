@@ -1,7 +1,7 @@
 import { CalendarDays, ChevronLeft, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { JournalDate } from "@/lib/api";
-import { shiftJournalDate, todayJournalDate } from "./journal-date";
+import { formatJournalDate, shiftJournalDate, todayJournalDate } from "./journal-date";
 import {
   dispositionFromShiftKey,
   type OpenDisposition,
@@ -72,7 +72,9 @@ export function JournalNavigation({ activeDate, busy, onOpenDate }: Props) {
             <CalendarDays className="size-3.5" />
           </span>
           <span className="text-xs font-medium">Today</span>
-          <span className="ml-auto text-[10px] tabular-nums text-muted-foreground">{today}</span>
+          <span className="ml-auto text-[10px] text-muted-foreground">
+            {formatJournalDate(today, { month: "short", day: "numeric" })}
+          </span>
         </Button>
         <label
           aria-disabled={busy}

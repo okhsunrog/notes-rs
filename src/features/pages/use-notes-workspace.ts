@@ -17,6 +17,7 @@ import {
   getJournal,
   getPage,
   getPageByTitle,
+  loadSettings,
   redo,
   undo,
   type Content,
@@ -28,6 +29,7 @@ import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify";
 import { useConfirmation } from "@/app/confirmation";
 import {
   PaneContentKind,
+  allNotesTarget,
   adjacentDisposition,
   currentDisposition,
   getActivePane,
@@ -39,7 +41,9 @@ import {
 } from "@/features/workspace/workspace-model";
 import type { WorkspaceController } from "@/features/workspace/workspace-controller";
 import { useWorkspaceStore } from "@/features/workspace/workspace-store";
+import { restoreWorkspaceSession } from "@/features/workspace/workspace-store";
 import { usePageSessionRegistry } from "./page-session";
+import { usePageNavigationStore } from "./page-navigation-store";
 
 export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
   const confirm = useConfirmation();
@@ -47,6 +51,8 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
   const queryClient = useQueryClient();
   const activePane = useWorkspaceStore(getActivePane);
   const dispatchWorkspace = useWorkspaceStore((state) => state.dispatch);
+  const recordOpenedPage = usePageNavigationStore((state) => state.recordOpenedPage);
+  const removePageFromNavigation = usePageNavigationStore((state) => state.removePage);
   const [newNote, setNewNote] = useState<{
     pageUuid: string;
     blockUuid: string | null;
@@ -57,6 +63,7 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
   const creatingNoteRef = useRef(false);
   const journalBusyRef = useRef(false);
   const navigationEpochRef = useRef(0);
+  const startupAppliedRef = useRef(false);
   const activeContent = activePane.content;
   const activePageUuid =
     activeContent.kind === PaneContentKind.Page
@@ -99,6 +106,12 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
     dispatchWorkspace,
     pageSessions,
   ]);
+
+  useEffect(() => {
+    if (activeContent.kind === PaneContentKind.Page && activePage?.kind.kind === "note") {
+      recordOpenedPage(activePage.uuid);
+    }
+  }, [activeContent.kind, activePage, recordOpenedPage]);
 
   const createNewNote = useCallback(
     async (title?: string, disposition: OpenDisposition = currentDisposition) => {
@@ -199,6 +212,45 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
     },
     [openTarget, queryClient, showEditor],
   );
+
+  useEffect(() => {
+    if (!ready || startupAppliedRef.current) return;
+    startupAppliedRef.current = true;
+    void (async () => {
+      try {
+        const settings = await queryClient.fetchQuery({
+          queryKey: queryKeys.settings,
+          queryFn: loadSettings,
+        });
+        switch (settings.startupView) {
+          case "dashboard":
+            return;
+          case "last_session":
+            if (restoreWorkspaceSession()) showEditor();
+            return;
+          case "today":
+            await openJournal(todayJournalDate());
+            return;
+          case "specific_page": {
+            if (!settings.startupPageUuid) return;
+            const page = await queryClient.fetchQuery({
+              queryKey: queryKeys.page(settings.startupPageUuid),
+              queryFn: () => getPage(settings.startupPageUuid as string),
+            });
+            if (!page) {
+              notifyInfo("The configured startup note no longer exists. Opened Dashboard instead.");
+              return;
+            }
+            queryClient.setQueryData(queryKeys.page(page.uuid), page);
+            openTarget(pageTarget(page.uuid), currentDisposition);
+            showEditor();
+          }
+        }
+      } catch (error) {
+        notifyError("startup", error);
+      }
+    })();
+  }, [openJournal, openTarget, queryClient, ready, showEditor]);
 
   const captureJournal = useCallback(
     async (date: JournalDate, markdown: string, openAfterCapture = false) => {
@@ -360,6 +412,7 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
           if (navigationEpoch !== navigationEpochRef.current) return;
           dispatchWorkspace({ type: "forget_page", pageUuid: page.uuid });
           pageSessions.discardPage(page.uuid);
+          removePageFromNavigation(page.uuid);
           queryClient.removeQueries({ queryKey: queryKeys.page(page.uuid), exact: true });
           notifySuccess("Page deleted; a recovery backup was created.");
         }
@@ -367,7 +420,7 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
         notifyError("delete", error);
       }
     },
-    [confirm, dispatchWorkspace, pageSessions, queryClient],
+    [confirm, dispatchWorkspace, pageSessions, queryClient, removePageFromNavigation],
   );
 
   const selectPage = useCallback(
@@ -387,9 +440,25 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
     void queryClient.invalidateQueries({ queryKey: queryKeys.root });
   }, [dispatchWorkspace, queryClient]);
 
+  const closePage = useCallback(() => {
+    navigationEpochRef.current += 1;
+    openTarget(homeTarget, currentDisposition);
+  }, [openTarget]);
+
+  const openAllNotes = useCallback(
+    (disposition: OpenDisposition = currentDisposition) => {
+      navigationEpochRef.current += 1;
+      setNewNote(null);
+      openTarget(allNotesTarget, disposition);
+      showEditor();
+    },
+    [openTarget, showEditor],
+  );
+
   const controller = useMemo<WorkspaceController>(
     () => ({
       createNewNote,
+      openAllNotes,
       openContent,
       openJournal,
       captureJournal,
@@ -401,6 +470,7 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
       applyUpdated,
       captureJournal,
       createNewNote,
+      openAllNotes,
       openContent,
       openJournal,
       openMarkdownLink,
@@ -415,16 +485,14 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
     applyUpdated,
     captureJournal,
     controller,
-    closePage: () => {
-      navigationEpochRef.current += 1;
-      openTarget(homeTarget, currentDisposition);
-    },
+    closePage,
     createNewNote,
     creatingNote,
     history: historyQuery.data ?? { undoCount: 0, redoCount: 0 },
     moveHistory,
     journalBusy,
     newNote,
+    openAllNotes,
     openMarkdownLink,
     openJournal,
     openContent,

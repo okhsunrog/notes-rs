@@ -13,12 +13,12 @@ type Props = {
   date: JournalDate;
   busy: boolean;
   onCapture: (date: JournalDate, markdown: string, openAfterCapture?: boolean) => Promise<boolean>;
-  onClose: () => void;
+  onOpenAllNotes: () => void;
   onOpenDate: (date: JournalDate, disposition?: OpenDisposition) => void | Promise<void>;
 };
 
 /** A read-only projection for a date that does not exist in durable source state yet. */
-export function EmptyJournalView({ date, busy, onCapture, onClose, onOpenDate }: Props) {
+export function EmptyJournalView({ date, busy, onCapture, onOpenAllNotes, onOpenDate }: Props) {
   const [markdown, setMarkdown] = useState("");
 
   async function submit() {
@@ -33,7 +33,7 @@ export function EmptyJournalView({ date, busy, onCapture, onClose, onOpenDate }:
       className="editor-page mx-auto flex min-h-full max-w-[52rem] flex-col px-5 pt-8 pb-24 sm:px-12 sm:pt-12 lg:px-16"
     >
       <div className="mb-8 flex items-center gap-2 text-[11px] font-medium text-muted-foreground">
-        <button type="button" onClick={onClose} className="transition hover:text-foreground">
+        <button type="button" onClick={onOpenAllNotes} className="transition hover:text-foreground">
           All notes
         </button>
         <span>/</span>

@@ -7,6 +7,8 @@ export function toSettingsUpdate(
 ): SettingsUpdate {
   return {
     windowDecorationMode: settings.windowDecorationMode,
+    startupView: settings.startupView,
+    startupPageUuid: settings.startupPageUuid,
     syncServerUrl: settings.syncServerUrl,
     aiSearchEnabled: settings.aiSearchEnabled,
     aiSearchTrigger: settings.aiSearchTrigger,

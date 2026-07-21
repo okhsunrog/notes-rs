@@ -6,6 +6,8 @@ describe("settings update mapping", () => {
   it("keeps the persisted settings contract in one place", () => {
     const snapshot = {
       windowDecorationMode: "native",
+      startupView: "specific_page",
+      startupPageUuid: "019cfa51-8d73-7b53-b090-cdb945bb1b4d",
       syncServerUrl: "https://notes.example.test",
       aiSearchEnabled: true,
       aiSearchTrigger: "enter_only",
@@ -22,6 +24,8 @@ describe("settings update mapping", () => {
     expect(update.apiKeys).toEqual({ SYNC_TOKEN: "secret" });
     expect(update.clearKeys).toEqual(["SYNC_TOKEN"]);
     expect(update.syncServerUrl).toBe(snapshot.syncServerUrl);
+    expect(update.startupView).toBe("specific_page");
+    expect(update.startupPageUuid).toBe(snapshot.startupPageUuid);
     expect(update.aiSearchEnabled).toBe(true);
     expect(update.aiSearchTrigger).toBe("enter_only");
     expect(update.aiSearchRerank).toBe(false);

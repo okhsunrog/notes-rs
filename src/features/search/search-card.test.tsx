@@ -72,6 +72,35 @@ afterEach(() => {
 });
 
 describe("SearchCard page-list refreshes", () => {
+  it("uses full-text search in the sidebar and renders matching block content", async () => {
+    const containingPage = page("page-1", "Math notes");
+    const block: SearchHit = {
+      content: {
+        kind: "block",
+        record: {
+          uuid: "block-1",
+          pageUuid: containingPage.uuid,
+          parentUuid: null,
+          orderKey: "a0",
+          markdown: "Теорема Пифагора",
+          style: { kind: "bullet" },
+          markdownRevision: "0000000000000000-00000000-00000000000000000000000000000001",
+          createdAt: 0,
+          updatedAt: 0,
+        },
+      },
+      score: 1,
+      snippet: "<mark>Теорема</mark> Пифагора",
+    };
+    api.searchResults = [block];
+    const { container } = await renderSearchCard([containingPage], "sidebar");
+
+    await enterQuery(container, "Теорема");
+
+    expect(api.search).toHaveBeenCalledWith("fts", "Теорема", 20);
+    expect(container.textContent).toContain("Теорема Пифагора");
+  });
+
   it("re-runs active local search after a page rename", async () => {
     const original = page("page-1", "Project Alpha");
     const renamed = page("page-1", "Project Beta");
@@ -83,7 +112,7 @@ describe("SearchCard page-list refreshes", () => {
 
     api.searchResults = [pageHit(renamed)];
     await act(async () => {
-      queryClient.setQueryData(queryKeys.pages, [renamed]);
+      queryClient.setQueryData(queryKeys.pageList("notes", 10_000), [renamed]);
       await vi.advanceTimersByTimeAsync(0);
       await Promise.resolve();
     });
@@ -103,7 +132,7 @@ describe("SearchCard page-list refreshes", () => {
 
     api.searchResults = [];
     await act(async () => {
-      queryClient.setQueryData(queryKeys.pages, []);
+      queryClient.setQueryData(queryKeys.pageList("notes", 10_000), []);
       await vi.advanceTimersByTimeAsync(0);
       await Promise.resolve();
     });
@@ -190,7 +219,7 @@ describe("SearchCard page-list refreshes", () => {
     await pressArrowDown(container);
     localResults = [pageHit(renamed), pageHit(beta)];
     await act(async () => {
-      queryClient.setQueryData(queryKeys.pages, [renamed, beta]);
+      queryClient.setQueryData(queryKeys.pageList("notes", 10_000), [renamed, beta]);
       await vi.advanceTimersByTimeAsync(0);
     });
     expect(container.textContent).toContain("Alpha renamed");
@@ -237,11 +266,11 @@ describe("SearchCard page-list refreshes", () => {
   });
 });
 
-async function renderSearchCard(initialPages: Page[]) {
+async function renderSearchCard(initialPages: Page[], variant: "dialog" | "sidebar" = "dialog") {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
   });
-  queryClient.setQueryData(queryKeys.pages, initialPages);
+  queryClient.setQueryData(queryKeys.pageList("notes", 10_000), initialPages);
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -250,7 +279,7 @@ async function renderSearchCard(initialPages: Page[]) {
     root.render(
       <QueryClientProvider client={queryClient}>
         <WorkspaceControllerProvider controller={controller}>
-          <SearchCard variant="dialog" onOpenContent={() => undefined} />
+          <SearchCard variant={variant} onOpenContent={() => undefined} />
         </WorkspaceControllerProvider>
       </QueryClientProvider>,
     );
@@ -311,6 +340,7 @@ function pageHit(record: Page): SearchHit {
 
 const controller: WorkspaceController = {
   createNewNote: api.createNewNote,
+  openAllNotes: () => undefined,
   openContent: () => undefined,
   openJournal: () => undefined,
   captureJournal: async () => true,

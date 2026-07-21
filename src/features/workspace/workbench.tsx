@@ -3,11 +3,13 @@ import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, ArrowRight, Columns2, Loader2, X } from "lucide-react";
 import { Group, Panel, Separator, usePanelRef } from "react-resizable-panels";
 import { useCompactLayout } from "@/app/use-compact-layout";
+import { useCompactBackToHome } from "@/app/compact-navigation";
 import { Button } from "@/components/ui/button";
 import { EmptyJournalView } from "@/features/journal/empty-journal-view";
 import { GraphWorkspace } from "@/features/graph/knowledge-panel";
 import { HomeView } from "@/features/home/home-view";
 import { PagePresentation } from "@/features/pages/page-presentation";
+import { AllNotesView } from "@/features/pages/all-notes-view";
 import { PageView } from "@/features/pages/page-view";
 import { usePageSessionRegistry } from "@/features/pages/page-session";
 import { getPage } from "@/lib/api";
@@ -189,6 +191,7 @@ function PaneFrame({
   const primary = useWorkspaceStore((state) => state.primaryPaneId === paneId);
   const compactVisible = useWorkspaceStore((state) => state.compactVisiblePaneId === paneId);
   const dispatch = useWorkspaceStore((state) => state.dispatch);
+  const backToHome = useCompactBackToHome();
   if (!pane) return null;
 
   return (
@@ -207,43 +210,64 @@ function PaneFrame({
         if (!active) dispatch({ type: "focus_pane", paneId });
       }}
     >
-      <div className="flex h-9 shrink-0 items-center gap-1 border-b border-border/50 bg-card/55 px-2">
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-xs"
-          disabled={pane.back.length === 0}
-          aria-label="Go back in pane"
-          onClick={() => dispatch({ type: "go_back", paneId })}
-        >
-          <ArrowLeft className="size-3.5" />
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-xs"
-          disabled={pane.forward.length === 0}
-          aria-label="Go forward in pane"
-          onClick={() => dispatch({ type: "go_forward", paneId })}
-        >
-          <ArrowRight className="size-3.5" />
-        </Button>
-        <span className="ml-1 truncate text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
-          {paneLabel(pane.content, primary)}
-        </span>
-        {!primary && (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-xs"
-            className="ml-auto"
-            aria-label="Close adjacent pane"
-            onClick={() => dispatch({ type: "close_pane", paneId })}
-          >
-            <X className="size-3.5" />
-          </Button>
-        )}
-      </div>
+      {(!compact || pane.content.kind !== PaneContentKind.Home) && (
+        <div className="flex h-9 shrink-0 items-center gap-1 border-b border-border/50 bg-card/55 px-2">
+          {compact && backToHome ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              aria-label="Go back"
+              onClick={() => {
+                if (pane.back.length > 0) dispatch({ type: "go_back", paneId });
+                else backToHome();
+              }}
+              className="gap-1 rounded-lg px-1.5"
+            >
+              <ArrowLeft className="size-3.5" />
+              Back
+            </Button>
+          ) : (
+            <>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                disabled={pane.back.length === 0}
+                aria-label="Go back in pane"
+                onClick={() => dispatch({ type: "go_back", paneId })}
+              >
+                <ArrowLeft className="size-3.5" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                disabled={pane.forward.length === 0}
+                aria-label="Go forward in pane"
+                onClick={() => dispatch({ type: "go_forward", paneId })}
+              >
+                <ArrowRight className="size-3.5" />
+              </Button>
+            </>
+          )}
+          <span className="ml-1 truncate text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
+            {paneLabel(pane.content, primary)}
+          </span>
+          {!primary && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              className="ml-auto"
+              aria-label="Close adjacent pane"
+              onClick={() => dispatch({ type: "close_pane", paneId })}
+            >
+              <X className="size-3.5" />
+            </Button>
+          )}
+        </div>
+      )}
       <div className="min-h-0 flex-1 overflow-y-auto">
         <PaneSurface paneId={paneId} content={pane.content} {...props} />
       </div>
@@ -257,7 +281,6 @@ function PaneSurface({
   ...props
 }: WorkbenchProps & { paneId: PaneId; content: PaneContent }) {
   const controller = useWorkspaceController();
-  const dispatch = useWorkspaceStore((state) => state.dispatch);
   switch (content.kind) {
     case PaneContentKind.Home:
       return (
@@ -265,10 +288,14 @@ function PaneSurface({
           creating={props.creatingNote}
           journalBusy={props.journalBusy}
           onCreate={controller.createNewNote}
+          onCapture={controller.captureJournal}
           onOpenJournal={controller.openJournal}
           onOpenContent={controller.openContent}
+          onOpenAllNotes={() => controller.openAllNotes(currentDisposition)}
         />
       );
+    case PaneContentKind.AllNotes:
+      return <AllNotesView />;
     case PaneContentKind.Page:
       return <PagePane paneId={paneId} content={content} {...props} />;
     case PaneContentKind.Graph:
@@ -279,7 +306,7 @@ function PaneSurface({
           date={content.date}
           busy={props.journalBusy}
           onCapture={controller.captureJournal}
-          onClose={() => dispatch({ type: "close_pane", paneId })}
+          onOpenAllNotes={() => controller.openAllNotes(currentDisposition)}
           onOpenDate={(date, disposition) =>
             controller.openJournal(date, disposition ?? currentDisposition)
           }
@@ -338,7 +365,7 @@ function PagePane({
         dispatch({ type: "set_page_presentation", paneId, presentation })
       }
       onSaved={controller.onSaved}
-      onClose={() => dispatch({ type: "close_pane", paneId })}
+      onOpenAllNotes={() => controller.openAllNotes(currentDisposition)}
       onDelete={controller.onDelete}
       onOpenMarkdownLink={controller.openMarkdownLink}
       onOpenJournalDate={(date, disposition) =>
@@ -392,7 +419,9 @@ function paneLabel(content: PaneContent, primary: boolean) {
   const location = primary ? "Primary" : "Beside";
   switch (content.kind) {
     case PaneContentKind.Home:
-      return `${location} · Home`;
+      return `${location} · Dashboard`;
+    case PaneContentKind.AllNotes:
+      return `${location} · All notes`;
     case PaneContentKind.Page:
       return `${location} · ${content.presentation === PagePresentation.Reading ? "Reading" : "Page"}`;
     case PaneContentKind.Graph:

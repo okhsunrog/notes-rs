@@ -192,15 +192,39 @@ pub fn spawn_worker(
                     None,
                 )
                 .await;
-                let result = synchronize_session(
-                    &app,
-                    &connection,
-                    &transport,
-                    &status,
-                    &server_url,
-                    &blob_store,
-                )
-                .await;
+                let result = tokio::select! {
+                    result = synchronize_session(
+                        &app,
+                        &connection,
+                        &transport,
+                        &status,
+                        &server_url,
+                        &blob_store,
+                    ) => result,
+                    changed = retries.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                        credentials = match crate::settings::runtime(&app)
+                            .and_then(|settings| settings.sync_credentials())
+                        {
+                            Ok(credentials) => credentials,
+                            Err(error) => {
+                                set_connection_state(
+                                    &app,
+                                    &status,
+                                    &connection,
+                                    &server_url,
+                                    SyncConnectionState::Error,
+                                    Some(error.to_string()),
+                                )
+                                .await;
+                                return;
+                            }
+                        };
+                        continue 'configuration;
+                    }
+                };
                 let message = result
                     .as_ref()
                     .err()
@@ -253,7 +277,26 @@ pub fn spawn_worker(
                     Some(message),
                 )
                 .await;
-                tokio::time::sleep(delay).await;
+                if wait_for_retry_during_backoff(&mut retries, delay).await {
+                    credentials = match crate::settings::runtime(&app)
+                        .and_then(|settings| settings.sync_credentials())
+                    {
+                        Ok(credentials) => credentials,
+                        Err(error) => {
+                            set_connection_state(
+                                &app,
+                                &status,
+                                &connection,
+                                &server_url,
+                                SyncConnectionState::Error,
+                                Some(error.to_string()),
+                            )
+                            .await;
+                            return;
+                        }
+                    };
+                    continue 'configuration;
+                }
                 delay = (delay * 2).min(Duration::from_secs(30));
             }
         }
@@ -280,6 +323,16 @@ async fn wait_for_retry(retries: &mut watch::Receiver<u64>, generation: u64) -> 
         }
     }
     true
+}
+
+async fn wait_for_retry_during_backoff(
+    retries: &mut watch::Receiver<u64>,
+    delay: Duration,
+) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => false,
+        changed = retries.changed() => changed.is_ok(),
+    }
 }
 
 async fn synchronize_session(
@@ -346,6 +399,22 @@ async fn synchronize_session(
             _ = drain.tick() => {
                 let pending = notes_core::pending_outbox(connection, SYNC_BATCH_SIZE).await?;
                 if !pending.is_empty() {
+                    if status
+                        .read()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .state
+                        != SyncConnectionState::Syncing
+                    {
+                        set_connection_state(
+                            app,
+                            status,
+                            connection,
+                            server_url,
+                            SyncConnectionState::Syncing,
+                            None,
+                        )
+                        .await;
+                    }
                     upload_operation_blobs(transport, blob_store, &pending).await?;
                     let message = serde_json::to_string(&ClientMessage::Push { ops: pending })?;
                     socket.send(Message::Text(message.into())).await?;
@@ -741,6 +810,29 @@ mod tests {
                 .await
                 .expect("retry generation resumes the parked loop")
                 .expect("parked task completes")
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_retry_interrupts_reconnect_backoff() {
+        let runtime = SyncRuntime::disabled();
+        let mut retries = runtime.subscribe_retries();
+        let mut backoff = tokio::spawn(async move {
+            wait_for_retry_during_backoff(&mut retries, Duration::from_secs(30)).await
+        });
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut backoff)
+                .await
+                .is_err(),
+            "backoff should wait without a retry request",
+        );
+        runtime.request_retry();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), backoff)
+                .await
+                .expect("retry interrupts backoff")
+                .expect("backoff task completes")
         );
     }
 

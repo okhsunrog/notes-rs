@@ -21,4 +21,19 @@ describe("RecentJournals", () => {
     expect(html).toContain('disabled=""');
     expect(html).toContain("17.07");
   });
+
+  it("fits recent days into the available width without a scrollbar", () => {
+    const pages = Array.from({ length: 7 }, (_, index) => ({
+      ...journal,
+      uuid: `019f0000-0000-7000-8000-00000000000${index}`,
+      kind: { kind: "journal" as const, date: `2026-07-${String(17 - index).padStart(2, "0")}` },
+    }));
+    const html = renderToStaticMarkup(
+      <RecentJournals pages={pages} activeUuid={null} busy={false} onOpen={() => undefined} />,
+    );
+
+    expect(html).not.toContain("overflow-x-auto");
+    expect(html.match(/flex-1/g)).toHaveLength(7);
+    expect(html.match(/aria-label="Open journal /g)).toHaveLength(7);
+  });
 });

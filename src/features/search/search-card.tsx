@@ -1,7 +1,17 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueries, useQuery } from "@tanstack/react-query";
-import { CalendarDays, FilePlus2, FileText, Loader2, Search, TextQuote } from "lucide-react";
+import {
+  ArrowLeft,
+  CalendarDays,
+  FilePlus2,
+  FileText,
+  Loader2,
+  Search,
+  TextQuote,
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useCompactLayout } from "@/app/use-compact-layout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { pageDisplayTitle, todayJournalDate } from "@/features/journal/journal-date";
 import { useWorkspaceController } from "@/features/workspace/workspace-controller";
@@ -41,12 +51,11 @@ import {
 
 const LOCAL_DEBOUNCE_MS = 150;
 const SERVER_DEBOUNCE_MS = 400;
-const SERVER_TIMEOUT_MS = 10_000;
 const RECENT_PAGE_LIMIT = 6;
 const RECENT_JOURNAL_LIMIT = 4;
 
 type Props = {
-  variant?: "card" | "inline" | "dialog";
+  variant?: "card" | "inline" | "dialog" | "dashboard" | "sidebar";
   onOpenContent: (content: Content, disposition?: OpenDisposition) => void | Promise<void>;
   onDismiss?: () => void;
 };
@@ -82,6 +91,7 @@ type FrozenSearchSnapshot = {
 };
 
 export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props) {
+  const compact = useCompactLayout();
   const controller = useWorkspaceController();
   const [query, setQuery] = useState("");
   const [localHits, setLocalHits] = useState<SearchHit[]>([]);
@@ -101,8 +111,8 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
   const serverEpoch = useRef(0);
   const settingsQuery = useQuery({ queryKey: queryKeys.settings, queryFn: loadSettings });
   const pagesQuery = useQuery({
-    queryKey: queryKeys.pages,
-    queryFn: () => listPages({ filter: "notes" }),
+    queryKey: queryKeys.pageList("notes", 10_000),
+    queryFn: () => listPages({ filter: "notes", limit: 10_000 }),
   });
   const journalsQuery = useQuery({
     queryKey: queryKeys.journals,
@@ -141,7 +151,9 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
 
   const runServer = useCallback(async (value: string, epoch: number, rerank: boolean) => {
     try {
-      const result = await withTimeout(search("semantic", value, 20, rerank), SERVER_TIMEOUT_MS);
+      // The shared Rust transport owns the request timeout. A shorter Promise timeout here cannot
+      // cancel the IPC request and used to discard successful semantic responses that arrived late.
+      const result = await search("semantic", value, 20, rerank);
       if (epoch !== serverEpoch.current) return;
       setServerHits(result);
       setServerState("success");
@@ -435,7 +447,24 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
         variant === "dialog" && "border-b border-border/60 px-4",
       )}
     >
-      <Search className="pointer-events-none absolute left-3 size-4 text-muted-foreground" />
+      {variant === "dialog" && compact && onDismiss && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          aria-label="Close search"
+          onClick={onDismiss}
+          className="mr-1 shrink-0 rounded-xl"
+        >
+          <ArrowLeft className="size-4" />
+        </Button>
+      )}
+      <Search
+        className={cn(
+          "pointer-events-none absolute left-3 size-4 text-muted-foreground",
+          variant === "dialog" && (compact ? "left-14" : "left-3"),
+        )}
+      />
       <Input
         autoFocus={variant === "dialog"}
         role="combobox"
@@ -450,7 +479,9 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
         className={cn(
           "pr-16 pl-9",
           variant === "dialog" &&
-            "h-14 rounded-none border-0 bg-transparent px-8 text-base shadow-none focus-visible:ring-0 dark:bg-transparent",
+            "h-14 rounded-none border-0 bg-transparent pr-8 pl-8 text-base shadow-none focus-visible:ring-0 dark:bg-transparent",
+          variant === "sidebar" &&
+            "h-9 rounded-xl border-transparent bg-sidebar-accent shadow-none focus-visible:border-primary/30 focus-visible:ring-primary/15",
         )}
       />
       {serverState === "pending" && (
@@ -473,7 +504,10 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
       role="listbox"
       className={cn(
         "space-y-1",
-        variant === "dialog" && "max-h-[min(60vh,32rem)] overflow-y-auto p-2",
+        variant === "dialog" &&
+          (compact
+            ? "min-h-0 flex-1 overflow-y-auto p-2"
+            : "max-h-[min(60vh,32rem)] overflow-y-auto p-2"),
       )}
     >
       {!queryValue && <SectionLabel>Recent</SectionLabel>}
@@ -503,13 +537,46 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
 
   if (variant === "dialog") {
     return (
-      <div className="overflow-hidden rounded-2xl">
+      <div
+        className={cn("overflow-hidden", compact ? "flex h-full min-h-0 flex-col" : "rounded-2xl")}
+      >
         {input}
         {resultList}
-        <div className="flex items-center justify-between border-t border-border/60 px-4 py-2 text-[11px] text-muted-foreground">
+        <div
+          className={cn(
+            "flex items-center justify-between border-t border-border/60 px-4 text-[11px] text-muted-foreground",
+            compact ? "pt-2 pb-[calc(0.5rem+var(--safe-area-inset-bottom))]" : "py-2",
+          )}
+        >
           <span>{displayedHits.length} results</span>
-          <span>↑↓ · ⏎ open · ⇧⏎ open beside · esc</span>
+          {!compact && <span>↑↓ · ⏎ open · ⇧⏎ open beside · esc</span>}
         </div>
+      </div>
+    );
+  }
+
+  if (variant === "dashboard") {
+    return (
+      <div>
+        {input}
+        {queryValue && (
+          <div className="mt-2 max-h-80 overflow-y-auto rounded-xl bg-background/35 p-1.5">
+            {resultList}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (variant === "sidebar") {
+    return (
+      <div className="min-h-0">
+        {input}
+        {queryValue && (
+          <div className="mt-2 max-h-[min(50dvh,28rem)] overflow-y-auto rounded-xl bg-background/35 p-1">
+            {resultList}
+          </div>
+        )}
       </div>
     );
   }
@@ -664,18 +731,4 @@ function ResultSnippet({ hit }: { hit: SearchHit }) {
       })}
     </span>
   );
-}
-
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<T>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("search timed out")), timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
 }

@@ -58,6 +58,16 @@ pub enum AiSearchTrigger {
     EnterOnly,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum StartupView {
+    #[default]
+    Dashboard,
+    LastSession,
+    Today,
+    SpecificPage,
+}
+
 const fn default_true() -> bool {
     true
 }
@@ -74,6 +84,8 @@ pub enum SecretKey {
 #[serde(rename_all = "camelCase")]
 pub struct SettingsSnapshot {
     pub window_decoration_mode: WindowDecorationMode,
+    pub startup_view: StartupView,
+    pub startup_page_uuid: Option<uuid::Uuid>,
     pub sync_server_url: Option<url::Url>,
     pub ai_search_enabled: bool,
     pub ai_search_trigger: AiSearchTrigger,
@@ -87,6 +99,8 @@ pub struct SettingsSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct SettingsUpdate {
     pub window_decoration_mode: WindowDecorationMode,
+    pub startup_view: StartupView,
+    pub startup_page_uuid: Option<uuid::Uuid>,
     pub sync_server_url: Option<url::Url>,
     pub ai_search_enabled: bool,
     pub ai_search_trigger: AiSearchTrigger,
@@ -103,6 +117,10 @@ pub struct SettingsUpdate {
 struct StoredSettings {
     version: u32,
     window_decoration_mode: WindowDecorationMode,
+    #[serde(default)]
+    startup_view: StartupView,
+    #[serde(default)]
+    startup_page_uuid: Option<uuid::Uuid>,
     sync_server_url: Option<url::Url>,
     #[serde(default = "default_true")]
     ai_search_enabled: bool,
@@ -120,6 +138,8 @@ impl Default for StoredSettings {
         Self {
             version: SETTINGS_VERSION,
             window_decoration_mode: WindowDecorationMode::Native,
+            startup_view: StartupView::Dashboard,
+            startup_page_uuid: None,
             sync_server_url: None,
             ai_search_enabled: true,
             ai_search_trigger: AiSearchTrigger::AsYouType,
@@ -180,6 +200,8 @@ fn snapshot(stored: StoredSettings, path: PathBuf) -> Result<SettingsSnapshot> {
         .collect();
     Ok(SettingsSnapshot {
         window_decoration_mode: stored.window_decoration_mode,
+        startup_view: stored.startup_view,
+        startup_page_uuid: stored.startup_page_uuid,
         sync_server_url: stored.sync_server_url,
         ai_search_enabled: stored.ai_search_enabled,
         ai_search_trigger: stored.ai_search_trigger,
@@ -194,6 +216,8 @@ pub fn save(app: &AppHandle, update: SettingsUpdate) -> Result<SettingsSnapshot>
     validate_update(&update)?;
     let mut stored = load_stored(app)?;
     stored.window_decoration_mode = update.window_decoration_mode;
+    stored.startup_view = update.startup_view;
+    stored.startup_page_uuid = update.startup_page_uuid;
     stored.sync_server_url = update.sync_server_url;
     stored.ai_search_enabled = update.ai_search_enabled;
     stored.ai_search_trigger = update.ai_search_trigger;
@@ -248,6 +272,7 @@ fn validate_update(update: &SettingsUpdate) -> Result<()> {
     if let Some(server_url) = &update.sync_server_url {
         validate_http_url(server_url)?;
     }
+    validate_startup(update.startup_view, update.startup_page_uuid)?;
     Ok(())
 }
 
@@ -267,6 +292,14 @@ fn validate_stored(stored: &StoredSettings) -> Result<()> {
         {
             bail!("a sync token is required when a sync server is configured");
         }
+    }
+    validate_startup(stored.startup_view, stored.startup_page_uuid)?;
+    Ok(())
+}
+
+fn validate_startup(view: StartupView, page_uuid: Option<uuid::Uuid>) -> Result<()> {
+    if view == StartupView::SpecificPage && page_uuid.is_none() {
+        bail!("a startup page is required when startup view is specific_page");
     }
     Ok(())
 }
@@ -338,6 +371,8 @@ mod tests {
                 "aiSearchTrigger",
                 "searchDebugSources",
                 "secrets",
+                "startupPageUuid",
+                "startupView",
                 "syncServerUrl",
                 "version",
                 "windowDecorationMode",
@@ -358,6 +393,8 @@ mod tests {
         assert_eq!(stored.ai_search_trigger, AiSearchTrigger::AsYouType);
         assert!(stored.ai_search_rerank);
         assert!(!stored.search_debug_sources);
+        assert_eq!(stored.startup_view, StartupView::Dashboard);
+        assert_eq!(stored.startup_page_uuid, None);
     }
 
     #[test]
@@ -377,5 +414,22 @@ mod tests {
         assert_eq!(snapshot.ai_search_trigger, AiSearchTrigger::EnterOnly);
         assert!(!snapshot.ai_search_rerank);
         assert!(snapshot.search_debug_sources);
+    }
+
+    #[test]
+    fn startup_preferences_round_trip_and_require_a_specific_page() {
+        let page_uuid = uuid::Uuid::new_v4();
+        let stored = StoredSettings {
+            startup_view: StartupView::SpecificPage,
+            startup_page_uuid: Some(page_uuid),
+            ..StoredSettings::default()
+        };
+        let body = serde_json::to_vec(&stored).expect("serialize settings");
+        let restored: StoredSettings = serde_json::from_slice(&body).expect("restore settings");
+        let snapshot = snapshot(restored, PathBuf::from("settings.json")).expect("snapshot");
+
+        assert_eq!(snapshot.startup_view, StartupView::SpecificPage);
+        assert_eq!(snapshot.startup_page_uuid, Some(page_uuid));
+        assert!(validate_startup(StartupView::SpecificPage, None).is_err());
     }
 }

@@ -9,7 +9,7 @@ describe("EmptyJournalView", () => {
         date="2026-07-17"
         busy={false}
         onCapture={async () => true}
-        onClose={() => undefined}
+        onOpenAllNotes={() => undefined}
         onOpenDate={() => undefined}
       />,
     );
@@ -25,7 +25,7 @@ describe("EmptyJournalView", () => {
         date="2026-07-17"
         busy
         onCapture={async () => true}
-        onClose={() => undefined}
+        onOpenAllNotes={() => undefined}
         onOpenDate={() => undefined}
       />,
     );

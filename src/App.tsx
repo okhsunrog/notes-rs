@@ -1,19 +1,11 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import {
-  Bot,
-  Cloud,
-  CloudOff,
-  GitFork,
-  Loader2,
-  Redo2,
-  Search,
-  Settings,
-  Undo2,
-} from "lucide-react";
+import { Bot, GitFork, Loader2, Redo2, Search, Settings, Undo2 } from "lucide-react";
 import { AppLayout } from "@/app/layout";
+import { useCompactLayout } from "@/app/use-compact-layout";
 import { WindowControls } from "@/app/window-controls";
 import { KnowledgePanel } from "@/features/graph/knowledge-panel";
+import { SyncStatusIndicator } from "@/features/sync/sync-status-indicator";
 import { SearchCard } from "@/features/search/search-card";
 import { PagesList } from "@/features/pages/pages-list";
 import { Button } from "@/components/ui/button";
@@ -42,11 +34,14 @@ const SettingsPage = lazy(() =>
 );
 
 function App() {
+  const compact = useCompactLayout();
   const { ready, startupError } = useStartupState();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const closeSettings = useCallback(() => setSettingsOpen(false), []);
   const [windowDecorationMode, setWindowDecorationMode] = useState<WindowDecorationMode>("native");
   const [searchOpen, setSearchOpen] = useState(false);
   const [editorRequest, setEditorRequest] = useState(0);
+  const [assistantRequest, setAssistantRequest] = useState(0);
   const showEditor = useCallback(() => setEditorRequest((request) => request + 1), []);
   const workspace = useNotesWorkspace(ready, showEditor);
   const assistant = useAssistantController();
@@ -88,7 +83,7 @@ function App() {
         }
       >
         <SettingsPage
-          onBack={() => setSettingsOpen(false)}
+          onBack={closeSettings}
           onDecorationModeChanged={setWindowDecorationMode}
           dataAvailable={ready}
           onDataChanged={(openPageUuid) => {
@@ -148,84 +143,110 @@ function App() {
     <WorkspaceControllerProvider controller={workspace.controller}>
       <AppLayout
         editorRequest={editorRequest}
+        assistantRequest={assistantRequest}
+        searchOpen={searchOpen}
+        onCloseSearch={() => setSearchOpen(false)}
+        workbenchIsHome={activePane.content.kind === PaneContentKind.Home}
+        onNavigateBack={() => {
+          if (activePane.back.length > 0) {
+            dispatchWorkspace({ type: "go_back", paneId: activePane.id });
+          } else {
+            workspace.closePage();
+          }
+        }}
+        onOpenHome={workspace.closePage}
         headerActions={
           <>
-            {syncQuery.data?.state !== "disabled" && (
-              <span
-                title={syncQuery.data?.message ?? `Sync ${syncQuery.data?.state}`}
-                className={`mr-1 flex h-8 items-center gap-1.5 rounded-xl border px-2.5 text-xs ${
-                  syncQuery.data?.state === "online"
-                    ? "border-emerald-500/20 bg-emerald-500/8 text-emerald-600"
-                    : syncQuery.data?.state === "error" || syncQuery.data?.state === "conflict"
-                      ? "border-destructive/20 bg-destructive/5 text-destructive"
-                      : "border-border/60 bg-card/55 text-muted-foreground"
-                }`}
-              >
-                {syncQuery.data?.state === "online" ? (
-                  <Cloud className="size-3.5" />
-                ) : (
-                  <CloudOff className="size-3.5" />
-                )}
-                <span className="hidden lg:inline">{syncQuery.data?.state}</span>
-                {!!syncQuery.data?.pendingOperations && (
-                  <span className="tabular-nums">{syncQuery.data.pendingOperations}</span>
-                )}
-              </span>
+            {syncQuery.data && syncQuery.data.state !== "disabled" && (
+              <SyncStatusIndicator
+                status={syncQuery.data}
+                onOpenSettings={() => setSettingsOpen(true)}
+              />
             )}
-            <Button
-              variant={graphOpen ? "secondary" : "ghost"}
-              size="sm"
-              aria-label={graphOpen ? "Close knowledge graph" : "Open knowledge graph"}
-              aria-pressed={graphOpen}
-              onClick={() => {
-                if (graphOpen) {
-                  dispatchWorkspace({ type: "go_back", paneId: activePane.id });
-                } else {
-                  dispatchWorkspace({
-                    type: "open_target",
-                    target: graphTarget(workspace.activePageUuid),
-                    disposition: currentDisposition,
-                  });
-                }
-              }}
-              className="hidden h-8 gap-1.5 rounded-xl px-2.5 sm:flex"
-            >
-              <GitFork className="size-3.5" />
-              <span className="text-xs">Graph</span>
-            </Button>
-            <Button
-              data-assistant-toggle
-              variant="ghost"
-              size="sm"
-              aria-label={
-                assistantDock.visibility === DockVisibility.Hidden
-                  ? "Show Assistant"
-                  : "Hide Assistant"
-              }
-              aria-expanded={assistantDock.visibility !== DockVisibility.Hidden}
-              aria-controls="assistant-dock-content"
-              onClick={() =>
-                dispatchWorkspace({
-                  type: "set_dock_visibility",
-                  visibility:
+            {compact ? (
+              <>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label="Search notes"
+                  onClick={() => setSearchOpen(true)}
+                >
+                  <Search className="size-4" />
+                </Button>
+                <Button
+                  data-assistant-toggle
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label="Open Assistant"
+                  onClick={() => {
+                    dispatchWorkspace({
+                      type: "set_dock_visibility",
+                      visibility: DockVisibility.Open,
+                    });
+                    setAssistantRequest((request) => request + 1);
+                  }}
+                >
+                  <Bot className="size-4" />
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button
+                  variant={graphOpen ? "secondary" : "ghost"}
+                  size="sm"
+                  aria-label={graphOpen ? "Close knowledge graph" : "Open knowledge graph"}
+                  aria-pressed={graphOpen}
+                  onClick={() => {
+                    if (graphOpen) {
+                      dispatchWorkspace({ type: "go_back", paneId: activePane.id });
+                    } else {
+                      dispatchWorkspace({
+                        type: "open_target",
+                        target: graphTarget(workspace.activePageUuid),
+                        disposition: currentDisposition,
+                      });
+                    }
+                  }}
+                  className="h-8 gap-1.5 rounded-xl px-2.5"
+                >
+                  <GitFork className="size-3.5" />
+                  <span className="text-xs">Graph</span>
+                </Button>
+                <Button
+                  data-assistant-toggle
+                  variant="ghost"
+                  size="sm"
+                  aria-label={
                     assistantDock.visibility === DockVisibility.Hidden
-                      ? DockVisibility.Open
-                      : DockVisibility.Hidden,
-                })
-              }
-            >
-              <Bot className="size-4" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setSearchOpen(true)}
-              className="mr-2 hidden h-8 rounded-xl border border-border/60 bg-card/55 px-3 text-muted-foreground shadow-sm hover:bg-card sm:flex"
-            >
-              <Search className="size-3.5" />
-              <span className="text-xs">Search</span>
-              <kbd className="ml-3 rounded bg-muted px-1.5 py-0.5 text-[9px]">Ctrl K</kbd>
-            </Button>
+                      ? "Show Assistant"
+                      : "Hide Assistant"
+                  }
+                  aria-expanded={assistantDock.visibility !== DockVisibility.Hidden}
+                  aria-controls="assistant-dock-content"
+                  onClick={() =>
+                    dispatchWorkspace({
+                      type: "set_dock_visibility",
+                      visibility:
+                        assistantDock.visibility === DockVisibility.Hidden
+                          ? DockVisibility.Open
+                          : DockVisibility.Hidden,
+                    })
+                  }
+                >
+                  <Bot className="size-4" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setSearchOpen(true)}
+                  className="mr-2 h-8 rounded-xl border border-border/60 bg-card/55 px-3 text-muted-foreground shadow-sm hover:bg-card"
+                >
+                  <Search className="size-3.5" />
+                  <span className="text-xs">Search</span>
+                  <kbd className="ml-3 rounded bg-muted px-1.5 py-0.5 text-[9px]">Ctrl K</kbd>
+                </Button>
+              </>
+            )}
             <Button
               variant="ghost"
               size="sm"
@@ -267,6 +288,8 @@ function App() {
             onCreate={workspace.createNewNote}
             onOpenJournal={workspace.openJournal}
             onQuickCapture={workspace.quickCapture}
+            allNotesActive={activePane.content.kind === PaneContentKind.AllNotes}
+            onOpenAllNotes={workspace.openAllNotes}
             journalBusy={workspace.journalBusy}
             onSelect={workspace.selectPage}
           />
@@ -296,7 +319,11 @@ function App() {
       <Dialog open={searchOpen} onOpenChange={setSearchOpen}>
         <DialogContent
           showCloseButton={false}
-          className="search-dialog top-[18%] max-w-2xl translate-y-0 gap-0 overflow-hidden rounded-2xl border-border/60 bg-background/95 p-0 shadow-2xl backdrop-blur-xl"
+          className={
+            compact
+              ? "search-dialog search-dialog-compact top-[var(--safe-area-inset-top)] left-0 h-[calc(100dvh-var(--safe-area-inset-top))] max-w-none translate-x-0 translate-y-0 gap-0 overflow-hidden rounded-none border-0 bg-background/95 p-0 shadow-2xl backdrop-blur-xl sm:max-w-none"
+              : "search-dialog top-[18%] max-w-2xl translate-y-0 gap-0 overflow-hidden rounded-2xl border-border/60 bg-background/95 p-0 shadow-2xl backdrop-blur-xl"
+          }
         >
           <div className="sr-only">
             <DialogTitle>Search notes</DialogTitle>
