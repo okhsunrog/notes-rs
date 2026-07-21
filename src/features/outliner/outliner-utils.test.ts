@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import { detectTrigger } from "./autocomplete";
 import { nextSibling, prevSibling } from "./keyboard";
+import { flattenBlocks } from "./outliner";
 import type { Block } from "@/lib/api";
 
 function block(uuid: string, orderKey: string): Block {
@@ -38,5 +39,29 @@ describe("outliner utilities", () => {
     expect(nextSibling(siblings, "block-b")?.uuid).toBe("block-c");
     expect(prevSibling(siblings, "block-a")).toBeNull();
     expect(nextSibling(siblings, "block-c")).toBeNull();
+  });
+
+  it("flattens the ordered tree and omits descendants of collapsed blocks", () => {
+    const rootB = block("root-b", "0000000200000000");
+    const rootA = block("root-a", "0000000100000000");
+    const childB = {
+      ...block("child-b", "0000000200000000"),
+      parentUuid: rootA.uuid,
+    };
+    const childA = {
+      ...block("child-a", "0000000100000000"),
+      parentUuid: rootA.uuid,
+    };
+
+    expect(flattenBlocks([rootB, childB, rootA, childA], () => false)).toEqual([
+      { block: rootA, depth: 0, ordinal: 1 },
+      { block: childA, depth: 1, ordinal: 1 },
+      { block: childB, depth: 1, ordinal: 2 },
+      { block: rootB, depth: 0, ordinal: 2 },
+    ]);
+    expect(flattenBlocks([rootB, childB, rootA, childA], (uuid) => uuid === rootA.uuid)).toEqual([
+      { block: rootA, depth: 0, ordinal: 1 },
+      { block: rootB, depth: 0, ordinal: 2 },
+    ]);
   });
 });

@@ -171,13 +171,17 @@ describe("MarkdownRenderer", () => {
 
   it("renders only a validated local attachment returned by the typed resolver", () => {
     let resolvedUuid = "";
+    const blobHash = "a".repeat(64);
+    const previewSrc = `notes-attachment://localhost/v1/${ATTACHMENT_UUID}/${blobHash}/preview`;
+    const originalSrc = `notes-attachment://localhost/v1/${ATTACHMENT_UUID}/${blobHash}/original`;
     const resolveImage: MarkdownImageResolver = (request) => {
       resolvedUuid = request.attachmentUuid;
       return {
         byteSize: 24_000,
         height: 480,
         mime: "image/png",
-        src: `notes-attachment://localhost/${ATTACHMENT_UUID}`,
+        originalSrc,
+        src: previewSrc,
         width: 640,
       };
     };
@@ -188,7 +192,8 @@ describe("MarkdownRenderer", () => {
 
     expect(resolvedUuid).toBe(ATTACHMENT_UUID);
     expect(html).toContain("<img");
-    expect(html).toContain(`src="notes-attachment://localhost/${ATTACHMENT_UUID}"`);
+    expect(html).toContain(`src="${previewSrc}"`);
+    expect(html).not.toContain(originalSrc);
     expect(html).toContain('loading="lazy"');
     expect(html).toContain('decoding="async"');
     expect(html).toContain('width="640"');
@@ -207,7 +212,8 @@ describe("MarkdownRenderer", () => {
           byteSize: 512,
           height: 480,
           mime: "image/svg+xml",
-          src: `notes-attachment://localhost/${ATTACHMENT_UUID}`,
+          originalSrc: `notes-attachment://localhost/v1/${ATTACHMENT_UUID}/${"a".repeat(64)}/original`,
+          src: `notes-attachment://localhost/v1/${ATTACHMENT_UUID}/${"a".repeat(64)}/preview`,
           width: 640,
         }) as unknown as MarkdownResolvedImage,
     );

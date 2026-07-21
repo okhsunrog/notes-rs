@@ -36,10 +36,10 @@ import {
   type Block,
   type BlockContent,
   type BlockStyle,
+  type PageRenderSnapshot,
   type TaskState,
 } from "@/lib/api";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
-import { BlockChildren } from "./block-tree";
 import { BlockEdit, type BlockEditHandle } from "./block-edit";
 import {
   resolveBlockEditKey,
@@ -79,6 +79,9 @@ type Props = {
   block: Block;
   depth: number;
   ordinal: number;
+  measureRef?: (element: HTMLLIElement | null) => void;
+  virtualIndex?: number;
+  style?: React.CSSProperties;
 };
 
 type SaveState = "idle" | "dirty" | "saving" | "error";
@@ -98,7 +101,7 @@ function lastOrderedBlock(blocks: Block[]) {
   );
 }
 
-export function BlockNode({ block, depth, ordinal }: Props) {
+export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, style }: Props) {
   const store = useOutliner();
   const queryClient = useQueryClient();
   const sessions = usePageSessionRegistry();
@@ -108,8 +111,7 @@ export function BlockNode({ block, depth, ordinal }: Props) {
   const outline = store.layout === "outline";
   const readOnly = store.readOnly;
   const containerUuid = block.parentUuid ?? block.pageUuid;
-  const collapseKey = `outliner.collapsed.${block.uuid}`;
-  const [collapsed, setCollapsed] = useState(() => localStorage.getItem(collapseKey) === "1");
+  const collapsed = store.isCollapsed(block.uuid);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [styleBusy, setStyleBusy] = useState(false);
   const styleBusyRef = useRef(false);
@@ -211,6 +213,21 @@ export function BlockNode({ block, depth, ordinal }: Props) {
         replaceCachedBlock(rows, updated),
       );
       queryClient.setQueryData(queryKeys.block(updated.uuid), updated);
+      queryClient.setQueryData<PageRenderSnapshot>(
+        queryKeys.pageRender(updated.pageUuid),
+        (snapshot) =>
+          snapshot
+            ? {
+                ...snapshot,
+                document: {
+                  ...snapshot.document,
+                  blocks: snapshot.document.blocks.map((candidate) =>
+                    candidate.uuid === updated.uuid ? updated : candidate,
+                  ),
+                },
+              }
+            : snapshot,
+      );
     },
     [containerUuid, queryClient],
   );
@@ -573,11 +590,7 @@ export function BlockNode({ block, depth, ordinal }: Props) {
   };
 
   const toggleCollapsed = () => {
-    setCollapsed((value) => {
-      const next = !value;
-      localStorage.setItem(collapseKey, next ? "1" : "0");
-      return next;
-    });
+    store.toggleCollapsed(block.uuid);
   };
 
   const onReorder = async (direction: "up" | "down") => {
@@ -650,7 +663,13 @@ export function BlockNode({ block, depth, ordinal }: Props) {
 
   return (
     <li
+      ref={measureRef}
+      style={style}
       className="flex flex-col"
+      // TanStack Virtual reads this attribute inside measureElement. Without
+      // it dynamic rows keep their estimates, producing gaps or overlaps.
+      data-index={virtualIndex}
+      data-block-depth={depth}
       data-block-style={block.style.kind}
       data-task-state={block.style.kind === "task" ? block.style.state : undefined}
     >
@@ -665,8 +684,12 @@ export function BlockNode({ block, depth, ordinal }: Props) {
           <>
             <button
               type="button"
-              className="mt-1.5 flex size-4 shrink-0 items-center justify-center rounded text-muted-foreground/35 transition hover:bg-primary/10 hover:text-primary"
+              className={cn(
+                "mt-1.5 flex size-4 shrink-0 items-center justify-center rounded text-muted-foreground/35 transition hover:bg-primary/10 hover:text-primary",
+                !store.hasChildren(block.uuid) && "invisible",
+              )}
               onClick={toggleCollapsed}
+              disabled={!store.hasChildren(block.uuid)}
               title={collapsed ? "expand" : "collapse"}
             >
               {collapsed ? (
@@ -764,6 +787,7 @@ export function BlockNode({ block, depth, ordinal }: Props) {
                 layout={store.layout}
                 readOnly={readOnly}
                 onOpenLink={store.onOpenMarkdownLink}
+                resolveImage={store.resolveImage}
                 taskBusy={styleBusy}
                 onTaskStateChange={(state) => void changeTaskState(state)}
               />
@@ -789,19 +813,6 @@ export function BlockNode({ block, depth, ordinal }: Props) {
           />
         )}
       </div>
-      {(!outline || !collapsed) && (
-        <div
-          className={
-            outline
-              ? "ml-[1.4rem] border-l border-primary/10 pl-3"
-              : depth > 0
-                ? "ml-5 border-l border-border/45 pl-4"
-                : ""
-          }
-        >
-          <BlockChildren pageUuid={block.pageUuid} parentUuid={block.uuid} depth={depth + 1} />
-        </div>
-      )}
     </li>
   );
 }

@@ -2,6 +2,142 @@ use super::*;
 use crate::operation::{AttachmentAdd, AttachmentRemove};
 use rusqlite::OptionalExtension;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentImageCache {
+    pub blob_hash: BlobHash,
+    pub format_version: u32,
+    pub byte_size: u64,
+    pub mime: String,
+    pub width: u32,
+    pub height: u32,
+    pub preview_hash: Option<BlobHash>,
+    pub preview_size: Option<u64>,
+    pub preview_width: Option<u32>,
+    pub preview_height: Option<u32>,
+}
+
+fn integer<T>(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<T>
+where
+    T: TryFrom<i64>,
+    T::Error: std::error::Error + Send + Sync + 'static,
+{
+    T::try_from(row.get::<_, i64>(index)?).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Integer,
+            Box::new(error),
+        )
+    })
+}
+
+fn optional_integer<T>(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Option<T>>
+where
+    T: TryFrom<i64>,
+    T::Error: std::error::Error + Send + Sync + 'static,
+{
+    row.get::<_, Option<i64>>(index)?
+        .map(|value| {
+            T::try_from(value).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    index,
+                    rusqlite::types::Type::Integer,
+                    Box::new(error),
+                )
+            })
+        })
+        .transpose()
+}
+
+fn row_to_image_cache(row: &rusqlite::Row<'_>) -> rusqlite::Result<AttachmentImageCache> {
+    Ok(AttachmentImageCache {
+        blob_hash: row_blob_hash(row, 0)?,
+        format_version: integer(row, 1)?,
+        byte_size: integer(row, 2)?,
+        mime: row.get(3)?,
+        width: integer(row, 4)?,
+        height: integer(row, 5)?,
+        preview_hash: row
+            .get_ref(6)?
+            .as_blob_or_null()?
+            .map(|bytes| {
+                let bytes: [u8; 32] = bytes.try_into().map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        6,
+                        rusqlite::types::Type::Blob,
+                        Box::new(error),
+                    )
+                })?;
+                Ok::<BlobHash, rusqlite::Error>(BlobHash::from_bytes(bytes))
+            })
+            .transpose()?,
+        preview_size: optional_integer(row, 7)?,
+        preview_width: optional_integer(row, 8)?,
+        preview_height: optional_integer(row, 9)?,
+    })
+}
+
+pub async fn get_attachment_image_cache(
+    conn: &Connection,
+    blob_hash: BlobHash,
+) -> Result<Option<AttachmentImageCache>> {
+    conn.call(move |database| {
+        database
+            .query_row(
+                "SELECT blob_hash, format_version, byte_size, mime, width, height,
+                        preview_hash, preview_size, preview_width, preview_height
+                   FROM attachment_image_cache WHERE blob_hash = ?1",
+                [blob_hash_bytes(&blob_hash)],
+                row_to_image_cache,
+            )
+            .optional()
+    })
+    .await
+}
+
+pub async fn upsert_attachment_image_cache(
+    conn: &Connection,
+    cached: AttachmentImageCache,
+) -> Result<()> {
+    let byte_size = i64::try_from(cached.byte_size).context("cached image size fits SQLite")?;
+    let preview_size = cached
+        .preview_size
+        .map(i64::try_from)
+        .transpose()
+        .context("cached preview size fits SQLite")?;
+    conn.call(move |database| {
+        database.execute(
+            "INSERT INTO attachment_image_cache(
+               blob_hash, format_version, byte_size, mime, width, height,
+               preview_hash, preview_size, preview_width, preview_height
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(blob_hash) DO UPDATE SET
+               format_version = excluded.format_version,
+               byte_size = excluded.byte_size,
+               mime = excluded.mime,
+               width = excluded.width,
+               height = excluded.height,
+               preview_hash = excluded.preview_hash,
+               preview_size = excluded.preview_size,
+               preview_width = excluded.preview_width,
+               preview_height = excluded.preview_height",
+            rusqlite::params![
+                blob_hash_bytes(&cached.blob_hash),
+                i64::from(cached.format_version),
+                byte_size,
+                cached.mime,
+                i64::from(cached.width),
+                i64::from(cached.height),
+                cached.preview_hash.as_ref().map(blob_hash_bytes),
+                preview_size,
+                cached.preview_width.map(i64::from),
+                cached.preview_height.map(i64::from),
+            ],
+        )?;
+        Ok(())
+    })
+    .await
+}
+
 pub(crate) fn row_to_attachment(row: &rusqlite::Row<'_>) -> rusqlite::Result<Attachment> {
     let page_uuid = row.get::<_, Option<uuid::Uuid>>(1)?;
     let block_uuid = row.get::<_, Option<uuid::Uuid>>(2)?;
@@ -202,4 +338,38 @@ pub async fn delete_attachment_with_ops(
         value: Some(attachment),
         operations,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn image_cache_round_trips_source_and_preview_metadata() {
+        let connection = super::super::open_in_memory().await.expect("database");
+        let source_hash = BlobHash::digest(b"source image");
+        let preview_hash = BlobHash::digest(b"preview image");
+        let cached = AttachmentImageCache {
+            blob_hash: source_hash,
+            format_version: 1,
+            byte_size: 12_345,
+            mime: "image/png".into(),
+            width: 1_920,
+            height: 1_080,
+            preview_hash: Some(preview_hash),
+            preview_size: Some(4_321),
+            preview_width: Some(1_024),
+            preview_height: Some(576),
+        };
+
+        upsert_attachment_image_cache(&connection, cached.clone())
+            .await
+            .expect("store image metadata");
+        assert_eq!(
+            get_attachment_image_cache(&connection, source_hash)
+                .await
+                .expect("read image metadata"),
+            Some(cached)
+        );
+    }
 }

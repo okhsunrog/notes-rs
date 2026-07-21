@@ -40,6 +40,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::append_to_journal,
             commands::get_page,
             commands::get_page_document,
+            commands::get_page_render_snapshot,
             commands::replace_page_document,
             commands::get_block,
             commands::set_block_content,
@@ -145,6 +146,7 @@ pub fn run() {
             let data_dir = app.path().app_data_dir().expect("resolving app data dir");
             std::fs::create_dir_all(&data_dir).expect("creating data dir");
             let blob_store = notes_blob::BlobStore::new(data_dir.clone());
+            let image_cache = notes_blob::BlobStore::new(data_dir.join("image-cache-v1"));
             app.manage(commands::LogseqImportSessions::default());
 
             let startup = Arc::new(RwLock::new(commands::StartupStatus::Starting {
@@ -202,6 +204,7 @@ pub fn run() {
                         handle.manage(commands::AppState {
                             conn: conn.clone(),
                             blob_store: blob_store.clone(),
+                            image_cache,
                             remote_ai,
                             chat_cancellations: Arc::new(std::sync::Mutex::new(
                                 std::collections::HashMap::new(),

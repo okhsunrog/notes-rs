@@ -58,6 +58,15 @@ export const commands = {
 	revision: DocumentRevision,
 	blocks: Block[],
 } | null, CommandError>(__TAURI_INVOKE("get_page_document", { uuid })),
+	/**
+	 *  Complete outline render input fetched behind one typed IPC boundary. The
+	 *  document remains the persisted source of truth; image descriptors are a
+	 *  host-derived projection used only to render authorized local resources.
+	 */
+	getPageRenderSnapshot: (uuid: string) => typedError<{
+	document: PageDocumentSnapshot,
+	images: AttachmentImageDescriptor[],
+} | null, CommandError>(__TAURI_INVOKE("get_page_render_snapshot", { uuid })),
 	replacePageDocument: (pageUuid: string, expectedRevision: DocumentRevision, units: DocumentUnitDraft[]) => typedError<PageDocumentSnapshot, CommandError>(__TAURI_INVOKE("replace_page_document", { pageUuid, expectedRevision, units })),
 	getBlock: (uuid: string) => typedError<{
 	uuid: string,
@@ -227,9 +236,18 @@ export type Attachment = {
 
 export type AttachmentImageDescriptor = {
 	attachmentUuid: string,
+	blobHash: string,
 	byteSize: number,
 	height: number,
 	mime: AttachmentImageMime,
+	previewHeight: number,
+	previewWidth: number,
+	/**
+	 *  Versioned into the immutable resource URL. Bump the cache format when
+	 *  preview bytes or sizing rules change so WebView caches cannot retain an
+	 *  older derivative under the same URL.
+	 */
+	resourceVersion: number,
 	width: number,
 };
 
@@ -488,6 +506,11 @@ export type PageLayout = "outline" | "document";
  *  `Notes`; explicit callers may request Journals or the complete catalog.
  */
 export type PageListFilter = "notes" | "journals" | "all";
+
+export type PageRenderSnapshot = {
+	document: PageDocumentSnapshot,
+	images: AttachmentImageDescriptor[],
+};
 
 export type SafeAreaInsets = {
 	top: number | null,

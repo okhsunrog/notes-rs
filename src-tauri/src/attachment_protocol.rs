@@ -1,14 +1,11 @@
 use crate::commands::AppState;
 use anyhow::Context as _;
+use futures::{StreamExt as _, stream};
 use image::{ImageFormat, ImageReader};
 use notes_blob::{BlobHash, BlobStore};
 use notes_core::{Connection, db};
 use serde::Serialize;
-use std::{
-    collections::BTreeSet,
-    fs::File,
-    io::{BufReader, Read, Seek, SeekFrom},
-};
+use std::{collections::BTreeSet, io::Cursor};
 use tauri::{Manager as _, Runtime};
 
 pub(crate) const ATTACHMENT_PROTOCOL: &str = "notes-attachment";
@@ -16,6 +13,36 @@ pub(crate) const MAX_MARKDOWN_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_MARKDOWN_IMAGE_DIMENSION: u32 = 8_192;
 const MAX_MARKDOWN_IMAGE_PIXELS: u64 = 25_000_000;
 pub(crate) const MAX_DESCRIPTOR_BATCH: usize = 256;
+const DESCRIPTOR_CONCURRENCY: usize = 4;
+const IMAGE_CACHE_FORMAT_VERSION: u32 = 1;
+const PREVIEW_MAX_EDGE: u32 = 1_024;
+const IMMUTABLE_CACHE_CONTROL: &str = "private, max-age=31536000, immutable";
+
+pub(crate) fn extract_attachment_uuids<'a>(
+    markdown: impl IntoIterator<Item = &'a str>,
+) -> BTreeSet<uuid::Uuid> {
+    const PREFIX: &str = "notes-attachment:";
+    const UUID_LEN: usize = 36;
+    let mut uuids = BTreeSet::new();
+    for source in markdown {
+        let mut remaining = source;
+        while let Some(index) = remaining.find(PREFIX) {
+            let candidate = &remaining[index + PREFIX.len()..];
+            let mut consumed = 1;
+            if candidate.len() >= UUID_LEN
+                && let Ok(uuid) = candidate[..UUID_LEN].parse()
+            {
+                uuids.insert(uuid);
+                consumed = UUID_LEN;
+                if uuids.len() == MAX_DESCRIPTOR_BATCH {
+                    return uuids;
+                }
+            }
+            remaining = &candidate[candidate.len().min(consumed)..];
+        }
+    }
+    uuids
+}
 
 #[derive(Debug, Clone, Copy, Serialize, specta::Type)]
 pub enum AttachmentImageMime {
@@ -44,16 +71,23 @@ impl AttachmentImageMime {
 #[serde(rename_all = "camelCase")]
 pub struct AttachmentImageDescriptor {
     pub attachment_uuid: uuid::Uuid,
+    #[specta(type = String)]
+    pub blob_hash: BlobHash,
     pub byte_size: u64,
     pub height: u32,
     pub mime: AttachmentImageMime,
+    pub preview_height: u32,
+    pub preview_width: u32,
+    /// Versioned into the immutable resource URL. Bump the cache format when
+    /// preview bytes or sizing rules change so WebView caches cannot retain an
+    /// older derivative under the same URL.
+    pub resource_version: u32,
     pub width: u32,
 }
 
 struct AuthorizedImage {
     descriptor: AttachmentImageDescriptor,
-    expected_hash: BlobHash,
-    file: File,
+    cache: db::AttachmentImageCache,
 }
 
 pub(crate) async fn resolve_descriptors(
@@ -65,16 +99,27 @@ pub(crate) async fn resolve_descriptors(
         "at most {MAX_DESCRIPTOR_BATCH} attachment images can be resolved at once"
     );
     let attachment_uuids = attachment_uuids.into_iter().collect::<BTreeSet<_>>();
-    let mut descriptors = Vec::with_capacity(attachment_uuids.len());
-    for attachment_uuid in attachment_uuids {
-        match open_authorized_image(&state.conn, &state.blob_store, attachment_uuid).await {
-            Ok(Some(image)) => descriptors.push(image.descriptor),
-            Ok(None) => {}
-            Err(error) => {
-                tracing::warn!(%attachment_uuid, %error, "attachment image is unavailable");
+    let connection = state.conn.clone();
+    let blob_store = state.blob_store.clone();
+    let descriptors = stream::iter(attachment_uuids)
+        .map(|attachment_uuid| {
+            let connection = connection.clone();
+            let blob_store = blob_store.clone();
+            async move {
+                match open_authorized_image(&connection, &blob_store, attachment_uuid).await {
+                    Ok(Some(image)) => Some(image.descriptor),
+                    Ok(None) => None,
+                    Err(error) => {
+                        tracing::warn!(%attachment_uuid, %error, "attachment image is unavailable");
+                        None
+                    }
+                }
             }
-        }
-    }
+        })
+        .buffer_unordered(DESCRIPTOR_CONCURRENCY)
+        .filter_map(|descriptor| async move { descriptor })
+        .collect()
+        .await;
     Ok(descriptors)
 }
 
@@ -89,24 +134,35 @@ async fn open_authorized_image(
     if attachment.size == 0 || attachment.size > MAX_MARKDOWN_IMAGE_BYTES {
         return Ok(None);
     }
+    if let Some(cache) = db::get_attachment_image_cache(connection, attachment.blob_hash).await?
+        && cache.format_version == IMAGE_CACHE_FORMAT_VERSION
+        && cache.byte_size == attachment.size
+        && let Some(image) = authorized_from_cache(&attachment, cache)
+    {
+        return Ok(Some(image));
+    }
     let blob_store = blob_store.clone();
-    tauri::async_runtime::spawn_blocking(move || inspect_attachment_image(&blob_store, attachment))
-        .await
-        .context("attachment image inspection task failed")?
+    let inspected = tauri::async_runtime::spawn_blocking(move || {
+        inspect_attachment_image(&blob_store, attachment)
+    })
+    .await
+    .context("attachment image inspection task failed")??;
+    if let Some(image) = &inspected {
+        db::upsert_attachment_image_cache(connection, image.cache.clone()).await?;
+    }
+    Ok(inspected)
 }
 
 fn inspect_attachment_image(
     blob_store: &BlobStore,
     attachment: db::Attachment,
 ) -> anyhow::Result<Option<AuthorizedImage>> {
-    let verified = blob_store.open_verified(attachment.blob_hash, MAX_MARKDOWN_IMAGE_BYTES)?;
+    let bytes = blob_store.read_verified(attachment.blob_hash, MAX_MARKDOWN_IMAGE_BYTES)?;
     anyhow::ensure!(
-        verified.blob.size == attachment.size,
+        bytes.len() as u64 == attachment.size,
         "attachment metadata size does not match its verified blob"
     );
-    let byte_size = verified.blob.size;
-    let mut file = verified.into_file();
-    let reader = ImageReader::new(BufReader::new(&mut file)).with_guessed_format()?;
+    let reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
     let Some(format) = reader.format() else {
         return Ok(None);
     };
@@ -132,32 +188,85 @@ fn inspect_attachment_image(
     {
         return Ok(None);
     }
-    file.seek(SeekFrom::Start(0))?;
+    let (preview_width, preview_height) = preview_dimensions(width, height);
+    let cache = db::AttachmentImageCache {
+        blob_hash: attachment.blob_hash,
+        format_version: IMAGE_CACHE_FORMAT_VERSION,
+        byte_size: attachment.size,
+        mime: mime.as_str().into(),
+        width,
+        height,
+        preview_hash: None,
+        preview_size: None,
+        preview_width: None,
+        preview_height: None,
+    };
     Ok(Some(AuthorizedImage {
         descriptor: AttachmentImageDescriptor {
             attachment_uuid: attachment.uuid,
-            byte_size,
+            blob_hash: attachment.blob_hash,
+            byte_size: attachment.size,
             height,
             mime,
+            preview_height,
+            preview_width,
+            resource_version: IMAGE_CACHE_FORMAT_VERSION,
             width,
         },
-        expected_hash: attachment.blob_hash,
-        file,
+        cache,
     }))
 }
 
-fn read_authorized_body(image: &mut AuthorizedImage) -> anyhow::Result<Vec<u8>> {
-    let size = usize::try_from(image.descriptor.byte_size)?;
-    let mut body = Vec::new();
-    body.try_reserve_exact(size)?;
-    body.resize(size, 0);
-    image.file.read_exact(&mut body)?;
-    let mut trailing = [0_u8; 1];
-    anyhow::ensure!(
-        image.file.read(&mut trailing)? == 0 && BlobHash::digest(&body) == image.expected_hash,
-        "attachment image changed after verification"
-    );
-    Ok(body)
+fn authorized_from_cache(
+    attachment: &db::Attachment,
+    cache: db::AttachmentImageCache,
+) -> Option<AuthorizedImage> {
+    let mime = mime_from_str(&cache.mime)?;
+    let pixels = u64::from(cache.width).checked_mul(u64::from(cache.height))?;
+    if cache.width == 0
+        || cache.height == 0
+        || cache.width > MAX_MARKDOWN_IMAGE_DIMENSION
+        || cache.height > MAX_MARKDOWN_IMAGE_DIMENSION
+        || pixels > MAX_MARKDOWN_IMAGE_PIXELS
+    {
+        return None;
+    }
+    let (preview_width, preview_height) = preview_dimensions(cache.width, cache.height);
+    Some(AuthorizedImage {
+        descriptor: AttachmentImageDescriptor {
+            attachment_uuid: attachment.uuid,
+            blob_hash: attachment.blob_hash,
+            byte_size: attachment.size,
+            height: cache.height,
+            mime,
+            preview_height,
+            preview_width,
+            resource_version: IMAGE_CACHE_FORMAT_VERSION,
+            width: cache.width,
+        },
+        cache,
+    })
+}
+
+fn mime_from_str(mime: &str) -> Option<AttachmentImageMime> {
+    match mime {
+        "image/gif" => Some(AttachmentImageMime::Gif),
+        "image/jpeg" => Some(AttachmentImageMime::Jpeg),
+        "image/png" => Some(AttachmentImageMime::Png),
+        "image/webp" => Some(AttachmentImageMime::Webp),
+        _ => None,
+    }
+}
+
+fn preview_dimensions(width: u32, height: u32) -> (u32, u32) {
+    if width <= PREVIEW_MAX_EDGE && height <= PREVIEW_MAX_EDGE {
+        return (width, height);
+    }
+    let scale = f64::from(PREVIEW_MAX_EDGE) / f64::from(width.max(height));
+    (
+        (f64::from(width) * scale).round().max(1.0) as u32,
+        (f64::from(height) * scale).round().max(1.0) as u32,
+    )
 }
 
 pub(crate) fn protocol<R: Runtime>(
@@ -191,69 +300,241 @@ async fn protocol_response<R: Runtime>(
                 .expect("static attachment protocol response is valid");
         }
     };
-    let Some(attachment_uuid) = parse_attachment_uri(request.uri()) else {
+    let Some(route) = parse_attachment_uri(request.uri()) else {
         return empty_response(tauri::http::StatusCode::BAD_REQUEST);
     };
-    let (connection, blob_store) = {
+    let (connection, blob_store, image_cache) = {
         let Some(state) = app.try_state::<AppState>() else {
             return empty_response(tauri::http::StatusCode::SERVICE_UNAVAILABLE);
         };
-        (state.conn.clone(), state.blob_store.clone())
+        (
+            state.conn.clone(),
+            state.blob_store.clone(),
+            state.image_cache.clone(),
+        )
     };
-    let mut image = match open_authorized_image(&connection, &blob_store, attachment_uuid).await {
+    let image = match open_authorized_image(&connection, &blob_store, route.attachment_uuid).await {
         Ok(Some(image)) => image,
         Ok(None) => return empty_response(tauri::http::StatusCode::NOT_FOUND),
         Err(error) => {
-            tracing::warn!(%attachment_uuid, %error, "failed to serve attachment image");
+            tracing::warn!(attachment_uuid = %route.attachment_uuid, %error, "failed to serve attachment image");
             return empty_response(tauri::http::StatusCode::NOT_FOUND);
         }
     };
+    if image.descriptor.blob_hash != route.blob_hash {
+        return empty_response(tauri::http::StatusCode::NOT_FOUND);
+    }
     let descriptor = image.descriptor.clone();
-    let body = if head {
-        Vec::new()
-    } else {
-        match tauri::async_runtime::spawn_blocking(move || read_authorized_body(&mut image)).await {
-            Ok(Ok(body)) => body,
-            Ok(Err(error)) => {
-                tracing::warn!(%attachment_uuid, %error, "verified attachment image changed while reading");
-                return empty_response(tauri::http::StatusCode::NOT_FOUND);
-            }
-            Err(error) => {
-                tracing::warn!(%attachment_uuid, %error, "attachment image read task failed");
-                return empty_response(tauri::http::StatusCode::NOT_FOUND);
-            }
+    let resource = match route.variant {
+        ImageVariant::Original => read_original(blob_store, &descriptor, head).await,
+        ImageVariant::Preview => {
+            read_or_create_preview(connection, blob_store, image_cache, image, head).await
+        }
+    };
+    let resource = match resource {
+        Ok(resource) => resource,
+        Err(error) => {
+            tracing::warn!(attachment_uuid = %route.attachment_uuid, %error, "attachment image resource failed");
+            return empty_response(tauri::http::StatusCode::NOT_FOUND);
         }
     };
     tauri::http::Response::builder()
         .status(tauri::http::StatusCode::OK)
-        .header(tauri::http::header::CONTENT_TYPE, descriptor.mime.as_str())
+        .header(tauri::http::header::CONTENT_TYPE, resource.mime)
         .header(
             tauri::http::header::CONTENT_LENGTH,
-            descriptor.byte_size.to_string(),
+            resource.byte_size.to_string(),
         )
-        .header(tauri::http::header::CACHE_CONTROL, "no-store")
+        .header(tauri::http::header::CACHE_CONTROL, IMMUTABLE_CACHE_CONTROL)
+        .header(tauri::http::header::ETAG, format!("\"{}\"", resource.hash))
         .header("X-Content-Type-Options", "nosniff")
         .header("Referrer-Policy", "no-referrer")
-        .body(body)
+        .body(resource.body)
         .expect("validated attachment protocol response is valid")
 }
 
-fn parse_attachment_uri(uri: &tauri::http::Uri) -> Option<uuid::Uuid> {
+struct ImageResource {
+    body: Vec<u8>,
+    byte_size: u64,
+    hash: BlobHash,
+    mime: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageVariant {
+    Preview,
+    Original,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ImageRoute {
+    attachment_uuid: uuid::Uuid,
+    blob_hash: BlobHash,
+    variant: ImageVariant,
+}
+
+async fn read_original(
+    blob_store: BlobStore,
+    descriptor: &AttachmentImageDescriptor,
+    head: bool,
+) -> anyhow::Result<ImageResource> {
+    let hash = descriptor.blob_hash;
+    let byte_size = descriptor.byte_size;
+    let body = if head {
+        Vec::new()
+    } else {
+        tauri::async_runtime::spawn_blocking(move || {
+            blob_store.read_verified(hash, MAX_MARKDOWN_IMAGE_BYTES)
+        })
+        .await
+        .context("attachment image read task failed")??
+    };
+    anyhow::ensure!(
+        head || body.len() as u64 == byte_size,
+        "attachment image size changed"
+    );
+    Ok(ImageResource {
+        body,
+        byte_size,
+        hash,
+        mime: descriptor.mime.as_str(),
+    })
+}
+
+async fn read_or_create_preview(
+    connection: Connection,
+    blob_store: BlobStore,
+    image_cache: BlobStore,
+    mut image: AuthorizedImage,
+    head: bool,
+) -> anyhow::Result<ImageResource> {
+    if let (Some(hash), Some(byte_size)) = (image.cache.preview_hash, image.cache.preview_size) {
+        let cache = image_cache.clone();
+        if head {
+            return Ok(ImageResource {
+                body: Vec::new(),
+                byte_size,
+                hash,
+                mime: "image/webp",
+            });
+        }
+        match tauri::async_runtime::spawn_blocking(move || {
+            cache.read_verified(hash, MAX_MARKDOWN_IMAGE_BYTES)
+        })
+        .await
+        .context("preview image read task failed")?
+        {
+            Ok(body) if body.len() as u64 == byte_size => {
+                return Ok(ImageResource {
+                    body,
+                    byte_size,
+                    hash,
+                    mime: "image/webp",
+                });
+            }
+            Ok(_) => {
+                tracing::warn!(%hash, "cached image preview size changed; rebuilding");
+            }
+            Err(error) => {
+                tracing::warn!(%hash, %error, "cached image preview is unavailable; rebuilding");
+            }
+        }
+        let cache = image_cache.clone();
+        tauri::async_runtime::spawn_blocking(move || cache.discard_unverified(hash))
+            .await
+            .context("stale preview cleanup task failed")??;
+    }
+
+    let source_hash = image.descriptor.blob_hash;
+    let source_mime = image.descriptor.mime;
+    let preview_width = image.descriptor.preview_width;
+    let preview_height = image.descriptor.preview_height;
+    let cache_for_install = image_cache.clone();
+    let generated =
+        tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<(BlobHash, Vec<u8>)> {
+            let source = blob_store.read_verified(source_hash, MAX_MARKDOWN_IMAGE_BYTES)?;
+            let decoded = image::load_from_memory_with_format(&source, image_format(source_mime))?;
+            let preview = if decoded.width() == preview_width && decoded.height() == preview_height
+            {
+                decoded
+            } else {
+                decoded.resize(
+                    preview_width,
+                    preview_height,
+                    image::imageops::FilterType::Triangle,
+                )
+            };
+            let mut encoded = Cursor::new(Vec::new());
+            preview.write_to(&mut encoded, ImageFormat::WebP)?;
+            let bytes = encoded.into_inner();
+            anyhow::ensure!(
+                bytes.len() as u64 <= MAX_MARKDOWN_IMAGE_BYTES,
+                "generated preview is too large"
+            );
+            let hash = BlobHash::digest(&bytes);
+            cache_for_install.install_reader(bytes.as_slice(), hash, MAX_MARKDOWN_IMAGE_BYTES)?;
+            Ok((hash, bytes))
+        })
+        .await
+        .context("preview generation task failed")??;
+    let (hash, bytes) = generated;
+    let byte_size = bytes.len() as u64;
+    image.cache.preview_hash = Some(hash);
+    image.cache.preview_size = Some(byte_size);
+    image.cache.preview_width = Some(preview_width);
+    image.cache.preview_height = Some(preview_height);
+    db::upsert_attachment_image_cache(&connection, image.cache).await?;
+    Ok(ImageResource {
+        body: if head { Vec::new() } else { bytes },
+        byte_size,
+        hash,
+        mime: "image/webp",
+    })
+}
+
+const fn image_format(mime: AttachmentImageMime) -> ImageFormat {
+    match mime {
+        AttachmentImageMime::Gif => ImageFormat::Gif,
+        AttachmentImageMime::Jpeg => ImageFormat::Jpeg,
+        AttachmentImageMime::Png => ImageFormat::Png,
+        AttachmentImageMime::Webp => ImageFormat::WebP,
+    }
+}
+
+fn parse_attachment_uri(uri: &tauri::http::Uri) -> Option<ImageRoute> {
     if uri.scheme_str()? != ATTACHMENT_PROTOCOL || uri.authority()?.as_str() != "localhost" {
         return None;
     }
     if uri.query().is_some() {
         return None;
     }
-    let segment = uri.path().strip_prefix('/')?;
-    if segment.len() != 36
-        || segment.contains('/')
-        || segment.bytes().any(|byte| byte.is_ascii_uppercase())
+    let mut segments = uri.path().strip_prefix('/')?.split('/');
+    let resource_version = segments.next()?.strip_prefix('v')?.parse::<u32>().ok()?;
+    if resource_version != IMAGE_CACHE_FORMAT_VERSION {
+        return None;
+    }
+    let uuid_segment = segments.next()?;
+    let hash_segment = segments.next()?;
+    let variant = match segments.next()? {
+        "preview" => ImageVariant::Preview,
+        "original" => ImageVariant::Original,
+        _ => return None,
+    };
+    if segments.next().is_some()
+        || uuid_segment.bytes().any(|byte| byte.is_ascii_uppercase())
+        || hash_segment.bytes().any(|byte| byte.is_ascii_uppercase())
     {
         return None;
     }
-    let uuid = segment.parse::<uuid::Uuid>().ok()?;
-    (uuid.hyphenated().to_string() == segment).then_some(uuid)
+    let attachment_uuid = uuid_segment.parse::<uuid::Uuid>().ok()?;
+    if attachment_uuid.hyphenated().to_string() != uuid_segment {
+        return None;
+    }
+    Some(ImageRoute {
+        attachment_uuid,
+        blob_hash: hash_segment.parse().ok()?,
+        variant,
+    })
 }
 
 fn empty_response(status: tauri::http::StatusCode) -> tauri::http::Response<Vec<u8>> {
@@ -269,7 +550,7 @@ fn empty_response(status: tauri::http::StatusCode) -> tauri::http::Response<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{DynamicImage, RgbaImage};
+    use image::{DynamicImage, GenericImageView as _, RgbaImage};
     use std::io::{Cursor, Write};
 
     fn png(width: u32, height: u32) -> Vec<u8> {
@@ -282,25 +563,40 @@ mod tests {
     #[test]
     fn route_accepts_only_a_canonical_attachment_uuid() {
         let uuid = uuid::Uuid::now_v7();
-        let valid = format!("{ATTACHMENT_PROTOCOL}://localhost/{uuid}")
+        let hash = BlobHash::digest(b"image");
+        let valid = format!("{ATTACHMENT_PROTOCOL}://localhost/v1/{uuid}/{hash}/preview")
             .parse()
             .unwrap();
-        assert_eq!(parse_attachment_uri(&valid), Some(uuid));
+        assert_eq!(
+            parse_attachment_uri(&valid),
+            Some(ImageRoute {
+                attachment_uuid: uuid,
+                blob_hash: hash,
+                variant: ImageVariant::Preview,
+            })
+        );
         for invalid in [
-            format!("{ATTACHMENT_PROTOCOL}://localhost/{uuid}/extra"),
-            format!("{ATTACHMENT_PROTOCOL}://localhost/{uuid}?download=1"),
+            format!("{ATTACHMENT_PROTOCOL}://localhost/v1/{uuid}/{hash}/preview/extra"),
+            format!("{ATTACHMENT_PROTOCOL}://localhost/v1/{uuid}/{hash}/preview?download=1"),
             format!(
-                "{ATTACHMENT_PROTOCOL}://localhost/{}",
+                "{ATTACHMENT_PROTOCOL}://localhost/v1/{}/{hash}/preview",
                 uuid.to_string().to_uppercase()
             ),
-            format!("{ATTACHMENT_PROTOCOL}://evil/{uuid}"),
-            format!("asset://localhost/{uuid}"),
+            format!("{ATTACHMENT_PROTOCOL}://evil/v1/{uuid}/{hash}/preview"),
+            format!("asset://localhost/v1/{uuid}/{hash}/preview"),
         ] {
             assert!(
                 parse_attachment_uri(&invalid.parse().unwrap()).is_none(),
                 "{invalid}"
             );
         }
+    }
+
+    #[test]
+    fn attachment_extraction_recovers_after_a_malformed_reference() {
+        let uuid = uuid::Uuid::now_v7();
+        let markdown = format!("notes-attachment:bad then notes-attachment:{uuid}");
+        assert_eq!(extract_attachment_uuids([markdown.as_str()]), [uuid].into());
     }
 
     #[test]
@@ -321,16 +617,21 @@ mod tests {
             size: payload.len() as u64,
             created_at: 0,
         };
-        let mut image = inspect_attachment_image(&store, attachment.clone())
+        let image = inspect_attachment_image(&store, attachment.clone())
             .unwrap()
             .unwrap();
         assert_eq!(image.descriptor.mime.as_str(), "image/png");
         assert_eq!((image.descriptor.width, image.descriptor.height), (4, 3));
-        assert_eq!(read_authorized_body(&mut image).unwrap(), payload);
+        assert_eq!(
+            store.read_verified(hash, payload.len() as u64).unwrap(),
+            payload
+        );
 
-        let mut tampered = inspect_attachment_image(&store, attachment)
-            .unwrap()
-            .unwrap();
+        assert!(
+            inspect_attachment_image(&store, attachment)
+                .unwrap()
+                .is_some()
+        );
         std::fs::OpenOptions::new()
             .write(true)
             .truncate(true)
@@ -338,7 +639,7 @@ mod tests {
             .unwrap()
             .write_all(&vec![0; payload.len()])
             .unwrap();
-        assert!(read_authorized_body(&mut tampered).is_err());
+        assert!(store.read_verified(hash, payload.len() as u64).is_err());
 
         let svg = b"<svg xmlns='http://www.w3.org/2000/svg'/>";
         let svg_hash = BlobHash::digest(svg);
@@ -396,6 +697,86 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_is_resized_cached_and_rebuilt_after_cache_corruption() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = db::open(&directory.path().join("notes.db")).await.unwrap();
+        let source_store = BlobStore::new(directory.path().join("source"));
+        let preview_store = BlobStore::new(directory.path().join("previews"));
+        let payload = png(1_200, 600);
+        let source_hash = BlobHash::digest(&payload);
+        source_store
+            .install_reader(payload.as_slice(), source_hash, payload.len() as u64)
+            .unwrap();
+        let page = db::create_page(&connection, "Images".into()).await.unwrap();
+        let attachment = db::create_attachment(
+            &connection,
+            notes_core::AttachmentOwner::Page(page.uuid),
+            source_hash,
+            "wide.png".into(),
+            "image/png".into(),
+            payload.len() as u64,
+        )
+        .await
+        .unwrap();
+
+        let image = open_authorized_image(&connection, &source_store, attachment.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (
+                image.descriptor.preview_width,
+                image.descriptor.preview_height
+            ),
+            (1_024, 512)
+        );
+        let first = read_or_create_preview(
+            connection.clone(),
+            source_store.clone(),
+            preview_store.clone(),
+            image,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.mime, "image/webp");
+        assert_eq!(
+            image::load_from_memory_with_format(&first.body, ImageFormat::WebP)
+                .unwrap()
+                .dimensions(),
+            (1_024, 512)
+        );
+        let cached = db::get_attachment_image_cache(&connection, source_hash)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cached.preview_hash, Some(first.hash));
+        assert_eq!(cached.preview_size, Some(first.byte_size));
+
+        std::fs::write(preview_store.path_for(first.hash), b"corrupt").unwrap();
+        let image = open_authorized_image(&connection, &source_store, attachment.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        let rebuilt = read_or_create_preview(
+            connection,
+            source_store,
+            preview_store.clone(),
+            image,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rebuilt.body, first.body);
+        assert_eq!(
+            preview_store
+                .read_verified(rebuilt.hash, MAX_MARKDOWN_IMAGE_BYTES)
+                .unwrap(),
+            rebuilt.body
         );
     }
 }

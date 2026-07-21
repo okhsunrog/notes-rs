@@ -268,7 +268,7 @@ function PaneFrame({
           )}
         </div>
       )}
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div data-workspace-scroll className="min-h-0 flex-1 overflow-y-auto">
         <PaneSurface paneId={paneId} content={pane.content} {...props} />
       </div>
     </section>

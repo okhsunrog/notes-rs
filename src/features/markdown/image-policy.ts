@@ -26,6 +26,7 @@ export interface MarkdownResolvedImage {
   byteSize: number;
   height: number;
   mime: MarkdownImageMime;
+  originalSrc: string;
   src: string;
   width: number;
 }
@@ -108,25 +109,50 @@ export function validateResolvedMarkdownImage(
     return { kind: "blocked", reason: "invalid_size" };
   }
   if (!isSupportedMime(image.mime)) return { kind: "blocked", reason: "unsafe_mime" };
-  if (!isAuthorizedLocalImageUrl(image.src, attachmentUuid)) {
+  const preview = authorizedLocalImageRoute(image.src, attachmentUuid, "preview");
+  const original = authorizedLocalImageRoute(image.originalSrc, attachmentUuid, "original");
+  if (
+    !preview ||
+    !original ||
+    preview.hash !== original.hash ||
+    preview.version !== original.version
+  ) {
     return { kind: "blocked", reason: "unsafe_src" };
   }
   return { kind: "safe", image };
 }
 
-function isAuthorizedLocalImageUrl(src: string, attachmentUuid: string): boolean {
-  if (src.length > MAX_SOURCE_LENGTH || hasControlCharacter(src)) return false;
+function authorizedLocalImageRoute(
+  src: string,
+  attachmentUuid: string,
+  variant: "preview" | "original",
+): { hash: string; version: number } | null {
+  if (src.length > MAX_SOURCE_LENGTH || hasControlCharacter(src)) return null;
   try {
     const parsed = new URL(src);
     if (parsed.username || parsed.password || parsed.port || parsed.search || parsed.hash)
-      return false;
-    const expectedPath = `/${attachmentUuid.toLowerCase()}`;
-    if (parsed.pathname !== expectedPath) return false;
-    return parsed.protocol === "notes-attachment:"
-      ? parsed.hostname === "localhost"
-      : parsed.protocol === "http:" && parsed.hostname === "notes-attachment.localhost";
+      return null;
+    const segments = parsed.pathname.split("/");
+    if (
+      segments.length !== 5 ||
+      !/^v[1-9][0-9]*$/.test(segments[1] ?? "") ||
+      segments[2] !== attachmentUuid.toLowerCase() ||
+      !/^[0-9a-f]{64}$/.test(segments[3] ?? "") ||
+      segments[4] !== variant
+    ) {
+      return null;
+    }
+    const allowedOrigin =
+      parsed.protocol === "notes-attachment:"
+        ? parsed.hostname === "localhost"
+        : parsed.protocol === "http:" && parsed.hostname === "notes-attachment.localhost";
+    if (!allowedOrigin) return null;
+    return {
+      hash: segments[3],
+      version: Number.parseInt(segments[1].slice(1), 10),
+    };
   } catch {
-    return false;
+    return null;
   }
 }
 

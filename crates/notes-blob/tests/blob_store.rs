@@ -131,6 +131,50 @@ fn verified_open_is_bounded_and_rewinds_the_hashed_handle() {
 }
 
 #[test]
+fn verified_read_is_bounded_and_rejects_tampering() {
+    let (_directory, store) = store();
+    let hash = BlobHash::digest(CONTENT);
+    store
+        .install_reader(Cursor::new(CONTENT), hash, CONTENT.len() as u64)
+        .expect("install blob");
+
+    assert!(matches!(
+        store.read_verified(hash, 4),
+        Err(BlobStoreError::TooLarge { limit: 4 })
+    ));
+    assert_eq!(
+        store
+            .read_verified(hash, CONTENT.len() as u64)
+            .expect("read verified blob"),
+        CONTENT
+    );
+
+    fs::write(store.path_for(hash), vec![b'x'; CONTENT.len()]).expect("tamper with blob");
+    assert!(matches!(
+        store.read_verified(hash, CONTENT.len() as u64),
+        Err(BlobStoreError::CorruptBlob { .. })
+    ));
+}
+
+#[test]
+fn disposable_cache_entries_can_be_discarded_after_failed_verification() {
+    let (_directory, store) = store();
+    let hash = BlobHash::digest(CONTENT);
+    store
+        .install_reader(Cursor::new(CONTENT), hash, CONTENT.len() as u64)
+        .expect("install cache entry");
+    fs::write(store.path_for(hash), b"corrupt").expect("corrupt cache entry");
+
+    assert!(store.discard_unverified(hash).expect("discard cache entry"));
+    assert!(!store.path_for(hash).exists());
+    assert!(
+        !store
+            .discard_unverified(hash)
+            .expect("discard missing entry")
+    );
+}
+
+#[test]
 fn installs_from_a_file_without_loading_it_whole() {
     let (directory, store) = store();
     let source = directory.path().join("source.bin");

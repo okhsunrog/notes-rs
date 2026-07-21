@@ -930,6 +930,11 @@ html::before {
     vertical-align: middle;
   }
 
+  .markdown-image-trigger:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+
   .markdown-image-caption {
     color: var(--muted-foreground);
     font-size: 0.75rem;

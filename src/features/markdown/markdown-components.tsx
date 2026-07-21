@@ -22,6 +22,7 @@ import { isMermaidFenceLanguage } from "./mermaid-policy";
 import { extractMarkdownCodeLanguage, highlightMarkdownCode } from "./syntax-highlighter";
 import { classifyMarkdownUrl } from "./url-policy";
 import type { MarkdownOpenHandler, MarkdownRenderContext } from "./types";
+import { MarkdownImageViewer } from "./image-viewer";
 
 interface MarkdownLinkProps extends AnchorHTMLAttributes<HTMLAnchorElement>, ExtraProps {
   context: MarkdownRenderContext;
@@ -158,17 +159,7 @@ export function MarkdownImage({
   }
 
   const image = (
-    <img
-      alt={alt}
-      decoding="async"
-      draggable={false}
-      height={validated.image.height}
-      loading="lazy"
-      referrerPolicy="no-referrer"
-      src={validated.image.src}
-      title={title}
-      width={validated.image.width}
-    />
+    <MarkdownImageViewer alt={alt} image={validated.image} inline={inline} title={title} />
   );
   if (inline) return <span className="markdown-image-inline">{image}</span>;
   return (

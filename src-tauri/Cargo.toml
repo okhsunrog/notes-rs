@@ -23,7 +23,6 @@ tauri-build = { version = "2.6.3", features = [] }
 [dependencies]
 notes-blob.workspace = true
 notes-core.workspace = true
-notes-import.workspace = true
 notes-protocol.workspace = true
 notes-sync.workspace = true
 tauri = { version = "2.11.5", features = [] }
@@ -61,6 +60,8 @@ tempfile.workspace = true
 tauri-plugin-mcp-bridge = { git = "https://github.com/okhsunrog/mcp-server-tauri.git", rev = "012b3893b1422c2deeb81f997cba736125c84804" }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
+# Direct filesystem importers (Logseq today, Obsidian later) are desktop-only.
+notes-import.workspace = true
 tauri-plugin-dialog = "2.7.1"
 
 [target.'cfg(target_os = "android")'.dependencies]

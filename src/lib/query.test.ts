@@ -29,6 +29,7 @@ describe("domain event query invalidation", () => {
     client.setQueryData(queryKeys.block("block-b"), { uuid: "block-b" });
     client.setQueryData(queryKeys.children("parent-a"), []);
     client.setQueryData(queryKeys.pageDocument("page-a"), { revision: "d1" });
+    client.setQueryData(queryKeys.pageRender("page-a"), { document: { revision: "d1" } });
     client.setQueryData(queryKeys.pages, []);
     client.setQueryData(queryKeys.graph(null), { items: [], edges: [] });
 
@@ -42,6 +43,7 @@ describe("domain event query invalidation", () => {
     expect(client.getQueryState(queryKeys.block("block-b"))?.isInvalidated).toBe(false);
     expect(client.getQueryState(queryKeys.children("parent-a"))?.isInvalidated).toBe(true);
     expect(client.getQueryState(queryKeys.pageDocument("page-a"))?.isInvalidated).toBe(true);
+    expect(client.getQueryState(queryKeys.pageRender("page-a"))?.isInvalidated).toBe(true);
     expect(client.getQueryState(queryKeys.pages)?.isInvalidated).toBe(false);
     expect(client.getQueryState(queryKeys.graph(null))?.isInvalidated).toBe(false);
   });
@@ -84,6 +86,7 @@ describe("domain event query invalidation", () => {
     client.setQueryData(queryKeys.children("parent-a"), []);
     client.setQueryData(queryKeys.children("parent-b"), []);
     client.setQueryData(queryKeys.graph(null), { items: [], edges: [] });
+    client.setQueryData(queryKeys.pageRender("page-a"), { document: { revision: "d1" } });
 
     await applyDomainEvent(client, {
       kind: "structure_changed",
@@ -92,6 +95,7 @@ describe("domain event query invalidation", () => {
 
     expect(client.getQueryState(queryKeys.children("parent-a"))?.isInvalidated).toBe(true);
     expect(client.getQueryState(queryKeys.children("parent-b"))?.isInvalidated).toBe(true);
+    expect(client.getQueryState(queryKeys.pageRender("page-a"))?.isInvalidated).toBe(true);
     expect(client.getQueryState(queryKeys.graph(null))?.isInvalidated).toBe(false);
   });
 
@@ -100,6 +104,7 @@ describe("domain event query invalidation", () => {
     client.setQueryData(queryKeys.attachments("parent-a"), []);
     client.setQueryData(queryKeys.attachments("parent-b"), []);
     client.setQueryData(queryKeys.attachmentImages(["attachment-a"]), []);
+    client.setQueryData(queryKeys.pageRender("page-a"), { document: { revision: "d1" } });
 
     await applyDomainEvent(client, {
       kind: "attachments_changed",
@@ -111,5 +116,6 @@ describe("domain event query invalidation", () => {
     expect(client.getQueryState(queryKeys.attachmentImages(["attachment-a"]))?.isInvalidated).toBe(
       true,
     );
+    expect(client.getQueryState(queryKeys.pageRender("page-a"))?.isInvalidated).toBe(true);
   });
 });

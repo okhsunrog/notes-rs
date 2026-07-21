@@ -398,6 +398,92 @@ impl BlobStore {
         })
     }
 
+    /// Reads an installed blob into one bounded buffer while hashing that same
+    /// pass. This is the display-path counterpart to `open_verified`: callers
+    /// that need the bytes do not have to hash the file and then read it again.
+    pub fn read_verified(&self, hash: BlobHash, max_bytes: u64) -> Result<Vec<u8>, BlobStoreError> {
+        let path = self.path_for(hash);
+        let file = open_regular_file(&path)?;
+        let size = file_metadata(&file, &path)?.len();
+        if size > max_bytes {
+            return Err(BlobStoreError::TooLarge { limit: max_bytes });
+        }
+        let capacity = usize::try_from(size).map_err(|source| BlobStoreError::Io {
+            operation: "allocate blob buffer",
+            path: path.clone(),
+            source: io::Error::new(io::ErrorKind::InvalidData, source),
+        })?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(capacity)
+            .map_err(|source| BlobStoreError::Io {
+                operation: "allocate blob buffer",
+                path: path.clone(),
+                source: io::Error::other(source),
+            })?;
+        file.take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|source| BlobStoreError::Io {
+                operation: "read blob",
+                path: path.clone(),
+                source,
+            })?;
+        if bytes.len() as u64 > max_bytes {
+            return Err(BlobStoreError::TooLarge { limit: max_bytes });
+        }
+        let actual = BlobHash::digest(&bytes);
+        if bytes.len() as u64 != size {
+            return Err(BlobStoreError::ExistingSizeMismatch {
+                path,
+                expected: size,
+                actual: bytes.len() as u64,
+            });
+        }
+        if actual != hash {
+            return Err(BlobStoreError::CorruptBlob {
+                path,
+                expected: hash,
+                actual,
+            });
+        }
+        Ok(bytes)
+    }
+
+    /// Removes the exact content-addressed entry without first trusting or
+    /// hashing its bytes. This is intended only for disposable derived caches
+    /// after [`Self::read_verified`] has rejected an entry; authoritative blob
+    /// stores should use [`Self::remove_verified`] instead.
+    pub fn discard_unverified(&self, hash: BlobHash) -> Result<bool, BlobStoreError> {
+        let path = self.path_for(hash);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(source) => {
+                return Err(BlobStoreError::Io {
+                    operation: "inspect disposable blob",
+                    path,
+                    source,
+                });
+            }
+        };
+        if metadata.is_dir() {
+            return Err(BlobStoreError::UnsafeFilesystemEntry {
+                path,
+                expected: "a file or symlink at the exact disposable cache path",
+            });
+        }
+        fs::remove_file(&path).map_err(|source| BlobStoreError::Io {
+            operation: "discard disposable blob",
+            path: path.clone(),
+            source,
+        })?;
+        let shard = path
+            .parent()
+            .expect("a canonical blob path always has a shard parent");
+        sync_directory(shard)?;
+        Ok(true)
+    }
+
     /// Reads and hashes an installed blob to verify its content-addressed name.
     pub fn verify(&self, hash: BlobHash) -> Result<BlobInfo, BlobStoreError> {
         self.open_verified(hash, u64::MAX)

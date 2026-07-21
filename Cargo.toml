@@ -80,3 +80,8 @@ url = { version = "2.5.8", features = ["serde"] }
 # Drop this patch once a tao release after 0.35.3 ships.
 [patch.crates-io]
 tao = { git = "https://github.com/tauri-apps/tao", rev = "f7f8173dc85287b2a18aceb9c47533097b8c123f" }
+
+[profile.release]
+strip = "symbols"
+lto = "thin"
+codegen-units = 1

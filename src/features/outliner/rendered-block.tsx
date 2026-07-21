@@ -1,8 +1,8 @@
 import { Check, Circle, CircleSlash, Loader2 } from "lucide-react";
 import {
   MarkdownRenderer,
+  type MarkdownImageResolver,
   type MarkdownOpenHandler,
-  useAttachmentImageResolver,
 } from "@/features/markdown";
 import type { Block, PageLayout, TaskState } from "@/lib/api";
 import { getTaskStateOption, toggledTaskState } from "./block-style";
@@ -15,6 +15,7 @@ export interface RenderedBlockProps {
   readOnly: boolean;
   taskBusy: boolean;
   onTaskStateChange: (state: TaskState) => void | Promise<void>;
+  resolveImage?: MarkdownImageResolver;
 }
 
 /** Renders the persisted block style around the shared notes Markdown dialect. */
@@ -26,8 +27,8 @@ export function RenderedBlock({
   readOnly,
   taskBusy,
   onTaskStateChange,
+  resolveImage,
 }: RenderedBlockProps) {
-  const resolveImage = useAttachmentImageResolver(block.markdown);
   if (block.style.kind === "divider") return <hr className="my-4 border-border/70" />;
   if (!block.markdown && block.style.kind !== "task") {
     return <span className="text-sm text-muted-foreground/45">Start writing…</span>;

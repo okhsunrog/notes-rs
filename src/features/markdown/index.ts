@@ -11,7 +11,7 @@ export {
   type MarkdownResolvedImage,
   type ResolvedImageValidation,
 } from "./image-policy";
-export { useAttachmentImageResolver } from "./use-attachment-images";
+export { useAttachmentImageResolver, useResolvedAttachmentImages } from "./use-attachment-images";
 export {
   MarkdownCode,
   MarkdownImage,

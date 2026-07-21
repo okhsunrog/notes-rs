@@ -1,5 +1,12 @@
 use super::*;
 
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PageRenderSnapshot {
+    pub document: db::PageDocumentSnapshot,
+    pub images: Vec<crate::attachment_protocol::AttachmentImageDescriptor>,
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn rename_page(
@@ -97,6 +104,33 @@ pub async fn get_page_document(
     uuid: uuid::Uuid,
 ) -> CommandResult<Option<db::PageDocumentSnapshot>> {
     db::get_page_document(&state.conn, uuid).await.map_err(err)
+}
+
+/// Complete outline render input fetched behind one typed IPC boundary. The
+/// document remains the persisted source of truth; image descriptors are a
+/// host-derived projection used only to render authorized local resources.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_page_render_snapshot(
+    state: State<'_, AppState>,
+    uuid: uuid::Uuid,
+) -> CommandResult<Option<PageRenderSnapshot>> {
+    let Some(document) = db::get_page_document(&state.conn, uuid)
+        .await
+        .map_err(err)?
+    else {
+        return Ok(None);
+    };
+    let attachment_uuids = crate::attachment_protocol::extract_attachment_uuids(
+        document.blocks.iter().map(|block| block.markdown.as_str()),
+    );
+    let images = crate::attachment_protocol::resolve_descriptors(
+        &state,
+        attachment_uuids.into_iter().collect(),
+    )
+    .await
+    .map_err(err)?;
+    Ok(Some(PageRenderSnapshot { document, images }))
 }
 
 #[tauri::command]

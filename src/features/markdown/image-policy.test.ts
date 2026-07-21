@@ -10,14 +10,18 @@ import {
 
 const ATTACHMENT_UUID = "019c8d1a-4ab1-7f31-8f00-f594337c3ca5";
 const OTHER_ATTACHMENT_UUID = "019c8d1a-4ab1-7f31-8f00-f594337c3ca6";
-const DESKTOP_URL = `notes-attachment://localhost/${ATTACHMENT_UUID}`;
-const ANDROID_URL = `http://notes-attachment.localhost/${ATTACHMENT_UUID}`;
+const BLOB_HASH = "a".repeat(64);
+const DESKTOP_URL = `notes-attachment://localhost/v1/${ATTACHMENT_UUID}/${BLOB_HASH}/preview`;
+const DESKTOP_ORIGINAL_URL = `notes-attachment://localhost/v1/${ATTACHMENT_UUID}/${BLOB_HASH}/original`;
+const ANDROID_URL = `http://notes-attachment.localhost/v1/${ATTACHMENT_UUID}/${BLOB_HASH}/preview`;
+const ANDROID_ORIGINAL_URL = `http://notes-attachment.localhost/v1/${ATTACHMENT_UUID}/${BLOB_HASH}/original`;
 
 function resolvedImage(overrides: Partial<MarkdownResolvedImage> = {}): MarkdownResolvedImage {
   return {
     byteSize: 24_000,
     height: 480,
     mime: "image/png",
+    originalSrc: DESKTOP_ORIGINAL_URL,
     src: DESKTOP_URL,
     width: 640,
     ...overrides,
@@ -62,10 +66,13 @@ describe("Markdown image policy", () => {
     ).toEqual([ATTACHMENT_UUID, OTHER_ATTACHMENT_UUID]);
   });
 
-  it.each([DESKTOP_URL, ANDROID_URL])(
+  it.each([
+    [DESKTOP_URL, DESKTOP_ORIGINAL_URL],
+    [ANDROID_URL, ANDROID_ORIGINAL_URL],
+  ])(
     "accepts the exact platform-local image route returned by the trusted resolver: %s",
-    (src) => {
-      const image = resolvedImage({ src });
+    (src, originalSrc) => {
+      const image = resolvedImage({ src, originalSrc });
       expect(validateResolvedMarkdownImage(image, ATTACHMENT_UUID)).toEqual({
         kind: "safe",
         image,
@@ -78,6 +85,21 @@ describe("Markdown image policy", () => {
       kind: "blocked",
       reason: "unsafe_src",
     });
+  });
+
+  it("requires preview and original routes to name the same immutable resource", () => {
+    expect(
+      validateResolvedMarkdownImage(
+        resolvedImage({ originalSrc: DESKTOP_ORIGINAL_URL.replace(BLOB_HASH, "b".repeat(64)) }),
+        ATTACHMENT_UUID,
+      ),
+    ).toEqual({ kind: "blocked", reason: "unsafe_src" });
+    expect(
+      validateResolvedMarkdownImage(
+        resolvedImage({ originalSrc: DESKTOP_ORIGINAL_URL.replace("/v1/", "/v2/") }),
+        ATTACHMENT_UUID,
+      ),
+    ).toEqual({ kind: "blocked", reason: "unsafe_src" });
   });
 
   it("rejects remote resolver output, oversized images, and unsupported formats", () => {

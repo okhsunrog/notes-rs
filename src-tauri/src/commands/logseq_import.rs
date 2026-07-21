@@ -10,11 +10,10 @@ use notes_core::{
     ExternalImportOutcome, ExternalImportPage, ExternalImportPageKind, ExternalImportProvenance,
     ExternalPageId, JournalDate, OrderKey, PageAlias, PageLayout, TaskState,
 };
-use notes_import::ImportDiagnostic;
 #[cfg(not(target_os = "android"))]
 use notes_import::{
     DiagnosticSeverity, DocumentFormat, DrawingConversionPublication, DrawingConversionStatus,
-    IdentityContext, ImportBlockPresentation, ImportMediaKind, ImportMediaOwner,
+    IdentityContext, ImportBlockPresentation, ImportDiagnostic, ImportMediaKind, ImportMediaOwner,
     ImportMediaResolution, ImportPageKind, ImportTaskState, LoadDrawingConversionErrorCode,
     MaterializedMediaBlob, MediaMaterializationPlan, PreparedImport, SourceKind,
 };
@@ -28,6 +27,84 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 #[cfg(not(target_os = "android"))]
 use std::sync::Mutex;
+
+// Android exposes the same unavailable-command IPC contract without linking the desktop-only
+// importer. Keep these wire-only diagnostics in sync with `notes_import` until the importer
+// protocol is promoted to a format-neutral shared crate (for example when Obsidian lands).
+#[cfg(target_os = "android")]
+mod mobile_diagnostics {
+    #![allow(dead_code)]
+
+    use serde::Serialize;
+
+    #[derive(Debug, Clone, Copy, Serialize, specta::Type)]
+    #[serde(rename_all = "snake_case")]
+    pub enum DiagnosticSeverity {
+        Info,
+        Warning,
+        Error,
+    }
+
+    #[derive(Debug, Clone, Copy, Serialize, specta::Type)]
+    #[serde(rename_all = "snake_case")]
+    pub enum DiagnosticCode {
+        ConfigNotFound,
+        SourceDirectoryNotFound,
+        UnsupportedDocumentFormat,
+        MixedIndentation,
+        NonCanonicalIndentation,
+        NonCanonicalContinuationIndentation,
+        UnclosedFence,
+        PreservedMacro,
+        EmptyPageTitle,
+        MultiplePageTitles,
+        DuplicatePageIdentity,
+        DuplicatePageTitle,
+        DuplicateJournalDate,
+        DuplicateTargetUuid,
+        InvalidBlockUuid,
+        MultipleBlockIdentityProperties,
+        DuplicateBlockUuid,
+        UnresolvedPageReference,
+        AmbiguousPageReference,
+        InvalidBlockReference,
+        UnresolvedBlockReference,
+        UnsupportedNestedWikilink,
+        MissingMediaSource,
+        RemoteMediaBlocked,
+        UnsafeMediaSource,
+        UnsupportedInlineMedia,
+    }
+
+    #[derive(Debug, Clone, Copy, Serialize, specta::Type)]
+    #[serde(rename_all = "camelCase")]
+    pub struct SourcePosition {
+        pub line: u64,
+        pub column: u64,
+        pub byte_offset: u64,
+    }
+
+    #[derive(Debug, Clone, Copy, Serialize, specta::Type)]
+    #[serde(rename_all = "camelCase")]
+    pub struct SourceRange {
+        pub start: SourcePosition,
+        pub end: SourcePosition,
+    }
+
+    #[derive(Debug, Clone, Serialize, specta::Type)]
+    #[serde(rename_all = "camelCase")]
+    pub struct ImportDiagnostic {
+        pub severity: DiagnosticSeverity,
+        pub code: DiagnosticCode,
+        pub relative_path: Option<String>,
+        pub range: Option<SourceRange>,
+        pub message: String,
+        pub remediation: Option<String>,
+    }
+}
+
+#[cfg(target_os = "android")]
+use mobile_diagnostics::ImportDiagnostic;
 
 #[cfg(not(target_os = "android"))]
 const MAX_PREVIEW_DIAGNOSTICS: usize = 200;
@@ -367,10 +444,10 @@ pub async fn prepare_logseq_import(
     #[cfg(target_os = "android")]
     {
         let _ = (app, state, sessions, on_progress);
-        return Err(CommandError::new(
+        Err(CommandError::new(
             CommandErrorCode::Unavailable,
             "direct Logseq folder import is available on desktop only",
-        ));
+        ))
     }
 
     #[cfg(not(target_os = "android"))]
@@ -495,10 +572,10 @@ pub async fn commit_logseq_import(
     #[cfg(target_os = "android")]
     {
         let _ = (app, state, sessions, session_uuid, on_progress);
-        return Err(CommandError::new(
+        Err(CommandError::new(
             CommandErrorCode::Unavailable,
             "direct Logseq folder import is available on desktop only",
-        ));
+        ))
     }
 
     #[cfg(not(target_os = "android"))]
