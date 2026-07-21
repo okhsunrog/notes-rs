@@ -322,9 +322,11 @@ impl BlobStore {
             });
         }
 
-        match fs::hard_link(temporary.path(), &target) {
+        match publish_noclobber(temporary.path(), &target) {
             Ok(()) => {
-                close_temporary(temporary, &temporary_path)?;
+                // The temporary path was atomically moved on Linux/Android. On platforms that
+                // publish with a hard link, closing it removes the original temporary name.
+                close_published_temporary(temporary, &temporary_path)?;
                 sync_directory(shard)?;
                 Ok(InstallResult {
                     blob: BlobInfo {
@@ -474,6 +476,23 @@ impl BlobStore {
         }
         Ok(())
     }
+}
+
+#[cfg(any(target_os = "android", target_os = "linux"))]
+fn publish_noclobber(source: &Path, target: &Path) -> io::Result<()> {
+    rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        source,
+        rustix::fs::CWD,
+        target,
+        rustix::fs::RenameFlags::NOREPLACE,
+    )
+    .map_err(io::Error::from)
+}
+
+#[cfg(not(any(target_os = "android", target_os = "linux")))]
+fn publish_noclobber(source: &Path, target: &Path) -> io::Result<()> {
+    fs::hard_link(source, target)
 }
 
 fn ensure_directory(path: &Path) -> Result<(), BlobStoreError> {
@@ -691,6 +710,26 @@ fn close_temporary(temporary: tempfile::NamedTempFile, path: &Path) -> Result<()
         path: path.to_path_buf(),
         source,
     })
+}
+
+#[cfg(any(target_os = "android", target_os = "linux"))]
+fn close_published_temporary(
+    mut temporary: tempfile::NamedTempFile,
+    _path: &Path,
+) -> Result<(), BlobStoreError> {
+    // `renameat2(RENAME_NOREPLACE)` moved the directory entry to its final name. Prevent
+    // NamedTempFile from attempting cleanup through its now-stale temporary pathname.
+    temporary.disable_cleanup(true);
+    drop(temporary);
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "android", target_os = "linux")))]
+fn close_published_temporary(
+    temporary: tempfile::NamedTempFile,
+    path: &Path,
+) -> Result<(), BlobStoreError> {
+    close_temporary(temporary, path)
 }
 
 /// Filesystem and validation failures from [`BlobStore`].

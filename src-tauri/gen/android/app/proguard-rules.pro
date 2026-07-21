@@ -19,3 +19,7 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# rustls calls this Android certificate-verifier bridge exclusively through JNI, so R8 cannot
+# discover the references by itself.
+-keep, includedescriptorclasses class org.rustls.platformverifier.** { *; }

@@ -1,3 +1,5 @@
+#[cfg(target_os = "android")]
+mod android_tls;
 mod attachment_protocol;
 mod commands;
 mod settings;

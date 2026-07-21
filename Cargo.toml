@@ -47,6 +47,7 @@ reqwest = { version = "0.13.4", default-features = false }
 rig = { package = "rig-core", version = "0.40.0" }
 rusqlite = { version = "0.40.1", default-features = false, features = ["bundled", "uuid"] }
 rusqlite_migration = "2.6.0"
+rustix = { version = "1.1.4", features = ["fs"] }
 rust-stemmers = "1.2.0"
 schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }

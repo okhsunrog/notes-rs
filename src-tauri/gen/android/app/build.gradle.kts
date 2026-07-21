@@ -1,4 +1,6 @@
+import java.io.FileInputStream
 import java.util.Properties
+import groovy.json.JsonSlurper
 
 plugins {
     id("com.android.application")
@@ -13,6 +15,32 @@ val tauriProperties = Properties().apply {
     }
 }
 
+val rustlsPlatformVerifierAndroid by lazy {
+    val cargoMetadata = providers.exec {
+        workingDir = rootProject.file("../..")
+        commandLine(
+            "cargo",
+            "metadata",
+            "--format-version",
+            "1",
+            "--filter-platform",
+            "aarch64-linux-android",
+            "--manifest-path",
+            rootProject.file("../../Cargo.toml").absolutePath,
+        )
+    }.standardOutput.asText.get()
+    @Suppress("UNCHECKED_CAST")
+    val packages = (JsonSlurper().parseText(cargoMetadata) as Map<String, Any>)["packages"] as List<Map<String, Any>>
+    packages.first { it["name"] == "rustls-platform-verifier-android" }
+}
+
+repositories {
+    maven {
+        val manifestPath = file(rustlsPlatformVerifierAndroid.getValue("manifest_path") as String)
+        url = uri(File(manifestPath.parentFile, "maven"))
+    }
+}
+
 android {
     compileSdk = 36
     namespace = "dev.okhsunrog.notes_rs"
@@ -24,8 +52,22 @@ android {
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
     }
+    signingConfigs {
+        create("release") {
+            val keystorePropertiesFile = rootProject.file("keystore.properties")
+            val keystoreProperties = Properties()
+            if (keystorePropertiesFile.exists()) {
+                keystoreProperties.load(FileInputStream(keystorePropertiesFile))
+            }
+            keyAlias = keystoreProperties["keyAlias"] as String
+            keyPassword = keystoreProperties["password"] as String
+            storeFile = file(keystoreProperties["storeFile"] as String)
+            storePassword = keystoreProperties["password"] as String
+        }
+    }
     buildTypes {
         getByName("debug") {
+            signingConfig = signingConfigs.getByName("release")
             manifestPlaceholders["usesCleartextTraffic"] = "true"
             isDebuggable = true
             isJniDebuggable = true
@@ -37,6 +79,7 @@ android {
             }
         }
         getByName("release") {
+            signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }
@@ -55,6 +98,9 @@ rust {
 }
 
 dependencies {
+    implementation(
+        "rustls:rustls-platform-verifier:${rustlsPlatformVerifierAndroid.getValue("version")}",
+    )
     implementation("androidx.webkit:webkit:1.14.0")
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.activity:activity-ktx:1.10.1")

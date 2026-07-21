@@ -64,6 +64,8 @@ tauri-plugin-mcp-bridge = { git = "https://github.com/okhsunrog/mcp-server-tauri
 tauri-plugin-dialog = "2.7.1"
 
 [target.'cfg(target_os = "android")'.dependencies]
+jni = { version = "0.22.4", default-features = false }
+rustls-platform-verifier = "0.7.0"
 tauri-plugin-mobile-system = { path = "../plugins/tauri-plugin-mobile-system" }
 tauri-plugin-android-fs = "28.4.0"
 tracing-logcat = "0.1.0"
