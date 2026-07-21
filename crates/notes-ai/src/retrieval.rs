@@ -5,6 +5,7 @@ use notes_core::Connection;
 use notes_core::db::{self, Content, SearchHit};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 const RRF_K: f64 = 60.0;
 const HYBRID_POOL_MULTIPLIER: u32 = 4;
@@ -55,20 +56,42 @@ impl RetrievalPipeline {
         query: String,
         limit: u32,
     ) -> Result<Vec<RankedCandidate>> {
+        let total_started = Instant::now();
         validate(&query, limit)?;
+        let embedding_started = Instant::now();
         let embedding = self.embedder.embed_query(query.clone()).await?;
+        let embedding_ms = embedding_started.elapsed().as_millis();
         let pool_limit = limit.saturating_mul(HYBRID_POOL_MULTIPLIER);
         let vector_chunk_limit = pool_limit.saturating_mul(VECTOR_CHUNK_OVERFETCH_MULTIPLIER);
-        let (fts, vector_chunks) = tokio::try_join!(
-            db::search_fts(&self.notes, query, pool_limit),
-            self.vectors.search(embedding, vector_chunk_limit)
+        let hybrid_started = Instant::now();
+        let fts_started = Instant::now();
+        let vector_started = Instant::now();
+        let ((fts, fts_ms), (vector_chunks, vector_ms)) = tokio::try_join!(
+            async {
+                db::search_fts(&self.notes, query.clone(), pool_limit)
+                    .await
+                    .map(|hits| (hits, fts_started.elapsed().as_millis()))
+            },
+            async {
+                self.vectors
+                    .search(embedding, vector_chunk_limit)
+                    .await
+                    .map(|hits| (hits, vector_started.elapsed().as_millis()))
+            }
         )?;
+        let hybrid_ms = hybrid_started.elapsed().as_millis();
+        let fts_count = fts.len();
+        let vector_chunk_count = vector_chunks.len();
         let vectors = dedup_vector_matches(vector_chunks, pool_limit as usize);
+        let vector_content_count = vectors.len();
         let vector_uuids = vectors
             .iter()
             .map(|result| result.content_uuid)
             .collect::<Vec<_>>();
+        let hydrate_started = Instant::now();
         let vector_content = db::get_contents(&self.notes, vector_uuids).await?;
+        let hydrate_ms = hydrate_started.elapsed().as_millis();
+        let merge_started = Instant::now();
         let mut content = fts
             .iter()
             .map(|hit| (hit.content.uuid(), hit.content.clone()))
@@ -115,6 +138,25 @@ impl RetrievalPipeline {
             .collect::<Vec<_>>();
         hits.sort_by(|left, right| right.hit.score.total_cmp(&left.hit.score));
         hits.truncate(limit as usize);
+        let merge_ms = merge_started.elapsed().as_millis();
+        tracing::info!(
+            query_chars = query.chars().count(),
+            limit,
+            pool_limit,
+            vector_chunk_limit,
+            fts_count,
+            vector_chunk_count,
+            vector_content_count,
+            result_count = hits.len(),
+            embedding_ms,
+            fts_ms,
+            vector_ms,
+            hybrid_ms,
+            hydrate_ms,
+            merge_ms,
+            total_ms = total_started.elapsed().as_millis(),
+            "hybrid retrieval completed"
+        );
         Ok(hits)
     }
 
@@ -139,13 +181,24 @@ impl RetrievalPipeline {
         let documents = candidates
             .iter()
             .map(|candidate| candidate.rerank_text.clone())
-            .collect();
+            .collect::<Vec<_>>();
+        let candidate_count = documents.len();
+        let rerank_started = Instant::now();
         let scored = self.reranker.rerank(query, documents).await?;
+        let rerank_ms = rerank_started.elapsed().as_millis();
         let hits = candidates
             .into_iter()
             .map(|candidate| candidate.hit)
             .collect::<Vec<_>>();
-        Ok(select_reranked_hits(scored, &hits, limit as usize))
+        let hits = select_reranked_hits(scored, &hits, limit as usize);
+        tracing::info!(
+            limit,
+            candidate_count,
+            result_count = hits.len(),
+            rerank_ms,
+            "semantic reranking completed"
+        );
+        Ok(hits)
     }
 
     pub fn notes(&self) -> &Connection {

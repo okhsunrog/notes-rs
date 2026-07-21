@@ -15,8 +15,10 @@ use notes_protocol::{
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 const SETTINGS_FILE: &str = "ai-settings.json";
 
@@ -97,11 +99,26 @@ impl AiRuntime {
             bail!("limit must be between 1 and 100");
         }
         let active = self.active();
-        active
-            .user(user_id)?
-            .retrieval
-            .retrieve_with_rerank(query, limit, rerank)
-            .await
+        let retrieval = active.user(user_id)?.retrieval.clone();
+        let span = tracing::info_span!(
+            "semantic_search",
+            search_id = %uuid::Uuid::new_v4(),
+            user = user_id,
+            limit,
+            rerank
+        );
+        async move {
+            let started = Instant::now();
+            let result = retrieval.retrieve_with_rerank(query, limit, rerank).await;
+            tracing::info!(
+                success = result.is_ok(),
+                total_ms = started.elapsed().as_millis(),
+                "semantic search request completed"
+            );
+            result
+        }
+        .instrument(span)
+        .await
     }
 
     pub async fn status(&self, user_id: &str) -> Result<AiIndexStatus> {

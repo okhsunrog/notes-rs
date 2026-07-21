@@ -125,9 +125,7 @@ async fn tick(
     extractor: &EntityExtractor,
     on_entities_changed: &(dyn Fn() + Send + Sync),
 ) -> Result<bool> {
-    let stale_sources = store
-        .reconcile_extractions(notes, notes_core::sync_cursor(notes).await?)
-        .await?;
+    let stale_sources = store.reconcile_extractions(notes).await?;
     for source_uuid in stale_sources {
         store.forget_extraction_source(source_uuid).await?;
         on_entities_changed();

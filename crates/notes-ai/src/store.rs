@@ -39,6 +39,12 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("store/migrations/V001__initial.sql")),
         M::up(include_str!("store/migrations/V002__chunked_vectors.sql")),
         M::up(include_str!("store/migrations/V003__reconcile_cursor.sql")),
+        M::up(include_str!(
+            "store/migrations/V004__extraction_reconcile_cursor.sql"
+        )),
+        M::up(include_str!(
+            "store/migrations/V005__extraction_edge_source_index.sql"
+        )),
     ])
 }
 
@@ -199,6 +205,8 @@ pub struct AiStore {
     table_name: String,
     #[cfg(test)]
     reconcile_scans: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    extraction_reconcile_scans: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl AiStore {
@@ -273,6 +281,8 @@ impl AiStore {
             table_name,
             #[cfg(test)]
             reconcile_scans: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(test)]
+            extraction_reconcile_scans: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         if initialize_control {
             store.set_control(default_control).await?;
@@ -575,11 +585,25 @@ impl AiStore {
             .await
     }
 
-    pub async fn reconcile_extractions(
-        &self,
-        notes: &Connection,
-        source_seq: u64,
-    ) -> Result<Vec<uuid::Uuid>> {
+    pub async fn reconcile_extractions(&self, notes: &Connection) -> Result<Vec<uuid::Uuid>> {
+        let source = index_source_cursor(notes).await?;
+        let reconciled = self
+            .connection
+            .call(|database| {
+                database.query_row(
+                    "SELECT last_extraction_reconciled_cursor
+                     FROM index_control WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+            })
+            .await?;
+        if reconciled.as_deref() == Some(source.token.as_str()) {
+            return Ok(Vec::new());
+        }
+        #[cfg(test)]
+        self.extraction_reconcile_scans
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let documents = extraction_documents(notes).await?;
         self.connection
             .call(move |database| {
@@ -622,7 +646,7 @@ impl AiStore {
                             content_uuid,
                             document.input_hash,
                             document.text,
-                            source_seq as i64
+                            source.server_seq
                         ],
                     )?;
                 }
@@ -658,16 +682,29 @@ impl AiStore {
                         [content_uuid],
                     )?;
                 }
+                transaction.execute(
+                    "UPDATE index_control
+                     SET last_extraction_reconciled_cursor = ?1
+                     WHERE singleton = 1",
+                    [source.token],
+                )?;
                 transaction.commit()?;
                 Ok(stale_sources)
             })
             .await
     }
 
+    #[cfg(test)]
+    pub(crate) fn extraction_reconcile_scan_count(&self) -> usize {
+        self.extraction_reconcile_scans
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub async fn forget_extraction_source(&self, source_uuid: uuid::Uuid) -> Result<()> {
         self.connection
             .call(move |database| {
                 let transaction = database.transaction()?;
+                let orphan_candidates = extraction_edge_endpoints(&transaction, source_uuid)?;
                 transaction.execute(
                     "DELETE FROM extraction_edges WHERE source_uuid = ?1",
                     [source_uuid],
@@ -680,7 +717,7 @@ impl AiStore {
                     "DELETE FROM extraction_jobs WHERE content_uuid = ?1",
                     [source_uuid],
                 )?;
-                delete_orphan_entities(&transaction)?;
+                delete_orphan_entities(&transaction, orphan_candidates)?;
                 transaction.commit()
             })
             .await
@@ -768,6 +805,8 @@ impl AiStore {
                 let Some(source_seq) = current else {
                     return Ok(());
                 };
+                let mut orphan_candidates = extraction_edge_endpoints(&transaction, source_uuid)?;
+                orphan_candidates.extend(entities.iter().map(|entity| entity.uuid));
                 transaction.execute(
                     "DELETE FROM extraction_edges WHERE source_uuid = ?1",
                     [source_uuid],
@@ -797,7 +836,7 @@ impl AiStore {
                         rusqlite::params![source_uuid, edge.src_uuid, edge.dst_uuid, edge.kind],
                     )?;
                 }
-                delete_orphan_entities(&transaction)?;
+                delete_orphan_entities(&transaction, orphan_candidates)?;
                 transaction.execute(
                     "INSERT INTO extraction_state(content_uuid, input_hash, source_seq)
                      VALUES (?1, ?2, ?3)
@@ -1005,15 +1044,36 @@ impl AiStore {
     }
 }
 
-fn delete_orphan_entities(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
-    transaction.execute(
+fn extraction_edge_endpoints(
+    transaction: &rusqlite::Transaction<'_>,
+    source_uuid: uuid::Uuid,
+) -> rusqlite::Result<HashSet<uuid::Uuid>> {
+    let mut statement = transaction
+        .prepare("SELECT src_uuid, dst_uuid FROM extraction_edges WHERE source_uuid = ?1")?;
+    let endpoints = statement
+        .query_map([source_uuid], |row| {
+            Ok((row.get::<_, uuid::Uuid>(0)?, row.get::<_, uuid::Uuid>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(endpoints
+        .into_iter()
+        .flat_map(|(source, destination)| [source, destination])
+        .collect())
+}
+
+fn delete_orphan_entities(
+    transaction: &rusqlite::Transaction<'_>,
+    candidates: HashSet<uuid::Uuid>,
+) -> rusqlite::Result<()> {
+    let mut statement = transaction.prepare(
         "DELETE FROM entities
-          WHERE NOT EXISTS (
-            SELECT 1 FROM extraction_edges
-             WHERE src_uuid = entities.uuid OR dst_uuid = entities.uuid
-          )",
-        [],
+          WHERE uuid = ?1
+            AND NOT EXISTS (SELECT 1 FROM extraction_edges WHERE src_uuid = ?1)
+            AND NOT EXISTS (SELECT 1 FROM extraction_edges WHERE dst_uuid = ?1)",
     )?;
+    for candidate in candidates {
+        statement.execute([candidate])?;
+    }
     Ok(())
 }
 
@@ -2224,9 +2284,10 @@ mod tests {
             .expect("AI store");
 
         store
-            .reconcile_extractions(&notes, 1)
+            .reconcile_extractions(&notes)
             .await
             .expect("reconcile extraction jobs");
+        assert_eq!(store.extraction_reconcile_scan_count(), 1);
         let job = store
             .take_extraction_jobs(16)
             .await
@@ -2252,6 +2313,11 @@ mod tests {
             )
             .await
             .expect("finish extraction");
+        store
+            .reconcile_extractions(&notes)
+            .await
+            .expect("skip extraction scan at an unchanged source cursor");
+        assert_eq!(store.extraction_reconcile_scan_count(), 1);
 
         assert!(
             notes_core::db::get_content(&notes, entity_uuid)
@@ -2290,9 +2356,10 @@ mod tests {
         .await
         .expect("update block");
         store
-            .reconcile_extractions(&notes, 2)
+            .reconcile_extractions(&notes)
             .await
             .expect("reconcile changed extraction input");
+        assert_eq!(store.extraction_reconcile_scan_count(), 2);
         let changed_job = store
             .take_extraction_jobs(16)
             .await
