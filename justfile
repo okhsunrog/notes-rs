@@ -4,6 +4,18 @@ server_target := "x86_64-unknown-linux-musl"
 server_release_dir := "release-server"
 server_archive := "notes-server-release.tar.gz"
 
+# Fast release APK for normal iteration: keep symbol stripping, but restore
+# Cargo's parallel release codegen and skip LTO.
+build-android-arm64:
+    CARGO_PROFILE_RELEASE_LTO=false \
+        CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
+        vp run tauri android build --apk --target aarch64 --split-per-abi
+
+# Final size-optimized release APK. The release profile in Cargo.toml enables
+# symbol stripping, Thin LTO and a single codegen unit.
+build-android-arm64-size:
+    vp run tauri android build --apk --target aarch64 --split-per-abi
+
 # Build the server as a portable static Linux binary for the VPS.
 # sqlite-vec 0.1.9 uses BSD u_int*_t aliases in its bundled C source; map
 # only those aliases to their standard stdint.h names for the musl target.
