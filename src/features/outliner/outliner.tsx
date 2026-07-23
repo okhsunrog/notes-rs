@@ -20,6 +20,11 @@ type Props = {
 
 type FlatBlock = { block: Block; depth: number; ordinal: number };
 
+// Verified on-device: 300 fully rendered markdown rows still fling natively-smooth,
+// while the virtualizer's per-scroll re-render is what causes stutter. So only
+// genuinely huge pages pay the virtualization trade-off.
+const NON_VIRTUAL_MAX = 400;
+
 export function Outliner({
   page,
   initialEditingUuid = null,
@@ -120,8 +125,15 @@ function VirtualOutline({
     }
   }, [blocks, page.uuid, queryClient]);
 
+  // Virtualization couples scrolling to React: the virtualizer re-renders on every
+  // scroll event, and that per-frame render pipeline is what makes flings stutter
+  // (verified: the same content rendered statically scrolls natively-smooth).
+  // Render typical pages in full and only virtualize genuinely huge ones.
+  const virtualize = rows.length > NON_VIRTUAL_MAX;
+
   const virtualizer = useVirtualizer({
     count: rows.length,
+    enabled: virtualize,
     estimateSize: (index) => estimateBlockHeight(rows[index]?.block),
     getItemKey: (index) => rows[index]?.block.uuid ?? index,
     getScrollElement: () => scrollElement,
@@ -144,10 +156,10 @@ function VirtualOutline({
   }, [focusFirstBlockRequest, rows, store]);
 
   useEffect(() => {
-    if (!store.editingUuid) return;
+    if (!virtualize || !store.editingUuid) return;
     const index = rows.findIndex(({ block }) => block.uuid === store.editingUuid);
     if (index >= 0) virtualizer.scrollToIndex(index, { align: "auto" });
-  }, [rows, store.editingUuid, virtualizer]);
+  }, [rows, store.editingUuid, virtualize, virtualizer]);
 
   const addRootBlock = async () => {
     const roots = blocks.filter((block) => block.parentUuid === null);
@@ -187,30 +199,42 @@ function VirtualOutline({
       <ul
         ref={rootRef}
         className="relative"
-        style={{ height: virtualizer.getTotalSize(), contain: "layout style" }}
+        style={
+          virtualize ? { height: virtualizer.getTotalSize(), contain: "layout style" } : undefined
+        }
       >
-        {virtualizer.getVirtualItems().map((item) => {
-          const row = rows[item.index];
-          if (!row) return null;
-          return (
-            <BlockNode
-              key={row.block.uuid}
-              block={row.block}
-              depth={row.depth}
-              ordinal={row.ordinal}
-              measureRef={virtualizer.measureElement}
-              virtualIndex={item.index}
-              style={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                width: "100%",
-                paddingInlineStart: `${row.depth * 1.75}rem`,
-                transform: `translateY(${item.start - virtualizer.options.scrollMargin}px)`,
-              }}
-            />
-          );
-        })}
+        {virtualize
+          ? virtualizer.getVirtualItems().map((item) => {
+              const row = rows[item.index];
+              if (!row) return null;
+              return (
+                <BlockNode
+                  key={row.block.uuid}
+                  block={row.block}
+                  depth={row.depth}
+                  ordinal={row.ordinal}
+                  measureRef={virtualizer.measureElement}
+                  virtualIndex={item.index}
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    width: "100%",
+                    paddingInlineStart: `${row.depth * 1.75}rem`,
+                    transform: `translateY(${item.start - virtualizer.options.scrollMargin}px)`,
+                  }}
+                />
+              );
+            })
+          : rows.map((row) => (
+              <BlockNode
+                key={row.block.uuid}
+                block={row.block}
+                depth={row.depth}
+                ordinal={row.ordinal}
+                style={{ paddingInlineStart: `${row.depth * 1.75}rem` }}
+              />
+            ))}
       </ul>
       {!store.readOnly && (
         <button

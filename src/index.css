@@ -971,3 +971,15 @@ html::before {
     line-height: 1.8;
   }
 }
+
+/* Promote the workspace scroller onto its own compositor layer. Without this the
+   Android WebView (unlike Chrome) scrolls this nested overflow container on the main
+   thread, repainting content every frame (measured: Paint 304ms per fling -> 0 after
+   promotion). Note: will-change:transform makes the content a containing block for
+   fixed-position descendants — popovers must stay portaled to <body> (they are). */
+[data-workspace-scroll] {
+  will-change: scroll-position;
+}
+[data-workspace-scroll] > * {
+  will-change: transform;
+}
