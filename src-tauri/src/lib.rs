@@ -146,7 +146,13 @@ pub fn run() {
             let data_dir = app.path().app_data_dir().expect("resolving app data dir");
             std::fs::create_dir_all(&data_dir).expect("creating data dir");
             let blob_store = notes_blob::BlobStore::new(data_dir.clone());
-            let image_cache = notes_blob::BlobStore::new(data_dir.join("image-cache-v1"));
+            // v2: previews switched from lossless to lossy WebP; the old
+            // lossless blobs would never be referenced again, so drop the dir.
+            let image_cache = notes_blob::BlobStore::new(data_dir.join("image-cache-v2"));
+            let stale_image_cache = data_dir.join("image-cache-v1");
+            std::thread::spawn(move || {
+                let _ = std::fs::remove_dir_all(stale_image_cache);
+            });
             app.manage(commands::LogseqImportSessions::default());
 
             let startup = Arc::new(RwLock::new(commands::StartupStatus::Starting {

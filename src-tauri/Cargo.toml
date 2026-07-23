@@ -55,6 +55,7 @@ tokio-tungstenite.workspace = true
 tokio-util.workspace = true
 thiserror.workspace = true
 tempfile.workspace = true
+zenwebp = "0.4.4"
 
 [target.'cfg(not(target_os = "ios"))'.dependencies]
 tauri-plugin-mcp-bridge = { git = "https://github.com/okhsunrog/mcp-server-tauri.git", rev = "012b3893b1422c2deeb81f997cba736125c84804" }

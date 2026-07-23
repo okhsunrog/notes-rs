@@ -14,8 +14,13 @@ const MAX_MARKDOWN_IMAGE_DIMENSION: u32 = 8_192;
 const MAX_MARKDOWN_IMAGE_PIXELS: u64 = 25_000_000;
 pub(crate) const MAX_DESCRIPTOR_BATCH: usize = 256;
 const DESCRIPTOR_CONCURRENCY: usize = 4;
-const IMAGE_CACHE_FORMAT_VERSION: u32 = 1;
+const IMAGE_CACHE_FORMAT_VERSION: u32 = 2;
 const PREVIEW_MAX_EDGE: u32 = 1_024;
+/// Lossy WebP quality for inline previews. The `image` crate only encodes
+/// lossless WebP (photo previews came out at hundreds of KB with slow decodes),
+/// so previews go through `zenwebp` instead — a pure-Rust lossy encoder with
+/// output within a few percent of libwebp's.
+const PREVIEW_WEBP_QUALITY: f32 = 80.0;
 const IMMUTABLE_CACHE_CONTROL: &str = "private, max-age=31536000, immutable";
 
 pub(crate) fn extract_attachment_uuids<'a>(
@@ -101,14 +106,13 @@ pub(crate) async fn resolve_descriptors(
     let attachment_uuids = attachment_uuids.into_iter().collect::<BTreeSet<_>>();
     let connection = state.conn.clone();
     let blob_store = state.blob_store.clone();
-    let descriptors = stream::iter(attachment_uuids)
+    let images: Vec<AuthorizedImage> = stream::iter(attachment_uuids)
         .map(|attachment_uuid| {
             let connection = connection.clone();
             let blob_store = blob_store.clone();
             async move {
                 match open_authorized_image(&connection, &blob_store, attachment_uuid).await {
-                    Ok(Some(image)) => Some(image.descriptor),
-                    Ok(None) => None,
+                    Ok(image) => image,
                     Err(error) => {
                         tracing::warn!(%attachment_uuid, %error, "attachment image is unavailable");
                         None
@@ -117,10 +121,49 @@ pub(crate) async fn resolve_descriptors(
             }
         })
         .buffer_unordered(DESCRIPTOR_CONCURRENCY)
-        .filter_map(|descriptor| async move { descriptor })
+        .filter_map(|image| async move { image })
         .collect()
         .await;
+    let descriptors = images
+        .iter()
+        .map(|image| image.descriptor.clone())
+        .collect();
+    warm_preview_cache(state, images);
     Ok(descriptors)
+}
+
+/// Generates missing previews in the background right after a page resolves its
+/// descriptors, so the decode/resize/encode work happens off the first-scroll
+/// path instead of on demand when the `<img>` enters the viewport mid-fling.
+fn warm_preview_cache(state: &AppState, images: Vec<AuthorizedImage>) {
+    let warm: Vec<AuthorizedImage> = images
+        .into_iter()
+        .filter(|image| image.cache.preview_hash.is_none())
+        .collect();
+    if warm.is_empty() {
+        return;
+    }
+    let connection = state.conn.clone();
+    let blob_store = state.blob_store.clone();
+    let image_cache = state.image_cache.clone();
+    tauri::async_runtime::spawn(async move {
+        // Sequential on purpose: previews are a warm-up, the UI thread and
+        // interactive protocol requests should win any CPU contention.
+        for image in warm {
+            let attachment_uuid = image.descriptor.attachment_uuid;
+            if let Err(error) = read_or_create_preview(
+                connection.clone(),
+                blob_store.clone(),
+                image_cache.clone(),
+                image,
+                true,
+            )
+            .await
+            {
+                tracing::debug!(%attachment_uuid, %error, "preview warm-up failed");
+            }
+        }
+    });
 }
 
 async fn open_authorized_image(
@@ -464,9 +507,30 @@ async fn read_or_create_preview(
                     image::imageops::FilterType::Triangle,
                 )
             };
-            let mut encoded = Cursor::new(Vec::new());
-            preview.write_to(&mut encoded, ImageFormat::WebP)?;
-            let bytes = encoded.into_inner();
+            let (width, height) = (preview.width(), preview.height());
+            let config = zenwebp::LossyConfig::new().with_quality(PREVIEW_WEBP_QUALITY);
+            let bytes = if preview.color().has_alpha() {
+                let pixels = preview.into_rgba8();
+                zenwebp::EncodeRequest::lossy(
+                    &config,
+                    &pixels,
+                    zenwebp::PixelLayout::Rgba8,
+                    width,
+                    height,
+                )
+                .encode()
+            } else {
+                let pixels = preview.into_rgb8();
+                zenwebp::EncodeRequest::lossy(
+                    &config,
+                    &pixels,
+                    zenwebp::PixelLayout::Rgb8,
+                    width,
+                    height,
+                )
+                .encode()
+            }
+            .map_err(|error| anyhow::anyhow!("preview webp encoding failed: {error}"))?;
             anyhow::ensure!(
                 bytes.len() as u64 <= MAX_MARKDOWN_IMAGE_BYTES,
                 "generated preview is too large"
@@ -564,7 +628,8 @@ mod tests {
     fn route_accepts_only_a_canonical_attachment_uuid() {
         let uuid = uuid::Uuid::now_v7();
         let hash = BlobHash::digest(b"image");
-        let valid = format!("{ATTACHMENT_PROTOCOL}://localhost/v1/{uuid}/{hash}/preview")
+        let version = IMAGE_CACHE_FORMAT_VERSION;
+        let valid = format!("{ATTACHMENT_PROTOCOL}://localhost/v{version}/{uuid}/{hash}/preview")
             .parse()
             .unwrap();
         assert_eq!(
@@ -576,14 +641,20 @@ mod tests {
             })
         );
         for invalid in [
-            format!("{ATTACHMENT_PROTOCOL}://localhost/v1/{uuid}/{hash}/preview/extra"),
-            format!("{ATTACHMENT_PROTOCOL}://localhost/v1/{uuid}/{hash}/preview?download=1"),
+            format!("{ATTACHMENT_PROTOCOL}://localhost/v{version}/{uuid}/{hash}/preview/extra"),
             format!(
-                "{ATTACHMENT_PROTOCOL}://localhost/v1/{}/{hash}/preview",
+                "{ATTACHMENT_PROTOCOL}://localhost/v{version}/{uuid}/{hash}/preview?download=1"
+            ),
+            format!(
+                "{ATTACHMENT_PROTOCOL}://localhost/v{version}/{}/{hash}/preview",
                 uuid.to_string().to_uppercase()
             ),
-            format!("{ATTACHMENT_PROTOCOL}://evil/v1/{uuid}/{hash}/preview"),
-            format!("asset://localhost/v1/{uuid}/{hash}/preview"),
+            format!(
+                "{ATTACHMENT_PROTOCOL}://localhost/v{}/{uuid}/{hash}/preview",
+                version + 1
+            ),
+            format!("{ATTACHMENT_PROTOCOL}://evil/v{version}/{uuid}/{hash}/preview"),
+            format!("asset://localhost/v{version}/{uuid}/{hash}/preview"),
         ] {
             assert!(
                 parse_attachment_uri(&invalid.parse().unwrap()).is_none(),
