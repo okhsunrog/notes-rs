@@ -3635,6 +3635,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "eventsource-stream",
  "futures",
  "notes-core",
  "notes-protocol",

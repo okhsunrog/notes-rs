@@ -1,6 +1,7 @@
 use crate::{SyncSnapshot, SyncTransport};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
+use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use notes_core::BlobHash;
 use notes_core::db::SearchHit;
@@ -171,7 +172,7 @@ impl HttpTransport {
         allow_writes: bool,
         active_content_uuid: Option<uuid::Uuid>,
         cancelled: CancellationToken,
-        mut on_event: impl FnMut(ChatEvent),
+        on_event: impl FnMut(ChatEvent),
     ) -> Result<String> {
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
@@ -196,49 +197,7 @@ impl HttpTransport {
             .send()
             .await?;
         let response = require_success(response).await?;
-        let mut body = response.bytes_stream();
-        let mut buffer = String::new();
-        let mut answer = None;
-        let mut remote_error = None;
-        loop {
-            let chunk = tokio::select! {
-                chunk = body.next() => chunk,
-                () = cancelled.cancelled() => {
-                    on_event(ChatEvent::Cancelled);
-                    bail!("chat request was cancelled");
-                }
-            };
-            let Some(chunk) = chunk else { break };
-            let chunk = chunk.context("reading chat event stream")?;
-            buffer.push_str(
-                std::str::from_utf8(&chunk).context("chat event stream was not valid UTF-8")?,
-            );
-            while let Some(end) = buffer.find("\n\n") {
-                let frame = buffer[..end].to_owned();
-                buffer.drain(..end + 2);
-                let data = frame
-                    .lines()
-                    .filter_map(|line| line.strip_prefix("data:"))
-                    .map(str::trim_start)
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if data.is_empty() {
-                    continue;
-                }
-                let event: ChatEvent =
-                    serde_json::from_str(&data).context("decoding chat event")?;
-                match &event {
-                    ChatEvent::Done { text } => answer = Some(text.clone()),
-                    ChatEvent::Error { message } => remote_error = Some(message.clone()),
-                    _ => {}
-                }
-                on_event(event);
-            }
-        }
-        if let Some(message) = remote_error {
-            bail!("{message}");
-        }
-        answer.context("chat stream ended without a completion event")
+        consume_chat_event_stream(response.bytes_stream(), cancelled, on_event).await
     }
 
     pub async fn connect(&self, since: u64) -> Result<SyncSocket> {
@@ -400,6 +359,43 @@ impl HttpTransport {
     }
 }
 
+async fn consume_chat_event_stream<S, B, E>(
+    body: S,
+    cancelled: CancellationToken,
+    mut on_event: impl FnMut(ChatEvent),
+) -> Result<String>
+where
+    S: futures::Stream<Item = std::result::Result<B, E>>,
+    B: AsRef<[u8]>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let mut body = std::pin::pin!(body.eventsource());
+    let mut answer = None;
+    let mut remote_error = None;
+    loop {
+        let event = tokio::select! {
+            event = body.next() => event,
+            () = cancelled.cancelled() => {
+                on_event(ChatEvent::Cancelled);
+                bail!("chat request was cancelled");
+            }
+        };
+        let Some(event) = event else { break };
+        let event = event.context("reading chat event stream")?;
+        let event: ChatEvent = serde_json::from_str(&event.data).context("decoding chat event")?;
+        match &event {
+            ChatEvent::Done { text } => answer = Some(text.clone()),
+            ChatEvent::Error { message } => remote_error = Some(message.clone()),
+            _ => {}
+        }
+        on_event(event);
+    }
+    if let Some(message) = remote_error {
+        bail!("{message}");
+    }
+    answer.context("chat stream ended without a completion event")
+}
+
 async fn create_download_temporary(
     parent: std::path::PathBuf,
 ) -> Result<(tokio::fs::File, tempfile::TempPath)> {
@@ -481,6 +477,35 @@ fn transport_error_from_response(status: StatusCode, body: &str) -> TransportErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn chat_event_stream_accepts_utf8_split_between_network_chunks() {
+        let expected = ChatEvent::Done {
+            text: "Зарядка для ESP32 🔋".into(),
+        };
+        let body = format!(
+            "event: chat\ndata: {}\n\n",
+            serde_json::to_string(&expected).expect("serialize chat event")
+        );
+        let split = body.find('🔋').expect("emoji in SSE body") + 1;
+        let bytes = body.into_bytes();
+        let chunks = vec![bytes[..split].to_vec(), bytes[split..].to_vec()];
+        let mut events = Vec::new();
+        let answer = consume_chat_event_stream(
+            futures::stream::iter(chunks.into_iter().map(Ok::<_, std::io::Error>)),
+            CancellationToken::new(),
+            |event| events.push(event),
+        )
+        .await
+        .expect("consume chat event stream");
+
+        assert_eq!(answer, "Зарядка для ESP32 🔋");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events.first(),
+            Some(ChatEvent::Done { text }) if text == "Зарядка для ESP32 🔋"
+        ));
+    }
 
     #[test]
     fn normalizes_base_paths_and_rejects_embedded_credentials() {

@@ -10,6 +10,7 @@ description = "Synchronization protocol and state machine for notes-rs"
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+eventsource-stream.workspace = true
 futures.workspace = true
 notes-core.workspace = true
 notes-protocol.workspace = true
