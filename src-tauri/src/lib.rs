@@ -243,11 +243,11 @@ pub fn run() {
                         *startup.write().unwrap_or_else(|e| e.into_inner()) =
                             commands::StartupStatus::Ready;
                         let _ = commands::StartupReadyEvent.emit(&handle);
-                        tracing::info!(?db_path, "notes-rs ready");
+                        tracing::info!(?db_path, "tangleaf ready");
                     }
                     Err(error) => {
                         let message = format!("{error:#}");
-                        tracing::error!(%message, "notes-rs startup failed");
+                        tracing::error!(%message, "tangleaf startup failed");
                         *startup.write().unwrap_or_else(|e| e.into_inner()) =
                             commands::StartupStatus::Error {
                                 message: message.clone(),
@@ -270,7 +270,7 @@ fn report_startup_error(
     error: anyhow::Error,
 ) {
     let message = format!("{error:#}");
-    tracing::error!(%message, "notes-rs startup failed");
+    tracing::error!(%message, "tangleaf startup failed");
     *startup.write().unwrap_or_else(|error| error.into_inner()) = commands::StartupStatus::Error {
         message: message.clone(),
     };
@@ -288,7 +288,7 @@ fn init_tracing() {
 fn init_tracing() {
     use tracing_logcat::{LogcatMakeWriter, LogcatTag};
 
-    let writer = LogcatMakeWriter::new(LogcatTag::Fixed("notes-rs".into()))
+    let writer = LogcatMakeWriter::new(LogcatTag::Fixed("tangleaf".into()))
         .expect("creating Android logcat writer");
     tracing_subscriber::fmt()
         .with_ansi(false)

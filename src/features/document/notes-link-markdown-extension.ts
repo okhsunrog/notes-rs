@@ -60,7 +60,7 @@ interface NotesLinkContextPolicy {
 const policyCache = new WeakMap<InlineContext, NotesLinkContextPolicy>();
 
 /**
- * notes-rs internal-link dialect for CodeMirror's Lezer Markdown parser.
+ * tangleaf internal-link dialect for CodeMirror's Lezer Markdown parser.
  *
  * `[[Page|Alias]]` intentionally has one content node. The Reading renderer currently treats the
  * entire `Page|Alias` text as both label and target; splitting alias semantics here would make Live

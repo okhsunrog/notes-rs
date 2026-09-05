@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Synchronization protocol and state machine for notes-rs"
+description = "Synchronization protocol and state machine for tangleaf"
 
 [dependencies]
 anyhow.workspace = true

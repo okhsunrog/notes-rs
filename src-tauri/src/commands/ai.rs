@@ -32,7 +32,7 @@ async fn remote_search(
 ) -> CommandResult<Vec<SearchHit>> {
     let remote = state.remote_ai.as_ref().ok_or_else(|| CommandError {
         code: CommandErrorCode::Unavailable,
-        message: "semantic search requires a configured notes-rs server; local FTS remains available offline".into(),
+        message: "semantic search requires a configured tangleaf server; local FTS remains available offline".into(),
     })?;
     remote.search(query, limit, rerank).await.map_err(err)
 }
@@ -75,7 +75,7 @@ pub async fn chat_stream(
     }
     let remote = state.remote_ai.as_ref().ok_or_else(|| CommandError {
         code: CommandErrorCode::Unavailable,
-        message: "AI chat requires a configured notes-rs server".into(),
+        message: "AI chat requires a configured tangleaf server".into(),
     })?;
     let result = remote
         .chat_stream(

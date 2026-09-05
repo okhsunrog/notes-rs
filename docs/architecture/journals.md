@@ -3,7 +3,7 @@
 Status: accepted on 2026-07-17. Journal/workspace identity, application services, and the minimum
 daily navigation/capture surfaces are implemented; Logseq conversion remains in progress.
 
-This decision defines daily journals as first-class notes-rs domain content and defines the
+This decision defines daily journals as first-class tangleaf domain content and defines the
 loss-aware conversion boundary for the existing Logseq graph. It intentionally adopts the useful
 semantic identity of a journal day without copying Logseq's filename conventions or making Journal
 a separate editor.
@@ -95,7 +95,7 @@ idempotent. `ensure_journal(date)` does not create a persisted empty block merel
 the first actual edit/capture creates ordinary UUIDv7 blocks. Concurrent captures become distinct
 blocks on the same journal page instead of duplicate pages or duplicate placeholders.
 
-An imported Logseq journal page UUID is recorded in import provenance and mapped to the notes-rs
+An imported Logseq journal page UUID is recorded in import provenance and mapped to the tangleaf
 deterministic journal UUID. Source block UUIDs may still be preserved when valid and collision-free.
 
 ## 4. Commands and queries
@@ -173,17 +173,17 @@ Extracted AI entities remain server-derived data and do not change Journal ident
 ## 7. Logseq model and conversion boundary
 
 Logseq also represents a journal as a page with a dedicated day attribute and renders journal pages
-through its ordinary page component. notes-rs preserves that useful semantic distinction but not
+through its ordinary page component. tangleaf preserves that useful semantic distinction but not
 Logseq's storage conventions.
 
 The importer treats these as separate concerns:
 
 ```text
 Logseq journals directory + filename -> JournalDate identity
-Logseq structural bullets/indentation -> notes-rs block tree/order
+Logseq structural bullets/indentation -> tangleaf block tree/order
 Logseq block body                   -> block Markdown
 Logseq metadata/properties          -> typed mapping or recoverable source/provenance
-Logseq asset path                   -> notes-rs Attachment/blob
+Logseq asset path                   -> tangleaf Attachment/blob
 ```
 
 The configured journals directory plus a strictly valid journal filename is authoritative. A
@@ -197,7 +197,7 @@ block body becomes Bullet/Numbered; recognized task state may become Task when t
 exists.
 
 Continuation lines, fenced code, properties, embeds, and logbooks belong to the surrounding Logseq
-block and must not be split into one notes-rs block per physical line.
+block and must not be split into one tangleaf block per physical line.
 
 ## 8. Loss-aware Logseq import pipeline
 
@@ -226,7 +226,7 @@ preserved. Other unsupported property lines remain recoverable raw source and ar
 typed property model can represent them; they are never silently stripped.
 
 Rerunning an import uses its provenance manifest to keep UUID mapping stable and to report source
-changes. It does not route through legacy notes-rs schema compatibility or destructively call the
+changes. It does not route through legacy tangleaf schema compatibility or destructively call the
 owned-archive restore path.
 
 ## 9. Verified source corpus constraints

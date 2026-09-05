@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-const STORAGE_KEY = "notes-rs:page-navigation:v1";
+const STORAGE_KEY = "tangleaf:page-navigation:v1";
 const MAX_RECENT_PAGES = 20;
 
 type StoredPageNavigation = {

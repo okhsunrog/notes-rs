@@ -9,7 +9,7 @@ use crate::{
 };
 use std::collections::{HashMap, HashSet};
 
-pub const ARCHIVE_FORMAT: &str = "notes-rs";
+pub const ARCHIVE_FORMAT: &str = "tangleaf";
 pub const ARCHIVE_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,4 +1,4 @@
-//! Sync protocol boundary for notes-rs.
+//! Sync protocol boundary for tangleaf.
 //!
 //! Versioned wire types, HLC merge semantics, and the transport-independent
 //! client state machine shared by desktop and the future server host.

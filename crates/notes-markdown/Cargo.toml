@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Canonical Markdown reference scanning for notes-rs"
+description = "Canonical Markdown reference scanning for tangleaf"
 
 [dependencies]
 pulldown-cmark.workspace = true

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::Path;
 
-const PORTABLE_ARCHIVE_MAGIC: &[u8; 16] = b"notes-rs-archive";
+const PORTABLE_ARCHIVE_MAGIC: &[u8; 16] = b"tangleaf-archive";
 const PORTABLE_CONTAINER_VERSION: u32 = 1;
 #[cfg(not(target_os = "android"))]
 const MAX_ARCHIVE_MANIFEST_BYTES: u64 = 32 * 1024 * 1024;
@@ -36,7 +36,7 @@ pub async fn export_data(
     state: State<'_, AppState>,
 ) -> CommandResult<Option<String>> {
     let filename = format!(
-        "notes-rs-{}.notes",
+        "tangleaf-{}.notes",
         chrono::Utc::now().format("%Y%m%d-%H%M%S")
     );
     let archive = db::export_archive(&state.conn).await.map_err(err)?;
@@ -46,7 +46,7 @@ pub async fn export_data(
         let Some(path) = app
             .dialog()
             .file()
-            .add_filter("notes-rs archive", &["notes"])
+            .add_filter("tangleaf archive", &["notes"])
             .set_file_name(filename)
             .blocking_save_file()
         else {
@@ -138,7 +138,7 @@ pub async fn import_data(
         let Some(path) = app
             .dialog()
             .file()
-            .add_filter("notes-rs archive", &["notes"])
+            .add_filter("tangleaf archive", &["notes"])
             .blocking_pick_file()
         else {
             return Ok(None);
@@ -246,7 +246,7 @@ pub(super) async fn write_backup(
     let directory = app.path().app_data_dir()?.join("backups");
     std::fs::create_dir_all(&directory)?;
     let path = directory.join(format!(
-        "notes-rs-{reason}-{}-{}.notes",
+        "tangleaf-{reason}-{}-{}.notes",
         chrono::Utc::now().format("%Y%m%d-%H%M%S-%3f"),
         uuid::Uuid::now_v7()
     ));
@@ -271,7 +271,7 @@ fn write_archive_atomically(
         .filter(|parent| !parent.as_os_str().is_empty())
         .context("archive destination has no parent directory")?;
     let mut temporary = tempfile::Builder::new()
-        .prefix(".notes-rs-export-")
+        .prefix(".tangleaf-export-")
         .tempfile_in(parent)?;
     write_portable_archive(&mut temporary, archive, blob_store)?;
     temporary.as_file_mut().sync_all()?;
@@ -291,8 +291,8 @@ fn write_portable_archive(
     blob_store: &BlobStore,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
-        archive.format == "notes-rs" && archive.version == db::ARCHIVE_VERSION,
-        "cannot export an unsupported notes-rs archive manifest"
+        archive.format == "tangleaf" && archive.version == db::ARCHIVE_VERSION,
+        "cannot export an unsupported tangleaf archive manifest"
     );
     validate_archive_shape(&archive)?;
     let expected = archive_blob_sizes(&archive)?;
@@ -332,12 +332,12 @@ fn read_portable_archive(
     reader.read_exact(&mut magic)?;
     anyhow::ensure!(
         &magic == PORTABLE_ARCHIVE_MAGIC,
-        "selected file is not a notes-rs portable archive"
+        "selected file is not a tangleaf portable archive"
     );
     let version = read_u32(&mut reader)?;
     anyhow::ensure!(
         version == PORTABLE_CONTAINER_VERSION,
-        "unsupported notes-rs portable container version {version}"
+        "unsupported tangleaf portable container version {version}"
     );
     let manifest_size = read_u64(&mut reader)?;
     anyhow::ensure!(
@@ -353,7 +353,7 @@ fn read_portable_archive(
     reader.read_exact(&mut manifest)?;
     let archive: db::DataArchive = serde_json::from_slice(&manifest)?;
     anyhow::ensure!(
-        archive.format == "notes-rs" && archive.version == db::ARCHIVE_VERSION,
+        archive.format == "tangleaf" && archive.version == db::ARCHIVE_VERSION,
         "unsupported archive format {} version {}",
         archive.format,
         archive.version
@@ -590,7 +590,7 @@ mod tests {
             created_at: 0,
         };
         db::DataArchive {
-            format: "notes-rs".into(),
+            format: "tangleaf".into(),
             version: db::ARCHIVE_VERSION,
             workspace_uuid: uuid::Uuid::now_v7(),
             exported_at: 0,

@@ -49,7 +49,7 @@ export function resolveDocumentLinkOpenDisposition(
 }
 
 /**
- * Resolves the notes-rs or ordinary Markdown link under a document position, reusing the exact
+ * Resolves the tangleaf or ordinary Markdown link under a document position, reusing the exact
  * typed URL policy the Reading renderer applies so editor navigation cannot diverge from it. The
  * returned range matches the exact node range `document-live-preview.ts` decorates, so callers can
  * test it against `isRangeSourceRevealed` for click-gating. Returns null for positions with no

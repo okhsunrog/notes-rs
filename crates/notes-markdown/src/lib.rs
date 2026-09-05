@@ -1,4 +1,4 @@
-//! Syntax-aware discovery of notes-rs page and block references in Markdown source.
+//! Syntax-aware discovery of tangleaf page and block references in Markdown source.
 
 use std::ops::Range;
 

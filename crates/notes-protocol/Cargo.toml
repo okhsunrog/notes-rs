@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Typed wire contracts shared by notes-rs clients and server"
+description = "Typed wire contracts shared by tangleaf clients and server"
 
 [dependencies]
 notes-core.workspace = true

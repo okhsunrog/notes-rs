@@ -8,7 +8,7 @@ const DEFAULT_EMBEDDING_USD_PER_MILLION_TOKENS: f64 = 0.01;
 #[derive(Parser)]
 #[command(version, about)]
 struct Arguments {
-    #[arg(long, default_value = "/etc/notes-rs/config.toml")]
+    #[arg(long, default_value = "/etc/tangleaf/config.toml")]
     config: PathBuf,
     #[command(subcommand)]
     command: Option<Command>,

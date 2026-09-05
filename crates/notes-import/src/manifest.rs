@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use crate::LogseqConfig;
 
 const MANIFEST_VERSION: u32 = 1;
-const HASH_DOMAIN: &[u8] = b"notes-rs/logseq-manifest/v1\0";
+const HASH_DOMAIN: &[u8] = b"tangleaf/logseq-manifest/v1\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

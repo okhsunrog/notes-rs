@@ -49,7 +49,7 @@ type AppearanceContextValue = {
 };
 
 const AppearanceContext = createContext<AppearanceContextValue | null>(null);
-const STORAGE_KEY = "notes-rs.palette";
+const STORAGE_KEY = "tangleaf.palette";
 
 export function AppearanceProvider({ children }: { children: React.ReactNode }) {
   const { resolvedTheme } = useTheme();

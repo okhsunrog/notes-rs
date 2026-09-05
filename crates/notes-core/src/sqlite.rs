@@ -46,7 +46,7 @@ impl Connection {
         let (sender, receiver) = mpsc::channel::<WorkerMessage>();
         let (opened_tx, opened_rx) = tokio::sync::oneshot::channel();
         std::thread::Builder::new()
-            .name("notes-rs-sqlite".into())
+            .name("tangleaf-sqlite".into())
             .spawn(move || match opener() {
                 Ok(mut connection) => {
                     if opened_tx.send(Ok(())).is_err() {

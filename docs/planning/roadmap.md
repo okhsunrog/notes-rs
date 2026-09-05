@@ -332,7 +332,7 @@ Mapping policy:
   prepared map;
 - unresolved wikilinks/block refs remain raw and are reported rather than deleted.
 
-The first importer supports an empty notes-rs workspace or an exact already-committed manifest
+The first importer supports an empty tangleaf workspace or an exact already-committed manifest
 no-op. It refuses arbitrary merge/update of a changed Logseq graph. Incremental matching is a later
 feature and must not be approximated with mutable line numbers.
 
@@ -367,7 +367,7 @@ Native drawing editing/rendering is out of scope. For the current graph:
   conversion helper based on Excalidraw's official export API;
 - import the PNG as a normal attachment and rewrite the visible drawing reference to that image;
 - treat conversion failure as a warning with the original reference preserved;
-- do not ship the Excalidraw editor or add a permanent drawing domain to notes-rs.
+- do not ship the Excalidraw editor or add a permanent drawing domain to tangleaf.
 
 Suggested commit:
 
@@ -446,7 +446,7 @@ Recommended stack:
 
 - CommonMark through unified/remark;
 - `remark-gfm`;
-- notes-rs extensions for wikilinks, block refs, attachment references, and supported macros;
+- tangleaf extensions for wikilinks, block refs, attachment references, and supported macros;
 - `remark-math` plus locally bundled KaTeX with `trust: false`;
 - fine-grained Shiki languages/themes with plain-text fallback;
 - `rehype-sanitize` and no raw HTML execution;
@@ -528,7 +528,7 @@ G4 is deliberately split at four boundaries:
   they never overwrite a dirty buffer. CodeMirror owns keystroke undo while focused, and the
   backend owns committed document-action undo after the editor session is closed/reloaded.
 
-Standard Markdown intentionally cannot encode every notes-rs metadata value. While a source-map
+Standard Markdown intentionally cannot encode every tangleaf metadata value. While a source-map
 segment survives reconciliation it preserves metadata such as `TaskState::Doing` and non-list
 parent identity. New checkbox tasks decode as `Todo`/`Done`; an explicit Markdown syntax change may
 change style. The codec must surface ambiguity instead of hiding metadata in HTML comments.
@@ -645,7 +645,7 @@ Android is a near-term daily-use target, not an eventual one, and its debug buil
 proven by `cargo check`/`cargo build`, which do not run the app. A dev-only bindings-export path
 that only ran in debug builds passed every automated gate yet panicked immediately on-device — any
 session that touches Document/editor code should launch (not just compile) the Android debug build
-on the connected device and confirm it reaches `notes-rs ready` before calling that boundary done:
+on the connected device and confirm it reaches `tangleaf ready` before calling that boundary done:
 
 ```sh
 vp exec tauri android dev --no-watch --host <lan-ip>  # tauri CLI may pick the wrong interface

@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Host-independent AI pipelines and agent for notes-rs"
+description = "Host-independent AI pipelines and agent for tangleaf"
 
 [features]
 default = []

@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 import type { DocumentAuthoringMode } from "./continuous-document-editor";
 
-export const DOCUMENT_AUTHORING_PREFERENCE_KEY = "notes-rs.document-authoring-mode.v1";
+export const DOCUMENT_AUTHORING_PREFERENCE_KEY = "tangleaf.document-authoring-mode.v1";
 export const DEFAULT_DOCUMENT_AUTHORING_MODE: DocumentAuthoringMode = "live_preview";
 
 type PreferencePayload = {

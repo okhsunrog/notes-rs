@@ -20,7 +20,7 @@ are defined in [`journals.md`](journals.md).
 
 ## 1. Product boundary
 
-notes-rs is a local-first personal knowledge application for desktop and Android. Both clients use
+tangleaf is a local-first personal knowledge application for desktop and Android. Both clients use
 the same React UI, Tauri adapter, Rust domain core, local SQLite database, and sync client.
 
 The main invariants are:
@@ -378,7 +378,7 @@ Product and corpus support:
 2. Add server-side retrieval chunking for large blocks/documents. The current index unit is one
    page or block UUID, which is sufficient for the demo but not ideal for long articles.
 3. Add journal-aware search/graph filters and journal templates.
-4. Add Markdown-vault and Obsidian import; no legacy notes-rs database importer is planned.
+4. Add Markdown-vault and Obsidian import; no legacy tangleaf database importer is planned.
 5. Add general properties, saved queries, and an extension model.
 6. Add drag-and-drop movement, cross-block selection, transclusion, richer Markdown authoring,
    graph filters/layouts, and measured larger-corpus performance work.

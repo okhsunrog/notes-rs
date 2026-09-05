@@ -41,7 +41,7 @@ jobs:
       - run: cargo fmt --all -- --check
       - name: Verify generated Tauri bindings
         run: |
-          cargo run -p notes-rs --bin export-bindings -- src/lib/bindings.ts
+          cargo run -p tangleaf --bin export-bindings -- src/lib/bindings.ts
           git diff --exit-code -- src/lib/bindings.ts
       - run: cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --locked --all-features

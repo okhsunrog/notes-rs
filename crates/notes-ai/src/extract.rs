@@ -232,7 +232,7 @@ async fn apply_extraction(store: &AiStore, job: &IndexJob, result: ExtractionRes
 fn entity_uuid(normalized_name: &str) -> uuid::Uuid {
     uuid::Uuid::new_v5(
         &uuid::Uuid::NAMESPACE_URL,
-        format!("notes-rs:entity:{normalized_name}").as_bytes(),
+        format!("tangleaf:entity:{normalized_name}").as_bytes(),
     )
 }
 

@@ -1,4 +1,4 @@
-package dev.okhsunrog.notes_rs
+package dev.okhsunrog.tangleaf
 
 import android.graphics.Color
 import android.os.Build
@@ -8,7 +8,7 @@ import androidx.core.view.WindowCompat
 
 class MainActivity : TauriActivity() {
   init {
-    System.loadLibrary("notes_rs_lib")
+    System.loadLibrary("tangleaf_lib")
   }
 
   private external fun initializeRustlsPlatformVerifier(context: android.content.Context): Boolean

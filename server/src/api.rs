@@ -186,7 +186,7 @@ impl IntoResponse for ApiError {
         if self.status == StatusCode::UNAUTHORIZED {
             response.headers_mut().insert(
                 WWW_AUTHENTICATE,
-                HeaderValue::from_static("Bearer realm=\"notes-rs\""),
+                HeaderValue::from_static("Bearer realm=\"tangleaf\""),
             );
         }
         response
@@ -1291,7 +1291,7 @@ mod tests {
         assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(
             unauthorized.headers().get(WWW_AUTHENTICATE),
-            Some(&HeaderValue::from_static("Bearer realm=\"notes-rs\""))
+            Some(&HeaderValue::from_static("Bearer realm=\"tangleaf\""))
         );
         let body = unauthorized
             .into_body()

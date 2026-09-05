@@ -9,7 +9,7 @@ import {
   type WorkspaceState,
 } from "./workspace-model";
 
-const SESSION_KEY = "notes-rs:workspace-session:v1";
+const SESSION_KEY = "tangleaf:workspace-session:v1";
 const SESSION_VERSION = 1;
 
 type StoredWorkspaceSession = {

@@ -25,7 +25,7 @@ const FONT_PATHS = [
   ],
 ] as const;
 
-const LOCAL_ASSET_ORIGIN = "https://assets.notes-rs.invalid";
+const LOCAL_ASSET_ORIGIN = "https://assets.tangleaf.invalid";
 const LOCAL_ASSETS = new Map<string, string>([
   ["Virgil.woff2", FONT_PATHS[0][1]],
   ["Cascadia.woff2", FONT_PATHS[1][1]],
@@ -45,9 +45,9 @@ type BrowserRenderResult =
 
 interface ConverterWindow extends Window {
   EXCALIDRAW_ASSET_PATH?: string;
-  __notesRsDrawingDownload?: () => void;
-  __notesRsDrawingDispose?: () => void;
-  __notesRsBoundedDimensions?: typeof boundedDimensions;
+  __tangleafDrawingDownload?: () => void;
+  __tangleafDrawingDispose?: () => void;
+  __tangleafBoundedDimensions?: typeof boundedDimensions;
 }
 
 export function boundedDimensions(
@@ -125,7 +125,7 @@ export class ExcalidrawBrowser {
       (window as ConverterWindow).EXCALIDRAW_ASSET_PATH = `${assetOrigin}/excalidraw`;
     }, LOCAL_ASSET_ORIGIN);
     await page.addScriptTag({
-      content: `window.__notesRsBoundedDimensions = ${boundedDimensions.toString()};`,
+      content: `window.__tangleafBoundedDimensions = ${boundedDimensions.toString()};`,
     });
 
     const fontRules: string[] = [];
@@ -205,7 +205,7 @@ export class ExcalidrawBrowser {
         files: restored.files ?? {},
         mimeType: "image/png",
         getDimensions(width: number, height: number) {
-          const dimensions = (window as ConverterWindow).__notesRsBoundedDimensions;
+          const dimensions = (window as ConverterWindow).__tangleafBoundedDimensions;
           if (!dimensions) {
             throw new Error("bounded dimensions policy is unavailable");
           }
@@ -217,19 +217,19 @@ export class ExcalidrawBrowser {
       }
 
       const blobUrl = URL.createObjectURL(blob);
-      (window as ConverterWindow).__notesRsDrawingDispose = () => {
+      (window as ConverterWindow).__tangleafDrawingDispose = () => {
         URL.revokeObjectURL(blobUrl);
-        delete (window as ConverterWindow).__notesRsDrawingDownload;
-        delete (window as ConverterWindow).__notesRsDrawingDispose;
+        delete (window as ConverterWindow).__tangleafDrawingDownload;
+        delete (window as ConverterWindow).__tangleafDrawingDispose;
       };
-      (window as ConverterWindow).__notesRsDrawingDownload = () => {
+      (window as ConverterWindow).__tangleafDrawingDownload = () => {
         const anchor = document.createElement("a");
         anchor.href = blobUrl;
         anchor.download = "drawing.png";
         document.body.append(anchor);
         anchor.click();
         anchor.remove();
-        (window as ConverterWindow).__notesRsDrawingDispose?.();
+        (window as ConverterWindow).__tangleafDrawingDispose?.();
       };
       return { status: "converted" };
     }, sourceDocument);
@@ -238,12 +238,12 @@ export class ExcalidrawBrowser {
       return prepared;
     }
     if (this.blockedRequests.length > 0) {
-      await this.page.evaluate(() => (window as ConverterWindow).__notesRsDrawingDispose?.());
+      await this.page.evaluate(() => (window as ConverterWindow).__tangleafDrawingDispose?.());
       return { status: "failed", blockedNetwork: true };
     }
 
     const downloadPromise = this.page.waitForEvent("download");
-    await this.page.evaluate(() => (window as ConverterWindow).__notesRsDrawingDownload?.());
+    await this.page.evaluate(() => (window as ConverterWindow).__tangleafDrawingDownload?.());
     const download = await downloadPromise;
     await download.saveAs(destination);
     if (this.blockedRequests.length > 0) {

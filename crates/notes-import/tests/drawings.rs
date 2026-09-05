@@ -522,7 +522,7 @@ fn bundle(
     DrawingConversionBundle {
         schema_version: 1,
         converter: DrawingConverterIdentity {
-            name: "notes-rs-excalidraw-converter".into(),
+            name: "tangleaf-excalidraw-converter".into(),
             version: "1.0.0".into(),
             excalidraw_version: "0.18.0".into(),
             playwright_version: "1.55.0".into(),

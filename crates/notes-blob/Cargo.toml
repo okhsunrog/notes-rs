@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Shared content-addressed blob storage for notes-rs"
+description = "Shared content-addressed blob storage for tangleaf"
 
 [dependencies]
 serde.workspace = true

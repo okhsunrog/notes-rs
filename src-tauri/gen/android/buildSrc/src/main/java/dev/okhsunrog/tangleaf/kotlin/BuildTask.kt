@@ -4,17 +4,9 @@ import org.gradle.api.DefaultTask
 import org.gradle.api.GradleException
 import org.gradle.api.logging.LogLevel
 import org.gradle.api.tasks.Input
-import org.gradle.api.tasks.Internal
 import org.gradle.api.tasks.TaskAction
-import org.gradle.process.ExecOperations
-import javax.inject.Inject
 
-abstract class BuildTask @Inject constructor(
-    private val execOperations: ExecOperations,
-) : DefaultTask() {
-    @get:Internal
-    lateinit var androidProjectDir: File
-
+open class BuildTask : DefaultTask() {
     @Input
     var rootDirRel: String? = null
     @Input
@@ -24,7 +16,7 @@ abstract class BuildTask @Inject constructor(
 
     @TaskAction
     fun assemble() {
-        val executable = "vp"
+        val executable = """/home/okhsunrog/.vite-plus/js_runtime/node/24.18.0/bin/node""";
         try {
             runTauriCli(executable)
         } catch (e: Exception) {
@@ -47,7 +39,7 @@ abstract class BuildTask @Inject constructor(
                 }
                 throw lastException
             } else {
-                throw e
+                throw e;
             }
         }
     }
@@ -56,10 +48,10 @@ abstract class BuildTask @Inject constructor(
         val rootDirRel = rootDirRel ?: throw GradleException("rootDirRel cannot be null")
         val target = target ?: throw GradleException("target cannot be null")
         val release = release ?: throw GradleException("release cannot be null")
-        val args = listOf("run", "tauri", "android", "android-studio-script")
+        val args = listOf("tauri", "android", "android-studio-script");
 
-        execOperations.exec {
-            workingDir(File(androidProjectDir, rootDirRel))
+        project.exec {
+            workingDir(File(project.projectDir, rootDirRel))
             executable(executable)
             args(args)
             if (project.logger.isEnabled(LogLevel.DEBUG)) {

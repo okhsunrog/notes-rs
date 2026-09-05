@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "notes-rs",
+      "name": "tangleaf",
       "dependencies": {
         "@base-ui/react": "^1.6.0",
         "@codemirror/commands": "^6.10.4",

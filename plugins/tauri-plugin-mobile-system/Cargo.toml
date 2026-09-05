@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Small reusable Tauri mobile system integration for notes-rs"
+description = "Small reusable Tauri mobile system integration for tangleaf"
 license = "MIT"
 links = "tauri-plugin-mobile-system"
 

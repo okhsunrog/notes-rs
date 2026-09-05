@@ -956,7 +956,7 @@ fn assert_archive_semantics(
     block_uuid: uuid::Uuid,
     attachment_uuid: uuid::Uuid,
 ) {
-    assert_eq!(archive.format, "notes-rs");
+    assert_eq!(archive.format, "tangleaf");
     assert_eq!(archive.version, db::ARCHIVE_VERSION);
     assert!(
         archive

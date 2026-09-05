@@ -187,7 +187,7 @@ impl AiRuntime {
 
         let embeddings = match clients
             .embedder
-            .embed_query("notes-rs provider probe".into())
+            .embed_query("tangleaf provider probe".into())
             .await
         {
             Ok(vector) if vector.len() == candidate.embedding_dimensions => {
@@ -203,7 +203,7 @@ impl AiRuntime {
         let reranking = match clients
             .reranker
             .rerank(
-                "notes-rs provider probe".into(),
+                "tangleaf provider probe".into(),
                 vec!["relevant note".into(), "unrelated note".into()],
             )
             .await

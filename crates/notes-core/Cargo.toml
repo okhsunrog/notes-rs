@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Domain model and SQLite storage engine for notes-rs"
+description = "Domain model and SQLite storage engine for tangleaf"
 
 [dependencies]
 anyhow.workspace = true

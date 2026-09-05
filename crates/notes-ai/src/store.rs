@@ -1576,7 +1576,7 @@ fn extraction_input_for_content(content: &notes_core::db::Content) -> IndexDocum
 fn extraction_input(title: Option<&str>, content: &str) -> IndexDocument {
     let text = format!("{}\n{content}", title.unwrap_or_default());
     let mut digest = Sha256::new();
-    digest.update(b"notes-rs:extraction-input:v1\0");
+    digest.update(b"tangleaf:extraction-input:v1\0");
     digest.update(text.as_bytes());
     IndexDocument {
         text,
@@ -1747,7 +1747,7 @@ fn delete_document_vectors(
 
 pub fn embedding_identity_fingerprint(endpoint: &str, model: &str, dimensions: usize) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"notes-rs:embedding-identity:v1\0");
+    digest.update(b"tangleaf:embedding-identity:v1\0");
     digest.update(endpoint.trim_end_matches('/').as_bytes());
     digest.update([0]);
     digest.update(model.as_bytes());
@@ -2295,7 +2295,7 @@ mod tests {
             .into_iter()
             .find(|job| job.content_uuid == block.uuid)
             .expect("block extraction job");
-        let entity_uuid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, b"notes-rs:entity:rust");
+        let entity_uuid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, b"tangleaf:entity:rust");
         store
             .finish_extraction(
                 &job,

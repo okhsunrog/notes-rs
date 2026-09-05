@@ -1,4 +1,4 @@
-//! Host-independent notes-rs domain model and SQLite storage engine.
+//! Host-independent tangleaf domain model and SQLite storage engine.
 
 pub mod db;
 mod error;

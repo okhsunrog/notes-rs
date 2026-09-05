@@ -1349,7 +1349,7 @@ pub fn materialized_attachment_uuid(owner: ImportMediaOwner, sha256: Sha256Diges
     };
     Uuid::new_v5(
         &Uuid::NAMESPACE_OID,
-        format!("notes-rs:attachment:{kind}:{uuid}:{sha256}").as_bytes(),
+        format!("tangleaf:attachment:{kind}:{uuid}:{sha256}").as_bytes(),
     )
 }
 

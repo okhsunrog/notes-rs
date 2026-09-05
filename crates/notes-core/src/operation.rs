@@ -2770,7 +2770,7 @@ pub fn attachment_uuid(owner: AttachmentOwner, blob_hash: &BlobHash) -> uuid::Uu
     uuid::Uuid::new_v5(
         &uuid::Uuid::NAMESPACE_OID,
         format!(
-            "notes-rs:attachment:{}:{}:{blob_hash}",
+            "tangleaf:attachment:{}:{}:{blob_hash}",
             owner.kind(),
             owner.uuid()
         )

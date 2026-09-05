@@ -19,7 +19,7 @@ const FIXTURES = path.join(HERE, "fixtures");
 const MANIFEST_SHA = "1".repeat(64);
 
 async function workspace(t: TestContext) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "notes-rs-excalidraw-test-"));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "tangleaf-excalidraw-test-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const source = path.join(root, "source");
   await fs.cp(FIXTURES, path.join(source, "draws"), { recursive: true });
@@ -112,7 +112,7 @@ void test("official export converts freehand, text, and embedded files and repor
   assert.equal(bundle.schemaVersion, 1);
   assert.deepEqual(bundle.sourceRoot, { kind: "redacted", manifestSha256: MANIFEST_SHA });
   assert.deepEqual(bundle.converter, {
-    name: "@notes-rs/excalidraw-converter",
+    name: "@tangleaf/excalidraw-converter",
     version: "1.0.0",
     excalidrawVersion: "0.12.0",
     playwrightVersion: "1.61.1",

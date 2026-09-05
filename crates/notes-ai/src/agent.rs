@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 const SYSTEM_PROMPT: &str = r#"
-You are an assistant embedded in a personal knowledge graph (notes-rs).
+You are an assistant embedded in a personal knowledge graph (tangleaf).
 The user's notes are stored as UUID-addressed pages containing ordered block trees.
 You answer questions by retrieving from the graph using tools — never invent facts.
 

@@ -6,7 +6,7 @@ replace, continuous CodeMirror authoring, linked Reading projection, bounded not
 and the Document Live Preview foundation are implemented. Rich semantic editor widgets and the
 remaining large-document/mobile gates are still pending.
 
-This decision defines how notes-rs presents and edits the same typed page/block model as an
+This decision defines how tangleaf presents and edits the same typed page/block model as an
 outliner and as a continuous Markdown document. It deliberately separates durable content from
 pane-local presentation and from server-side retrieval chunks.
 
@@ -78,7 +78,7 @@ Outline has one primary workflow: Editing with Live Preview.
   visible mode.
 
 Only the active block mounts an editor instance. Inactive blocks remain lightweight semantic React
-output; notes-rs must not mount one editor per visible block.
+output; tangleaf must not mount one editor per visible block.
 
 ### Document layout
 
@@ -99,7 +99,7 @@ third Document mode. A read-only editor DOM is not the reading surface.
 
 ## 4. Editor engine
 
-notes-rs will standardize on CodeMirror 6 as the programmable Markdown editor engine.
+tangleaf will standardize on CodeMirror 6 as the programmable Markdown editor engine.
 
 It is used in two configurations:
 
@@ -116,7 +116,7 @@ adapter, not domain types.
 Use the official CodeMirror packages directly behind a small React lifecycle component. Avoid a
 third-party React wrapper unless it demonstrates a concrete need that the adapter cannot cover.
 
-CodeMirror is an engine, not a ready-made Obsidian clone. notes-rs owns:
+CodeMirror is an engine, not a ready-made Obsidian clone. tangleaf owns:
 
 - Live Preview decoration policy;
 - `[[wikilink]]` and `((block-reference))` syntax and autocomplete;
@@ -137,7 +137,7 @@ representation of that model, not a byte-for-byte archive of UUIDs and arbitrary
 All editing and rendering surfaces must share one documented dialect:
 
 - CommonMark plus the supported GitHub Flavored Markdown extensions;
-- notes-rs wikilinks and UUID block references;
+- tangleaf wikilinks and UUID block references;
 - typed `BlockStyle` semantics;
 - explicitly registered future extensions such as properties or transclusion.
 
@@ -231,7 +231,7 @@ loop per block.
 
 ## 9. Rejected directions
 
-- **Keep the textarea and extend it:** rejected because notes-rs would have to rebuild selection,
+- **Keep the textarea and extend it:** rejected because tangleaf would have to rebuild selection,
   IME, history, syntax trees, decorations, accessibility, and large-document behavior.
 - **Use one rich-text/JSON editor as the canonical format:** rejected because Markdown portability,
   source-text recoverability, Logseq/Obsidian import, and custom syntax are product requirements.

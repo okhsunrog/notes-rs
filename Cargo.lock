@@ -3537,49 +3537,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "notes-rs"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "futures",
- "image",
- "jni 0.22.4",
- "notes-blob",
- "notes-core",
- "notes-import",
- "notes-protocol",
- "notes-sync",
- "raw-window-handle",
- "rustls-platform-verifier",
- "serde",
- "serde_json",
- "sha2",
- "specta",
- "specta-typescript",
- "tauri",
- "tauri-build",
- "tauri-plugin-android-fs",
- "tauri-plugin-dialog",
- "tauri-plugin-mcp-bridge",
- "tauri-plugin-mobile-system",
- "tauri-plugin-opener",
- "tauri-specta",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite 0.30.0",
- "tokio-util",
- "tracing",
- "tracing-logcat",
- "tracing-subscriber",
- "url",
- "uuid",
- "zenwebp",
-]
-
-[[package]]
 name = "notes-server"
 version = "0.1.0"
 dependencies = [
@@ -6145,6 +6102,49 @@ dependencies = [
  "pkg-config",
  "toml 0.8.2",
  "version-compare",
+]
+
+[[package]]
+name = "tangleaf"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "futures",
+ "image",
+ "jni 0.22.4",
+ "notes-blob",
+ "notes-core",
+ "notes-import",
+ "notes-protocol",
+ "notes-sync",
+ "raw-window-handle",
+ "rustls-platform-verifier",
+ "serde",
+ "serde_json",
+ "sha2",
+ "specta",
+ "specta-typescript",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-android-fs",
+ "tauri-plugin-dialog",
+ "tauri-plugin-mcp-bridge",
+ "tauri-plugin-mobile-system",
+ "tauri-plugin-opener",
+ "tauri-specta",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tokio-util",
+ "tracing",
+ "tracing-logcat",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "zenwebp",
 ]
 
 [[package]]

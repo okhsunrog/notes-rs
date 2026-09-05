@@ -1,6 +1,6 @@
 [package]
-name = "notes-rs"
-default-run = "notes-rs"
+name = "tangleaf"
+default-run = "tangleaf"
 version.workspace = true
 description = "A graph-native personal knowledge app with hybrid retrieval and agentic RAG"
 authors.workspace = true
@@ -14,7 +14,7 @@ homepage.workspace = true
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "notes_rs_lib"
+name = "tangleaf_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

@@ -1708,7 +1708,7 @@ mod tests {
         );
         let publication_root =
             PathBuf::from(std::env::var_os("HOME").expect("HOME for drawing publication"))
-                .join(".local/share/dev.okhsunrog.notes-rs/logseq-drawing-conversions")
+                .join(".local/share/dev.okhsunrog.tangleaf/logseq-drawing-conversions")
                 .join(
                     graph
                         .prepared

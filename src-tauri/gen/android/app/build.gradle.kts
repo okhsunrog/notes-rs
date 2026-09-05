@@ -43,10 +43,10 @@ repositories {
 
 android {
     compileSdk = 37
-    namespace = "dev.okhsunrog.notes_rs"
+    namespace = "dev.okhsunrog.tangleaf"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
-        applicationId = "dev.okhsunrog.notes_rs"
+        applicationId = "dev.okhsunrog.tangleaf"
         minSdk = 24
         targetSdk = 37
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()

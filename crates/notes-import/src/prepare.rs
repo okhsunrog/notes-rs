@@ -27,7 +27,7 @@ use crate::{
     LogseqSourceBlock, ParsedLogseqDocument, Sha256Digest, SourceKind, SourcePosition, SourceRange,
 };
 
-const BLOCK_ID_DOMAIN: &[u8] = b"notes-rs/import/logseq/block/v1\0";
+const BLOCK_ID_DOMAIN: &[u8] = b"tangleaf/import/logseq/block/v1\0";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrepareLimits {
@@ -1968,7 +1968,7 @@ fn hash_prepared_plan(
     identity_maps: &ImportIdentityMaps,
     report: &ImportReport,
 ) -> Result<Sha256Digest, PrepareImportError> {
-    const DOMAIN: &[u8] = b"notes-rs/import/logseq/prepared-plan/v2\0";
+    const DOMAIN: &[u8] = b"tangleaf/import/logseq/prepared-plan/v2\0";
     let canonical = serde_json::to_vec(&PreparedPlanHashInput {
         planner_version: IMPORT_PLANNER_VERSION,
         identity,

@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "@notes-rs/excalidraw-converter",
+      "name": "@tangleaf/excalidraw-converter",
       "dependencies": {
         "@excalidraw/excalidraw": "0.12.0",
         "playwright": "1.61.1",

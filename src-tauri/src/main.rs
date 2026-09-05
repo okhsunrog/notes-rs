@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    notes_rs_lib::run()
+    tangleaf_lib::run()
 }

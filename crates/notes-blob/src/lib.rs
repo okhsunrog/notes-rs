@@ -1,4 +1,4 @@
-//! Synchronous, content-addressed blob storage shared by notes-rs hosts.
+//! Synchronous, content-addressed blob storage shared by tangleaf hosts.
 //!
 //! A caller must know the expected SHA-256 before installation. That lets the
 //! store create its temporary file in the final shard and publish the verified

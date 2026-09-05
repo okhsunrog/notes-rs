@@ -32,7 +32,7 @@ pub fn sync_status(state: State<'_, crate::sync::SyncRuntime>) -> crate::sync::S
 fn remote_ai(state: &AppState) -> CommandResult<&notes_sync::HttpTransport> {
     state.remote_ai.as_ref().ok_or_else(|| CommandError {
         code: CommandErrorCode::Unavailable,
-        message: "server AI requires a configured notes-rs server".into(),
+        message: "server AI requires a configured tangleaf server".into(),
     })
 }
 

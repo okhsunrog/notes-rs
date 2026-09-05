@@ -1,6 +1,6 @@
 listen = "127.0.0.1:8787"
 log_filter = "info"
-data_dir = "/var/lib/notes-rs"
+data_dir = "/var/lib/tangleaf"
 snapshot_every_ops = 10000
 max_blob_bytes = 1073741824
 max_user_blob_bytes = 10737418240

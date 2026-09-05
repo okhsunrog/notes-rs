@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-const DOCUMENT_REVISION_DOMAIN: &[u8] = b"notes-rs/page-document/v1";
+const DOCUMENT_REVISION_DOMAIN: &[u8] = b"tangleaf/page-document/v1";
 
 /// Semantic limits for one atomic continuous-document edit. They bound IPC
 /// decoding work, operation batches, history rows, and pathological tree input.

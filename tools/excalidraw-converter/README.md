@@ -1,7 +1,7 @@
-# notes-rs legacy Excalidraw converter
+# tangleaf legacy Excalidraw converter
 
 This is an isolated, one-time migration tool for legacy Excalidraw `0.12.0`
-documents. It is not part of the notes-rs runtime and must not be bundled into
+documents. It is not part of the tangleaf runtime and must not be bundled into
 the desktop, Android, or server applications.
 
 The converter restores a drawing with Excalidraw's official `restore` API,
@@ -31,7 +31,7 @@ bun run convert -- \
 
 The Rust helper prints the exact source-manifest digest and the drawing
 allowlist that belong to one immutable scan. Pass those values to the
-converter unchanged. For notes-rs' automatic import discovery, publish to:
+converter unchanged. For tangleaf' automatic import discovery, publish to:
 
 ```text
 <app-data>/logseq-drawing-conversions/<source-manifest-sha256>/

@@ -9,7 +9,7 @@ import {
   createAssistantSession,
 } from "./assistant-session";
 
-const CHAT_STORAGE_KEY = "notes-rs.chat.v1";
+const CHAT_STORAGE_KEY = "tangleaf.chat.v1";
 export const CHAT_INACTIVITY_TIMEOUT_MS = 60_000;
 
 function loadStoredChat(): ChatTurn[] {

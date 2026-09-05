@@ -4,7 +4,7 @@ Status: accepted on 2026-07-17 and implemented. The Zustand pane tree, adjacent 
 responsive compact projection, linked Reading sessions, and collapsible Assistant dock are shipped;
 native multi-window hosting and promoting the Assistant into a normal pane remain reserved.
 
-This decision defines how one native notes-rs window composes navigation, one or more independent
+This decision defines how one native tangleaf window composes navigation, one or more independent
 content surfaces, and the AI companion. It deliberately treats side-by-side layout as a general
 workspace capability rather than a special Document editor mode.
 

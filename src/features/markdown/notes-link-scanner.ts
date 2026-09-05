@@ -93,8 +93,8 @@ const AST_SPLITTING_PAGE_CHARACTERS = new Set([
   0x3e, // >: raw HTML / explicit autolink
   0x5f, // _: emphasis
   0x60, // `: inline code
-  0x7b, // {: notes-rs Logseq macro extensions
-  0x7d, // }: notes-rs Logseq macro extensions
+  0x7b, // {: tangleaf Logseq macro extensions
+  0x7d, // }: tangleaf Logseq macro extensions
   0x7e, // ~: GFM strikethrough
 ]);
 const GFM_URL_AUTOLINK = /(?:https?:\/\/|www\.)[^\s]+/i;
@@ -102,7 +102,7 @@ const GFM_EMAIL_AUTOLINK = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
 const BLOCK_UUID_LENGTH = 36;
 
 /**
- * Scans notes-rs internal links in one deterministic left-to-right pass.
+ * Scans tangleaf internal links in one deterministic left-to-right pass.
  *
  * This function deliberately knows nothing about Markdown AST opacity. Callers decide which text
  * ranges are eligible (Reading skips code/HTML/ordinary links; Lezer does the equivalent through

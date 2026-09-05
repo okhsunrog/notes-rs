@@ -12,7 +12,7 @@ pub const CHUNK_BODY_MAX_CHARS: usize = 1_600;
 /// lone fence opener) is worse than a hard cut and is rejected.
 pub const FALLBACK_MIN_CHUNK_CHARS: usize = 64;
 pub const MAX_PROVIDER_INPUT_CHARS: usize = 8_000;
-pub const PROVIDER_TRUNCATION_MARKER: &str = "\n[notes-rs: input truncated]";
+pub const PROVIDER_TRUNCATION_MARKER: &str = "\n[tangleaf: input truncated]";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextChunk {

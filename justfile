@@ -1,4 +1,4 @@
-# notes-rs build and deployment helpers
+# tangleaf build and deployment helpers
 
 server_target := "x86_64-unknown-linux-musl"
 server_release_dir := "release-server"

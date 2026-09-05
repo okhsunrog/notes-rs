@@ -75,7 +75,7 @@ describe("resolveDocumentLinkOpenDisposition", () => {
 });
 
 describe("resolveDocumentLink", () => {
-  it("resolves a notes-rs page link from any position inside it, with its full source range", () => {
+  it("resolves a tangleaf page link from any position inside it, with its full source range", () => {
     const source = "See [[Project Aurora]] today";
     const state = stateFor(source);
     const from = source.indexOf("[[Project");
@@ -88,7 +88,7 @@ describe("resolveDocumentLink", () => {
     }
   });
 
-  it("resolves a notes-rs block link", () => {
+  it("resolves a tangleaf block link", () => {
     const uuid = "0f5a1c2e-1234-4bcd-8abc-1234567890ab";
     const source = `See ((${uuid})) today`;
     const state = stateFor(source);
