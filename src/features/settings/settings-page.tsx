@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { onBackButtonPress } from "@tauri-apps/api/app";
+import { dismissBackOverlay } from "@/lib/back-overlays";
 import { useTheme } from "next-themes";
 import {
   ArrowLeft,
@@ -71,7 +72,9 @@ export function SettingsPage({
     if (!compact || !navigator.userAgent.toLocaleLowerCase().includes("android")) return;
     let disposed = false;
     let unlisten: (() => Promise<void>) | undefined;
-    void onBackButtonPress(onBack)
+    void onBackButtonPress(() => {
+      if (!dismissBackOverlay()) onBack();
+    })
       .then((listener) => {
         if (disposed) void listener.unregister();
         else unlisten = () => listener.unregister();

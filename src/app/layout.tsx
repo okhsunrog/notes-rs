@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useReducer, type ReactNode } from "react";
 import { onBackButtonPress } from "@tauri-apps/api/app";
+import { dismissBackOverlay } from "@/lib/back-overlays";
 import { ArrowLeft, Bot, ChevronLeft, X } from "lucide-react";
 import { TangleafBrand } from "@/brand/TangleafBrand";
 import { Group, Panel, Separator, usePanelRef } from "react-resizable-panels";
@@ -105,7 +106,9 @@ export function AppLayout({
     }
     let disposed = false;
     let unlisten: (() => Promise<void>) | undefined;
-    void onBackButtonPress(() => navigateCompactBack())
+    void onBackButtonPress(() => {
+      if (!dismissBackOverlay()) navigateCompactBack();
+    })
       .then((listener) => {
         if (disposed) void listener.unregister();
         else unlisten = () => listener.unregister();

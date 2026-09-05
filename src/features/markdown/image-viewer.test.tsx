@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { expect, it } from "vite-plus/test";
 import { MarkdownImageViewer } from "./image-viewer";
+import { dismissBackOverlay } from "@/lib/back-overlays";
 
 it("marks the portaled viewer as fullscreen and loads the original only when open", async () => {
   (
@@ -64,6 +65,11 @@ it("marks the portaled viewer as fullscreen and loads the original only when ope
       document.querySelector<HTMLImageElement>('[src="http://localhost/original"]')!.style
         .transform,
     ).toBe("translate3d(0px, 0px, 0) scale(1)");
+    await act(async () => {
+      expect(dismissBackOverlay()).toBe(true);
+    });
+    expect(document.querySelector('[src="http://localhost/original"]')).toBeNull();
+    expect(dismissBackOverlay()).toBe(false);
   } finally {
     await act(async () => root.unmount());
     container.remove();

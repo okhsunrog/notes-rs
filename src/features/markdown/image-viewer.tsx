@@ -1,4 +1,5 @@
-import { useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { registerBackOverlay } from "@/lib/back-overlays";
 import { Maximize2, RotateCcw, ZoomIn, ZoomOut } from "lucide-react";
 import {
   Dialog,
@@ -37,13 +38,16 @@ export function MarkdownImageViewer({
   } | null>(null);
 
   const reset = () => setTransform({ scale: 1, x: 0, y: 0 });
-  const changeOpen = (next: boolean) => {
+  const changeOpen = useCallback((next: boolean) => {
     setOpen(next);
     setLoaded(false);
-    reset();
+    setTransform({ scale: 1, x: 0, y: 0 });
     pointers.current.clear();
     gesture.current = null;
-  };
+  }, []);
+  useEffect(() => {
+    if (open) return registerBackOverlay(() => changeOpen(false));
+  }, [open, changeOpen]);
   const zoom = (factor: number) => {
     setTransform((current) => {
       const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, current.scale * factor));
