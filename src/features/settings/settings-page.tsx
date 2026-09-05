@@ -45,6 +45,7 @@ import { DataSettingsSections } from "./data-settings-sections";
 import { ServerAiSettingsSection } from "./server-ai-settings-section";
 import { Field, FieldGroup, ModeButton, SettingsSection, ToggleField } from "./settings-controls";
 import { toSettingsUpdate } from "./settings-update";
+import { ConfigurationTransferSection } from "./configuration-transfer-section";
 
 type Props = {
   onBack: () => void;
@@ -275,6 +276,21 @@ export function SettingsPage({
         onSubmit={submit}
         className="mx-auto max-w-4xl space-y-7 px-4 py-5 pb-[calc(6rem+var(--safe-area-inset-bottom))] sm:p-10"
       >
+        <ConfigurationTransferSection
+          appearance={{ theme: theme === "light" || theme === "dark" ? theme : "system", palette }}
+          disabled={busy}
+          onBusyChange={setBusy}
+          onImported={(result) => {
+            setSettings(result.settings);
+            queryClient.setQueryData(queryKeys.settings, result.settings);
+            setSecrets({});
+            setClearKeys([]);
+            if (result.appearance) {
+              setTheme(result.appearance.theme);
+              setPalette(result.appearance.palette);
+            }
+          }}
+        />
         <SettingsSection
           title="Appearance"
           description="Choose a brightness mode and a color atmosphere. Every palette has a tuned light and dark version."

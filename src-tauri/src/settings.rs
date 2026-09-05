@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use tauri::{AppHandle, Manager};
 
+pub(crate) mod transfer;
+
 const SETTINGS_VERSION: u32 = 3;
 const fn default_window_corner_radius() -> u8 {
     10

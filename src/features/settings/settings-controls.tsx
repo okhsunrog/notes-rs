@@ -28,6 +28,7 @@ export function SettingsSection({
       Embeddings: BrainCircuit,
       Reranking: BrainCircuit,
       "API keys": KeyRound,
+      "Configuration transfer": KeyRound,
       Data: Database,
       "Realtime sync": Cloud,
       "Background indexing": Activity,

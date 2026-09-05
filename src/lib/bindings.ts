@@ -22,6 +22,20 @@ export const commands = {
 	probeServerAiProvider: (settings: AiProviderSettingsUpdate) => typedError<AiProviderProbeResult, CommandError>(__TAURI_INVOKE("probe_server_ai_provider", { settings })),
 	reindexServerAi: () => typedError<AiIndexStatus, CommandError>(__TAURI_INVOKE("reindex_server_ai")),
 	loadSettings: () => typedError<SettingsSnapshot, CommandError>(__TAURI_INVOKE("load_settings")),
+	exportDeviceConfiguration: (includeToken: boolean, appearance: {
+	theme: ConfigurationTheme,
+	palette: ConfigurationPalette,
+} | null) => typedError<boolean, CommandError>(__TAURI_INVOKE("export_device_configuration", { includeToken, appearance })),
+	previewConfigurationImport: () => typedError<{
+	id: string,
+	serverUrl: string | null,
+	tokenIncluded: boolean,
+	tokenRequired: boolean,
+	search: ConfigurationSearch,
+	appearance: ConfigurationAppearance | null,
+} | null, CommandError>(__TAURI_INVOKE("preview_configuration_import")),
+	applyConfigurationImport: (id: string, token: string | null) => typedError<ConfigurationImportResult, CommandError>(__TAURI_INVOKE("apply_configuration_import", { id, token })),
+	cancelConfigurationImport: (id: string) => __TAURI_INVOKE<void>("cancel_configuration_import", { id }),
 	saveSettings: (update: SettingsUpdate) => typedError<SettingsSnapshot, CommandError>(__TAURI_INVOKE("save_settings", { update })),
 	resetSettings: () => typedError<SettingsSnapshot, CommandError>(__TAURI_INVOKE("reset_settings")),
 	retrySync: () => __TAURI_INVOKE<void>("retry_sync"),
@@ -290,6 +304,37 @@ export type CommandError = {
 export type CommandErrorCode = "invalid_input" | "not_found" | "conflict" | "unavailable" | "internal";
 
 export type CompletionProtocol = "openai" | "anthropic";
+
+export type ConfigurationAppearance = {
+	theme: ConfigurationTheme,
+	palette: ConfigurationPalette,
+};
+
+export type ConfigurationImportResult = {
+	settings: SettingsSnapshot,
+	appearance: ConfigurationAppearance | null,
+	connectionVerified: boolean,
+	restartRequired: boolean,
+};
+
+export type ConfigurationPalette = "iris" | "tidal" | "ember" | "sakura" | "nordic" | "moss";
+
+export type ConfigurationPreview = {
+	id: string,
+	serverUrl: string | null,
+	tokenIncluded: boolean,
+	tokenRequired: boolean,
+	search: ConfigurationSearch,
+	appearance: ConfigurationAppearance | null,
+};
+
+export type ConfigurationSearch = {
+	enabled: boolean,
+	trigger: AiSearchTrigger,
+	rerank: boolean,
+};
+
+export type ConfigurationTheme = "system" | "light" | "dark";
 
 export type Content = { kind: "page"; record: Page } | { kind: "block"; record: Block };
 

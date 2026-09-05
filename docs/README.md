@@ -3,6 +3,7 @@
 ## Architecture
 
 - [Sync, storage, and AI](architecture/sync-storage-ai.md)
+- [Device configuration transfer](architecture/configuration-transfer.md)
 - [Editor and page presentation](architecture/editor.md)
 - [Workspace panes](architecture/workspace.md)
 - [Journals and Logseq import](architecture/journals.md)

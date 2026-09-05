@@ -24,6 +24,10 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::probe_server_ai_provider,
             commands::reindex_server_ai,
             commands::load_settings,
+            settings::transfer::export_device_configuration,
+            settings::transfer::preview_configuration_import,
+            settings::transfer::apply_configuration_import,
+            settings::transfer::cancel_configuration_import,
             commands::save_settings,
             commands::reset_settings,
             commands::retry_sync,
@@ -130,6 +134,7 @@ pub fn run() {
         (context, main_window_config)
     };
     let builder = tauri::Builder::default()
+        .manage(settings::transfer::PendingConfiguration::default())
         .register_asynchronous_uri_scheme_protocol(
             attachment_protocol::ATTACHMENT_PROTOCOL,
             attachment_protocol::protocol,

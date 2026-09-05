@@ -220,6 +220,15 @@ export const getStartupStatus = commands.startupStatus;
 export const getMobileSystemInfo = checkedCommand(commands.mobileSystemInfo);
 export const setSystemBarsStyle = checkedCommand(commands.setSystemBarsStyle);
 export const loadSettings = checkedCommand(commands.loadSettings);
+export const exportDeviceConfiguration = checkedCommand(commands.exportDeviceConfiguration);
+export const previewConfigurationImport = checkedCommand(commands.previewConfigurationImport);
+export const applyConfigurationImport = checkedCommand(commands.applyConfigurationImport);
+export const cancelConfigurationImport = commands.cancelConfigurationImport;
+export type {
+  ConfigurationAppearance,
+  ConfigurationPreview,
+  ConfigurationImportResult,
+} from "@/lib/bindings";
 export const saveSettings = checkedCommand(commands.saveSettings);
 export const resetSettings = checkedCommand(commands.resetSettings);
 
