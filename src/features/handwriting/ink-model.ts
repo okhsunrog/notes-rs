@@ -79,8 +79,9 @@ export function drawSheet(
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, 1000, 1400);
   if (background === "grid") {
-    ctx.strokeStyle = "#c4c4c4";
-    ctx.lineWidth = 0.65;
+    // Thin light gray lines can disappear under e-ink contrast processing.
+    ctx.strokeStyle = "#777777";
+    ctx.lineWidth = 1;
     ctx.beginPath();
     for (let x = 25; x < 1000; x += 25) {
       ctx.moveTo(x, 0);
