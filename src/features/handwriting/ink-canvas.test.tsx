@@ -53,6 +53,7 @@ beforeEach(() => {
         lineTo: vi.fn(),
         stroke: vi.fn(),
         clearRect: vi.fn(),
+        fillRect: vi.fn(),
         setTransform: vi.fn(),
         drawImage: vi.fn(),
       } as unknown as CanvasRenderingContext2D;

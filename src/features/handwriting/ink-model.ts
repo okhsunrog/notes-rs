@@ -1,7 +1,13 @@
-import type { InkDraft, InkPoint, InkStroke } from "@/lib/bindings";
+import type { InkBackground, InkDraft, InkPoint, InkStroke } from "@/lib/bindings";
 
 export const MAX_INK_POINTS = 150_000;
-export const emptyDraft = (): InkDraft => ({ version: 1, width: 1000, height: 1400, strokes: [] });
+export const emptyDraft = (): InkDraft => ({
+  version: 1,
+  width: 1000,
+  height: 1400,
+  strokes: [],
+  background: "plain",
+});
 
 export function inkPoint(
   event: Pick<
@@ -64,8 +70,28 @@ export function drawSegment(
   }
 }
 
-export function drawSheet(ctx: CanvasRenderingContext2D, strokes: InkStroke[]) {
+export function drawSheet(
+  ctx: CanvasRenderingContext2D,
+  strokes: InkStroke[],
+  background: InkBackground = "plain",
+) {
   ctx.clearRect(0, 0, 1000, 1400);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, 1000, 1400);
+  if (background === "grid") {
+    ctx.strokeStyle = "#c4c4c4";
+    ctx.lineWidth = 0.65;
+    ctx.beginPath();
+    for (let x = 25; x < 1000; x += 25) {
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, 1400);
+    }
+    for (let y = 25; y < 1400; y += 25) {
+      ctx.moveTo(0, y);
+      ctx.lineTo(1000, y);
+    }
+    ctx.stroke();
+  }
   for (const stroke of strokes) {
     for (let i = 0; i < stroke.points.length; i++) {
       drawSegment(ctx, stroke.points[Math.max(0, i - 1)]!, stroke.points[i]!, stroke.width);

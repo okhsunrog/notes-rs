@@ -101,6 +101,7 @@ export function InkCanvas({
           ? current.strokes
           : [...current.strokes, current.stroke]
         : draft.strokes,
+      draft.background,
     );
     // Publish a complete image in one operation, including erasure/undo, with no blank frame.
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -119,7 +120,7 @@ export function InkCanvas({
       const next = eraseAt(current.strokes, p);
       if (next.length !== current.strokes.length) {
         current.strokes = next;
-        drawSheet(ctx, next);
+        drawSheet(ctx, next, draft.background);
       }
     } else {
       if (current.count + current.stroke.points.length >= MAX_INK_POINTS) return;
@@ -188,7 +189,7 @@ export function InkCanvas({
       event.currentTarget.releasePointerCapture(event.pointerId);
     if (cancelled) {
       const ctx = event.currentTarget.getContext("2d");
-      if (ctx) drawSheet(ctx, draft.strokes);
+      if (ctx) drawSheet(ctx, draft.strokes, draft.background);
     } else {
       const strokes = current.erasing
         ? current.strokes

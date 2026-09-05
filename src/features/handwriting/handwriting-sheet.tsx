@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, Eraser, PenLine, Redo2, Undo2, X } from "lucide-react";
+import { Check, Eraser, Grid2X2, Square, PenLine, Redo2, Undo2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { loadHandwritingDraft, saveHandwritingDraft } from "@/lib/api";
@@ -173,6 +173,26 @@ export function HandwritingSheet() {
               />
             </Button>
           ))}
+          <div className="flex gap-1" role="group" aria-label="Paper background">
+            {(["plain", "grid"] as const).map((background) => (
+              <Button
+                key={background}
+                variant={draft?.background === background ? "secondary" : "ghost"}
+                aria-label={background === "grid" ? "Grid paper" : "Plain paper"}
+                aria-pressed={draft?.background === background}
+                disabled={!draft || active}
+                onClick={() => {
+                  if (draft && draft.background !== background) change({ ...draft, background });
+                }}
+              >
+                {background === "grid" ? (
+                  <Grid2X2 className="size-4" />
+                ) : (
+                  <Square className="size-4" />
+                )}
+              </Button>
+            ))}
+          </div>
           <div className="ml-auto flex gap-1">
             <Button
               type="button"

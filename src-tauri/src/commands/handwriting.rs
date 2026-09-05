@@ -39,6 +39,14 @@ pub struct InkStroke {
     pub points: Vec<InkPoint>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub enum InkBackground {
+    #[default]
+    Plain,
+    Grid,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InkDraft {
@@ -46,6 +54,8 @@ pub struct InkDraft {
     pub width: u32,
     pub height: u32,
     pub strokes: Vec<InkStroke>,
+    #[serde(default)]
+    pub background: InkBackground,
 }
 
 impl Default for InkDraft {
@@ -55,6 +65,7 @@ impl Default for InkDraft {
             width: 1000,
             height: 1400,
             strokes: Vec::new(),
+            background: InkBackground::Plain,
         }
     }
 }
@@ -234,6 +245,21 @@ mod tests {
             }],
             ..InkDraft::default()
         }
+    }
+
+    #[test]
+    fn old_drafts_default_to_plain_and_grid_round_trips() {
+        let legacy = r#"{"version":1,"width":1000,"height":1400,"strokes":[]}"#;
+        let mut draft: InkDraft = serde_json::from_str(legacy).unwrap();
+        assert!(matches!(draft.background, InkBackground::Plain));
+        draft.background = InkBackground::Grid;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("draft.json");
+        write_draft(&path, draft, None).unwrap();
+        assert!(matches!(
+            read_draft(&path).unwrap().draft.background,
+            InkBackground::Grid
+        ));
     }
 
     #[test]

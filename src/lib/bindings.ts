@@ -431,11 +431,14 @@ export type ImportDiagnostic = {
 	remediation: string | null,
 };
 
+export type InkBackground = "plain" | "grid";
+
 export type InkDraft = {
 	version: number,
 	width: number,
 	height: number,
 	strokes: InkStroke[],
+	background?: InkBackground,
 };
 
 export type InkDraftSnapshot = {
