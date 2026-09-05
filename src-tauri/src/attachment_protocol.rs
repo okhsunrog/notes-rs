@@ -622,7 +622,7 @@ async fn read_or_create_preview_inner(
             let hash = BlobHash::digest(&bytes);
             cache_for_install.install_reader(bytes.as_slice(), hash, MAX_MARKDOWN_IMAGE_BYTES)?;
             let store_ms = start.elapsed().as_secs_f64() * 1000.0;
-            tracing::info!(%source_hash, queue_ms, blocking_queue_ms, read_ms, decode_ms, resize_ms, encode_ms,
+            tracing::debug!(%source_hash, queue_ms, blocking_queue_ms, read_ms, decode_ms, resize_ms, encode_ms,
                 store_ms, bytes = bytes.len(), width, height, background = head,
                 "image preview generated");
             Ok((hash, bytes))
@@ -637,7 +637,7 @@ async fn read_or_create_preview_inner(
     image.cache.preview_height = Some(preview_height);
     let publishing = Instant::now();
     db::upsert_attachment_image_cache(&connection, image.cache).await?;
-    tracing::info!(%source_hash, publish_ms = publishing.elapsed().as_secs_f64() * 1000.0,
+    tracing::debug!(%source_hash, publish_ms = publishing.elapsed().as_secs_f64() * 1000.0,
         total_ms = started.elapsed().as_secs_f64() * 1000.0, "image preview ready");
     Ok(ImageResource {
         body: if head { Vec::new() } else { bytes },
