@@ -124,7 +124,7 @@ function App() {
         )}
         {startupError ? (
           <div className="max-w-lg rounded-md border border-destructive/40 bg-destructive/5 p-5">
-            <h1 className="font-semibold text-destructive">notes-rs could not start</h1>
+            <h1 className="font-semibold text-destructive">Tangleaf could not start</h1>
             <p className="mt-2 text-sm break-words text-muted-foreground">{startupError}</p>
             <p className="mt-3 text-xs text-muted-foreground">
               Open Settings to reset invalid device configuration, then restart the app.
@@ -137,7 +137,7 @@ function App() {
         ) : (
           <>
             <Loader2 className="size-6 animate-spin text-muted-foreground" />
-            <p className="text-sm text-muted-foreground">starting notes-rs…</p>
+            <p className="text-sm text-muted-foreground">Starting Tangleaf…</p>
           </>
         )}
       </div>

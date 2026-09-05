@@ -10,7 +10,6 @@ import {
   Moon,
   RotateCcw,
   Save,
-  Sparkles,
   Sun,
   Trash2,
 } from "lucide-react";
@@ -251,9 +250,7 @@ export function SettingsPage({
           >
             <ArrowLeft className="size-4" />
           </Button>
-          <div className="brand-mark flex size-9 items-center justify-center rounded-xl text-primary-foreground shadow-sm">
-            <Sparkles className="size-4" />
-          </div>
+          <TangleafMark width={32} height={32} />
           <div>
             <h1 className="font-semibold tracking-tight">Settings</h1>
             <p className="text-xs text-muted-foreground">Device, appearance, and server</p>
@@ -324,7 +321,7 @@ export function SettingsPage({
 
         <SettingsSection
           title="Window"
-          description="Choose the native window frame or a borderless notes-rs frame."
+          description="Choose the native window frame or a borderless Tangleaf frame."
         >
           <Field label="Decoration mode">
             <select
@@ -338,7 +335,7 @@ export function SettingsPage({
               className="h-10 w-full rounded-xl border border-border/70 bg-background/70 px-3 text-sm shadow-none"
             >
               <option value="native">Native (system decorations)</option>
-              <option value="borderless">Borderless (notes-rs controls)</option>
+              <option value="borderless">Borderless (Tangleaf controls)</option>
             </select>
           </Field>
           <p className="text-xs text-muted-foreground">
@@ -376,7 +373,7 @@ export function SettingsPage({
 
         <SettingsSection
           title="Startup"
-          description="Choose what this device shows when notes-rs opens. Dashboard is the calm default; your notes are never changed by this choice."
+          description="Choose what this device shows when Tangleaf opens. Dashboard is the calm default; your notes are never changed by this choice."
         >
           <Field label="Open on launch">
             <select
@@ -410,7 +407,7 @@ export function SettingsPage({
               label="Startup note"
               hint={
                 startupPagesQuery.data?.length
-                  ? "If this note is deleted, notes-rs safely falls back to Dashboard."
+                  ? "If this note is deleted, Tangleaf safely falls back to Dashboard."
                   : "Create a note before choosing it as your startup page."
               }
             >
@@ -485,7 +482,7 @@ export function SettingsPage({
 
         <SettingsSection
           title="Notes server"
-          description="Realtime sync and every AI feature are owned by your notes-rs server. Local editing, graph navigation, and full-text search remain available offline."
+          description="Realtime sync and every AI feature are owned by your Tangleaf server. Local editing, graph navigation, and full-text search remain available offline."
         >
           <Field
             label="Server URL"
@@ -620,3 +617,5 @@ export function SettingsPage({
     </div>
   );
 }
+import { TangleafMark } from "@/brand/TangleafMark";
+import "@/brand/brand.css";

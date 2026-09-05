@@ -1,0 +1,27 @@
+/* Keep fonts/ next to react/, or adjust this URL after copying. */
+@font-face {
+  font-family: "Tangleaf Manrope";
+  src: url("../fonts/manrope-600.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+.tangleaf-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  color: inherit;
+  white-space: nowrap;
+}
+.tangleaf-brand > svg {
+  display: block;
+  flex-shrink: 0;
+}
+.tangleaf-wordmark {
+  font-family: "Tangleaf Manrope", sans-serif;
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0;
+}

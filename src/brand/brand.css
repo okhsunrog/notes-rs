@@ -1,0 +1,68 @@
+:root {
+  --brand-start: #143b66;
+  --brand-mid: #185e9f;
+  --brand-end: #278fd5;
+  --brand-light: #70d2eb;
+  --brand-glow: 0.55;
+}
+/* Brand finishes v2. Geometry is unchanged. */
+:root[data-palette="iris"] {
+  --brand-start: #29205c;
+  --brand-mid: #5738a5;
+  --brand-end: #7856d9;
+  --brand-light: #ac8bff;
+  --brand-glow: 0.55;
+}
+:root.dark[data-palette="iris"] {
+  --brand-glow: 0.72;
+}
+:root[data-palette="tidal"] {
+  --brand-start: #033b46;
+  --brand-mid: #00616b;
+  --brand-end: #008f98;
+  --brand-light: #42d5bf;
+  --brand-glow: 0.55;
+}
+:root.dark[data-palette="tidal"] {
+  --brand-glow: 0.72;
+}
+:root[data-palette="ember"] {
+  --brand-start: #703322;
+  --brand-mid: #ac502c;
+  --brand-end: #d98239;
+  --brand-light: #f5c878;
+  --brand-glow: 0.55;
+}
+:root.dark[data-palette="ember"] {
+  --brand-glow: 0.72;
+}
+:root[data-palette="sakura"] {
+  --brand-start: #5c2446;
+  --brand-mid: #98305c;
+  --brand-end: #c84b7d;
+  --brand-light: #f58eb6;
+  --brand-glow: 0.55;
+}
+:root.dark[data-palette="sakura"] {
+  --brand-glow: 0.72;
+}
+:root[data-palette="nordic"] {
+  --brand-start: #143b66;
+  --brand-mid: #185e9f;
+  --brand-end: #278fd5;
+  --brand-light: #70d2eb;
+  --brand-glow: 0.55;
+}
+:root.dark[data-palette="nordic"] {
+  --brand-glow: 0.72;
+}
+:root[data-palette="moss"] {
+  --brand-start: #163f31;
+  --brand-mid: #286c4d;
+  --brand-end: #479567;
+  --brand-light: #9ed5a4;
+  --brand-glow: 0.55;
+}
+:root.dark[data-palette="moss"] {
+  --brand-glow: 0.72;
+}

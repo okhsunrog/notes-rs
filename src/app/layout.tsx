@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useReducer, type ReactNode } from "react";
 import { onBackButtonPress } from "@tauri-apps/api/app";
-import { ArrowLeft, Bot, ChevronLeft, Sparkles, X } from "lucide-react";
+import { ArrowLeft, Bot, ChevronLeft, X } from "lucide-react";
+import { TangleafBrand } from "@/brand/TangleafBrand";
 import { Group, Panel, Separator, usePanelRef } from "react-resizable-panels";
 import { Button } from "@/components/ui/button";
 import { DockVisibility } from "@/features/workspace/workspace-model";
@@ -192,10 +193,7 @@ export function AppLayout({
               returnToDashboard();
             }}
           >
-            <div className="brand-mark flex size-8 items-center justify-center rounded-xl text-primary-foreground shadow-sm">
-              <Sparkles className="size-4" />
-            </div>
-            <h1 className="text-[15px] leading-none font-semibold tracking-[-0.02em]">notes-rs</h1>
+            <TangleafBrand />
           </button>
           <div className="flex items-center gap-1">{headerActions}</div>
         </header>

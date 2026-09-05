@@ -446,7 +446,6 @@ html::before {
     background: var(--inspector);
   }
 
-  .brand-mark,
   .brand-button {
     background: linear-gradient(
       135deg,
