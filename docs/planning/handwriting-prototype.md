@@ -247,3 +247,11 @@ calls, not measured physical display latency. Three new unit tests cover timing/
 ownership alongside the four frame-fence tests; all 388 frontend tests pass.
 
 Physical acceptance of the transient mode and grayscale restoration on Note Air 4C is pending.
+
+Installed on Note Air 4C with the saved draft retained byte-for-byte. Readback on the actual
+WebView changed from GC (raw 5) to GU (raw 2) while the sheet was open, then returned to GC
+(raw 5) after Done. The EAC profile dump remained byte-identical across installation and the
+open/close check. Raw integer restoration preserves inherited/unknown firmware values which
+SDK enum conversion can lose. Seven Android unit tests pass. Gesture acceleration and the
+five-second quality restoration still await physical-display feedback; readback of a view
+mode alone does not establish the effective waveform during a gesture.
