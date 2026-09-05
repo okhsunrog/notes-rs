@@ -31,19 +31,19 @@ export function TangleafMark({ title, branded = false, width = 36, height = 36, 
           x2="440"
           y2="70"
         >
-          <stop stopColor={color("start", "#143b66")} />
-          <stop offset=".42" stopColor={color("mid", "#185e9f")} />
-          <stop offset=".78" stopColor={color("end", "#278fd5")} />
-          <stop offset="1" stopColor={color("end", "#278fd5")} />
+          <stop stopColor={color("start", "#29205c")} />
+          <stop offset=".42" stopColor={color("mid", "#5738a5")} />
+          <stop offset=".78" stopColor={color("end", "#7856d9")} />
+          <stop offset="1" stopColor={color("end", "#7856d9")} />
         </linearGradient>
         <radialGradient id={`${id}-light`} gradientUnits="userSpaceOnUse" cx="495" cy="90" r="390">
-          <stop stopColor={color("light", "#70d2eb")} style={glow(0.55)} />
-          <stop offset=".40" stopColor={color("light", "#70d2eb")} style={glow(0.275)} />
-          <stop offset="1" stopColor={color("light", "#70d2eb")} stopOpacity="0" />
+          <stop stopColor={color("light", "#ac8bff")} style={glow(0.55)} />
+          <stop offset=".40" stopColor={color("light", "#ac8bff")} style={glow(0.275)} />
+          <stop offset="1" stopColor={color("light", "#ac8bff")} stopOpacity="0" />
         </radialGradient>
         <radialGradient id={`${id}-shade`} gradientUnits="userSpaceOnUse" cx="115" cy="500" r="340">
-          <stop stopColor={color("start", "#143b66")} stopOpacity=".25" />
-          <stop offset="1" stopColor={color("start", "#143b66")} stopOpacity="0" />
+          <stop stopColor={color("start", "#29205c")} stopOpacity=".25" />
+          <stop offset="1" stopColor={color("start", "#29205c")} stopOpacity="0" />
         </radialGradient>
       </defs>
       {(["base", "light", "shade"] as const).map((layer) => (

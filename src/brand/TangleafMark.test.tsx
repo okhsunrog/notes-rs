@@ -26,10 +26,10 @@ describe("Tangleaf mark", () => {
     expect(labelled.getAttribute("aria-labelledby")).toBe(labelled.querySelector("title")!.id);
   });
 
-  it("uses theme variables in the UI but fixed Nordic colors for branded marks", () => {
+  it("uses theme variables in the UI but fixed Iris colors for branded marks", () => {
     expect(renderToStaticMarkup(<TangleafMark />)).toContain("var(--brand-start");
     const branded = renderToStaticMarkup(<TangleafMark branded />);
     expect(branded).not.toContain("var(--brand-");
-    expect(branded).toContain("#143b66");
+    expect(branded).toContain("#29205c");
   });
 });

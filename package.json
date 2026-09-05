@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "icons:generate": "node tools/generate-icons.mjs",
     "desktop:dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
     "bindings:generate": "cargo run -p tangleaf --bin export-bindings -- src/lib/bindings.ts",
     "tauri": "tauri",
