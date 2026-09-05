@@ -7,7 +7,7 @@ intensity are preserved. In-app marks still follow the selected UI palette.
 Run `vp run icons:generate` from the repository root to regenerate the favicon,
 desktop/iOS icons and Android resources from `tangleaf.svg`.
 
-Android uses a pale Iris background and a generated foreground with 50% artwork
+Android uses a dark plum background gradient (`#352644` to `#171221`) and a generated foreground with 50% artwork
 scale in its 108dp layer. This keeps the pointed leaf and T visible under circular
 and rounded-square masks. The manifest's 150% scale applies only to legacy icons,
 compensating for the adaptive layer's outer margins. Do not run the icon generator
