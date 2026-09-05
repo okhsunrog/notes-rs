@@ -131,6 +131,7 @@ function SplitFrame({
 
   return (
     <Group
+      disabled={compact}
       orientation={node.axis}
       id={node.splitId}
       className="h-full min-h-0"

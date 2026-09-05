@@ -211,6 +211,7 @@ pub fn run() {
                             conn: conn.clone(),
                             blob_store: blob_store.clone(),
                             image_cache,
+                            preview_jobs: Arc::new(attachment_protocol::PreviewJobs::default()),
                             remote_ai,
                             chat_cancellations: Arc::new(std::sync::Mutex::new(
                                 std::collections::HashMap::new(),

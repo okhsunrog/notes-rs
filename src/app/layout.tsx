@@ -219,7 +219,7 @@ export function AppLayout({
             compact && "mx-0 mb-0 rounded-none border-x-0 border-b-0 shadow-none",
           )}
         >
-          <Group orientation="horizontal" className="h-full min-h-0">
+          <Group orientation="horizontal" className="h-full min-h-0" disabled={compact}>
             <Panel
               id="navigation-sidebar"
               panelRef={sidebarRef}

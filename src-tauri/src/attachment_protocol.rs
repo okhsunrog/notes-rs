@@ -5,7 +5,12 @@ use image::{ImageFormat, ImageReader};
 use notes_blob::{BlobHash, BlobStore};
 use notes_core::{Connection, db};
 use serde::Serialize;
-use std::{collections::BTreeSet, io::Cursor};
+use std::{
+    collections::{BTreeSet, HashMap},
+    io::Cursor,
+    sync::{Arc, Mutex, Weak},
+    time::Instant,
+};
 use tauri::{Manager as _, Runtime};
 
 pub(crate) const ATTACHMENT_PROTOCOL: &str = "notes-attachment";
@@ -22,6 +27,41 @@ const PREVIEW_MAX_EDGE: u32 = 1_024;
 /// output within a few percent of libwebp's.
 const PREVIEW_WEBP_QUALITY: f32 = 80.0;
 const IMMUTABLE_CACHE_CONTROL: &str = "private, max-age=31536000, immutable";
+
+/// Shared by foreground requests and all background warm-ups in one workspace.
+pub(crate) struct PreviewJobs {
+    keys: Mutex<HashMap<BlobHash, Weak<tokio::sync::Mutex<()>>>>,
+    slots: Arc<tokio::sync::Semaphore>,
+    background: tokio::sync::Semaphore,
+    #[cfg(test)]
+    generations: std::sync::atomic::AtomicUsize,
+}
+
+impl Default for PreviewJobs {
+    fn default() -> Self {
+        Self {
+            keys: Mutex::new(HashMap::new()),
+            slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            // Background work cannot occupy both generation slots.
+            background: tokio::sync::Semaphore::new(1),
+            #[cfg(test)]
+            generations: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+impl PreviewJobs {
+    fn key(&self, hash: BlobHash) -> Arc<tokio::sync::Mutex<()>> {
+        let mut keys = self.keys.lock().expect("preview key registry poisoned");
+        keys.retain(|_, value| value.strong_count() > 0);
+        if let Some(key) = keys.get(&hash).and_then(Weak::upgrade) {
+            return key;
+        }
+        let key = Arc::new(tokio::sync::Mutex::new(()));
+        keys.insert(hash, Arc::downgrade(&key));
+        key
+    }
+}
 
 pub(crate) fn extract_attachment_uuids<'a>(
     markdown: impl IntoIterator<Item = &'a str>,
@@ -146,9 +186,8 @@ fn warm_preview_cache(state: &AppState, images: Vec<AuthorizedImage>) {
     let connection = state.conn.clone();
     let blob_store = state.blob_store.clone();
     let image_cache = state.image_cache.clone();
+    let jobs = state.preview_jobs.clone();
     tauri::async_runtime::spawn(async move {
-        // Sequential on purpose: previews are a warm-up, the UI thread and
-        // interactive protocol requests should win any CPU contention.
         for image in warm {
             let attachment_uuid = image.descriptor.attachment_uuid;
             if let Err(error) = read_or_create_preview(
@@ -157,6 +196,7 @@ fn warm_preview_cache(state: &AppState, images: Vec<AuthorizedImage>) {
                 image_cache.clone(),
                 image,
                 true,
+                jobs.clone(),
             )
             .await
             {
@@ -346,7 +386,7 @@ async fn protocol_response<R: Runtime>(
     let Some(route) = parse_attachment_uri(request.uri()) else {
         return empty_response(tauri::http::StatusCode::BAD_REQUEST);
     };
-    let (connection, blob_store, image_cache) = {
+    let (connection, blob_store, image_cache, jobs) = {
         let Some(state) = app.try_state::<AppState>() else {
             return empty_response(tauri::http::StatusCode::SERVICE_UNAVAILABLE);
         };
@@ -354,6 +394,7 @@ async fn protocol_response<R: Runtime>(
             state.conn.clone(),
             state.blob_store.clone(),
             state.image_cache.clone(),
+            state.preview_jobs.clone(),
         )
     };
     let image = match open_authorized_image(&connection, &blob_store, route.attachment_uuid).await {
@@ -371,7 +412,7 @@ async fn protocol_response<R: Runtime>(
     let resource = match route.variant {
         ImageVariant::Original => read_original(blob_store, &descriptor, head).await,
         ImageVariant::Preview => {
-            read_or_create_preview(connection, blob_store, image_cache, image, head).await
+            read_or_create_preview(connection, blob_store, image_cache, image, head, jobs).await
         }
     };
     let resource = match resource {
@@ -448,19 +489,45 @@ async fn read_or_create_preview(
     connection: Connection,
     blob_store: BlobStore,
     image_cache: BlobStore,
+    image: AuthorizedImage,
+    head: bool,
+    jobs: Arc<PreviewJobs>,
+) -> anyhow::Result<ImageResource> {
+    // Keep the lock through cache publication even if the requesting future is
+    // cancelled: spawn_blocking work cannot be cancelled once it starts.
+    tauri::async_runtime::spawn(async move {
+        read_or_create_preview_inner(connection, blob_store, image_cache, image, head, jobs).await
+    })
+    .await
+    .context("preview request task failed")?
+}
+
+async fn read_or_create_preview_inner(
+    connection: Connection,
+    blob_store: BlobStore,
+    image_cache: BlobStore,
     mut image: AuthorizedImage,
     head: bool,
+    jobs: Arc<PreviewJobs>,
 ) -> anyhow::Result<ImageResource> {
+    let started = Instant::now();
+    let _background = if head {
+        Some(jobs.background.acquire().await?)
+    } else {
+        None
+    };
+    let key = jobs.key(image.descriptor.blob_hash);
+    let _key = key.lock().await;
+    // The descriptor may predate another request's completed generation.
+    if let Some(cache) =
+        db::get_attachment_image_cache(&connection, image.descriptor.blob_hash).await?
+        && cache.format_version == IMAGE_CACHE_FORMAT_VERSION
+        && cache.byte_size == image.descriptor.byte_size
+    {
+        image.cache = cache;
+    }
     if let (Some(hash), Some(byte_size)) = (image.cache.preview_hash, image.cache.preview_size) {
         let cache = image_cache.clone();
-        if head {
-            return Ok(ImageResource {
-                body: Vec::new(),
-                byte_size,
-                hash,
-                mime: "image/webp",
-            });
-        }
         match tauri::async_runtime::spawn_blocking(move || {
             cache.read_verified(hash, MAX_MARKDOWN_IMAGE_BYTES)
         })
@@ -469,7 +536,7 @@ async fn read_or_create_preview(
         {
             Ok(body) if body.len() as u64 == byte_size => {
                 return Ok(ImageResource {
-                    body,
+                    body: if head { Vec::new() } else { body },
                     byte_size,
                     hash,
                     mime: "image/webp",
@@ -493,10 +560,23 @@ async fn read_or_create_preview(
     let preview_width = image.descriptor.preview_width;
     let preview_height = image.descriptor.preview_height;
     let cache_for_install = image_cache.clone();
+    let permit = jobs.slots.clone().acquire_owned().await?;
+    #[cfg(test)]
+    jobs.generations
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let queue_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let submitted = Instant::now();
     let generated =
         tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<(BlobHash, Vec<u8>)> {
+            let _permit = permit;
+            let blocking_queue_ms = submitted.elapsed().as_secs_f64() * 1000.0;
+            let start = Instant::now();
             let source = blob_store.read_verified(source_hash, MAX_MARKDOWN_IMAGE_BYTES)?;
+            let read_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let start = Instant::now();
             let decoded = image::load_from_memory_with_format(&source, image_format(source_mime))?;
+            let decode_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let start = Instant::now();
             let preview = if decoded.width() == preview_width && decoded.height() == preview_height
             {
                 decoded
@@ -508,6 +588,8 @@ async fn read_or_create_preview(
                 )
             };
             let (width, height) = (preview.width(), preview.height());
+            let resize_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let start = Instant::now();
             let config = zenwebp::LossyConfig::new().with_quality(PREVIEW_WEBP_QUALITY);
             let bytes = if preview.color().has_alpha() {
                 let pixels = preview.into_rgba8();
@@ -531,12 +613,18 @@ async fn read_or_create_preview(
                 .encode()
             }
             .map_err(|error| anyhow::anyhow!("preview webp encoding failed: {error}"))?;
+            let encode_ms = start.elapsed().as_secs_f64() * 1000.0;
             anyhow::ensure!(
                 bytes.len() as u64 <= MAX_MARKDOWN_IMAGE_BYTES,
                 "generated preview is too large"
             );
+            let start = Instant::now();
             let hash = BlobHash::digest(&bytes);
             cache_for_install.install_reader(bytes.as_slice(), hash, MAX_MARKDOWN_IMAGE_BYTES)?;
+            let store_ms = start.elapsed().as_secs_f64() * 1000.0;
+            tracing::info!(%source_hash, queue_ms, blocking_queue_ms, read_ms, decode_ms, resize_ms, encode_ms,
+                store_ms, bytes = bytes.len(), width, height, background = head,
+                "image preview generated");
             Ok((hash, bytes))
         })
         .await
@@ -547,7 +635,10 @@ async fn read_or_create_preview(
     image.cache.preview_size = Some(byte_size);
     image.cache.preview_width = Some(preview_width);
     image.cache.preview_height = Some(preview_height);
+    let publishing = Instant::now();
     db::upsert_attachment_image_cache(&connection, image.cache).await?;
+    tracing::info!(%source_hash, publish_ms = publishing.elapsed().as_secs_f64() * 1000.0,
+        total_ms = started.elapsed().as_secs_f64() * 1000.0, "image preview ready");
     Ok(ImageResource {
         body: if head { Vec::new() } else { bytes },
         byte_size,
@@ -622,6 +713,27 @@ mod tests {
         let mut encoded = Cursor::new(Vec::new());
         image.write_to(&mut encoded, ImageFormat::Png).unwrap();
         encoded.into_inner()
+    }
+
+    #[tokio::test]
+    async fn preview_jobs_share_keys_and_reserve_capacity_for_requests() {
+        let jobs = PreviewJobs::default();
+        let hash = BlobHash::digest(b"same image");
+        let key = jobs.key(hash);
+        assert!(Arc::ptr_eq(&key, &jobs.key(hash)));
+        let held = key.lock().await;
+        assert!(jobs.key(hash).try_lock().is_err());
+        drop(held);
+        drop(key);
+        let _other = jobs.key(BlobHash::digest(b"other image"));
+        assert!(!jobs.keys.lock().unwrap().contains_key(&hash));
+        let _background = jobs.background.try_acquire().unwrap();
+        assert!(jobs.background.try_acquire().is_err());
+        let _first = jobs.slots.try_acquire().unwrap();
+        let second = jobs.slots.try_acquire().unwrap();
+        assert!(jobs.slots.try_acquire().is_err());
+        drop(second);
+        assert!(jobs.slots.try_acquire().is_ok());
     }
 
     #[test]
@@ -805,15 +917,34 @@ mod tests {
             ),
             (1_024, 512)
         );
-        let first = read_or_create_preview(
+        let stale = open_authorized_image(&connection, &source_store, attachment.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        let jobs = Arc::new(PreviewJobs::default());
+        let first_request = read_or_create_preview(
             connection.clone(),
             source_store.clone(),
             preview_store.clone(),
             image,
             false,
-        )
-        .await
-        .unwrap();
+            jobs.clone(),
+        );
+        let background_request = read_or_create_preview(
+            connection.clone(),
+            source_store.clone(),
+            preview_store.clone(),
+            stale,
+            true,
+            jobs.clone(),
+        );
+        let (first, warmed) = tokio::join!(first_request, background_request);
+        let first = first.unwrap();
+        assert_eq!(warmed.unwrap().hash, first.hash);
+        assert_eq!(
+            jobs.generations.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
         assert_eq!(first.mime, "image/webp");
         assert_eq!(
             image::load_from_memory_with_format(&first.body, ImageFormat::WebP)
@@ -839,10 +970,15 @@ mod tests {
             preview_store.clone(),
             image,
             false,
+            jobs.clone(),
         )
         .await
         .unwrap();
         assert_eq!(rebuilt.body, first.body);
+        assert_eq!(
+            jobs.generations.load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
         assert_eq!(
             preview_store
                 .read_verified(rebuilt.hash, MAX_MARKDOWN_IMAGE_BYTES)

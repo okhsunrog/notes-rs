@@ -104,6 +104,7 @@ pub struct AppState {
     pub conn: Connection,
     pub blob_store: notes_blob::BlobStore,
     pub image_cache: notes_blob::BlobStore,
+    pub(crate) preview_jobs: Arc<crate::attachment_protocol::PreviewJobs>,
     pub remote_ai: Option<notes_sync::HttpTransport>,
     pub chat_cancellations: Arc<std::sync::Mutex<HashMap<uuid::Uuid, CancellationToken>>>,
 }

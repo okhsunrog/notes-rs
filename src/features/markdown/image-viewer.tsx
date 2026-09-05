@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Loader2, Maximize2, RotateCcw, ZoomIn, ZoomOut } from "lucide-react";
+import { Maximize2, RotateCcw, ZoomIn, ZoomOut } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -37,6 +37,13 @@ export function MarkdownImageViewer({
   } | null>(null);
 
   const reset = () => setTransform({ scale: 1, x: 0, y: 0 });
+  const changeOpen = (next: boolean) => {
+    setOpen(next);
+    setLoaded(false);
+    reset();
+    pointers.current.clear();
+    gesture.current = null;
+  };
   const zoom = (factor: number) => {
     setTransform((current) => {
       const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, current.scale * factor));
@@ -45,17 +52,7 @@ export function MarkdownImageViewer({
   };
 
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(next) => {
-        setOpen(next);
-        if (!next) {
-          setLoaded(false);
-          reset();
-          pointers.current.clear();
-        }
-      }}
-    >
+    <Dialog open={open} onOpenChange={changeOpen}>
       <DialogTrigger
         type="button"
         className={`markdown-image-trigger group relative max-w-full cursor-zoom-in overflow-hidden rounded-xl text-left ${inline ? "inline-flex align-middle" : "block"}`}
@@ -78,15 +75,16 @@ export function MarkdownImageViewer({
         </span>
       </DialogTrigger>
       <DialogContent
+        data-fullscreen="true"
         showCloseButton={false}
-        className="inset-0 top-0 left-0 h-dvh w-dvw max-w-none translate-x-0 translate-y-0 gap-0 overflow-hidden rounded-none border-0 bg-black/95 p-0 sm:max-w-none"
+        className="inset-0 top-0 left-0 h-dvh w-dvw max-w-none translate-x-0 translate-y-0 gap-0 overflow-hidden rounded-none border-0 bg-black p-0 sm:max-w-none"
         onClick={(event) => event.stopPropagation()}
       >
         <DialogTitle className="sr-only">{alt || title || "Image viewer"}</DialogTitle>
         <DialogDescription className="sr-only">
           Full-resolution image. Use the controls to zoom, reset, or close.
         </DialogDescription>
-        <div className="absolute top-[max(0.75rem,env(safe-area-inset-top))] right-3 left-3 z-20 flex items-center gap-2">
+        <div className="absolute top-[max(0.75rem,var(--safe-area-inset-top))] right-[max(0.75rem,var(--safe-area-inset-right))] left-[max(0.75rem,var(--safe-area-inset-left))] z-20 flex items-center gap-2">
           <div className="flex items-center rounded-xl border border-white/15 bg-black/60 p-1 text-white shadow-lg backdrop-blur-md">
             <ViewerButton
               label="Zoom out"
@@ -118,7 +116,7 @@ export function MarkdownImageViewer({
             type="button"
             aria-label="Close image viewer"
             className="ml-auto flex size-10 items-center justify-center rounded-xl border border-white/15 bg-black/60 text-xl text-white shadow-lg backdrop-blur-md hover:bg-white/15"
-            onClick={() => setOpen(false)}
+            onClick={() => changeOpen(false)}
           >
             ×
           </button>
@@ -173,13 +171,10 @@ export function MarkdownImageViewer({
             <div className="absolute inset-0 flex items-center justify-center">
               <img
                 aria-hidden="true"
-                className="max-h-full max-w-full object-contain opacity-45 blur-sm"
+                className="max-h-full max-w-full object-contain"
                 draggable={false}
                 src={image.src}
               />
-              <span className="absolute flex items-center gap-2 rounded-xl bg-black/65 px-3 py-2 text-sm text-white">
-                <Loader2 className="size-4 animate-spin" /> Loading original…
-              </span>
             </div>
           )}
           <img
@@ -187,12 +182,20 @@ export function MarkdownImageViewer({
             className="max-h-full max-w-full object-contain will-change-transform"
             decoding="async"
             draggable={false}
-            onLoad={() => setLoaded(true)}
+            onLoad={async (event) => {
+              const element = event.currentTarget;
+              try {
+                await element.decode();
+                // A closing dialog can unmount while decoding is in flight.
+                if (element.isConnected) setLoaded(true);
+              } catch {
+                // Keep the preview if the original cannot be decoded.
+              }
+            }}
             src={open ? image.originalSrc : undefined}
             style={{
-              opacity: loaded ? 1 : 0,
+              visibility: loaded ? "visible" : "hidden",
               transform: `translate3d(${transform.x}px, ${transform.y}px, 0) scale(${transform.scale})`,
-              transition: pointers.current.size > 0 ? "none" : "opacity 150ms ease",
             }}
           />
         </div>

@@ -394,7 +394,7 @@ html::before {
   height: var(--safe-area-inset-top);
 }
 
-[data-slot="dialog-content"] {
+[data-slot="dialog-content"]:not([data-fullscreen="true"]) {
   max-height: calc(
     100dvh - 2rem - var(--safe-area-inset-top) - var(--safe-area-inset-bottom)
   ) !important;
