@@ -167,3 +167,26 @@ API references:
 
 - https://developer.android.com/reference/android/webkit/WebView.VisualStateCallback
 - https://developer.android.com/reference/android/view/ViewTreeObserver#registerFrameCommitCallback(java.lang.Runnable)
+
+### Selection, erasing, and paper
+
+The sheet now supports freehand/rectangular lasso selection, dragging the selection, copying,
+scaling, and deletion. Pixel erasing splits vector strokes at intersections with a swept round
+brush; stroke erasing deletes intersected strokes, and lasso erasing deletes strokes intersecting
+or inside the enclosed region. Clear sheet is undoable. With the pen tool selected, the hardware
+eraser uses the most recently selected eraser mode and size. There are no separate layer erasers
+because the prototype has a single handwriting layer.
+
+Plain/grid paper is stored separately from strokes in the draft. Existing drafts default to
+plain paper. Grid spacing is 25 logical units, aligned to the sheet rather than the viewport;
+erasing never removes the grid. The field is backward compatible when loading old drafts, but
+older application builds do not accept this new field.
+
+Portable and BOOX input share editing geometry. BOOX drawing still uses fast native ink. Editing
+previews use throttled native move events (at most once per 32 ms), while completed operations
+use the full SDK point list. A cancelled gesture discards its preview; a completed edit creates
+one undo entry. Partial erasing interpolates pressure, tilt, and time at cut endpoints. Point
+budget checks reject an oversized edit without discarding the original handwriting.
+
+The new native preview/selection path still needs physical-display acceptance on the device;
+automated tests cover both Pointer Events and native event routing, including hardware erasing.

@@ -34,6 +34,7 @@ class OnyxInkArgs {
     var viewportWidth: Double = 0.0
     var strokeWidth: Double = 3.0
     var eraser: Boolean = false
+    var interaction: Boolean = false
 }
 
 @InvokeArg
@@ -60,6 +61,7 @@ class OnyxInk(
     private var repaintCount = 0L
     private var pendingFrame: Runnable? = null
     private var pendingObserver: ViewTreeObserver? = null
+    private var previewAt = 0L
     private var maxPressure = 4095f
     private var failed: String? = null
     private val refresh = Runnable { refreshFrame() }
@@ -201,7 +203,7 @@ class OnyxInk(
     private fun resume() {
         if (!resumed || !webView.hasWindowFocus() || config == null || limit.isEmpty) return
         helper?.setRawDrawingEnabled(true)
-        helper?.setRawDrawingRenderEnabled(config?.eraser == false)
+        helper?.setRawDrawingRenderEnabled(config?.eraser == false && config?.interaction == false)
     }
 
     private fun pause() {
@@ -245,8 +247,9 @@ class OnyxInk(
         })
     }
 
-    private fun begin() {
+    private fun begin(point: TouchPoint, erasing: Boolean) {
         if (config == null || helper?.isRawDrawingInputEnabled != true) return
+        if (!point.x.isFinite() || !point.y.isFinite() || !point.pressure.isFinite()) return
         drawing = true
         webView.removeCallbacks(refresh)
         cancelFrameSubmission()
@@ -254,7 +257,8 @@ class OnyxInk(
         webView.getLocationOnScreen(position)
         val palm = Rect(limit).apply { offset(position[0], position[1]) }
         EpdController.setAppCTPDisableRegion(activity, arrayOf(palm))
-        send("begin")
+        previewAt = 0L
+        send("begin", JSONArray().put(normalize(point)), erasing)
     }
 
     private fun end() {
@@ -273,14 +277,7 @@ class OnyxInk(
         for (point in list.points.take(150_000)) {
             if (!point.x.isFinite() || !point.y.isFinite() || !point.pressure.isFinite()) continue
             if (point.pressure > 0) pressure = (point.pressure / maxPressure).toDouble().coerceIn(0.0, 1.0)
-            points.put(JSONObject().apply {
-                put("x", ((point.x - sheet.left) / sheet.width() * 1000).toDouble().coerceIn(0.0, 1000.0))
-                put("y", ((point.y - sheet.top) / sheet.height() * 1400).toDouble().coerceIn(0.0, 1400.0))
-                put("pressure", pressure)
-                put("tiltX", point.tiltX.coerceIn(-90, 90))
-                put("tiltY", point.tiltY.coerceIn(-90, 90))
-                put("time", point.timestamp.coerceAtLeast(0))
-            })
+            points.put(normalize(point, pressure))
         }
         if (points.length() > 0) {
             sequence++
@@ -288,14 +285,32 @@ class OnyxInk(
         }
     }
 
+    private fun normalize(point: TouchPoint, pressure: Double = (point.pressure / maxPressure).toDouble().coerceIn(0.0, 1.0)): JSONObject = JSONObject().apply {
+        put("x", ((point.x - sheet.left) / sheet.width() * 1000).toDouble().coerceIn(0.0, 1000.0))
+        put("y", ((point.y - sheet.top) / sheet.height() * 1400).toDouble().coerceIn(0.0, 1400.0))
+        put("pressure", pressure)
+        put("tiltX", point.tiltX.coerceIn(-90, 90))
+        put("tiltY", point.tiltY.coerceIn(-90, 90))
+        put("time", point.timestamp.coerceAtLeast(0))
+    }
+
+    private fun preview(point: TouchPoint, erasing: Boolean) {
+        if (!drawing || (config?.interaction != true && config?.eraser != true && !erasing)) return
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - previewAt < 32) return
+        if (!point.x.isFinite() || !point.y.isFinite() || !point.pressure.isFinite()) return
+        previewAt = now
+        send("preview", JSONArray().put(normalize(point)), erasing)
+    }
+
     private fun callback(epoch: Long) = object : RawInputCallback() {
-        override fun onBeginRawDrawing(shortcut: Boolean, point: TouchPoint) { if (epoch == generation) begin() }
+        override fun onBeginRawDrawing(shortcut: Boolean, point: TouchPoint) { if (epoch == generation) begin(point, false) }
         override fun onEndRawDrawing(outside: Boolean, point: TouchPoint) { if (epoch == generation) end() }
-        override fun onRawDrawingTouchPointMoveReceived(point: TouchPoint) {}
+        override fun onRawDrawingTouchPointMoveReceived(point: TouchPoint) { if (epoch == generation) preview(point, false) }
         override fun onRawDrawingTouchPointListReceived(points: TouchPointList) { if (epoch == generation) stroke(points, false) }
-        override fun onBeginRawErasing(shortcut: Boolean, point: TouchPoint) { if (epoch == generation) begin() }
+        override fun onBeginRawErasing(shortcut: Boolean, point: TouchPoint) { if (epoch == generation) begin(point, true) }
         override fun onEndRawErasing(outside: Boolean, point: TouchPoint) { if (epoch == generation) end() }
-        override fun onRawErasingTouchPointMoveReceived(point: TouchPoint) {}
+        override fun onRawErasingTouchPointMoveReceived(point: TouchPoint) { if (epoch == generation) preview(point, true) }
         override fun onRawErasingTouchPointListReceived(points: TouchPointList) { if (epoch == generation) stroke(points, true) }
     }
 }

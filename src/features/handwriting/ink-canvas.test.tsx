@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act } from "react";
+import { act, type ComponentProps } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { InkCanvas } from "./ink-canvas";
@@ -13,7 +13,7 @@ const changed = vi.fn();
 let resize: ResizeObserverCallback;
 let contexts: WeakMap<HTMLCanvasElement, CanvasRenderingContext2D>;
 
-function renderDraft(draft: InkDraft) {
+function renderDraft(draft: InkDraft, props: Partial<ComponentProps<typeof InkCanvas>> = {}) {
   root.render(
     <InkCanvas
       draft={draft}
@@ -24,6 +24,7 @@ function renderDraft(draft: InkDraft) {
       onActiveChange={vi.fn()}
       onMetrics={vi.fn()}
       onLimit={vi.fn()}
+      {...props}
     />,
   );
 }
@@ -168,4 +169,61 @@ it("discards cancelled strokes and ignores a second pointer while writing", () =
   pointer("pointerdown");
   pointer("pointerup");
   expect(changed).toHaveBeenCalledTimes(1);
+});
+
+it("selects with a rectangle and moves selected strokes as one undoable gesture", () => {
+  const draft = {
+    ...emptyDraft(),
+    strokes: [
+      {
+        id: "a",
+        width: 2,
+        points: [
+          { x: 50, y: 60, pressure: 0.5, tiltX: 0, tiltY: 0, time: 1 },
+          { x: 100, y: 80, pressure: 0.6, tiltX: 0, tiltY: 0, time: 2 },
+        ],
+      },
+    ],
+  };
+  const selection = vi.fn();
+  act(() =>
+    renderDraft(draft, { tool: "lasso", lassoMode: "rectangle", onSelectionChange: selection }),
+  );
+  pointer("pointerdown", { clientX: 10, clientY: 10 });
+  pointer("pointermove", { clientX: 80, clientY: 60 });
+  pointer("pointerup", { clientX: 80, clientY: 60 });
+  expect(selection).toHaveBeenLastCalledWith(["a"]);
+  expect(changed).not.toHaveBeenCalled();
+  act(() => renderDraft(draft, { tool: "lasso", selected: ["a"], onSelectionChange: selection }));
+  pointer("pointerdown", { clientX: 30, clientY: 35 });
+  pointer("pointermove", { clientX: 40, clientY: 50 });
+  pointer("pointerup", { clientX: 40, clientY: 50 });
+  expect(changed).toHaveBeenCalledTimes(1);
+  expect(changed.mock.calls[0]![0].strokes[0].points[0]).toMatchObject({ x: 70, y: 90 });
+});
+
+it("hardware eraser uses the selected pixel mode and cancel leaves handwriting intact", () => {
+  const draft = {
+    ...emptyDraft(),
+    background: "grid" as const,
+    strokes: [
+      {
+        id: "a",
+        width: 2,
+        points: [
+          { x: 0, y: 100, pressure: 0.5, tiltX: 0, tiltY: 0, time: 1 },
+          { x: 200, y: 100, pressure: 0.5, tiltX: 0, tiltY: 0, time: 2 },
+        ],
+      },
+    ],
+  };
+  act(() => renderDraft(draft, { eraserMode: "pixel", eraserRadius: 9 }));
+  pointer("pointerdown", { button: 5, buttons: 32, clientX: 50, clientY: 50 });
+  pointer("pointercancel");
+  expect(changed).not.toHaveBeenCalled();
+  pointer("pointerdown", { button: 5, buttons: 32, clientX: 50, clientY: 50 });
+  pointer("pointerup", { button: 5, buttons: 0, clientX: 50, clientY: 50 });
+  expect(changed).toHaveBeenCalledTimes(1);
+  expect(changed.mock.calls[0]![0].strokes).toHaveLength(2);
+  expect(changed.mock.calls[0]![0].background).toBe("grid");
 });

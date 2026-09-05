@@ -6,7 +6,7 @@ import { eraseAt, MAX_INK_POINTS } from "./ink-model";
 
 export type OnyxInkEvent = {
   session: string;
-  kind: "begin" | "end" | "cancel" | "stroke";
+  kind: "begin" | "end" | "cancel" | "stroke" | "preview";
   sequence: number;
   width: number;
   erasing: boolean;
@@ -45,6 +45,8 @@ export function useOnyxInk({
   onMetrics,
   onLimit,
   onStatus,
+  onInput,
+  onStroke,
 }: {
   canvasRef: RefObject<HTMLCanvasElement | null>;
   enabled: boolean;
@@ -56,6 +58,8 @@ export function useOnyxInk({
   onMetrics: (metrics: InkMetrics) => void;
   onLimit: () => void;
   onStatus?: (status: OnyxInkStatus) => void;
+  onInput?: (event: OnyxInkEvent) => void;
+  onStroke?: (draft: InkDraft, event: OnyxInkEvent) => InkDraft;
 }) {
   const [native, setNative] = useState(false);
   const [frame, setFrame] = useState(0);
@@ -68,12 +72,25 @@ export function useOnyxInk({
     onMetrics,
     onLimit,
     onStatus,
+    onInput,
+    onStroke,
   });
   const session = useRef<string | null>(null);
   const sequence = useRef(0);
   const update = useRef<(() => void) | null>(null);
   useLayoutEffect(() => {
-    state.current = { draft, tool, width, onChange, onActiveChange, onMetrics, onLimit, onStatus };
+    state.current = {
+      draft,
+      tool,
+      width,
+      onChange,
+      onActiveChange,
+      onMetrics,
+      onLimit,
+      onStatus,
+      onInput,
+      onStroke,
+    };
   });
 
   useEffect(() => {
@@ -115,6 +132,7 @@ export function useOnyxInk({
         viewportWidth: window.innerWidth,
         strokeWidth: state.current.width,
         eraser: state.current.tool === "eraser",
+        interaction: state.current.tool === "lasso",
       };
       const key = JSON.stringify(args);
       if (key === lastConfig) return;
@@ -142,13 +160,16 @@ export function useOnyxInk({
     void addPluginListener<OnyxInkEvent>("mobile-system", "onyxInk", (event) => {
       if (disposed || event.session !== id) return;
       const current = state.current;
+      if (event.kind !== "stroke") current.onInput?.(event);
       if (event.kind === "begin") current.onActiveChange(true);
       else if (event.kind === "end" || event.kind === "cancel") {
         current.onActiveChange(false);
         setFrame((n) => n + 1);
       } else if (event.kind === "stroke" && event.sequence > sequence.current) {
         sequence.current = event.sequence;
-        const next = applyOnyxStroke(current.draft, event);
+        const next = current.onStroke
+          ? current.onStroke(current.draft, event)
+          : applyOnyxStroke(current.draft, event);
         if (next !== current.draft) {
           // Native batches can arrive before React renders the previous one.
           current.draft = next;
