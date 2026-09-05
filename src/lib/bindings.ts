@@ -532,7 +532,11 @@ export type SearchTokenMode = "plain" | "prefix";
 export type SecretKey = "SYNC_TOKEN";
 
 export type SettingsSnapshot = {
+	windowCornerRadius: number,
+	windowCornerRoundingSupported: boolean,
 	windowDecorationMode: WindowDecorationMode,
+	activeWindowDecorationMode: WindowDecorationMode,
+	windowDecorationsRequireRestart: boolean,
 	startupView: StartupView,
 	startupPageUuid: string | null,
 	syncServerUrl: string | null,
@@ -545,6 +549,7 @@ export type SettingsSnapshot = {
 };
 
 export type SettingsUpdate = {
+	windowCornerRadius: number,
 	windowDecorationMode: WindowDecorationMode,
 	startupView: StartupView,
 	startupPageUuid: string | null,

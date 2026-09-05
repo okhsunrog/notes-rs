@@ -114,7 +114,7 @@ export function SettingsPage({
       const saved = await saveSettings(toSettingsUpdate(settings, secrets, clearKeys));
       setSettings(saved);
       queryClient.setQueryData(queryKeys.settings, saved);
-      onDecorationModeChanged(saved.windowDecorationMode);
+      onDecorationModeChanged(saved.activeWindowDecorationMode);
       setSecrets({});
       setClearKeys([]);
       setMessage("Saved. Startup and server connection changes apply on the next app launch.");
@@ -175,6 +175,8 @@ export function SettingsPage({
     try {
       const restored = await resetSettings();
       setSettings(restored);
+      queryClient.setQueryData(queryKeys.settings, restored);
+      onDecorationModeChanged(restored.activeWindowDecorationMode);
       setError("");
       setMessage("Device settings reset. Restart the app after configuring the server.");
     } catch (reason) {
@@ -257,7 +259,7 @@ export function SettingsPage({
             <p className="text-xs text-muted-foreground">Device, appearance, and server</p>
           </div>
         </div>
-        {settings.windowDecorationMode === "borderless" && <WindowControls />}
+        {settings.activeWindowDecorationMode === "borderless" && <WindowControls />}
       </header>
 
       <form onSubmit={submit} className="mx-auto max-w-4xl space-y-7 p-6 pb-24 sm:p-10">
@@ -335,13 +337,41 @@ export function SettingsPage({
               }
               className="h-10 w-full rounded-xl border border-border/70 bg-background/70 px-3 text-sm shadow-none"
             >
-              <option value="native">Native (compositor decorations)</option>
+              <option value="native">Native (system decorations)</option>
               <option value="borderless">Borderless (notes-rs controls)</option>
             </select>
           </Field>
           <p className="text-xs text-muted-foreground">
-            On KDE Plasma Wayland, native mode uses KWin server-side decorations.
+            Native mode uses system decorations. On Wayland, save your choice and restart the app to
+            change the frame; the current window keeps its existing controls.
           </p>
+          <Field label="Borderless corner radius">
+            <select
+              value={settings.windowCornerRadius}
+              disabled={
+                !settings.windowCornerRoundingSupported ||
+                settings.windowDecorationMode !== "borderless"
+              }
+              onChange={(event) => update("windowCornerRadius", Number(event.currentTarget.value))}
+              className="h-10 w-full rounded-xl border border-border/70 bg-background/70 px-3 text-sm disabled:opacity-50"
+            >
+              {[0, 6, 10, 16, 24].map((radius) => (
+                <option key={radius} value={radius}>
+                  {radius === 0 ? "Square" : `${radius} px${radius === 10 ? " (default)" : ""}`}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <p className="text-xs text-muted-foreground">
+            Applies after saving on Linux and Windows, only in borderless mode. Maximized and
+            fullscreen windows stay square.
+          </p>
+          {settings.windowDecorationsRequireRestart &&
+            settingsQuery.data?.windowDecorationMode !== settings.activeWindowDecorationMode && (
+              <p role="status" className="text-sm text-muted-foreground">
+                Saved window frame change will apply after restarting the app.
+              </p>
+            )}
         </SettingsSection>
 
         <SettingsSection

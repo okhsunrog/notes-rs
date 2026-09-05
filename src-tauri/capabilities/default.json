@@ -3,6 +3,14 @@
   "identifier": "default",
   "description": "Desktop capability for the main window",
   "windows": ["main"],
-  "permissions": ["core:default", "opener:default", "mcp-bridge:default"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+    "opener:default",
+    "mcp-bridge:default"
+  ],
   "platforms": ["linux", "macOS", "windows"]
 }

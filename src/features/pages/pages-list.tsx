@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowRight, Clock3, FileText, Files, Plus, Star } from "lucide-react";
+import { Clock3, FileText, Files, Plus, Star } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { JournalNavigation } from "@/features/journal/journal-navigation";
 import { JournalQuickCapture } from "@/features/journal/journal-quick-capture";
@@ -90,7 +90,7 @@ export function PagesList({
         type="button"
         onClick={() => void create()}
         disabled={busy}
-        className="brand-button h-10 w-full justify-between rounded-xl px-3 shadow-md shadow-primary/15"
+        className="brand-button h-9 w-full justify-between rounded-lg px-2.5 shadow-none"
       >
         <span className="flex items-center gap-2">
           <Plus className="size-4" />
@@ -115,13 +115,13 @@ export function PagesList({
       <JournalQuickCapture busy={journalBusy} onCapture={onQuickCapture} />
 
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pt-1 pr-0.5">
-        <NoteSection title="Favorites" count={favoritePages.length} icon={Star}>
-          {favoritePages.length === 0 ? (
-            <p className="px-2 py-2 text-[10px] leading-relaxed text-muted-foreground">
-              Star important notes to keep them close.
-            </p>
-          ) : (
-            favoritePages.map((page) => (
+        {favoritePages.length === 0 ? (
+          <p className="flex items-center gap-2 px-1 py-1 text-xs text-muted-foreground">
+            <Star className="size-3.5 shrink-0" /> No favorites yet
+          </p>
+        ) : (
+          <NoteSection title="Favorites" count={favoritePages.length} icon={Star}>
+            {favoritePages.map((page) => (
               <NoteRow
                 key={page.uuid}
                 page={page}
@@ -130,9 +130,9 @@ export function PagesList({
                 onOpen={openPage}
                 onToggleFavorite={toggleFavoritePage}
               />
-            ))
-          )}
-        </NoteSection>
+            ))}
+          </NoteSection>
+        )}
 
         <NoteSection title="Recent" count={recentPages.length} icon={Clock3}>
           {recentPages.length === 0 ? (
@@ -160,16 +160,13 @@ export function PagesList({
           aria-current={allNotesActive ? "page" : undefined}
           onClick={(event) => onOpenAllNotes(dispositionFromShiftKey(event.shiftKey))}
           className={cn(
-            "flex w-full items-center gap-2 rounded-xl px-2 py-2 text-left text-[11px] font-semibold tracking-wide text-muted-foreground transition hover:bg-sidebar-accent hover:text-foreground",
+            "flex w-full items-center gap-2 rounded-lg px-1 py-2 text-left text-xs font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground",
             allNotesActive && "bg-sidebar-accent text-sidebar-accent-foreground shadow-sm",
           )}
         >
-          <Files className={cn("size-3.5", allNotesActive && "text-primary")} />
-          <span>ALL NOTES</span>
-          <span className="ml-auto rounded-full bg-sidebar-accent px-2 py-0.5 text-[10px] font-medium tabular-nums">
-            {pages.length}
-          </span>
-          <ArrowRight className="size-3.5" />
+          <Files className={cn("size-3.5 shrink-0", allNotesActive && "text-primary")} />
+          <span className="whitespace-nowrap">All notes</span>
+          <span className="ml-auto text-[11px] font-normal tabular-nums">{pages.length}</span>
         </button>
       </div>
     </div>
@@ -192,7 +189,7 @@ function NoteSection({
     <section aria-labelledby={id}>
       <div className="flex items-center gap-2 px-1 py-1 text-[11px] font-semibold tracking-wide text-muted-foreground">
         <Icon className="size-3.5" />
-        <span id={id}>{title.toUpperCase()}</span>
+        <span id={id}>{title}</span>
         {count > 0 && <span className="ml-auto text-[10px] font-medium tabular-nums">{count}</span>}
       </div>
       <div className="mt-0.5 space-y-0.5">{children}</div>
@@ -225,7 +222,8 @@ function NoteRow({
       <button
         type="button"
         onClick={(event) => onOpen(page, event.shiftKey)}
-        className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left"
+        title={pageDisplayTitle(page)}
+        className="flex min-w-0 flex-1 items-center gap-1.5 px-1 py-1.5 text-left"
       >
         <FileText
           className={cn("size-3.5 shrink-0 text-muted-foreground", selected && "text-primary")}

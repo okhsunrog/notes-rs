@@ -182,10 +182,7 @@ export function AppLayout({
       <div className="app-shell flex h-full flex-col overflow-hidden text-foreground">
         <header
           data-tauri-drag-region
-          className={cn(
-            "relative z-20 flex h-14 shrink-0 items-center justify-between px-3",
-            compact && "h-12",
-          )}
+          className="relative z-20 flex h-12 shrink-0 items-center justify-between px-3"
         >
           <button
             type="button"
@@ -198,17 +195,7 @@ export function AppLayout({
             <div className="brand-mark flex size-8 items-center justify-center rounded-xl text-primary-foreground shadow-sm">
               <Sparkles className="size-4" />
             </div>
-            <div className="leading-none">
-              <h1 className="text-[15px] font-semibold tracking-[-0.02em]">notes-rs</h1>
-              <p
-                className={cn(
-                  "mt-1 text-[10px] font-medium tracking-wide text-muted-foreground",
-                  compact && "hidden",
-                )}
-              >
-                connected thinking
-              </p>
-            </div>
+            <h1 className="text-[15px] leading-none font-semibold tracking-[-0.02em]">notes-rs</h1>
           </button>
           <div className="flex items-center gap-1">{headerActions}</div>
         </header>

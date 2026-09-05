@@ -13,7 +13,36 @@ use tokio::sync::watch;
 use tokio_tungstenite::tungstenite::Message;
 
 const SYNC_BATCH_SIZE: u32 = 256;
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(45);
+const HEARTBEAT_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_ATTACHMENT_SIZE: u64 = 100 * 1024 * 1024;
+
+#[derive(Default)]
+struct Heartbeat {
+    sent_at: Option<tokio::time::Instant>,
+}
+
+impl Heartbeat {
+    fn should_send(&self, now: tokio::time::Instant) -> Result<bool> {
+        if let Some(sent_at) = self.sent_at {
+            if now.duration_since(sent_at) >= HEARTBEAT_TIMEOUT {
+                bail!("sync heartbeat timed out: server did not respond to ping");
+            }
+            Ok(false)
+        } else {
+            Ok(true)
+        }
+    }
+
+    fn sent(&mut self, now: tokio::time::Instant) {
+        self.sent_at = Some(now);
+    }
+
+    fn pong(&mut self) {
+        self.sent_at = None;
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 enum SyncSessionError {
@@ -372,6 +401,12 @@ async fn synchronize_session(
     .await;
     let mut drain = tokio::time::interval(Duration::from_millis(400));
     drain.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut heartbeat_tick = tokio::time::interval_at(
+        tokio::time::Instant::now() + HEARTBEAT_INTERVAL,
+        HEARTBEAT_INTERVAL,
+    );
+    heartbeat_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut heartbeat = Heartbeat::default();
 
     loop {
         tokio::select! {
@@ -381,6 +416,11 @@ async fn synchronize_session(
                     Message::Text(text) => {
                         let message: ServerMessage = serde_json::from_str(&text)
                             .context("decoding sync websocket message")?;
+                        if matches!(message, ServerMessage::Pong) {
+                            heartbeat.pong();
+                            // Heartbeats must not acknowledge outbox items or change sync state.
+                            continue;
+                        }
                         handle_server_message(app, connection, transport, blob_store, message).await?;
                         set_connection_state(
                             app,
@@ -394,6 +434,16 @@ async fn synchronize_session(
                     Message::Ping(payload) => socket.send(Message::Pong(payload)).await?,
                     Message::Close(_) => bail!("sync websocket closed"),
                     _ => {}
+                }
+            }
+            _ = heartbeat_tick.tick() => {
+                if heartbeat.should_send(tokio::time::Instant::now())? {
+                    let message = serde_json::to_string(&ClientMessage::Ping)?;
+                    tokio::time::timeout(
+                        HEARTBEAT_SEND_TIMEOUT,
+                        socket.send(Message::Text(message.into())),
+                    ).await.context("sending sync heartbeat timed out")??;
+                    heartbeat.sent(tokio::time::Instant::now());
                 }
             }
             _ = drain.tick() => {
@@ -785,6 +835,41 @@ fn emit_workspace_changed(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn heartbeat_waits_for_pong_and_detects_dead_peer() {
+        let start = tokio::time::Instant::now();
+        let mut heartbeat = super::Heartbeat::default();
+        assert!(heartbeat.should_send(start).unwrap());
+        heartbeat.sent(start);
+        assert!(
+            !heartbeat
+                .should_send(start + super::HEARTBEAT_INTERVAL)
+                .unwrap()
+        );
+        assert!(
+            heartbeat
+                .should_send(start + super::HEARTBEAT_TIMEOUT)
+                .is_err()
+        );
+        heartbeat.pong();
+        assert!(
+            heartbeat
+                .should_send(start + super::HEARTBEAT_TIMEOUT)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn heartbeat_uses_existing_protocol_without_changing_operations() {
+        assert_eq!(
+            serde_json::to_string(&notes_protocol::ClientMessage::Ping).unwrap(),
+            r#"{"type":"ping"}"#
+        );
+        assert!(matches!(
+            serde_json::from_str::<notes_protocol::ServerMessage>(r#"{"type":"pong"}"#).unwrap(),
+            notes_protocol::ServerMessage::Pong
+        ));
+    }
     use super::*;
 
     #[tokio::test]

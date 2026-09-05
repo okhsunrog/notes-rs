@@ -114,6 +114,21 @@ pub fn run() {
     export_bindings("../src/lib/bindings.ts").expect("exporting TypeScript bindings");
 
     let invoke_handler = specta_builder.invoke_handler();
+    let context = tauri::generate_context!();
+    #[cfg(not(mobile))]
+    let (context, main_window_config) = {
+        let mut context = context;
+        let config = context
+            .config_mut()
+            .app
+            .windows
+            .iter_mut()
+            .find(|window| window.label == "main")
+            .expect("main window configuration");
+        let main_window_config = config.clone();
+        config.create = false;
+        (context, main_window_config)
+    };
     let builder = tauri::Builder::default()
         .register_asynchronous_uri_scheme_protocol(
             attachment_protocol::ATTACHMENT_PROTOCOL,
@@ -141,6 +156,8 @@ pub fn run() {
 
     builder
         .setup(move |app| {
+            #[cfg(not(mobile))]
+            settings::create_main_window(app, &main_window_config)?;
             specta_builder.mount_events(app);
             let handle = app.handle().clone();
             let data_dir = app.path().app_data_dir().expect("resolving app data dir");
@@ -165,11 +182,6 @@ pub fn run() {
             let sync_status = sync_runtime.status.clone();
             let sync_retries = sync_runtime.subscribe_retries();
             app.manage(sync_runtime);
-
-            #[cfg(not(mobile))]
-            if let Err(error) = settings::apply_saved_window_preferences(&handle) {
-                tracing::warn!(%error, "failed to apply saved window preferences");
-            }
 
             let db_path = data_dir.join("notes.db");
             let configured_settings = match settings::runtime(&handle) {
@@ -248,7 +260,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(invoke_handler)
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running tauri application");
 }
 

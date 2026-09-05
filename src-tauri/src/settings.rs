@@ -7,6 +7,9 @@ use std::str::FromStr;
 use tauri::{AppHandle, Manager};
 
 const SETTINGS_VERSION: u32 = 3;
+const fn default_window_corner_radius() -> u8 {
+    10
+}
 
 macro_rules! settings_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
@@ -83,7 +86,11 @@ pub enum SecretKey {
 #[derive(Debug, Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsSnapshot {
+    pub window_corner_radius: u8,
+    pub window_corner_rounding_supported: bool,
     pub window_decoration_mode: WindowDecorationMode,
+    pub active_window_decoration_mode: WindowDecorationMode,
+    pub window_decorations_require_restart: bool,
     pub startup_view: StartupView,
     pub startup_page_uuid: Option<uuid::Uuid>,
     pub sync_server_url: Option<url::Url>,
@@ -98,6 +105,7 @@ pub struct SettingsSnapshot {
 #[derive(Debug, Clone, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsUpdate {
+    pub window_corner_radius: u8,
     pub window_decoration_mode: WindowDecorationMode,
     pub startup_view: StartupView,
     pub startup_page_uuid: Option<uuid::Uuid>,
@@ -115,6 +123,8 @@ pub struct SettingsUpdate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StoredSettings {
+    #[serde(default = "default_window_corner_radius")]
+    window_corner_radius: u8,
     version: u32,
     window_decoration_mode: WindowDecorationMode,
     #[serde(default)]
@@ -136,6 +146,7 @@ struct StoredSettings {
 impl Default for StoredSettings {
     fn default() -> Self {
         Self {
+            window_corner_radius: default_window_corner_radius(),
             version: SETTINGS_VERSION,
             window_decoration_mode: WindowDecorationMode::Native,
             startup_view: StartupView::Dashboard,
@@ -186,7 +197,43 @@ pub(crate) fn runtime(app: &AppHandle) -> Result<RuntimeSettings> {
 }
 
 pub fn load(app: &AppHandle) -> Result<SettingsSnapshot> {
-    snapshot(load_stored(app)?, config_path(app)?)
+    live_snapshot(app, load_stored(app)?, config_path(app)?)
+}
+
+#[cfg(not(mobile))]
+struct WindowDecorations {
+    active: std::sync::Mutex<WindowDecorationMode>,
+    requires_restart: bool,
+}
+
+#[cfg(any(not(mobile), test))]
+fn should_apply_decorations(
+    requires_restart: bool,
+    active: WindowDecorationMode,
+    requested: WindowDecorationMode,
+) -> bool {
+    !requires_restart && active != requested
+}
+
+fn live_snapshot(
+    app: &AppHandle,
+    stored: StoredSettings,
+    path: PathBuf,
+) -> Result<SettingsSnapshot> {
+    let mut result = snapshot(stored, path)?;
+    #[cfg(not(mobile))]
+    {
+        let state = app.state::<WindowDecorations>();
+        result.active_window_decoration_mode =
+            *state.active.lock().unwrap_or_else(|e| e.into_inner());
+        result.window_decorations_require_restart = state.requires_restart;
+    }
+    #[cfg(mobile)]
+    {
+        let _ = app;
+        result.active_window_decoration_mode = WindowDecorationMode::Native;
+    }
+    Ok(result)
 }
 
 fn snapshot(stored: StoredSettings, path: PathBuf) -> Result<SettingsSnapshot> {
@@ -199,7 +246,11 @@ fn snapshot(stored: StoredSettings, path: PathBuf) -> Result<SettingsSnapshot> {
         .into_iter()
         .collect();
     Ok(SettingsSnapshot {
+        window_corner_radius: stored.window_corner_radius,
+        window_corner_rounding_supported: cfg!(any(target_os = "linux", target_os = "windows")),
         window_decoration_mode: stored.window_decoration_mode,
+        active_window_decoration_mode: stored.window_decoration_mode,
+        window_decorations_require_restart: false,
         startup_view: stored.startup_view,
         startup_page_uuid: stored.startup_page_uuid,
         sync_server_url: stored.sync_server_url,
@@ -215,6 +266,7 @@ fn snapshot(stored: StoredSettings, path: PathBuf) -> Result<SettingsSnapshot> {
 pub fn save(app: &AppHandle, update: SettingsUpdate) -> Result<SettingsSnapshot> {
     validate_update(&update)?;
     let mut stored = load_stored(app)?;
+    stored.window_corner_radius = update.window_corner_radius;
     stored.window_decoration_mode = update.window_decoration_mode;
     stored.startup_view = update.startup_view;
     stored.startup_page_uuid = update.startup_page_uuid;
@@ -235,7 +287,7 @@ pub fn save(app: &AppHandle, update: SettingsUpdate) -> Result<SettingsSnapshot>
     let path = config_path(app)?;
     write_settings(&path, &stored)?;
     apply_window_decorations(app, &stored.window_decoration_mode)?;
-    snapshot(stored, path)
+    live_snapshot(app, stored, path)
 }
 
 pub fn reset(app: &AppHandle) -> Result<SettingsSnapshot> {
@@ -243,22 +295,60 @@ pub fn reset(app: &AppHandle) -> Result<SettingsSnapshot> {
     let path = config_path(app)?;
     write_settings(&path, &stored)?;
     apply_window_decorations(app, &stored.window_decoration_mode)?;
-    snapshot(stored, path)
+    live_snapshot(app, stored, path)
 }
 
 #[cfg(not(mobile))]
-pub fn apply_saved_window_preferences(app: &AppHandle) -> Result<()> {
-    let settings = load_stored(app)?;
-    apply_window_decorations(app, &settings.window_decoration_mode)
+pub fn create_main_window(
+    app: &tauri::App,
+    config: &tauri::utils::config::WindowConfig,
+) -> Result<()> {
+    let mode = match load_stored(app.handle()) {
+        Ok(settings) => settings.window_decoration_mode,
+        Err(error) => {
+            // Keep the startup-error UI available if settings are unreadable.
+            tracing::warn!(%error, "using native decorations because settings could not be loaded");
+            WindowDecorationMode::Native
+        }
+    };
+    let builder = tauri::WebviewWindowBuilder::from_config(app, config)?
+        .decorations(mode == WindowDecorationMode::Native);
+    // Transparency is creation-time only; CSS keeps native mode opaque.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    let builder = builder.transparent(true);
+    let window = builder.build()?;
+    #[cfg(target_os = "linux")]
+    let requires_restart = {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        matches!(
+            window.window_handle()?.as_raw(),
+            RawWindowHandle::Wayland(_)
+        )
+    };
+    #[cfg(not(target_os = "linux"))]
+    let requires_restart = false;
+    let _ = window;
+    app.manage(WindowDecorations {
+        active: std::sync::Mutex::new(mode),
+        requires_restart,
+    });
+    Ok(())
 }
 
 fn apply_window_decorations(app: &AppHandle, mode: &WindowDecorationMode) -> Result<()> {
     #[cfg(not(mobile))]
     {
+        let state = app.state::<WindowDecorations>();
+        let mut active = state.active.lock().unwrap_or_else(|e| e.into_inner());
+        if !should_apply_decorations(state.requires_restart, *active, *mode) {
+            return Ok(());
+        }
         app.get_webview_window("main")
             .context("main window is unavailable")?
             .set_decorations(*mode != WindowDecorationMode::Borderless)
-            .context("applying window decorations")
+            .context("applying window decorations")?;
+        *active = *mode;
+        Ok(())
     }
 
     #[cfg(mobile)]
@@ -269,6 +359,9 @@ fn apply_window_decorations(app: &AppHandle, mode: &WindowDecorationMode) -> Res
 }
 
 fn validate_update(update: &SettingsUpdate) -> Result<()> {
+    if update.window_corner_radius > 24 {
+        bail!("window corner radius must be between 0 and 24 px");
+    }
     if let Some(server_url) = &update.sync_server_url {
         validate_http_url(server_url)?;
     }
@@ -277,6 +370,9 @@ fn validate_update(update: &SettingsUpdate) -> Result<()> {
 }
 
 fn validate_stored(stored: &StoredSettings) -> Result<()> {
+    if stored.window_corner_radius > 24 {
+        bail!("window corner radius must be between 0 and 24 px");
+    }
     if stored.version != SETTINGS_VERSION {
         bail!(
             "unsupported settings format version {}; remove settings.json and configure this development build again",
@@ -357,6 +453,36 @@ fn write_settings(path: &Path, settings: &StoredSettings) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn corner_radius_defaults_round_trips_and_rejects_excessive_values() {
+        let mut stored = StoredSettings::default();
+        assert_eq!(stored.window_corner_radius, 10);
+        for radius in [0, 6, 10, 16, 24] {
+            stored.window_corner_radius = radius;
+            let restored: StoredSettings =
+                serde_json::from_slice(&serde_json::to_vec(&stored).unwrap()).unwrap();
+            assert_eq!(restored.window_corner_radius, radius);
+            assert!(validate_stored(&restored).is_ok());
+        }
+        stored.window_corner_radius = 25;
+        assert!(validate_stored(&stored).is_err());
+    }
+    #[test]
+    fn decoration_changes_are_deferred_only_on_wayland() {
+        use super::{
+            WindowDecorationMode::{Borderless, Native},
+            should_apply_decorations,
+        };
+        for active in [Native, Borderless] {
+            for requested in [Native, Borderless] {
+                assert!(!should_apply_decorations(true, active, requested));
+                assert_eq!(
+                    should_apply_decorations(false, active, requested),
+                    active != requested
+                );
+            }
+        }
+    }
     use super::*;
 
     #[test]
@@ -375,6 +501,7 @@ mod tests {
                 "startupView",
                 "syncServerUrl",
                 "version",
+                "windowCornerRadius",
                 "windowDecorationMode",
             ]
         );
@@ -389,6 +516,7 @@ mod tests {
             "secrets": {}
         }))
         .expect("read legacy settings");
+        assert_eq!(stored.window_corner_radius, 10);
         assert!(stored.ai_search_enabled);
         assert_eq!(stored.ai_search_trigger, AiSearchTrigger::AsYouType);
         assert!(stored.ai_search_rerank);

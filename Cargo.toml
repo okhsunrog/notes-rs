@@ -75,12 +75,19 @@ unicode-normalization = "0.1.25"
 uuid = { version = "1.24.0", features = ["v4", "v5", "v7", "serde"] }
 url = { version = "2.5.8", features = ["serde"] }
 
-# tao 0.35.3 unconditionally installs a CSD GtkHeaderBar on every Wayland
-# window, which prevents GTK from negotiating KWin server-side decorations.
-# Fixed upstream by tauri-apps/tao#1218 ("apply CSD only when necessary").
-# Drop this patch once a tao release after 0.35.3 ships.
+# Keep the Tauri crate family on the same upstream development source, including
+# transitive plugin dependencies. Cargo.lock pins the resolved dev commits.
+# tao dev includes the Wayland CSD/SSD negotiation fix (tao#1218).
 [patch.crates-io]
-tao = { git = "https://github.com/tauri-apps/tao", rev = "f7f8173dc85287b2a18aceb9c47533097b8c123f" }
+tauri = { git = "https://github.com/tauri-apps/tauri", branch = "dev" }
+tauri-build = { git = "https://github.com/tauri-apps/tauri", branch = "dev" }
+tauri-runtime = { git = "https://github.com/tauri-apps/tauri", branch = "dev" }
+tauri-runtime-wry = { git = "https://github.com/tauri-apps/tauri", branch = "dev" }
+tauri-utils = { git = "https://github.com/tauri-apps/tauri", branch = "dev" }
+tauri-macros = { git = "https://github.com/tauri-apps/tauri", branch = "dev" }
+tauri-codegen = { git = "https://github.com/tauri-apps/tauri", branch = "dev" }
+tauri-plugin = { git = "https://github.com/tauri-apps/tauri", branch = "dev" }
+tao = { git = "https://github.com/tauri-apps/tao", branch = "dev" }
 
 [profile.release]
 strip = "symbols"

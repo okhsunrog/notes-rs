@@ -68,6 +68,20 @@ vp run tauri android init
 vp run tauri android build --debug
 ```
 
+The Rust Tauri crate family and tao currently track upstream `dev` through workspace patches;
+`Cargo.lock` pins their commits. The JavaScript API and CLI remain released packages. The checked-in
+Android project uses AGP 9.3.1, Gradle 9.6.1 and Kotlin 2.2.10; do not regenerate it with an older
+CLI template without reviewing the diff. Built-in Kotlin and the new Android DSL are disabled for
+compatibility with existing plugins, matching the upstream AGP 9 migration. Configuration cache is
+not enabled: our custom Rust build task still accesses its Project during execution.
+
+Desktop windows are created with their saved decoration mode. On Wayland, GTK negotiates the
+native frame with the compositor; borderless windows are created without decorations. Since tao
+does not support toggling SSD on existing Wayland windows, changes there are saved for the next
+app launch. The current window keeps its active frame and matching controls until restart. Other
+desktop backends apply decoration changes immediately. The backend is detected from the native
+window handle, not session environment variables.
+
 The only build-time environment input is Tauri's `TAURI_DEV_HOST`, which Vite needs for Android/device hot reload. Product configuration does not read process environment variables.
 
 Theming uses `oklch()` colors, which require Chromium 111+. If a device's palette renders unstyled or colorless (buttons/accents transparent while everything else looks fine), its Android System WebView is too old — update it. If the device has no Google account configured, WebView can be sideloaded directly: download the matching architecture's APK from [APKMirror's Android System WebView page](https://www.apkmirror.com/apk/google-inc/android-system-webview/) and `adb install -r` it; no Play Store/account needed.

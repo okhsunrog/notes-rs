@@ -24,7 +24,7 @@ export function JournalNavigation({ activeDate, busy, onOpenDate }: Props) {
           id="journal-navigation-title"
           className="text-[11px] font-semibold tracking-wide text-muted-foreground"
         >
-          JOURNAL
+          Journal
         </span>
         <div className="flex items-center gap-0.5">
           <Button
@@ -66,7 +66,7 @@ export function JournalNavigation({ activeDate, busy, onOpenDate }: Props) {
           variant={activeDate === today ? "secondary" : "outline"}
           disabled={busy}
           onClick={(event) => void onOpenDate(today, dispositionFromShiftKey(event.shiftKey))}
-          className="h-9 justify-start rounded-xl border-border/60 bg-card/45 px-2.5"
+          className="h-9 justify-start rounded-lg border-border/60 bg-card/45 px-2 shadow-none"
         >
           <span className="flex size-6 items-center justify-center rounded-lg bg-primary/10 text-primary">
             <CalendarDays className="size-3.5" />
@@ -78,7 +78,7 @@ export function JournalNavigation({ activeDate, busy, onOpenDate }: Props) {
         </Button>
         <label
           aria-disabled={busy}
-          className="relative flex size-9 cursor-pointer items-center justify-center rounded-xl border border-border/60 bg-card/45 text-muted-foreground transition hover:bg-accent hover:text-accent-foreground has-disabled:pointer-events-none has-disabled:cursor-not-allowed has-disabled:opacity-50"
+          className="relative flex size-9 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground has-disabled:pointer-events-none has-disabled:cursor-not-allowed has-disabled:opacity-50"
         >
           <CalendarDays className="size-4" />
           <span className="sr-only">Choose journal date</span>

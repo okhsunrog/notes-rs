@@ -19,7 +19,9 @@ describe("RecentJournals", () => {
     );
 
     expect(html).toContain('disabled=""');
-    expect(html).toContain("17.07");
+    expect(html).toContain(">17</span>");
+    expect(html).toContain('title="Friday, July 17, 2026"');
+    expect(html).not.toContain("17.07");
   });
 
   it("fits recent days into the available width without a scrollbar", () => {
@@ -33,7 +35,7 @@ describe("RecentJournals", () => {
     );
 
     expect(html).not.toContain("overflow-x-auto");
-    expect(html.match(/flex-1/g)).toHaveLength(7);
+    expect(html).toContain("grid-cols-7");
     expect(html.match(/aria-label="Open journal /g)).toHaveLength(7);
   });
 });

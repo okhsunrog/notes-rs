@@ -8,7 +8,7 @@ describe("JournalNavigation", () => {
       <JournalNavigation activeDate="2026-07-17" busy={false} onOpenDate={() => undefined} />,
     );
 
-    expect(html).toContain("JOURNAL");
+    expect(html).toContain("Journal");
     expect(html).toContain("Today");
     expect(html).toContain('aria-label="Open previous journal day"');
     expect(html).toContain('aria-label="Open next journal day"');

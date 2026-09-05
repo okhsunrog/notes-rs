@@ -82,7 +82,10 @@ android {
             signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true
             proguardFiles(
-                *fileTree(".") { include("**/*.pro") }
+                *fileTree(".") {
+                    include("**/*.pro")
+                    exclude("build/**")
+                }
                     .plus(getDefaultProguardFile("proguard-android-optimize.txt"))
                     .toList().toTypedArray()
             )
@@ -111,4 +114,4 @@ dependencies {
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.0")
 }
 
-apply(from = "tauri.build.gradle.kts")
+apply(from = file("tauri.build.gradle.kts"))

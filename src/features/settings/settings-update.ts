@@ -6,6 +6,7 @@ export function toSettingsUpdate(
   clearKeys: SecretKey[] = [],
 ): SettingsUpdate {
   return {
+    windowCornerRadius: settings.windowCornerRadius,
     windowDecorationMode: settings.windowDecorationMode,
     startupView: settings.startupView,
     startupPageUuid: settings.startupPageUuid,

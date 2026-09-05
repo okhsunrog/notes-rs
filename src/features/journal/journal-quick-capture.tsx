@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ArrowUp, PencilLine } from "lucide-react";
+import { ArrowUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 
@@ -21,17 +21,14 @@ export function JournalQuickCapture({ busy, onCapture }: Props) {
   return (
     <form
       aria-busy={busy}
-      className="rounded-xl border border-border/60 bg-card/45 p-2 shadow-sm"
+      className="py-1"
       onSubmit={(event) => {
         event.preventDefault();
         void submit();
       }}
     >
-      <div className="mb-1.5 flex items-center gap-1.5 px-1 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">
-        <PencilLine className="size-3" />
-        Quick capture · Today
-      </div>
-      <div className="flex items-end gap-1.5">
+      <div className="mb-1.5 px-1 text-xs font-medium text-muted-foreground">Quick capture</div>
+      <div className="relative">
         <Textarea
           value={markdown}
           disabled={busy}
@@ -45,14 +42,14 @@ export function JournalQuickCapture({ busy, onCapture }: Props) {
               void submit();
             }
           }}
-          className="min-h-16 flex-1 resize-none rounded-lg border-0 bg-background/55 px-2.5 py-2 text-xs shadow-none focus-visible:ring-1"
+          className="min-h-20 w-full resize-none rounded-lg border-border/60 bg-background/55 px-2.5 pt-2 pb-9 text-xs shadow-none focus-visible:ring-1"
         />
         <Button
           type="submit"
           size="icon-sm"
           disabled={!canSubmit}
           aria-label="Add capture to today's journal"
-          className="brand-button shrink-0 rounded-lg"
+          className="absolute right-1.5 bottom-1.5 size-6 rounded-md shadow-none"
         >
           <ArrowUp className="size-4" />
         </Button>

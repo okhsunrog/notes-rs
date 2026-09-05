@@ -371,6 +371,13 @@
   }
 }
 
+html[data-rounded-window="true"] {
+  background: transparent;
+}
+html[data-rounded-window="true"] body {
+  clip-path: inset(0 round var(--window-corner-radius, 10px));
+}
+
 /* Android WebView does not populate env(safe-area-inset-*), so native insets
    are copied into the variables above. The top mask protects the draggable
    header. The bottom stays transparent: application surfaces extend beneath

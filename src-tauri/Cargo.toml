@@ -71,3 +71,6 @@ rustls-platform-verifier = "0.7.0"
 tauri-plugin-mobile-system = { path = "../plugins/tauri-plugin-mobile-system" }
 tauri-plugin-android-fs = "28.4.0"
 tracing-logcat = "0.1.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+raw-window-handle = "0.6.2"

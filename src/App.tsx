@@ -4,6 +4,7 @@ import { Bot, GitFork, Loader2, Redo2, Search, Settings, Undo2 } from "lucide-re
 import { AppLayout } from "@/app/layout";
 import { useCompactLayout } from "@/app/use-compact-layout";
 import { WindowControls } from "@/app/window-controls";
+import { useWindowCorners } from "@/app/use-window-corners";
 import { KnowledgePanel } from "@/features/graph/knowledge-panel";
 import { SyncStatusIndicator } from "@/features/sync/sync-status-indicator";
 import { SearchCard } from "@/features/search/search-card";
@@ -59,9 +60,13 @@ function App() {
     queryFn: getSyncStatus,
     enabled: ready,
   });
+  useWindowCorners(
+    windowDecorationMode === "borderless" && !!settingsQuery.data?.windowCornerRoundingSupported,
+    settingsQuery.data?.windowCornerRadius ?? 10,
+  );
   useEffect(() => {
     if (settingsQuery.data) {
-      setWindowDecorationMode(settingsQuery.data.windowDecorationMode);
+      setWindowDecorationMode(settingsQuery.data.activeWindowDecorationMode);
     }
   }, [settingsQuery.data]);
 
