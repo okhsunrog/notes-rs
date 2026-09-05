@@ -42,6 +42,7 @@ import { queryKeys } from "@/lib/query";
 import { cn } from "@/lib/utils";
 import { presentSyncStatus } from "@/features/sync/sync-status-presentation";
 import { DataSettingsSections } from "./data-settings-sections";
+import { HandwritingPreferenceField } from "@/features/handwriting/handwriting-preference";
 import { ServerAiSettingsSection } from "./server-ai-settings-section";
 import { Field, FieldGroup, ModeButton, SettingsSection, ToggleField } from "./settings-controls";
 import { toSettingsUpdate } from "./settings-update";
@@ -398,6 +399,8 @@ export function SettingsPage({
               )}
           </SettingsSection>
         )}
+
+        <HandwritingPreferenceField />
 
         <SettingsSection
           title="Startup"

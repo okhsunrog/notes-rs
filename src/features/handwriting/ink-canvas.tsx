@@ -1,0 +1,180 @@
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import type { InkDraft, InkStroke } from "@/lib/bindings";
+import { drawSegment, drawSheet, eraseAt, inkPoint, MAX_INK_POINTS } from "./ink-model";
+
+export type InkMetrics = {
+  tool: string;
+  pressure: number;
+  tiltX: number;
+  tiltY: number;
+  samples: number;
+};
+export type InkTool = "pen" | "eraser";
+
+export function InkCanvas({
+  draft,
+  tool,
+  width,
+  mouseEnabled,
+  onChange,
+  onActiveChange,
+  onMetrics,
+  onLimit,
+}: {
+  draft: InkDraft;
+  tool: InkTool;
+  width: number;
+  mouseEnabled: boolean;
+  onChange: (draft: InkDraft) => void;
+  onActiveChange: (active: boolean) => void;
+  onMetrics: (metrics: InkMetrics) => void;
+  onLimit: () => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const active = useRef<{
+    id: number;
+    stroke: InkStroke;
+    erasing: boolean;
+    strokes: InkStroke[];
+    count: number;
+    rect: DOMRect;
+    lastMetrics: number;
+  } | null>(null);
+  const [size, setSize] = useState({ width: 0, height: 0 });
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry) setSize({ width: entry.contentRect.width, height: entry.contentRect.height });
+    });
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !size.width) return;
+    const ratio = Math.min(window.devicePixelRatio || 1, 3);
+    canvas.width = Math.round(size.width * ratio);
+    canvas.height = Math.round(size.height * ratio);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(canvas.width / 1000, 0, 0, canvas.height / 1400, 0, 0);
+    const current = active.current;
+    drawSheet(
+      ctx,
+      current
+        ? current.erasing
+          ? current.strokes
+          : [...current.strokes, current.stroke]
+        : draft.strokes,
+    );
+  }, [draft, size]);
+
+  const sample = (event: PointerEvent, end = false) => {
+    const current = active.current;
+    const ctx = canvasRef.current?.getContext("2d");
+    if (!current || !ctx) return;
+    const p = inkPoint(event, current.rect);
+    if (current.erasing) {
+      const next = eraseAt(current.strokes, p);
+      if (next.length !== current.strokes.length) {
+        current.strokes = next;
+        drawSheet(ctx, next);
+      }
+    } else {
+      if (current.count + current.stroke.points.length >= MAX_INK_POINTS) return;
+      const last = current.stroke.points[current.stroke.points.length - 1];
+      // Pointerup usually reports pressure zero. Preserve the final contact width.
+      if (end && last) p.pressure = last.pressure;
+      if (last && p.x === last.x && p.y === last.y && p.pressure === last.pressure) return;
+      current.stroke.points.push(p);
+      drawSegment(ctx, last ?? p, p, current.stroke.width);
+    }
+    if (event.timeStamp - current.lastMetrics > 120 || end) {
+      current.lastMetrics = event.timeStamp;
+      onMetrics({
+        tool: event.pointerType,
+        pressure: p.pressure,
+        tiltX: p.tiltX,
+        tiltY: p.tiltY,
+        samples: current.stroke.points.length,
+      });
+    }
+  };
+
+  const start = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (
+      active.current ||
+      (event.pointerType !== "pen" && !(mouseEnabled && event.pointerType === "mouse"))
+    )
+      return;
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    event.preventDefault();
+    const count = draft.strokes.reduce((sum, stroke) => sum + stroke.points.length, 0);
+    const erasing = tool === "eraser" || event.button === 5 || (event.buttons & 32) !== 0;
+    if (!erasing && count >= MAX_INK_POINTS) {
+      onLimit();
+      return;
+    }
+    active.current = {
+      id: event.pointerId,
+      erasing,
+      count,
+      strokes: draft.strokes,
+      stroke: { id: crypto.randomUUID(), width, points: [] },
+      rect: event.currentTarget.getBoundingClientRect(),
+      lastMetrics: -Infinity,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    onActiveChange(true);
+    sample(event.nativeEvent);
+  };
+
+  const move = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (event.pointerId !== active.current?.id) return;
+    event.preventDefault();
+    const coalesced = event.nativeEvent.getCoalescedEvents?.() ?? [];
+    for (const point of coalesced.length ? coalesced : [event.nativeEvent]) sample(point);
+  };
+
+  const finish = (event: ReactPointerEvent<HTMLCanvasElement>, cancelled: boolean) => {
+    const current = active.current;
+    if (!current || current.id !== event.pointerId) return;
+    if (!cancelled) sample(event.nativeEvent, true);
+    active.current = null;
+    onActiveChange(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId))
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    if (cancelled) {
+      const ctx = event.currentTarget.getContext("2d");
+      if (ctx) drawSheet(ctx, draft.strokes);
+    } else {
+      const strokes = current.erasing
+        ? current.strokes
+        : current.stroke.points.length
+          ? [...current.strokes, current.stroke]
+          : current.strokes;
+      if (strokes !== draft.strokes) onChange({ ...draft, strokes });
+      if (!current.erasing && current.count + current.stroke.points.length >= MAX_INK_POINTS)
+        onLimit();
+    }
+  };
+
+  return (
+    <canvas
+      ref={canvasRef}
+      aria-label="Handwriting sheet"
+      role="img"
+      className="block aspect-[5/7] w-full touch-none select-none bg-white"
+      style={{ cursor: tool === "eraser" ? "cell" : "crosshair" }}
+      onContextMenu={(event) => event.preventDefault()}
+      onPointerDown={start}
+      onPointerMove={move}
+      onPointerUp={(event) => finish(event, false)}
+      onPointerCancel={(event) => finish(event, true)}
+      onLostPointerCapture={(event) => finish(event, true)}
+    />
+  );
+}

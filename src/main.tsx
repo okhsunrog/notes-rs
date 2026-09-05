@@ -9,6 +9,7 @@ import { ErrorBoundary } from "@/app/error-boundary";
 import { disableViewportZoom } from "@/app/viewport-zoom";
 import { PageSessionProvider } from "@/features/pages/page-session";
 import { InputCapabilitiesProvider } from "@/features/handwriting/input-capabilities";
+import { HandwritingHost } from "@/features/handwriting/handwriting-host";
 import { Toaster } from "@/components/ui/sonner";
 import "./index.css";
 
@@ -30,6 +31,7 @@ root.render(
               <PageSessionProvider>
                 <InputCapabilitiesProvider>
                   <App />
+                  <HandwritingHost />
                 </InputCapabilitiesProvider>
               </PageSessionProvider>
             </ErrorBoundary>

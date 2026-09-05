@@ -13,6 +13,7 @@ import {
   Star,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { NewNoteButton } from "@/features/handwriting/new-note-button";
 import { Input } from "@/components/ui/input";
 import { useCompactLayout } from "@/app/use-compact-layout";
 import { pageDisplayTitle, todayJournalDate } from "@/features/journal/journal-date";
@@ -119,14 +120,14 @@ export function HomeView({
           something.
         </p>
         <div className="mt-7 flex flex-wrap gap-2.5">
-          <Button
+          <NewNoteButton
             disabled={creating}
             onClick={() => void onCreate()}
-            className="brand-button h-11 rounded-xl px-5"
+            className="brand-button h-9 rounded-xl px-5"
           >
             <FilePlus2 className="size-4" />
             Create first note
-          </Button>
+          </NewNoteButton>
           <Button
             variant="outline"
             disabled={journalBusy}
@@ -170,14 +171,14 @@ export function HomeView({
               <FileText className="size-3.5" />
               All notes
             </Button>
-            <Button
+            <NewNoteButton
               disabled={creating}
               onClick={() => void onCreate()}
               className="brand-button h-9 rounded-xl px-3.5"
             >
               <FilePlus2 className="size-3.5" />
               New note
-            </Button>
+            </NewNoteButton>
           </div>
         )}
       </header>

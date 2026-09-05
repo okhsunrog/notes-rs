@@ -15,6 +15,8 @@ export const commands = {
 	safeArea: SafeAreaInsets,
 } | null, CommandError>(__TAURI_INVOKE("mobile_system_info")),
 	inputCapabilities: () => typedError<InputCapabilities, CommandError>(__TAURI_INVOKE("input_capabilities")),
+	loadHandwritingDraft: () => typedError<InkDraftSnapshot, CommandError>(__TAURI_INVOKE("load_handwriting_draft")),
+	saveHandwritingDraft: (draft: InkDraft, expectedRevision: string | null) => typedError<string, CommandError>(__TAURI_INVOKE("save_handwriting_draft", { draft, expectedRevision })),
 	setSystemBarsStyle: (darkBackground: boolean) => typedError<null, CommandError>(__TAURI_INVOKE("set_system_bars_style", { darkBackground })),
 	syncStatus: () => __TAURI_INVOKE<SyncStatus>("sync_status"),
 	serverAiStatus: () => typedError<AiIndexStatus, CommandError>(__TAURI_INVOKE("server_ai_status")),
@@ -427,6 +429,33 @@ export type ImportDiagnostic = {
 	range: SourceRange | null,
 	message: string,
 	remediation: string | null,
+};
+
+export type InkDraft = {
+	version: number,
+	width: number,
+	height: number,
+	strokes: InkStroke[],
+};
+
+export type InkDraftSnapshot = {
+	draft: InkDraft,
+	revision: string | null,
+};
+
+export type InkPoint = {
+	x: number,
+	y: number,
+	pressure: number,
+	tiltX: number,
+	tiltY: number,
+	time: number,
+};
+
+export type InkStroke = {
+	id: string,
+	width: number,
+	points: InkPoint[],
 };
 
 export type InputCapabilities = {

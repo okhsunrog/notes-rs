@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowRight, Clock3, FilePlus2, FileText, ListFilter, Search, Star, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { NewNoteButton } from "@/features/handwriting/new-note-button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { pageDisplayTitle } from "@/features/journal/journal-date";
@@ -71,14 +72,13 @@ export function AllNotesView() {
               : `${visiblePages.length} of ${pages.length} notes`}
           </p>
         </div>
-        <Button
-          type="button"
+        <NewNoteButton
           className="brand-button h-9 rounded-xl px-3.5"
           onClick={() => void controller.createNewNote()}
         >
           <FilePlus2 className="size-3.5" />
           New note
-        </Button>
+        </NewNoteButton>
       </header>
 
       <div className="mt-6 rounded-2xl border border-border/60 bg-card/45 p-3 shadow-sm">

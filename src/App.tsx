@@ -14,6 +14,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/compone
 import { getPage, getSyncStatus, loadSettings, type WindowDecorationMode } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
 import { useAppShortcuts } from "@/app/use-app-shortcuts";
+import { useHandwritingSession } from "@/features/handwriting/handwriting-session";
 import { useStartupState } from "@/app/use-startup-state";
 import { useNotesWorkspace } from "@/features/pages/use-notes-workspace";
 import { useAssistantController } from "@/features/chat/use-assistant-controller";
@@ -35,6 +36,7 @@ const SettingsPage = lazy(() =>
 );
 
 function App() {
+  const handwritingOpen = useHandwritingSession((state) => state.open);
   const compact = useCompactLayout();
   const { ready, startupError } = useStartupState();
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -72,7 +74,7 @@ function App() {
   }, [settingsQuery.data]);
 
   useAppShortcuts({
-    enabled: ready,
+    enabled: ready && !handwritingOpen,
     createNote: () => void workspace.createNewNote(),
     openSearch: () => setSearchOpen(true),
     undo: () => void workspace.moveHistory("undo"),

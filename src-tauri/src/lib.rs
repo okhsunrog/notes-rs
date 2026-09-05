@@ -17,6 +17,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::startup_status,
             commands::mobile_system_info,
             commands::input_capabilities,
+            commands::load_handwriting_draft,
+            commands::save_handwriting_draft,
             commands::set_system_bars_style,
             commands::sync_status,
             commands::server_ai_status,
@@ -135,6 +137,7 @@ pub fn run() {
         (context, main_window_config)
     };
     let builder = tauri::Builder::default()
+        .manage(commands::HandwritingStore::default())
         .manage(settings::transfer::PendingConfiguration::default())
         .register_asynchronous_uri_scheme_protocol(
             attachment_protocol::ATTACHMENT_PROTOCOL,

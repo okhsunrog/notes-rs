@@ -1,0 +1,65 @@
+import type { ReactNode } from "react";
+import { Menu } from "@base-ui/react/menu";
+import { ChevronDown, PenLine } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
+import { useHandwritingAvailability } from "./input-capabilities";
+import { useHandwritingSession } from "./handwriting-session";
+
+export function NewNoteButton({
+  children,
+  onClick,
+  disabled,
+  className,
+  fullWidth = false,
+}: {
+  children: ReactNode;
+  onClick: () => void;
+  disabled?: boolean;
+  className?: string;
+  fullWidth?: boolean;
+}) {
+  const { available } = useHandwritingAvailability();
+  const open = useHandwritingSession((state) => state.setOpen);
+  return (
+    <div className={cn("inline-flex min-w-0", fullWidth && "w-full")}>
+      <Button
+        type="button"
+        disabled={disabled}
+        onClick={onClick}
+        className={cn(className, fullWidth && "flex-1", available && "rounded-r-none")}
+      >
+        {children}
+      </Button>
+      {available && (
+        <Menu.Root>
+          <Menu.Trigger
+            render={
+              <Button
+                type="button"
+                disabled={disabled}
+                aria-label="More note options"
+                className="brand-button h-9 w-9 shrink-0 rounded-l-none border-l border-primary-foreground/25 px-0"
+              />
+            }
+          >
+            <ChevronDown className="size-4" />
+          </Menu.Trigger>
+          <Menu.Portal>
+            <Menu.Positioner sideOffset={6} align="end">
+              <Menu.Popup className="z-50 min-w-48 rounded-xl border bg-popover p-1 text-popover-foreground shadow-lg outline-none">
+                <Menu.Item
+                  className="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2.5 text-sm outline-none data-[highlighted]:bg-accent"
+                  onClick={() => open(true)}
+                >
+                  <PenLine className="size-4" />
+                  Write by hand
+                </Menu.Item>
+              </Menu.Popup>
+            </Menu.Positioner>
+          </Menu.Portal>
+        </Menu.Root>
+      )}
+    </div>
+  );
+}

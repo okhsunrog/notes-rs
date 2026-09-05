@@ -40,6 +40,8 @@ mod outliner;
 pub use outliner::*;
 mod system;
 pub use system::*;
+mod handwriting;
+pub use handwriting::*;
 
 #[cfg(target_os = "android")]
 use tauri_plugin_mobile_system::MobileSystemExt;

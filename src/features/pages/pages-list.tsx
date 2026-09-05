@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Clock3, FileText, Files, Plus, Star } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { NewNoteButton } from "@/features/handwriting/new-note-button";
 import { JournalNavigation } from "@/features/journal/journal-navigation";
 import { JournalQuickCapture } from "@/features/journal/journal-quick-capture";
 import { RecentJournals } from "@/features/journal/recent-journals";
@@ -86,8 +86,8 @@ export function PagesList({
 
   return (
     <div className="flex h-full min-h-[22rem] flex-col gap-2.5">
-      <Button
-        type="button"
+      <NewNoteButton
+        fullWidth
         onClick={() => void create()}
         disabled={busy}
         className="brand-button h-9 w-full justify-between rounded-lg px-2.5 shadow-none"
@@ -99,7 +99,7 @@ export function PagesList({
         <kbd className="rounded-md bg-primary-foreground/15 px-1.5 py-0.5 text-[10px] font-medium">
           Ctrl N
         </kbd>
-      </Button>
+      </NewNoteButton>
 
       <JournalNavigation
         activeDate={activeJournalDate}
