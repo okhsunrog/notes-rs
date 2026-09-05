@@ -52,6 +52,7 @@ export function useOnyxInk({
   decoration,
   lassoMode,
   selection,
+  damage,
 }: {
   canvasRef: RefObject<HTMLCanvasElement | null>;
   enabled: boolean;
@@ -66,6 +67,7 @@ export function useOnyxInk({
   decoration?: string;
   lassoMode?: LassoMode;
   selection?: Bounds | null;
+  damage?: { take: () => Bounds | null; invalidate: () => void };
   onInput?: (event: OnyxInkEvent) => void;
   onStroke?: (draft: InkDraft, event: OnyxInkEvent) => InkDraft;
 }) {
@@ -84,6 +86,7 @@ export function useOnyxInk({
     onStroke,
     lassoMode,
     selection,
+    damage,
   });
   const session = useRef<string | null>(null);
   const sequence = useRef(0);
@@ -102,6 +105,7 @@ export function useOnyxInk({
       onStroke,
       lassoMode,
       selection,
+      damage,
     };
   });
 
@@ -283,10 +287,20 @@ export function useOnyxInk({
     const currentSequence = sequence.current;
     // The canvas draws in a layout effect, before this compositor acknowledgement.
     const handle = requestAnimationFrame(() => {
+      const damage = state.current.damage;
+      const bounds = damage?.take();
       void invoke("plugin:mobile-system|commit_onyx_frame", {
         session: id,
         sequence: currentSequence,
-      }).catch(console.error);
+        partial: !!damage,
+        left: bounds?.left ?? 0,
+        top: bounds?.top ?? 0,
+        right: bounds?.right ?? 0,
+        bottom: bounds?.bottom ?? 0,
+      }).catch((error: unknown) => {
+        damage?.invalidate();
+        console.error(error);
+      });
     });
     return () => cancelAnimationFrame(handle);
   }, [draft, frame, native, decoration, tool]);

@@ -7,13 +7,14 @@ import {
 } from "react";
 import type { InkDraft, InkPoint, InkStroke } from "@/lib/bindings";
 import { drawSegment, drawSheet, inkPoint, MAX_INK_POINTS } from "./ink-model";
-import { changedInkBounds, drawInkRegion } from "./ink-region";
+import { changedInkBounds, drawInkRegion, unionBounds, SHEET_BOUNDS } from "./ink-region";
 import {
   eraseGesture,
   lassoPolygon,
   moveSelection,
   selectionBounds,
   selectLasso,
+  type Bounds,
   type EraserMode,
   type LassoMode,
 } from "./ink-editing";
@@ -85,6 +86,8 @@ export function InkCanvas({
     strokes: InkStroke[];
     background: InkDraft["background"];
   } | null>(null);
+  const damageRef = useRef<Bounds | null>(SHEET_BOUNDS);
+  const publishedRef = useRef<{ strokes: InkStroke[]; overlay: Bounds | null } | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
 
   const publish = (strokes: InkStroke[]) => {
@@ -115,6 +118,7 @@ export function InkCanvas({
         scene.width === canvas.width &&
         scene.height === canvas.height;
       if (!reusable) {
+        damageRef.current = SHEET_BOUNDS;
         scene.width = canvas.width;
         scene.height = canvas.height;
       }
@@ -197,6 +201,31 @@ export function InkCanvas({
       staging.arc(p.x, p.y, eraserRadius, 0, Math.PI * 2);
       staging.stroke();
     }
+    let overlay: Bounds | null = bounds
+      ? {
+          left: bounds.left - 8,
+          top: bounds.top - 8,
+          right: bounds.right + 8,
+          bottom: bounds.bottom + 8,
+        }
+      : null;
+    if (gesture?.action === "select" || gesture?.action === "erase") {
+      const padding = gesture.action === "erase" ? eraserRadius + 2 : 2;
+      for (const p of gesture.points)
+        overlay = unionBounds(overlay, {
+          left: p.x - padding,
+          top: p.y - padding,
+          right: p.x + padding,
+          bottom: p.y + padding,
+        });
+    }
+    const previous = publishedRef.current;
+    const inkDamage = previous ? changedInkBounds(previous.strokes, strokes) : SHEET_BOUNDS;
+    damageRef.current = unionBounds(
+      damageRef.current,
+      unionBounds(inkDamage, unionBounds(previous?.overlay ?? null, overlay)),
+    );
+    publishedRef.current = { strokes, overlay };
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalCompositeOperation = "copy";
     ctx.drawImage(buffer, 0, 0);
@@ -334,6 +363,16 @@ export function InkCanvas({
     selection: selectionBounds(draft.strokes, selected),
     onInput: nativeInput,
     onStroke: nativeStroke,
+    damage: {
+      take: () => {
+        const bounds = damageRef.current;
+        damageRef.current = null;
+        return bounds;
+      },
+      invalidate: () => {
+        damageRef.current = SHEET_BOUNDS;
+      },
+    },
   });
 
   useEffect(() => {

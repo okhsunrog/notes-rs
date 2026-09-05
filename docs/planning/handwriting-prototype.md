@@ -279,3 +279,34 @@ previous measured drag. Per-gesture maxima were 30–395 ms. Final stroke delive
 the last SDK point was 66–474 ms, and some final rasterization tasks still took 301–365 ms;
 these are event-processing measurements, not pen-to-display latency. The multi-second preview
 backlog no longer appeared in this trial. Timing listeners were unregistered after capture.
+
+### Regional rendering and panel repaint
+
+The canonical scene cache now redraws only changed ink bounds and overlapping strokes in
+page order. Starting a drag removes selected ink from that cache; finishing rasterizes the
+selected ink at its final vector coordinates, preserving the separate translated preview
+bitmap during the gesture. Background/size changes still rebuild the scene. The staging
+canvas is reused for region rendering, then an opaque, pixel-aligned patch is copied back;
+clipping vector paths directly changed Skia antialiasing near clip edges in a device probe.
+A 35-stroke / 19,400-point offscreen WebView comparison tested seven repeated moves and a
+deletion at 0.5/1/1.37 scales: maximum channel difference versus full redraw was 3/255,
+with the small mismatch count stable after the second operation, and exact pixels at 1.37.
+This is a renderer probe, not a physical latency measurement or proof of bitwise identity.
+
+The frontend accumulates damage from ink changes and old/new decorations until a frame
+acknowledgement is requested. Native code unions those bounds with SDK trace points and
+retains them across superseded acknowledgements. Only a successfully submitted, current
+frame consumes that damage. Handwriting repaint is limited to its visible intersection,
+with a safety margin; no-op frames do not request a panel repaint. The five-second cleanup
+uses the union of areas affected during the transient interval. Focus/size/background
+transitions retain full repaint fallback. Native status includes lastRepaint, repaintedPixels
+and visibleCanvasPixels for diagnosing the actual requested area.
+
+The arm64 debug APK was installed on Note Air 4C and the saved JSON was byte-identical across
+installation. Notification shade, EinkWise, Home/return, landscape/portrait, and Done/reopen
+were exercised with ADB on the installed build. Lost focus/closed sheet reported inactive,
+quality ownership false and the previous raw view mode 5; return reported active with GU/raw 2. Rotation retained the dialog and updated canvas bounds. The saved EAC profile dump was
+byte-identical, rotation settings were restored, and USB stay-awake remains enabled. The
+SDK logs some unavailable optional reflective APIs on initialization; no application crash
+occurred during these checks. Physical acceptance of the new regional gesture cleanup and
+its performance remains pending. Validation: 392 frontend tests and nine Android unit tests.

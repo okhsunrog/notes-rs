@@ -50,6 +50,11 @@ class OnyxInkArgs {
 
 @InvokeArg
 class OnyxFrameArgs {
+    var partial: Boolean = false
+    var left: Double = 0.0
+    var top: Double = 0.0
+    var right: Double = 0.0
+    var bottom: Double = 0.0
     var session: String = ""
     var sequence: Long = 0
 }
@@ -70,6 +75,10 @@ class OnyxInk(
     private var generation = 0L
     private val frames = InkFrameFence()
     private var repaintCount = 0L
+    private val damage = InkDamage()
+    private val qualityDamage = InkDamage()
+    private var lastRepaint = Rect()
+    private var repaintedPixels = 0L
     private var pendingFrame: Runnable? = null
     private var pendingObserver: ViewTreeObserver? = null
     private var fastPreview = false
@@ -99,10 +108,15 @@ class OnyxInk(
     )
     private val settleDisplay = Runnable {
         if (!drawing && displayPolicy.settle(SystemClock.uptimeMillis())) {
+            val dirty = qualityDamage.take()
             // Repaint even if the last content revision was already presented in fast mode.
             config?.let { args -> commit(OnyxFrameArgs().apply {
                 session = args.session
                 sequence = this@OnyxInk.sequence
+                partial = true
+                if (dirty != null) {
+                    left = dirty.left; top = dirty.top; right = dirty.right; bottom = dirty.bottom
+                }
             }) }
         }
     }
@@ -145,6 +159,8 @@ class OnyxInk(
         config = args
         // CSS pixels may differ from Android density because BOOX has per-app DPI settings.
         val scale = webView.width / args.viewportWidth
+        val previousSheet = RectF(sheet)
+        val previousLimit = Rect(limit)
         sheet = RectF((args.left * scale).toFloat(), (args.top * scale).toFloat(),
             ((args.left + args.width) * scale).toFloat(), ((args.top + args.height) * scale).toFloat())
         limit = Rect(floor(sheet.left).toInt(), ceil(maxOf(sheet.top.toDouble(), args.clipTop * scale)).toInt(),
@@ -170,6 +186,10 @@ class OnyxInk(
                 .setStrokeColor(Color.BLACK)
                 .setStrokeStyle(if (args.fastLasso) TouchHelper.STROKE_STYLE_PENCIL else TouchHelper.STROKE_STYLE_FOUNTAIN)
             resume()
+            if (sheet != previousSheet || limit != previousLimit) commit(OnyxFrameArgs().apply {
+                session = args.session
+                sequence = this@OnyxInk.sequence
+            })
             check(helper!!.isRawDrawingCreated) { "Pen SDK did not create a drawing session" }
             return status()
         } catch (error: Throwable) {
@@ -184,6 +204,9 @@ class OnyxInk(
         put("active", helper?.isRawDrawingInputEnabled == true)
         put("error", failed)
         put("repaintCount", repaintCount)
+        put("lastRepaint", lastRepaint.toShortString())
+        put("repaintedPixels", repaintedPixels)
+        put("visibleCanvasPixels", limit.width().toLong() * limit.height())
         put("qualityModeOwned", qualityOwned)
         put("viewUpdateMode", EpdController.getViewDefaultUpdateMode(webView)?.name)
         put("viewUpdateModeRaw", readViewModeRaw())
@@ -197,6 +220,8 @@ class OnyxInk(
 
     fun commit(args: OnyxFrameArgs) {
         if (config?.session != args.session) return
+        if (args.partial) addDamage(args.left, args.top, args.right, args.bottom)
+        else addDamage(0.0, 0.0, 1000.0, 1400.0)
         cancelFrameSubmission()
         val revision = frames.request()
         // This only guarantees readiness for the next WebView draw, not a submitted frame.
@@ -222,7 +247,16 @@ class OnyxInk(
                 pendingObserver = null
                 if (!canPresent() || !frames.present(submission, sequence, drawing)) return@post
                 // Keep the raw pen layer alive. The firmware reconciles ink from the new buffer.
-                EpdController.handwritingRepaint(webView, limit)
+                val dirty = damage.take() ?: return@post
+                val region = Rect(
+                    floor(sheet.left + dirty.left * sheet.width() / 1000).toInt() - 2,
+                    floor(sheet.top + dirty.top * sheet.height() / 1400).toInt() - 2,
+                    ceil(sheet.left + dirty.right * sheet.width() / 1000).toInt() + 2,
+                    ceil(sheet.top + dirty.bottom * sheet.height() / 1400).toInt() + 2)
+                if (!region.intersect(limit)) return@post
+                EpdController.handwritingRepaint(webView, region)
+                lastRepaint = Rect(region)
+                repaintedPixels += region.width().toLong() * region.height()
                 repaintCount++
             }
         }
@@ -291,6 +325,7 @@ class OnyxInk(
     private fun releaseDisplayMode() {
         webView.removeCallbacks(settleDisplay)
         displayPolicy.reset()
+        qualityDamage.take()
         if (qualityOwned) {
             val restored = previousViewModeRaw?.let { raw -> runCatching {
                 View::class.java.getMethod("setDefaultUpdateMode", Int::class.javaPrimitiveType)
@@ -303,6 +338,19 @@ class OnyxInk(
         }
     }
 
+    private fun addDamage(left: Double, top: Double, right: Double, bottom: Double) {
+        damage.add(left, top, right, bottom)
+        if (displayPolicy.fastRequested) qualityDamage.add(left, top, right, bottom)
+    }
+
+    private fun markNativePoint(point: TouchPoint) {
+        if (config == null || sheet.isEmpty || !point.x.isFinite() || !point.y.isFinite()) return
+        val x = (point.x - sheet.left).toDouble() / sheet.width() * 1000
+        val y = (point.y - sheet.top).toDouble() / sheet.height() * 1400
+        val margin = maxOf(3.0, (config?.strokeWidth ?: 3.0) * 2)
+        addDamage(x - margin, y - margin, x + margin, y + margin)
+    }
+
     private fun resetPalm() {
         EpdController.appResetCTPDisableRegion(activity)
     }
@@ -313,6 +361,7 @@ class OnyxInk(
         helper?.closeRawDrawing()
         helper = null
         config = null
+        damage.take()
     }
 
     fun destroy() {
@@ -346,6 +395,7 @@ class OnyxInk(
         drawing = true
         webView.removeCallbacks(settleDisplay)
         displayPolicy.begin((args.interaction || args.eraser || erasing) && !fastPreview)
+        markNativePoint(point)
         webView.removeCallbacks(refresh)
         cancelFrameSubmission()
         val position = IntArray(2)
@@ -377,6 +427,7 @@ class OnyxInk(
         for (point in list.points.take(150_000)) {
             if (!point.x.isFinite() || !point.y.isFinite() || !point.pressure.isFinite()) continue
             if (point.pressure > 0) pressure = (point.pressure / maxPressure).toDouble().coerceIn(0.0, 1.0)
+            markNativePoint(point)
             points.put(normalize(point, pressure))
         }
         if (points.length() > 0) {
@@ -395,6 +446,7 @@ class OnyxInk(
     }
 
     private fun preview(point: TouchPoint, erasing: Boolean) {
+        if (drawing) markNativePoint(point)
         if (!drawing || fastPreview || (config?.interaction != true && config?.eraser != true && !erasing)) return
         val now = android.os.SystemClock.uptimeMillis()
         if (now - previewAt < 32) return
