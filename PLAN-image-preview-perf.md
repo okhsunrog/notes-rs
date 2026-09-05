@@ -1,6 +1,14 @@
 # Plan: inline image previews without scroll jank
 
-## Context (from the 2026-07 scroll investigation)
+## Status (2026-09-05)
+
+The preview implementation and device checks below are complete. This document
+is an investigation record, not a queue of required implementation work. The
+synthetic scroll-test page and its hash route have been removed. Per-image timing
+events remain available at debug level for future diagnostics. Encoder tuning
+and further subjective scroll comparisons are optional follow-ups, not merge gates.
+
+## Historical context (from the 2026-07 scroll investigation)
 
 Scroll experiments on `exploring-perf-issue` introduced nonvirtual rendering for
 ≤400 blocks and compositor promotion (`14927b9`). Residual intermittent jank was
@@ -41,7 +49,7 @@ fullscreen viewer.
    generation of missing previews right after page load (`warm_preview_cache`). This
    does not guarantee that generation finishes before the first scroll.
 4. ✅ Fullscreen viewer keeps `/original` (unchanged, verified).
-5. **Tune loading during scroll** (only if still needed after 2+3): measure on
+5. **Optional: tune loading during scroll** (only if still needed after 2+3): measure on
    "расположение вещей" first; `loading="lazy" decoding="async"` stays as-is otherwise.
 
 ## Validation gates
