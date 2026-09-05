@@ -9,6 +9,7 @@ import { DraftWriter, type DraftSaveState } from "./draft-writer";
 import { InkCanvas, type InkMetrics, type InkTool } from "./ink-canvas";
 import { useHandwritingSession } from "./handwriting-session";
 import { useHandwritingAvailability } from "./input-capabilities";
+import type { OnyxInkStatus } from "./onyx-ink";
 
 export function HandwritingSheet() {
   const setOpen = useHandwritingSession((state) => state.setOpen);
@@ -22,6 +23,7 @@ export function HandwritingSheet() {
   const [closing, setClosing] = useState(false);
   const [mouseEnabled, setMouseEnabled] = useState(false);
   const [metrics, setMetrics] = useState<InkMetrics | null>(null);
+  const [nativeStatus, setNativeStatus] = useState<OnyxInkStatus | null>(null);
   const [limit, setLimit] = useState(false);
   const [undo, setUndo] = useState<InkDraft[]>([]);
   const [redo, setRedo] = useState<InkDraft[]>([]);
@@ -192,7 +194,10 @@ export function HandwritingSheet() {
             </Button>
           </div>
         </div>
-        <div className="min-h-0 flex-1 overflow-auto overscroll-contain bg-neutral-100 px-2 py-3 sm:px-6">
+        <div
+          data-ink-viewport
+          className="min-h-0 flex-1 overflow-auto overscroll-contain bg-neutral-100 px-2 py-3 sm:px-6"
+        >
           {loadError ? (
             <p role="alert" className="mx-auto max-w-xl p-6 text-red-800">
               Could not load the saved draft. It has not been changed. {loadError}
@@ -204,6 +209,8 @@ export function HandwritingSheet() {
                 tool={tool}
                 width={width}
                 mouseEnabled={mouseEnabled}
+                nativeInk={capabilities.nativeDeviceEvents}
+                onNativeStatus={setNativeStatus}
                 onChange={change}
                 onActiveChange={setActive}
                 onMetrics={setMetrics}
@@ -253,6 +260,10 @@ export function HandwritingSheet() {
             <summary className="cursor-pointer py-1 text-muted-foreground">Input details</summary>
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 py-1 text-muted-foreground">
               <span>Pen: {capabilities.stylus.replace(/_/g, " ")}</span>
+              <span>Ink: {nativeStatus?.available ? "BOOX Pen SDK" : "Web canvas"}</span>
+              {nativeStatus?.error && (
+                <span role="alert">BOOX ink unavailable: {nativeStatus.error}</span>
+              )}
               <span>Pressure: {metrics ? `${Math.round(metrics.pressure * 100)}%` : "—"}</span>
               <span>Tilt: {metrics ? `${metrics.tiltX}°, ${metrics.tiltY}°` : "—"}</span>
               <span>Input: {metrics?.tool ?? "—"}</span>

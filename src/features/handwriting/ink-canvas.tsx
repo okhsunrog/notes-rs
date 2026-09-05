@@ -1,6 +1,13 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import type { InkDraft, InkStroke } from "@/lib/bindings";
 import { drawSegment, drawSheet, eraseAt, inkPoint, MAX_INK_POINTS } from "./ink-model";
+import { useOnyxInk, type OnyxInkStatus } from "./onyx-ink";
 
 export type InkMetrics = {
   tool: string;
@@ -20,6 +27,8 @@ export function InkCanvas({
   onActiveChange,
   onMetrics,
   onLimit,
+  nativeInk = false,
+  onNativeStatus,
 }: {
   draft: InkDraft;
   tool: InkTool;
@@ -29,8 +38,22 @@ export function InkCanvas({
   onActiveChange: (active: boolean) => void;
   onMetrics: (metrics: InkMetrics) => void;
   onLimit: () => void;
+  nativeInk?: boolean;
+  onNativeStatus?: (status: OnyxInkStatus) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const onyx = useOnyxInk({
+    canvasRef,
+    enabled: nativeInk,
+    draft,
+    tool,
+    width,
+    onChange,
+    onActiveChange,
+    onMetrics,
+    onLimit,
+    onStatus: onNativeStatus,
+  });
   const active = useRef<{
     id: number;
     stroke: InkStroke;
@@ -52,7 +75,7 @@ export function InkCanvas({
     return () => observer.disconnect();
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !size.width) return;
     const ratio = Math.min(window.devicePixelRatio || 1, 3);
@@ -107,6 +130,7 @@ export function InkCanvas({
   const start = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     if (
       active.current ||
+      (onyx && event.pointerType === "pen") ||
       (event.pointerType !== "pen" && !(mouseEnabled && event.pointerType === "mouse"))
     )
       return;

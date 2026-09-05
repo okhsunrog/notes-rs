@@ -59,3 +59,56 @@ tests, and an arm64 debug APK build passed. Strict Clippy currently reports exis
 in `notes-blob/src/lib.rs` (`chunks_exact_to_as_chunks`) and `settings/transfer.rs`
 (`collapsible_if`, `field_reassign_with_default`). The affected crates pass with those three
 lints allowed; no unrelated source changes were made to silence them.
+
+## BOOX fast-ink experiment
+
+The WebView-only trial on Note Air 4C accepted pressure and handwriting, but the user found
+normal-speed writing uncomfortably delayed. The next experiment uses ONYX Pen SDK 1.5.4.3
+(the publisher's Maven metadata was checked on 2026-09-05), through the existing Android plugin.
+
+A separate SurfaceView is not required. `TouchHelper` binds directly to the existing WebView
+with `FEATURE_SF_TOUCH_RENDER`. This selects the vendor system rendering path and native raw
+input reader. The DOM sends the canvas rectangle and its visible clipping rectangle; the
+native adapter converts CSS coordinates using actual WebView width, rather than assuming
+Android density matches the BOOX per-app display settings.
+
+While the pen is down, the vendor draws transient ink on the physical display. Completed
+native point lists are normalized into the same portable draft coordinates, pressure, tilt,
+and timestamps as Pointer Events. JavaScript does not also record those pen gestures. The
+shared canvas draws completed strokes and the existing draft writer saves them. A Chromium
+visual-state callback acknowledges the canvas frame before the native adapter releases the
+transient drawing mode to refresh it. A 120 ms quiet period avoids doing that during a stroke;
+a sequence check prevents refreshing a frame which is missing a newer completed stroke.
+
+This is a two-stage rendering experiment, not a second note format. The SDK fountain brush and
+our portable pressure brush have different shaping algorithms, so a small change in stroke
+appearance on reconciliation is possible. Toolbar erasing and hardware erasing use the existing
+whole-stroke eraser after a native point list arrives; fast continuous eraser previews are not
+implemented. Native input batches are bounded by the same draft budget.
+
+The adapter pauses on Activity pause or window focus loss, resets the app's temporary palm
+rejection region, and closes the SDK on sheet exit. Session identities and callback generations
+reject events from closed sheets. Non-BOOX devices and SDK startup failures retain Pointer Events;
+Input details reports the chosen renderer and startup errors. AndroidX Jetifier is needed for
+legacy transitive SDK artifacts. The native C++ runtime is packaged once, following the vendor demo.
+
+Before declaring this path usable, test on the physical display:
+
+- Verify Input details says BOOX Pen SDK, and compare writing at normal speed.
+- Check pen position near every edge, pressure, dots, and fast consecutive letters.
+- Wait for reconciliation, then undo/redo, scroll, close/reopen, and restart to check persistence.
+- Rest a palm, test the hardware eraser, rotate the screen, open the notification shade, and return
+  from another app. Confirm the normal interface remains responsive after leaving the sheet.
+- Screenshots and automated events cannot establish physical pen-to-ink latency.
+
+Sources inspected locally under `~/tmp_zfs/OnyxAndroidDemo` (commit `689ff7f`) and
+`~/tmp_zfs/onyx-sdk-inspect` (published AARs and class inspection):
+
+- https://github.com/onyx-intl/OnyxAndroidDemo/blob/master/doc/Onyx-Pen-SDK.md
+- https://github.com/onyx-intl/OnyxAndroidDemo/blob/master/app/OnyxPenDemo/src/main/java/com/onyx/android/eink/pen/demo/scribble/ui/ScribbleWebViewDemoActivity.java
+- https://github.com/onyx-intl/OnyxAndroidDemo/blob/master/app/OnyxPenDemo/src/main/java/com/onyx/android/eink/pen/demo/scribble/ui/ScribbleTouchHelperDemoActivity.java
+- https://repo.boox.com/repository/maven-public/com/onyx/android/sdk/onyxsdk-pen/maven-metadata.xml
+
+The Git repository contains examples and documentation; the Pen SDK implementation is distributed
+as compiled Maven artifacts. The README and older documentation list older dependency versions;
+the inspected published API additionally exposes explicit renderer selection and refresh controls.
