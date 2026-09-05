@@ -48,7 +48,7 @@ fn materializes_local_and_inline_bytes_deduplicates_and_targets_preamble_block()
         let expected = Uuid::new_v5(
             &Uuid::NAMESPACE_OID,
             format!(
-                "tangleaf:attachment:{kind}:{owner_uuid}:{}",
+                "notes-rs:attachment:{kind}:{owner_uuid}:{}",
                 attachment.sha256
             )
             .as_bytes(),

@@ -2767,10 +2767,11 @@ fn reconcile_attachment(
 }
 
 pub fn attachment_uuid(owner: AttachmentOwner, blob_hash: &BlobHash) -> uuid::Uuid {
+    // Persisted sync identity: this namespace must survive product renames.
     uuid::Uuid::new_v5(
         &uuid::Uuid::NAMESPACE_OID,
         format!(
-            "tangleaf:attachment:{}:{}:{blob_hash}",
+            "notes-rs:attachment:{}:{}:{blob_hash}",
             owner.kind(),
             owner.uuid()
         )
@@ -2980,6 +2981,15 @@ mod tests {
         break_structure_cycles(&mut intents);
         assert_eq!(intents[&first].parent_uuid, Some(second));
         assert_eq!(intents[&second].parent_uuid, None);
+    }
+
+    #[test]
+    fn attachment_identity_preserves_existing_notes_rs_data() {
+        let hash = BlobHash::from_bytes([0xaa; 32]);
+        assert_eq!(
+            attachment_uuid(AttachmentOwner::Page(uuid::Uuid::nil()), &hash).to_string(),
+            "0ce031d5-b27c-5ea6-b2cc-db92829fd6ec"
+        );
     }
 
     #[test]
