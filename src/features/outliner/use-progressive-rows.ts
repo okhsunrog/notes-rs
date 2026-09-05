@@ -10,8 +10,8 @@ export function useProgressiveRows(
 ) {
   const [limit, setLimit] = useState(0);
   useEffect(() => {
-    if (!enabled || limit === Infinity) return;
-    if (limit >= total) {
+    if (limit === Infinity) return;
+    if (!enabled || limit >= total) {
       setLimit(Infinity);
       return;
     }

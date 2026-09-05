@@ -53,6 +53,15 @@ describe("progressive rows", () => {
     act(() => root.render(<Probe />));
     expect(count).toBe(40);
   });
+  it("does not hide existing rows when a small page grows past the threshold", () => {
+    enabled = false;
+    total = 16;
+    act(() => root.render(<Probe />));
+    enabled = true;
+    total = 17;
+    act(() => root.render(<Probe />));
+    expect(count).toBe(17);
+  });
   it("cancels scheduled work when unmounted", () => {
     act(() => root.unmount());
     expect(vi.getTimerCount()).toBe(0);
