@@ -996,3 +996,18 @@ html::before {
 [data-workspace-scroll] > * {
   will-change: transform;
 }
+
+/* E-ink needs a luminance difference, not a subtle tinted selection. */
+.ink-dialog [role="toolbar"] button {
+  transition: none;
+}
+.ink-dialog [role="toolbar"] button[aria-pressed="true"] {
+  background: #111;
+  color: #fff;
+  box-shadow: inset 0 0 0 2px #111;
+  opacity: 1;
+}
+.ink-dialog [role="toolbar"] button[aria-pressed="false"] {
+  background: transparent;
+  color: inherit;
+}

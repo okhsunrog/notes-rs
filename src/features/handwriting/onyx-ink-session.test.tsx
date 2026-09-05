@@ -148,6 +148,7 @@ it("routes native hardware erasing and lasso gestures to the shared editor witho
     setTransform() {},
     clearRect() {},
     fillRect() {},
+    setLineDash() {},
     beginPath() {},
     arc() {},
     fill() {},

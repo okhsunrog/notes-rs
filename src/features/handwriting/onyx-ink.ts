@@ -47,6 +47,7 @@ export function useOnyxInk({
   onStatus,
   onInput,
   onStroke,
+  decoration,
 }: {
   canvasRef: RefObject<HTMLCanvasElement | null>;
   enabled: boolean;
@@ -58,6 +59,7 @@ export function useOnyxInk({
   onMetrics: (metrics: InkMetrics) => void;
   onLimit: () => void;
   onStatus?: (status: OnyxInkStatus) => void;
+  decoration?: string;
   onInput?: (event: OnyxInkEvent) => void;
   onStroke?: (draft: InkDraft, event: OnyxInkEvent) => InkDraft;
 }) {
@@ -239,6 +241,6 @@ export function useOnyxInk({
       }).catch(console.error);
     });
     return () => cancelAnimationFrame(handle);
-  }, [draft, frame, native]);
+  }, [draft, frame, native, decoration, tool]);
   return enabled && native;
 }

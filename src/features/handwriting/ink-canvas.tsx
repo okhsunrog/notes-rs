@@ -15,7 +15,6 @@ import {
   selectLasso,
   type EraserMode,
   type LassoMode,
-  type XY,
 } from "./ink-editing";
 import { applyOnyxStroke, useOnyxInk, type OnyxInkEvent, type OnyxInkStatus } from "./onyx-ink";
 
@@ -76,8 +75,6 @@ export function InkCanvas({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const bufferRef = useRef<HTMLCanvasElement | null>(null);
   const active = useRef<Gesture | null>(null);
-  const [path, setPath] = useState<XY[]>([]);
-  const [previewStrokes, setPreviewStrokes] = useState<InkStroke[] | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
 
   const publish = (strokes: InkStroke[]) => {
@@ -90,7 +87,49 @@ export function InkCanvas({
     const staging = buffer.getContext("2d");
     if (!ctx || !staging) return;
     staging.setTransform(canvas.width / 1000, 0, 0, canvas.height / 1400, 0, 0);
+    staging.setLineDash([]);
     drawSheet(staging, strokes, draft.background);
+    // Frame and ink share the same staging bitmap, so e-ink cannot present them separately.
+    const gesture = active.current;
+    const ids =
+      gesture?.action === "move"
+        ? gesture.ids
+        : gesture?.action === "select" || gesture?.action === "erase"
+          ? NO_SELECTION
+          : selected;
+    const bounds = selectionBounds(strokes, ids);
+    staging.strokeStyle = "#111111";
+    staging.lineWidth = 1.5;
+    staging.setLineDash([7, 5]);
+    if (bounds) {
+      staging.beginPath();
+      staging.moveTo(bounds.left - 6, bounds.top - 6);
+      staging.lineTo(bounds.right + 6, bounds.top - 6);
+      staging.lineTo(bounds.right + 6, bounds.bottom + 6);
+      staging.lineTo(bounds.left - 6, bounds.bottom + 6);
+      staging.lineTo(bounds.left - 6, bounds.top - 6);
+      staging.stroke();
+    }
+    if (gesture?.action === "select" || (gesture?.action === "erase" && eraserMode === "lasso")) {
+      const polygon = lassoPolygon(
+        gesture.points,
+        gesture.action === "select" ? lassoMode : "free",
+      );
+      if (polygon.length > 1) {
+        staging.beginPath();
+        staging.moveTo(polygon[0]!.x, polygon[0]!.y);
+        for (const p of polygon.slice(1)) staging.lineTo(p.x, p.y);
+        staging.lineTo(polygon[0]!.x, polygon[0]!.y);
+        staging.stroke();
+      }
+    }
+    staging.setLineDash([]);
+    if (gesture?.action === "erase" && eraserMode !== "lasso" && gesture.points.length) {
+      const p = gesture.points[gesture.points.length - 1]!;
+      staging.beginPath();
+      staging.arc(p.x, p.y, eraserRadius, 0, Math.PI * 2);
+      staging.stroke();
+    }
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalCompositeOperation = "copy";
     ctx.drawImage(buffer, 0, 0);
@@ -147,7 +186,6 @@ export function InkCanvas({
         point.y - start.y,
       );
       publish(current.preview);
-      setPreviewStrokes(current.preview);
     } else if (current.action === "erase" && eraserMode !== "lasso") {
       current.preview = eraseGesture(
         current.preview,
@@ -156,8 +194,7 @@ export function InkCanvas({
         eraserRadius,
       );
       publish(current.preview);
-      setPath([point]);
-    } else setPath([...current.points]);
+    } else publish(current.preview);
   };
   const finishGesture = (base: InkDraft, points?: InkPoint[]): InkDraft => {
     const current = active.current;
@@ -167,7 +204,7 @@ export function InkCanvas({
     if (current.action === "select")
       onSelectionChange?.(selectLasso(strokes, lassoPolygon(gesture, lassoMode)));
     else if (current.action === "move" && gesture.length) {
-      const first = gesture[0]!,
+      const first = current.points[0] ?? gesture[0]!,
         last = gesture[gesture.length - 1]!;
       strokes = moveSelection(strokes, current.ids, last.x - first.x, last.y - first.y);
     } else if (current.action === "erase")
@@ -175,8 +212,6 @@ export function InkCanvas({
     else if (current.action === "pen" && gesture.length)
       strokes = [...strokes, { id: crypto.randomUUID(), width, points: gesture }];
     active.current = null;
-    setPath([]);
-    setPreviewStrokes(null);
     if (strokes.reduce((count, s) => count + s.points.length, 0) > MAX_INK_POINTS) {
       onLimit();
       publish(base.strokes);
@@ -196,8 +231,6 @@ export function InkCanvas({
         active.current = null;
         publish(draft.strokes);
       }
-      setPath([]);
-      setPreviewStrokes(null);
     }
   };
   const nativeStroke = (base: InkDraft, event: OnyxInkEvent) => {
@@ -217,6 +250,7 @@ export function InkCanvas({
     onMetrics,
     onLimit,
     onStatus: onNativeStatus,
+    decoration: selected.join(","),
     onInput: nativeInput,
     onStroke: nativeStroke,
   });
@@ -248,7 +282,7 @@ export function InkCanvas({
     );
     // Redraw on document/size changes only; pointer previews publish directly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draft, size]);
+  }, [draft, size, selected, tool]);
 
   const sample = (event: PointerEvent, end = false) => {
     const current = active.current;
@@ -298,8 +332,6 @@ export function InkCanvas({
     if (!current || current.id !== event.pointerId) return;
     if (cancelled) {
       active.current = null;
-      setPath([]);
-      setPreviewStrokes(null);
       onSelectionChange?.(current.ids);
       publish(draft.strokes);
     } else {
@@ -311,8 +343,6 @@ export function InkCanvas({
     if (event.currentTarget.hasPointerCapture(event.pointerId))
       event.currentTarget.releasePointerCapture(event.pointerId);
   };
-  const bounds = selectionBounds(previewStrokes ?? draft.strokes, selected);
-  const area = tool === "lasso" ? lassoPolygon(path, lassoMode) : path;
   return (
     <div className="relative">
       <canvas
@@ -328,34 +358,6 @@ export function InkCanvas({
         onPointerCancel={(event) => finish(event, true)}
         onLostPointerCapture={(event) => finish(event, true)}
       />
-      <svg
-        aria-hidden="true"
-        viewBox="0 0 1000 1400"
-        className="pointer-events-none absolute inset-0 h-full w-full"
-        fill="none"
-        stroke="#333"
-        strokeWidth="1.5"
-      >
-        {bounds && (
-          <rect
-            x={bounds.left - 6}
-            y={bounds.top - 6}
-            width={bounds.right - bounds.left + 12}
-            height={bounds.bottom - bounds.top + 12}
-            strokeDasharray="7 5"
-          />
-        )}
-        {area.length > 1 && (
-          <polygon
-            points={area.map((p) => `${p.x},${p.y}`).join(" ")}
-            strokeDasharray="6 4"
-            fill="#00000008"
-          />
-        )}
-        {path.length === 1 && tool !== "lasso" && eraserMode !== "lasso" && (
-          <circle cx={path[0]!.x} cy={path[0]!.y} r={eraserRadius} />
-        )}
-      </svg>
     </div>
   );
 }

@@ -47,6 +47,7 @@ beforeEach(() => {
       let context = contexts.get(this);
       if (context) return context;
       context = {
+        setLineDash: vi.fn(),
         beginPath: vi.fn(),
         arc: vi.fn(),
         fill: vi.fn(),
@@ -197,6 +198,13 @@ it("selects with a rectangle and moves selected strokes as one undoable gesture"
   act(() => renderDraft(draft, { tool: "lasso", selected: ["a"], onSelectionChange: selection }));
   pointer("pointerdown", { clientX: 30, clientY: 35 });
   pointer("pointermove", { clientX: 40, clientY: 50 });
+  expect(container.querySelector("svg")).toBeNull();
+  const visible = contexts.get(canvas)!;
+  const published = vi.spyOn(visible, "drawImage").mock.calls;
+  const buffer = published[published.length - 1]![0] as HTMLCanvasElement;
+  const staging = contexts.get(buffer)!;
+  expect(vi.spyOn(staging, "moveTo")).toHaveBeenCalledWith(64, 84); // Selection at the moved ink bounds.
+  expect(vi.spyOn(visible, "lineTo")).not.toHaveBeenCalled(); // Both are published via one bitmap.
   pointer("pointerup", { clientX: 40, clientY: 50 });
   expect(changed).toHaveBeenCalledTimes(1);
   expect(changed.mock.calls[0]![0].strokes[0].points[0]).toMatchObject({ x: 70, y: 90 });

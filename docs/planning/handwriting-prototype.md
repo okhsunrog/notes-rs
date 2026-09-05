@@ -190,3 +190,11 @@ budget checks reject an oversized edit without discarding the original handwriti
 
 The new native preview/selection path still needs physical-display acceptance on the device;
 automated tests cover both Pointer Events and native event routing, including hardware erasing.
+
+On-device follow-up: the user confirmed that selection, movement, erasing, and live contours
+work. They then reported selection borders moving out of step with handwriting, and inadequate
+contrast for active tools. Selection/gesture overlays now render into the same staging bitmap
+as the ink, so one canvas publication contains both. Drag completion retains the same anchor
+as its live preview. Active tools, modes, paper and size choices use black/white contrast;
+transitions are disabled in the handwriting toolbars. Physical retest of these refinements is
+pending.
