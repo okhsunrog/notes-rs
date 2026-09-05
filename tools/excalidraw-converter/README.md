@@ -1,7 +1,7 @@
-# tangleaf legacy Excalidraw converter
+# Tangleaf legacy Excalidraw converter
 
 This is an isolated, one-time migration tool for legacy Excalidraw `0.12.0`
-documents. It is not part of the tangleaf runtime and must not be bundled into
+documents. It is not part of the Tangleaf runtime and must not be bundled into
 the desktop, Android, or server applications.
 
 The converter restores a drawing with Excalidraw's official `restore` API,
@@ -18,10 +18,10 @@ The dependency graph and lockfile are intentionally local to this directory:
 cargo run -p notes-import --example drawing_conversion_inputs -- /path/to/logseq-graph
 
 cd tools/excalidraw-converter
-bun install --frozen-lockfile
-bunx playwright install chromium
+vp install --frozen-lockfile
+vpx playwright install chromium
 mkdir -p /path/outside/the/graph
-bun run convert -- \
+vp run convert -- \
   --source-root /path/to/logseq-graph \
   --output /path/outside/the/graph/excalidraw-publication \
   --source-manifest-sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
@@ -31,7 +31,7 @@ bun run convert -- \
 
 The Rust helper prints the exact source-manifest digest and the drawing
 allowlist that belong to one immutable scan. Pass those values to the
-converter unchanged. For tangleaf' automatic import discovery, publish to:
+converter unchanged. For Tangleaf's automatic import discovery, publish to:
 
 ```text
 <app-data>/logseq-drawing-conversions/<source-manifest-sha256>/
