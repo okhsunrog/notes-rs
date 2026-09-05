@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { undo } from "@codemirror/commands";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
+import { forceParsing } from "@codemirror/language";
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vite-plus/test";
@@ -81,6 +82,14 @@ describe("Document Live Preview", () => {
       "```",
     ].join("\n");
     const { container, view } = await mountEditor(source);
+
+    // CodeMirror's initial parse has a time budget. Under parallel test load,
+    // finish it before asserting decorations for the whole fixture.
+    await vi.waitFor(() => {
+      act(() => {
+        expect(forceParsing(view, view.state.doc.length, 100)).toBe(true);
+      });
+    });
 
     const hiddenSource = [...container.querySelectorAll<HTMLElement>(".cm-lp-hidden-syntax")].map(
       (element) => element.textContent,
