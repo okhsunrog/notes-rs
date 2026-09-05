@@ -126,3 +126,21 @@ the SDK's static Device initialization. Like the vendor demo, the adapter uses H
 (6.1), restricted to `android.onyx` and `android.view.View` APIs. Without it, Android 13 blocks
 firmware calls and the SDK can report a created helper despite an empty coordinate mapping.
 The adapter also checks the exposed digitizer coordinate range before enabling native ink.
+
+### Verified on Note Air 4C (2026-09-06)
+
+The arm64 debug APK was installed with package data retained. Native status reported available
+and active, the SDK reader found `onyx_emp_Wacom I2C Digitizer`, and real pen input reached the
+portable draft through SDK callbacks. The user confirmed that normal-speed writing became
+comfortable. This confirms the physical latency improvement qualitatively; no latency in
+milliseconds was measured. Completed real SDK strokes were checked in the on-device draft file.
+
+One measured fragment contained 11 strokes / 3442 points; within-stroke intervals were most often
+2 ms. SDK timestamps in this run were Unix epoch milliseconds. Pressure values were consistent
+with discrete 0..4095 levels before normalization. A lossless columnar fixture of the normalized
+snapshot was exported for the separate codec benchmark; original native coordinates and size
+were not captured separately.
+
+`vp check` and all 377 frontend tests (71 files) passed. The debug Android APK build passed.
+Release shrinking, other BOOX firmware versions, and full rotation/notification-shade/eraser
+acceptance remain outside this first successful pen-latency check.
