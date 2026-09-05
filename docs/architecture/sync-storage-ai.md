@@ -7,16 +7,16 @@ has no users or valuable production databases yet, so storage and wire formats m
 deliberately before the first release.
 
 The accepted editor and page-presentation target is recorded separately in
-[`EDITOR_ARCHITECTURE.md`](EDITOR_ARCHITECTURE.md). The durable `PageLayout` versus pane-local
+[`editor.md`](editor.md). The durable `PageLayout` versus pane-local
 Reading boundary, continuous CodeMirror Document editing, Live Preview, and linked preview sessions
 are implemented; rich semantic widgets and the remaining large-document/mobile gates are pending.
 
 General multi-pane composition, adjacent navigation, linked preview, responsive projection, and
 the collapsible AI companion are defined in
-[`WORKSPACE_ARCHITECTURE.md`](WORKSPACE_ARCHITECTURE.md).
+[`workspace.md`](workspace.md).
 
 The accepted daily Journal domain, UI surfaces, sync identity, and loss-aware Logseq import boundary
-are defined in [`JOURNAL_ARCHITECTURE.md`](JOURNAL_ARCHITECTURE.md).
+are defined in [`journals.md`](journals.md).
 
 ## 1. Product boundary
 
@@ -92,14 +92,14 @@ revision-guarded atomic document replacement. Source and Live Preview are author
 same durable block tree; Reading is a pane-local projection.
 
 Side-by-side Split is implemented as a workspace layout operation and likewise never enters content
-operations or sync. See [`EDITOR_ARCHITECTURE.md`](EDITOR_ARCHITECTURE.md) and
-[`WORKSPACE_ARCHITECTURE.md`](WORKSPACE_ARCHITECTURE.md).
+operations or sync. See [`editor.md`](editor.md) and
+[`workspace.md`](workspace.md).
 
 The accepted Journal target adds a closed `PageKind = Note | Journal { date }` independently of
 layout. Journal reuses the ordinary page/block model and defaults to Outline; Today/calendar and
 quick-capture UI are workspace surfaces, not another page kind or editor. These minimum product
 surfaces are implemented. See
-[`JOURNAL_ARCHITECTURE.md`](JOURNAL_ARCHITECTURE.md).
+[`journals.md`](journals.md).
 
 ### Blocks
 

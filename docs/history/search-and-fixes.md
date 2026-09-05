@@ -1,5 +1,9 @@
 # Search Overhaul + Review-Findings Plan
 
+> Historical development record. Task ordering and completion claims reflect the
+> original investigation, not a current execution plan. Verify against current code
+> before using outstanding items. Source paths are relative to the repository root.
+
 Self-contained handoff plan for an executor agent. Work through the tracks **in order** (A → B → C → D); within a track, one commit per task. Every task lists steps, guardrails, and acceptance criteria. If something doesn't match this plan, or a decision arises that the plan doesn't cover: **stop and report** — do not improvise.
 
 ## Context
@@ -252,7 +256,7 @@ Expand `mermaid-sanitize.test.ts` (URL-attribute vectors, CSS smuggling, nested 
 ### D3. Repo/docs cleanup
 
 1. Remove the committed release binary payload (`release-server/notes-server`, `notes-server-release.tar.gz`) from the working tree and add ignore rules; note in README that `just package-server` produces it.
-2. README "What works": add Logseq import, journals, Document/Live Preview, pane workspace (all shipped). Fix WORKSPACE_ARCHITECTURE.md:3 "Implementation is pending" and SYNC_ARCHITECTURE_PLAN.md stale "pending" claims (CodeMirror/Document/Journal shipped); add `PageAliasSet` to the plan's op table; correct "HTTP/SSE" → "HTTP/WebSocket (SSE is chat-only)".
+2. README "What works": add Logseq import, journals, Document/Live Preview, pane workspace (all shipped). Fix ../architecture/workspace.md:3 "Implementation is pending" and ../architecture/sync-storage-ai.md stale "pending" claims (CodeMirror/Document/Journal shipped); add `PageAliasSet` to the plan's op table; correct "HTTP/SSE" → "HTTP/WebSocket (SSE is chat-only)".
 3. Note the Zustand workspace store + notify layer in README's architecture section (one paragraph).
 
 ---

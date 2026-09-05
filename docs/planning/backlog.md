@@ -1,6 +1,6 @@
 # Review Findings Backlog (parking lot)
 
-Findings from the 2026-07-19 multi-agent review that are **deliberately not in any active plan** (`SEARCH_AND_FIXES_PLAN.md`, `EMBEDDINGS_PLAN.md`, `MD_IMPORT_EXPORT_PLAN.md`). Each entry names its trigger — the event that should promote it into a plan. Do not implement from this file directly.
+Findings from the 2026-07-19 multi-agent review that are **deliberately not in any active plan** (`../history/search-and-fixes.md`, `../history/embeddings.md`, `../history/markdown-import-export.md`). Each entry names its trigger — the event that should promote it into a plan. Do not implement from this file directly.
 
 ## Correctness / robustness
 
@@ -49,6 +49,6 @@ Findings from the 2026-07-19 multi-agent review that are **deliberately not in a
 
 - 2026-07-19 frontend review findings → fixed in `f1c7dc3`.
 - Promoted 2026-07-19: journal-date search → SEARCH_AND_FIXES_PLAN A5.7; permanent-WorkspaceConflict parking → SEARCH_AND_FIXES_PLAN B8; visible HTML blocks → MD_IMPORT_EXPORT_PLAN M6.
-- Search/correctness/security/hygiene batches → `SEARCH_AND_FIXES_PLAN.md` Tracks A–D (in execution).
-- Embedding composition/chunking/eval → `EMBEDDINGS_PLAN.md` (pending execution).
-- MD import/export + code-fence language + block stats → `MD_IMPORT_EXPORT_PLAN.md` (pending execution).
+- Search/correctness/security/hygiene batches → `../history/search-and-fixes.md` Tracks A–D (in execution).
+- Embedding composition/chunking/eval → `../history/embeddings.md` (pending execution).
+- MD import/export + code-fence language + block stats → `../history/markdown-import-export.md` (pending execution).

@@ -1,6 +1,10 @@
 # Markdown Import/Export + Block Statistics Plan
 
-Self-contained handoff plan. Run AFTER the current `SEARCH_AND_FIXES_PLAN.md` execution finishes (A6 and M5 both touch Settings; A5 touches search UI). One commit per task, in order. If something doesn't match this plan: stop and report.
+> Historical development record. Task ordering and completion claims reflect the
+> original investigation, not a current execution plan. Verify against current code
+> before using outstanding items. Source paths are relative to the repository root.
+
+Self-contained handoff plan. Run AFTER the current `search-and-fixes.md` execution finishes (A6 and M5 both touch Settings; A5 touches search UI). One commit per task, in order. If something doesn't match this plan: stop and report.
 
 ## Architecture decision (fixed — do not revisit in this plan)
 
@@ -30,7 +34,7 @@ Consequence: codec normalizations are import semantics. M1 fixes the one that lo
 
 ## M2 (decision task — small). Headings 4–6
 
-The codec clamps `####`–`######` to `heading_3`. Two options: (a) extend `BlockStyle` with `heading_4..6` end-to-end (schema, projections, style menu icons), or (b) keep the clamp but document it as import semantics. Implement **(b)** now — one doc paragraph in EDITOR_ARCHITECTURE.md and a codec test pinning the clamp — and report (a) as a follow-up candidate with an effort estimate. Do not implement (a) without a go-ahead.
+The codec clamps `####`–`######` to `heading_3`. Two options: (a) extend `BlockStyle` with `heading_4..6` end-to-end (schema, projections, style menu icons), or (b) keep the clamp but document it as import semantics. Implement **(b)** now — one doc paragraph in ../architecture/editor.md and a codec test pinning the clamp — and report (a) as a follow-up candidate with an effort estimate. Do not implement (a) without a go-ahead.
 
 ## M3. Export to Markdown files
 

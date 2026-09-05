@@ -10,7 +10,7 @@ text = "основной проект"
 expect = ["00000000-0000-0000-0000-000000000001"]
 group = "general"
 
-# Accepted morphology debt from SEARCH_AND_FIXES_PLAN.md A2. These genitive
+# Accepted morphology debt from ../docs/history/search-and-fixes.md A2. These genitive
 # forms can diverge from the indexed Snowball stem; semantic retrieval should
 # compensate, and this group makes that behavior measurable.
 

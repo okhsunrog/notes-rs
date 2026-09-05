@@ -1,16 +1,16 @@
-# notes-rs Implementation Roadmap
+# Tangleaf Implementation Roadmap
 
 Status: active planning document. Created 2026-07-17.
 
 This roadmap turns the accepted architecture records into an executable sequence. It does not
 replace them:
 
-- [`SYNC_ARCHITECTURE_PLAN.md`](SYNC_ARCHITECTURE_PLAN.md) defines the implemented source/sync/AI
+- [`../architecture/sync-storage-ai.md`](../architecture/sync-storage-ai.md) defines the implemented source/sync/AI
   boundary;
-- [`EDITOR_ARCHITECTURE.md`](EDITOR_ARCHITECTURE.md) defines Outline, Document, Reading, and the
+- [`../architecture/editor.md`](../architecture/editor.md) defines Outline, Document, Reading, and the
   CodeMirror boundary;
-- [`WORKSPACE_ARCHITECTURE.md`](WORKSPACE_ARCHITECTURE.md) defines panes and the Assistant dock;
-- [`JOURNAL_ARCHITECTURE.md`](JOURNAL_ARCHITECTURE.md) defines Journal identity and the Logseq
+- [`../architecture/workspace.md`](../architecture/workspace.md) defines panes and the Assistant dock;
+- [`../architecture/journals.md`](../architecture/journals.md) defines Journal identity and the Logseq
   conversion boundary.
 
 The purpose of this file is to record ordering, concrete deliverables, validation gates, commit

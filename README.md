@@ -37,14 +37,8 @@ Persisted Rust state is exposed through generated tauri-specta bindings and cach
 
 The server keeps source pages, blocks, attachments, and the oplog in SQLite. Derived embeddings, generations, indexing jobs, extracted entities, and extraction state live in a separate disposable `ai.db` behind a `VectorStore` interface; they are not synced into the client graph. sqlite-vec is loaded only by the server binary. Provider settings are bootstrapped from the server TOML on first start and subsequently managed from the authenticated application Settings page; provider secrets are stored server-side with owner-only permissions and are never returned to the webview.
 
-The detailed implementation record is in [SYNC_ARCHITECTURE_PLAN.md](SYNC_ARCHITECTURE_PLAN.md).
-The accepted Outline/Document, Live Preview, Reading, and CodeMirror boundary is recorded in
-[EDITOR_ARCHITECTURE.md](EDITOR_ARCHITECTURE.md). General side-by-side panes, linked previews, and
-the collapsible AI companion are defined in
-[WORKSPACE_ARCHITECTURE.md](WORKSPACE_ARCHITECTURE.md). The Journal domain, Today/calendar UI, and
-Logseq conversion plan are recorded in [JOURNAL_ARCHITECTURE.md](JOURNAL_ARCHITECTURE.md).
-The ordered implementation stages, validation gates, and measured development timeline live in
-[ROADMAP.md](ROADMAP.md).
+See the [documentation index](docs/README.md) for architecture records, the roadmap,
+and historical technical investigations.
 
 ## Development
 

@@ -1,8 +1,12 @@
 # Embeddings Polish Plan
 
+> Historical development record. Task ordering and completion claims reflect the
+> original investigation, not a current execution plan. Verify against current code
+> before using outstanding items. Source paths are relative to the repository root.
+
 Self-contained handoff plan. Goal: bring the embedding/indexing pipeline to its target state **before** the bulk Logseq import, so the corpus is embedded once against a frozen input format, and quality becomes measurable instead of guessed.
 
-**Sequencing:** run this AFTER the current `SEARCH_AND_FIXES_PLAN.md` execution finishes — both touch `crates/notes-ai` (A6 adds a rerank flag in `retrieval.rs`). One commit per task, in order. If anything contradicts this plan: stop and report.
+**Sequencing:** run this AFTER the current `search-and-fixes.md` execution finishes — both touch `crates/notes-ai` (A6 adds a rerank flag in `retrieval.rs`). One commit per task, in order. If anything contradicts this plan: stop and report.
 
 ## Global rules
 
@@ -43,7 +47,7 @@ New format, in order:
 Facts this encodes: blocks are author-drawn semantic units (outline bullets; document-codec units = paragraphs/headings/fences; Logseq import preserves bullet granularity). Average block in the target corpus is ~80 chars; the long tail is code fences and pasted walls of text. Policy:
 
 1. **Tier 1:** composed text ≤ ~2,000 chars → one vector (current behavior).
-2. **Tier 2:** composed text > ~2,000 chars → deterministic splitter cuts the block body at natural boundaries, in preference order: blank lines → table rows / lines inside code fences → any line boundary → (only for a single enormous line) hard character cut. Target ~1,200–1,600 chars per sub-chunk, hard cap from E2. A block with no blank lines at all — a large GFM table is the canonical real case (this repo's ROADMAP.md contains a 36 KB table) — must still split, never silently truncate. **Every sub-chunk gets the same E1 header** (title + breadcrumb). No overlap — boundary-aware splits plus the shared header replace it.
+2. **Tier 2:** composed text > ~2,000 chars → deterministic splitter cuts the block body at natural boundaries, in preference order: blank lines → table rows / lines inside code fences → any line boundary → (only for a single enormous line) hard character cut. Target ~1,200–1,600 chars per sub-chunk, hard cap from E2. A block with no blank lines at all — a large GFM table is the canonical real case (this repo's ../planning/roadmap.md contains a 36 KB table) — must still split, never silently truncate. **Every sub-chunk gets the same E1 header** (title + breadcrumb). No overlap — boundary-aware splits plus the shared header replace it.
 3. Storage: `generation_vectors` mapping gains `chunk_index` (1:N per content_uuid). `embedding_jobs` stays one row per content_uuid holding the full composed text; the worker splits just before the provider call. `input_hash` still covers the full composition — any change re-embeds all chunks of that block.
 4. Retrieval: KNN may return several chunks of one block — dedup by `content_uuid` keeping the best distance **before** the RRF/rerank pool is built; the rerank stage receives the matched chunk's text (not the whole block).
 5. The retrieval unit stays the block: results, UUIDs, and open-behavior are unchanged.
@@ -66,7 +70,7 @@ Server binary subcommand (e.g. `notes-server inspect-index --db <path>`): runs c
 
 Server subcommand `notes-server eval --queries <file>`: reads a TOML golden set (`[[query]] text = "..." expect = ["uuid", …]`), runs each through the full retrieval pipeline (configurable: with/without rerank), reports recall@5/@10 and MRR overall and per query, and lists misses with what ranked above them. No provider mocking — it runs against the real configured pipeline; document that it costs a few cents per run. This is the tool that turns every future tuning question (model choice, thresholds, rerank floor) into a number.
 
-The golden-set template (ship an example `eval-queries.example.toml`) must include a **morphology-debt section**: 3–4 Russian queries using inflected forms whose Snowball stems diverge from the indexed form (fleeting-vowel genitives like «покупок» → «Покупки», and similar irregular pairs), tagged `group = "morphology"`. Context: SEARCH_AND_FIXES_PLAN.md Track A2 deliberately fixed this only for title search and left block-level Russian morphology as accepted debt. A per-group score line in the eval output makes that debt visible on every run — if the morphology group scores poorly on real queries, that is the trigger to revisit relaxed matching for blocks; if it scores fine (semantic channel covering it), the debt stays parked with evidence.
+The golden-set template (ship an example `eval-queries.example.toml`) must include a **morphology-debt section**: 3–4 Russian queries using inflected forms whose Snowball stems diverge from the indexed form (fleeting-vowel genitives like «покупок» → «Покупки», and similar irregular pairs), tagged `group = "morphology"`. Context: search-and-fixes.md Track A2 deliberately fixed this only for title search and left block-level Russian morphology as accepted debt. A per-group score line in the eval output makes that debt visible on every run — if the morphology group scores poorly on real queries, that is the trigger to revisit relaxed matching for blocks; if it scores fine (semantic channel covering it), the debt stays parked with evidence.
 
 ---
 

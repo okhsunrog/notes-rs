@@ -11,11 +11,11 @@ outliner and as a continuous Markdown document. It deliberately separates durabl
 pane-local presentation and from server-side retrieval chunks.
 
 General side-by-side composition, navigation, linked preview panes, and the Assistant dock are
-defined in [`WORKSPACE_ARCHITECTURE.md`](WORKSPACE_ARCHITECTURE.md). Split is a workspace operation,
+defined in [`workspace.md`](workspace.md). Split is a workspace operation,
 not an editor mode.
 
 Journal is an orthogonal typed page identity using the same editor and is defined in
-[`JOURNAL_ARCHITECTURE.md`](JOURNAL_ARCHITECTURE.md).
+[`journals.md`](journals.md).
 
 ## 1. Goals
 

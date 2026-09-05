@@ -1,5 +1,9 @@
 # Plan: inline image previews without scroll jank
 
+> Historical development record. Task ordering and completion claims reflect the
+> original investigation, not a current execution plan. Verify against current code
+> before using outstanding items. Source paths are relative to the repository root.
+
 ## Status (2026-09-05)
 
 The preview implementation and device checks below are complete. This document
