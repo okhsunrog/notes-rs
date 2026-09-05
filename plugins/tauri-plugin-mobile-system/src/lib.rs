@@ -16,7 +16,7 @@ mod models;
 pub use error::{Error, Result};
 #[cfg(mobile)]
 pub use mobile::MobileSystem;
-pub use models::SafeAreaInsets;
+pub use models::{SafeAreaInsets, StylusCapabilities};
 
 #[cfg(mobile)]
 pub trait MobileSystemExt<R: Runtime> {

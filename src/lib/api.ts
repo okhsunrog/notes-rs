@@ -218,6 +218,7 @@ export const splitBlock = checkedCommand(commands.splitBlock);
 export const isReady = commands.isReady;
 export const getStartupStatus = commands.startupStatus;
 export const getMobileSystemInfo = checkedCommand(commands.mobileSystemInfo);
+export const getInputCapabilities = checkedCommand(commands.inputCapabilities);
 export const setSystemBarsStyle = checkedCommand(commands.setSystemBarsStyle);
 export const loadSettings = checkedCommand(commands.loadSettings);
 export const exportDeviceConfiguration = checkedCommand(commands.exportDeviceConfiguration);

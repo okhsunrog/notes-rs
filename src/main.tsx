@@ -8,6 +8,7 @@ import { ConfirmationProvider } from "@/app/confirmation";
 import { ErrorBoundary } from "@/app/error-boundary";
 import { disableViewportZoom } from "@/app/viewport-zoom";
 import { PageSessionProvider } from "@/features/pages/page-session";
+import { InputCapabilitiesProvider } from "@/features/handwriting/input-capabilities";
 import { Toaster } from "@/components/ui/sonner";
 import "./index.css";
 
@@ -27,7 +28,9 @@ root.render(
           <ConfirmationProvider>
             <ErrorBoundary>
               <PageSessionProvider>
-                <App />
+                <InputCapabilitiesProvider>
+                  <App />
+                </InputCapabilitiesProvider>
               </PageSessionProvider>
             </ErrorBoundary>
           </ConfirmationProvider>

@@ -1,5 +1,52 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, Serialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)] // Native enumeration is currently implemented on Android only.
+pub enum StylusAvailability {
+    Available,
+    NotDetected,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct InputCapabilities {
+    pub stylus: StylusAvailability,
+    pub pressure: bool,
+    pub tilt: bool,
+    pub native_device_events: bool,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn input_capabilities(app: AppHandle) -> CommandResult<InputCapabilities> {
+    #[cfg(target_os = "android")]
+    {
+        let native = app.mobile_system().stylus_capabilities().map_err(err)?;
+        Ok(InputCapabilities {
+            stylus: if native.available {
+                StylusAvailability::Available
+            } else {
+                StylusAvailability::NotDetected
+            },
+            pressure: native.pressure,
+            tilt: native.tilt,
+            native_device_events: true,
+        })
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(InputCapabilities {
+            stylus: StylusAvailability::Unknown,
+            pressure: false,
+            tilt: false,
+            native_device_events: false,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct MobileSystemInfo {

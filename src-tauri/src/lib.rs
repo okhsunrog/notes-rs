@@ -16,6 +16,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::is_ready,
             commands::startup_status,
             commands::mobile_system_info,
+            commands::input_capabilities,
             commands::set_system_bars_style,
             commands::sync_status,
             commands::server_ai_status,

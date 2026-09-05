@@ -31,6 +31,7 @@ export const queryKeys = {
     [...root, "attachments", "images", ...attachmentUuids] as const,
   history: [...root, "history"] as const,
   settings: [...root, "settings"] as const,
+  inputCapabilities: [...root, "input-capabilities"] as const,
   syncStatus: [...root, "sync-status"] as const,
   serverAi: [...root, "server-ai"] as const,
 };

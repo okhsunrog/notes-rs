@@ -14,6 +14,7 @@ export const commands = {
 	deviceName: string,
 	safeArea: SafeAreaInsets,
 } | null, CommandError>(__TAURI_INVOKE("mobile_system_info")),
+	inputCapabilities: () => typedError<InputCapabilities, CommandError>(__TAURI_INVOKE("input_capabilities")),
 	setSystemBarsStyle: (darkBackground: boolean) => typedError<null, CommandError>(__TAURI_INVOKE("set_system_bars_style", { darkBackground })),
 	syncStatus: () => __TAURI_INVOKE<SyncStatus>("sync_status"),
 	serverAiStatus: () => typedError<AiIndexStatus, CommandError>(__TAURI_INVOKE("server_ai_status")),
@@ -428,6 +429,13 @@ export type ImportDiagnostic = {
 	remediation: string | null,
 };
 
+export type InputCapabilities = {
+	stylus: StylusAvailability,
+	pressure: boolean,
+	tilt: boolean,
+	nativeDeviceEvents: boolean,
+};
+
 /**
  *  A calendar day without a timezone or time-of-day component.
  *  The private canonical string keeps the Tauri/Specta wire type simple while
@@ -635,6 +643,8 @@ export type StartupReadyEvent = null;
 export type StartupStatus = { state: "starting"; message: string } | { state: "ready" } | { state: "error"; message: string };
 
 export type StartupView = "dashboard" | "last_session" | "today" | "specific_page";
+
+export type StylusAvailability = "available" | "not_detected" | "unknown";
 
 export type SyncConnectionState = "disabled" | "connecting" | "syncing" | "online" | "offline" | "conflict" | "error";
 

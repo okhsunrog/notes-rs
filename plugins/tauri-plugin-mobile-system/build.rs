@@ -1,4 +1,5 @@
 const COMMANDS: &[&str] = &[
+    "get_stylus_capabilities",
     "get_safe_area_insets",
     "get_device_name",
     "set_system_bars_style",

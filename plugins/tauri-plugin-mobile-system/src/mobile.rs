@@ -15,6 +15,12 @@ const PLUGIN_IDENTIFIER: &str = "dev.okhsunrog.mobile_system";
 pub struct MobileSystem<R: Runtime>(PluginHandle<R>);
 
 impl<R: Runtime> MobileSystem<R> {
+    pub fn stylus_capabilities(&self) -> Result<crate::StylusCapabilities> {
+        self.0
+            .run_mobile_plugin("getStylusCapabilities", ())
+            .map_err(Into::into)
+    }
+
     pub fn safe_area_insets(&self) -> Result<SafeAreaInsets> {
         self.0
             .run_mobile_plugin("getSafeAreaInsets", ())

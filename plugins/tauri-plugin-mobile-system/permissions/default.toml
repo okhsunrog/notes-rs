@@ -1,3 +1,8 @@
 [default]
 description = "Default permissions for non-sensitive mobile system integration"
-permissions = ["allow-get-safe-area-insets", "allow-get-device-name", "allow-set-system-bars-style"]
+permissions = [
+  "allow-get-safe-area-insets",
+  "allow-get-device-name",
+  "allow-set-system-bars-style",
+  "allow-get-stylus-capabilities",
+]

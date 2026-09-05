@@ -2,6 +2,13 @@ package dev.okhsunrog.mobile_system
 
 import android.app.Activity
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.hardware.input.InputManager
+import android.view.InputDevice
+import android.view.MotionEvent
+import android.webkit.WebView
+import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -18,7 +25,44 @@ class SystemBarsStyleArgs {
 }
 
 @TauriPlugin
-class MobileSystemPlugin(private val activity: Activity) : Plugin(activity) {
+class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), InputManager.InputDeviceListener {
+    private val inputManager = activity.getSystemService(InputManager::class.java)
+
+    override fun load(webView: WebView) {
+        inputManager.registerInputDeviceListener(this, Handler(Looper.getMainLooper()))
+    }
+
+    override fun onDestroy(activity: AppCompatActivity) {
+        inputManager.unregisterInputDeviceListener(this)
+    }
+
+    override fun onResume(activity: AppCompatActivity) {
+        inputDevicesChanged()
+    }
+
+    override fun onInputDeviceAdded(deviceId: Int) = inputDevicesChanged()
+    override fun onInputDeviceRemoved(deviceId: Int) = inputDevicesChanged()
+    override fun onInputDeviceChanged(deviceId: Int) = inputDevicesChanged()
+
+    private fun inputDevicesChanged() {
+        trigger("inputDevicesChanged", JSObject())
+    }
+
+    @Command
+    fun getStylusCapabilities(invoke: Invoke) {
+        val devices = inputManager.inputDeviceIds.mapNotNull { inputManager.getInputDevice(it) }
+            .filter { !it.isVirtual && it.supportsSource(InputDevice.SOURCE_STYLUS) }
+        val result = JSObject()
+        result.put("available", devices.isNotEmpty())
+        result.put("pressure", devices.any { device ->
+            device.motionRanges.any { it.axis == MotionEvent.AXIS_PRESSURE && it.range > 0 }
+        })
+        result.put("tilt", devices.any { device ->
+            device.motionRanges.any { it.axis == MotionEvent.AXIS_TILT && it.range > 0 }
+        })
+        invoke.resolve(result)
+    }
+
     @Command
     fun getSafeAreaInsets(invoke: Invoke) {
         activity.runOnUiThread {
