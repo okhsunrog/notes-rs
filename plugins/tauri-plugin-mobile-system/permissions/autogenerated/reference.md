@@ -4,6 +4,7 @@ Default permissions for non-sensitive mobile system integration
 
 #### This default permission set includes the following:
 
+- `allow-input-events`
 - `allow-configure-onyx-ink`
 - `allow-commit-onyx-frame`
 - `allow-get-safe-area-insets`
@@ -172,6 +173,19 @@ Enables the set_system_bars_style command without any pre-configured scope.
 <td>
 
 Denies the set_system_bars_style command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mobile-system:allow-input-events`
+
+</td>
+<td>
+
+Subscribe to native input-device and BOOX stroke events.
 
 </td>
 </tr>

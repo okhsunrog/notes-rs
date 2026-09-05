@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-input-events"
+description = "Subscribe to native input-device and BOOX stroke events."
+commands.allow = ["register_listener", "remove_listener"]

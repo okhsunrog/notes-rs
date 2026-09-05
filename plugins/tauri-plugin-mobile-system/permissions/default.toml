@@ -1,6 +1,7 @@
 [default]
 description = "Default permissions for non-sensitive mobile system integration"
 permissions = [
+  "allow-input-events",
   "allow-configure-onyx-ink",
   "allow-commit-onyx-frame",
   "allow-get-safe-area-insets",
