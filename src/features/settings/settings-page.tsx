@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { onBackButtonPress } from "@tauri-apps/api/app";
+import { SettingsSelect } from "./settings-select";
 import { dismissBackOverlay } from "@/lib/back-overlays";
 import { useTheme } from "next-themes";
 import {
@@ -327,40 +328,34 @@ export function SettingsPage({
           description="Choose the native window frame or a borderless Tangleaf frame."
         >
           <Field label="Decoration mode">
-            <select
+            <SettingsSelect
+              label="Decoration mode"
               value={settings.windowDecorationMode}
-              onChange={(event) =>
-                update(
-                  "windowDecorationMode",
-                  event.currentTarget.value as SettingsSnapshot["windowDecorationMode"],
-                )
-              }
-              className="h-10 w-full rounded-xl border border-border/70 bg-background/70 px-3 text-sm shadow-none"
-            >
-              <option value="native">Native (system decorations)</option>
-              <option value="borderless">Borderless (Tangleaf controls)</option>
-            </select>
+              onValueChange={(value) => update("windowDecorationMode", value)}
+              options={[
+                { value: "native", label: "Native (system decorations)" },
+                { value: "borderless", label: "Borderless (Tangleaf controls)" },
+              ]}
+            />
           </Field>
           <p className="text-xs text-muted-foreground">
             Native mode uses system decorations. On Wayland, save your choice and restart the app to
             change the frame; the current window keeps its existing controls.
           </p>
           <Field label="Borderless corner radius">
-            <select
+            <SettingsSelect
+              label="Borderless corner radius"
               value={settings.windowCornerRadius}
               disabled={
                 !settings.windowCornerRoundingSupported ||
                 settings.windowDecorationMode !== "borderless"
               }
-              onChange={(event) => update("windowCornerRadius", Number(event.currentTarget.value))}
-              className="h-10 w-full rounded-xl border border-border/70 bg-background/70 px-3 text-sm disabled:opacity-50"
-            >
-              {[0, 6, 10, 16, 24].map((radius) => (
-                <option key={radius} value={radius}>
-                  {radius === 0 ? "Square" : `${radius} px${radius === 10 ? " (default)" : ""}`}
-                </option>
-              ))}
-            </select>
+              onValueChange={(value) => update("windowCornerRadius", value)}
+              options={[0, 6, 10, 16, 24].map((radius) => ({
+                value: radius,
+                label: radius === 0 ? "Square" : `${radius} px${radius === 10 ? " (default)" : ""}`,
+              }))}
+            />
           </Field>
           <p className="text-xs text-muted-foreground">
             Applies after saving on Linux and Windows, only in borderless mode. Maximized and
@@ -379,10 +374,10 @@ export function SettingsPage({
           description="Choose what this device shows when Tangleaf opens. Dashboard is the calm default; your notes are never changed by this choice."
         >
           <Field label="Open on launch">
-            <select
+            <SettingsSelect<SettingsSnapshot["startupView"]>
+              label="Open on launch"
               value={settings.startupView}
-              onChange={(event) => {
-                const startupView = event.currentTarget.value as SettingsSnapshot["startupView"];
+              onValueChange={(startupView) => {
                 setSettings((current) =>
                   current
                     ? {
@@ -397,13 +392,13 @@ export function SettingsPage({
                 );
                 setMessage("");
               }}
-              className="h-10 w-full rounded-xl border border-border/70 bg-background/70 px-3 text-sm shadow-none"
-            >
-              <option value="dashboard">Dashboard</option>
-              <option value="last_session">Restore last session</option>
-              <option value="today">Today&apos;s journal</option>
-              <option value="specific_page">A specific note</option>
-            </select>
+              options={[
+                { value: "dashboard", label: "Dashboard" },
+                { value: "last_session", label: "Restore last session" },
+                { value: "today", label: "Today's journal" },
+                { value: "specific_page", label: "A specific note" },
+              ]}
+            />
           </Field>
           {settings.startupView === "specific_page" && (
             <Field
@@ -414,19 +409,19 @@ export function SettingsPage({
                   : "Create a note before choosing it as your startup page."
               }
             >
-              <select
-                value={settings.startupPageUuid ?? ""}
+              <SettingsSelect
+                label="Startup note"
+                value={settings.startupPageUuid}
                 disabled={!startupPagesQuery.data?.length}
-                onChange={(event) => update("startupPageUuid", event.currentTarget.value || null)}
-                className="h-10 w-full rounded-xl border border-border/70 bg-background/70 px-3 text-sm shadow-none disabled:opacity-55"
-              >
-                {!startupPagesQuery.data?.length && <option value="">No notes available</option>}
-                {startupPagesQuery.data?.map((page) => (
-                  <option key={page.uuid} value={page.uuid}>
-                    {page.title ?? "Untitled note"}
-                  </option>
-                ))}
-              </select>
+                placeholder={
+                  startupPagesQuery.data?.length ? "Choose a note" : "No notes available"
+                }
+                onValueChange={(value) => update("startupPageUuid", value)}
+                options={(startupPagesQuery.data ?? []).map((page) => ({
+                  value: page.uuid,
+                  label: page.title ?? "Untitled note",
+                }))}
+              />
             </Field>
           )}
           <p className="text-xs leading-relaxed text-muted-foreground">
@@ -448,20 +443,16 @@ export function SettingsPage({
             label="AI trigger"
             hint="Enter-only avoids server requests while you are still typing. Press Enter once to request AI results, then again to open the selection."
           >
-            <select
+            <SettingsSelect
+              label="AI trigger"
               value={settings.aiSearchTrigger}
               disabled={!settings.aiSearchEnabled}
-              onChange={(event) =>
-                update(
-                  "aiSearchTrigger",
-                  event.currentTarget.value as SettingsSnapshot["aiSearchTrigger"],
-                )
-              }
-              className="h-10 w-full rounded-xl border border-border/70 bg-background/70 px-3 text-sm shadow-none disabled:opacity-55"
-            >
-              <option value="as_you_type">As you type</option>
-              <option value="enter_only">Enter only</option>
-            </select>
+              onValueChange={(value) => update("aiSearchTrigger", value)}
+              options={[
+                { value: "as_you_type", label: "As you type" },
+                { value: "enter_only", label: "Enter only" },
+              ]}
+            />
           </Field>
           <ToggleField
             checked={settings.aiSearchRerank}

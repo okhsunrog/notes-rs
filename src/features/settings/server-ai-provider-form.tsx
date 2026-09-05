@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { SettingsSelect } from "./settings-select";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, FlaskConical, Loader2, Save, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -146,20 +147,16 @@ export function ServerAiProviderForm({ provider, onError, onMessage }: Props) {
 
       <div className="grid gap-4 sm:grid-cols-2">
         <Field label="Completion protocol">
-          <select
+          <SettingsSelect
+            label="Completion protocol"
             value={draft.completionProtocol}
             disabled={busy}
-            onChange={(event) =>
-              set(
-                "completionProtocol",
-                event.currentTarget.value as AiProviderSettingsUpdate["completionProtocol"],
-              )
-            }
-            className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm dark:bg-input/30"
-          >
-            <option value="openai">OpenAI-compatible</option>
-            <option value="anthropic">Anthropic-compatible</option>
-          </select>
+            onValueChange={(value) => set("completionProtocol", value)}
+            options={[
+              { value: "openai", label: "OpenAI-compatible" },
+              { value: "anthropic", label: "Anthropic-compatible" },
+            ]}
+          />
         </Field>
         <Field label="Completion API URL">
           <Input
