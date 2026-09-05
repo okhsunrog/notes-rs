@@ -30,6 +30,7 @@ android {
 
 dependencies {
     implementation("com.onyx.android.sdk:onyxsdk-pen:1.5.4.3")
+    implementation("org.lsposed.hiddenapibypass:hiddenapibypass:6.1")
     implementation("androidx.core:core-ktx:1.17.0")
     implementation(project(":tauri-android"))
 }

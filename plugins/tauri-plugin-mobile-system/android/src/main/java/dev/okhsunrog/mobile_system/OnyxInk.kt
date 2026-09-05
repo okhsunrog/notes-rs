@@ -18,6 +18,7 @@ import com.onyx.android.sdk.pen.data.TouchPointList
 import com.onyx.android.sdk.utils.ResManager
 import org.json.JSONArray
 import org.json.JSONObject
+import org.lsposed.hiddenapibypass.HiddenApiBypass
 import kotlin.math.ceil
 import kotlin.math.floor
 
@@ -66,6 +67,13 @@ class OnyxInk(
     }
 
     init {
+        // Vendor firmware APIs are hidden from apps targeting recent Android versions.
+        // Initialize before any EpdController/Device static lookup, including cleanup calls.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            check(HiddenApiBypass.addHiddenApiExemptions("Landroid/onyx/", "Landroid/view/View;")) {
+                "BOOX firmware drawing APIs are unavailable"
+            }
+        }
         webView.viewTreeObserver.addOnWindowFocusChangeListener(this)
     }
 
@@ -97,6 +105,9 @@ class OnyxInk(
         try {
             if (helper == null) {
                 ResManager.init(activity.applicationContext)
+                check(EpdController.getTouchWidth() > 0 && EpdController.getTouchHeight() > 0) {
+                    "BOOX firmware did not expose the digitizer coordinate range"
+                }
                 maxPressure = EpdController.getMaxTouchPressure().takeIf { it > 0 } ?: 4095f
                 helper = TouchHelper.create(webView, TouchHelper.FEATURE_SF_TOUCH_RENDER, callback(generation), false)
                 helper!!.setPenUpRefreshEnabled(false) // Refresh only after the web canvas acknowledges its frame.

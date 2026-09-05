@@ -28,8 +28,15 @@ published through a synced temporary file and atomic replacement. A failed save 
 current in-memory draft for retry and prevents Done from closing the sheet. Invalid saved data
 is reported rather than overwritten. An interrupted, unfinished stroke is not guaranteed to survive.
 
+JSON is an interim input-test format. The agreed production direction is columnar stroke data,
+with point offsets per stroke and separate coordinate, pressure, tilt, and time columns. Codec
+and quantization choices are being benchmarked separately. Preserve native source precision and
+store coordinate transforms/pressure ranges as metadata when comparing compression variants;
+the prototype's normalized f64 values must not silently become the production encoding contract.
+
 This initial sheet is 1000 × 1400 logical units, limited to 150,000 points and 16 MiB on disk.
-There is no ONYX acceleration, recognition, note insertion, or handwriting sync in this experiment.
+Recognition, note insertion, and handwriting sync are not included. BOOX acceleration is an
+optional native rendering path described below; the portable canvas remains the fallback.
 
 ## Device check
 
@@ -43,7 +50,7 @@ There is no ONYX acceleration, recognition, note insertion, or handwriting sync 
 7. On Android without a digitizer, confirm automatic mode hides the menu. On desktop, test a
    real tablet, including pressure and reconnect behavior; mouse testing is not a substitute.
 
-If normal canvas rendering feels too slow on BOOX, compare ONYX SDK rendering on the same sheet.
+Compare the portable canvas and ONYX SDK rendering on the same BOOX device.
 Once writing is comfortable, send a rendered image through the configured completion provider
 and selected chat model. Then add durable handwriting attachments, versioned transcripts,
 local FTS integration, and sync as a separate feature increment.
@@ -112,3 +119,10 @@ Sources inspected locally under `~/tmp_zfs/OnyxAndroidDemo` (commit `689ff7f`) a
 The Git repository contains examples and documentation; the Pen SDK implementation is distributed
 as compiled Maven artifacts. The README and older documentation list older dependency versions;
 the inspected published API additionally exposes explicit renderer selection and refresh controls.
+
+Runtime integration found two additional requirements: Tauri permissions must explicitly allow
+native `register_listener`/`remove_listener`, and the BOOX firmware APIs must be accessible before
+the SDK's static Device initialization. Like the vendor demo, the adapter uses HiddenApiBypass
+(6.1), restricted to `android.onyx` and `android.view.View` APIs. Without it, Android 13 blocks
+firmware calls and the SDK can report a created helper despite an empty coordinate mapping.
+The adapter also checks the exposed digitizer coordinate range before enabling native ink.
