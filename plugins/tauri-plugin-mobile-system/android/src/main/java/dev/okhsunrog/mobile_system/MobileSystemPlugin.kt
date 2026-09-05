@@ -26,19 +26,57 @@ class SystemBarsStyleArgs {
 @TauriPlugin
 class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), InputManager.InputDeviceListener {
     private val inputManager = activity.getSystemService(InputManager::class.java)
+    private var inkWebView: WebView? = null
+    private var onyxInk: OnyxInk? = null
 
     override fun load(webView: WebView) {
+        inkWebView = webView
         inputManager.registerInputDeviceListener(this, Handler(Looper.getMainLooper()))
     }
 
     @Suppress("OVERRIDE_DEPRECATION") // This plugin does not depend on AppCompat types.
     override fun onDestroy() {
+        onyxInk?.destroy()
         inputManager.unregisterInputDeviceListener(this)
     }
 
     @Suppress("OVERRIDE_DEPRECATION")
     override fun onResume() {
+        onyxInk?.onResume()
         inputDevicesChanged()
+    }
+
+    @Suppress("OVERRIDE_DEPRECATION")
+    override fun onPause() {
+        onyxInk?.onPause()
+    }
+
+    @Command
+    fun configureOnyxInk(invoke: Invoke) {
+        val args = invoke.parseArgs(OnyxInkArgs::class.java)
+        activity.runOnUiThread {
+            if (!OnyxInk.supported()) {
+                invoke.resolve(JSObject().put("available", false).put("active", false))
+                return@runOnUiThread
+            }
+            try {
+                if (onyxInk == null && args.enabled) {
+                    onyxInk = OnyxInk(activity, checkNotNull(inkWebView)) { trigger("onyxInk", it) }
+                }
+                invoke.resolve(onyxInk?.configure(args) ?: JSObject().put("available", true).put("active", false))
+            } catch (error: Throwable) {
+                invoke.reject("Could not start BOOX ink: ${error.message}")
+            }
+        }
+    }
+
+    @Command
+    fun commitOnyxFrame(invoke: Invoke) {
+        val args = invoke.parseArgs(OnyxFrameArgs::class.java)
+        activity.runOnUiThread {
+            onyxInk?.commit(args)
+            invoke.resolve()
+        }
     }
 
     override fun onInputDeviceAdded(deviceId: Int) = inputDevicesChanged()

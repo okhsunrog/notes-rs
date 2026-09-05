@@ -4,6 +4,8 @@ Default permissions for non-sensitive mobile system integration
 
 #### This default permission set includes the following:
 
+- `allow-configure-onyx-ink`
+- `allow-commit-onyx-frame`
 - `allow-get-safe-area-insets`
 - `allow-get-device-name`
 - `allow-set-system-bars-style`
@@ -17,6 +19,58 @@ Default permissions for non-sensitive mobile system integration
 <th>Description</th>
 </tr>
 
+
+<tr>
+<td>
+
+`mobile-system:allow-commit-onyx-frame`
+
+</td>
+<td>
+
+Enables the commit_onyx_frame command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mobile-system:deny-commit-onyx-frame`
+
+</td>
+<td>
+
+Denies the commit_onyx_frame command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mobile-system:allow-configure-onyx-ink`
+
+</td>
+<td>
+
+Enables the configure_onyx_ink command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mobile-system:deny-configure-onyx-ink`
+
+</td>
+<td>
+
+Denies the configure_onyx_ink command without any pre-configured scope.
+
+</td>
+</tr>
 
 <tr>
 <td>

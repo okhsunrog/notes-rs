@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-commit-onyx-frame"
+description = "Enables the commit_onyx_frame command without any pre-configured scope."
+commands.allow = ["commit_onyx_frame"]
+
+[[permission]]
+identifier = "deny-commit-onyx-frame"
+description = "Denies the commit_onyx_frame command without any pre-configured scope."
+commands.deny = ["commit_onyx_frame"]

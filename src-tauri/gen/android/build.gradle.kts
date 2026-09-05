@@ -45,6 +45,16 @@ allprojects {
     repositories {
         google()
         mavenCentral()
+        maven {
+            url = uri("https://repo.boox.com/repository/maven-public/")
+            content {
+                includeGroup("com.onyx.android.sdk")
+                // Legacy transitive artifacts mirrored by the SDK publisher.
+                includeGroup("pub.devrel")
+                includeGroup("com.tencent")
+                includeGroup("com.jakewharton.hugo.fix")
+            }
+        }
     }
 }
 

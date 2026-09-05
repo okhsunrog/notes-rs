@@ -1,0 +1,253 @@
+package dev.okhsunrog.mobile_system
+
+import android.app.Activity
+import android.graphics.Color
+import android.graphics.Rect
+import android.graphics.RectF
+import android.os.Build
+import android.view.ViewTreeObserver
+import android.webkit.WebView
+import app.tauri.annotation.InvokeArg
+import app.tauri.plugin.JSObject
+import com.onyx.android.sdk.api.device.epd.EpdController
+import com.onyx.android.sdk.api.device.epd.UpdateMode
+import com.onyx.android.sdk.data.note.TouchPoint
+import com.onyx.android.sdk.pen.RawInputCallback
+import com.onyx.android.sdk.pen.TouchHelper
+import com.onyx.android.sdk.pen.data.TouchPointList
+import com.onyx.android.sdk.utils.ResManager
+import org.json.JSONArray
+import org.json.JSONObject
+import kotlin.math.ceil
+import kotlin.math.floor
+
+@InvokeArg
+class OnyxInkArgs {
+    var session: String = ""
+    var enabled: Boolean = false
+    var left: Double = 0.0
+    var top: Double = 0.0
+    var width: Double = 0.0
+    var height: Double = 0.0
+    var clipTop: Double = 0.0
+    var clipBottom: Double = 0.0
+    var viewportWidth: Double = 0.0
+    var strokeWidth: Double = 3.0
+    var eraser: Boolean = false
+}
+
+@InvokeArg
+class OnyxFrameArgs {
+    var session: String = ""
+    var sequence: Long = 0
+}
+
+/** Vendor fast ink is transient. Completed points go to the ordinary, durable web canvas. */
+class OnyxInk(
+    private val activity: Activity,
+    private val webView: WebView,
+    private val emit: (JSObject) -> Unit,
+) : ViewTreeObserver.OnWindowFocusChangeListener {
+    private var helper: TouchHelper? = null
+    private var config: OnyxInkArgs? = null
+    private var sheet = RectF()
+    private var limit = Rect()
+    private var resumed = true
+    private var drawing = false
+    private var sequence = 0L
+    private var generation = 0L
+    private var paintedSequence = -1L
+    private var maxPressure = 4095f
+    private var failed: String? = null
+    private val refresh = Runnable { refreshFrame() }
+
+    companion object {
+        fun supported(): Boolean = Build.MANUFACTURER.equals("ONYX", true)
+    }
+
+    init {
+        webView.viewTreeObserver.addOnWindowFocusChangeListener(this)
+    }
+
+    fun configure(args: OnyxInkArgs): JSObject {
+        if (!args.enabled) {
+            // Ignore cleanup from a sheet which has already been replaced.
+            if (config?.session == args.session) close()
+            return status()
+        }
+        require(args.session.length in 1..128)
+        require(listOf(args.left, args.top, args.width, args.height, args.clipTop,
+            args.clipBottom, args.viewportWidth, args.strokeWidth).all { it.isFinite() })
+        require(args.width > 0 && args.height > 0 && args.viewportWidth > 0)
+        require(args.strokeWidth in 0.1..20.0)
+        check(failed == null) { failed ?: "Pen SDK unavailable" }
+        if (config?.session != args.session) {
+            close()
+            paintedSequence = -1
+        }
+        pause()
+        config = args
+        // CSS pixels may differ from Android density because BOOX has per-app DPI settings.
+        val scale = webView.width / args.viewportWidth
+        sheet = RectF((args.left * scale).toFloat(), (args.top * scale).toFloat(),
+            ((args.left + args.width) * scale).toFloat(), ((args.top + args.height) * scale).toFloat())
+        limit = Rect(floor(sheet.left).toInt(), ceil(maxOf(sheet.top.toDouble(), args.clipTop * scale)).toInt(),
+            ceil(sheet.right).toInt(), floor(minOf(sheet.bottom.toDouble(), args.clipBottom * scale)).toInt())
+        if (!limit.intersect(0, 0, webView.width, webView.height)) limit.setEmpty()
+        try {
+            if (helper == null) {
+                ResManager.init(activity.applicationContext)
+                maxPressure = EpdController.getMaxTouchPressure().takeIf { it > 0 } ?: 4095f
+                helper = TouchHelper.create(webView, TouchHelper.FEATURE_SF_TOUCH_RENDER, callback(generation), false)
+                helper!!.setPenUpRefreshEnabled(false) // Refresh only after the web canvas acknowledges its frame.
+                helper!!.setPostInputEvent(false)
+                helper!!.setHostViewScrollListenerEnabled(false)
+                helper!!.setLimitRect(limit, emptyList()).openRawDrawing()
+                helper!!.setEraserRawDrawingEnabled(false, 0)
+                helper!!.enableSideBtnErase(true)
+            }
+            helper!!.setLimitRect(limit, emptyList())
+                .setStrokeWidth((args.strokeWidth * sheet.width() / 1000).toFloat())
+                .setStrokeColor(Color.BLACK)
+                .setStrokeStyle(TouchHelper.STROKE_STYLE_FOUNTAIN)
+            resume()
+            check(helper!!.isRawDrawingCreated) { "Pen SDK did not create a drawing session" }
+            return status()
+        } catch (error: Throwable) {
+            failed = error.message ?: error.javaClass.simpleName
+            close()
+            throw error
+        }
+    }
+
+    fun status(): JSObject = JSObject().apply {
+        put("available", failed == null)
+        put("active", helper?.isRawDrawingInputEnabled == true)
+        put("error", failed)
+    }
+
+    fun commit(args: OnyxFrameArgs) {
+        if (config?.session != args.session) return
+        // A visual-state callback waits for Chromium's compositor, not just JS execution.
+        webView.postVisualStateCallback(args.sequence, object : WebView.VisualStateCallback() {
+            override fun onComplete(requestId: Long) {
+                if (config?.session != args.session) return
+                paintedSequence = maxOf(paintedSequence, requestId)
+                webView.removeCallbacks(refresh)
+                webView.postDelayed(refresh, 120)
+            }
+        })
+    }
+
+    private fun refreshFrame() {
+        if (drawing || paintedSequence < sequence || !resumed || !webView.hasWindowFocus()) return
+        val current = helper ?: return
+        current.setRawDrawingRenderEnabled(false)
+        EpdController.invalidate(webView, UpdateMode.DU)
+        current.setRawDrawingRenderEnabled(config?.eraser == false && !limit.isEmpty)
+    }
+
+    fun onPause() { resumed = false; pause() }
+    fun onResume() { resumed = true; resume() }
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        if (hasFocus) resume() else pause()
+    }
+
+    private fun resume() {
+        if (!resumed || !webView.hasWindowFocus() || config == null || limit.isEmpty) return
+        helper?.setRawDrawingEnabled(true)
+        helper?.setRawDrawingRenderEnabled(config?.eraser == false)
+    }
+
+    private fun pause() {
+        webView.removeCallbacks(refresh)
+        helper?.setRawDrawingEnabled(false)
+        resetPalm()
+        if (drawing) {
+            drawing = false
+            send("cancel")
+        }
+    }
+
+    private fun resetPalm() {
+        EpdController.appResetCTPDisableRegion(activity)
+    }
+
+    fun close() {
+        pause()
+        generation++
+        helper?.closeRawDrawing()
+        helper = null
+        config = null
+    }
+
+    fun destroy() {
+        close()
+        webView.viewTreeObserver.removeOnWindowFocusChangeListener(this)
+    }
+
+    private fun send(kind: String, points: JSONArray? = null, erasing: Boolean = false) {
+        val args = config ?: return
+        emit(JSObject().apply {
+            put("session", args.session)
+            put("kind", kind)
+            put("sequence", sequence)
+            put("width", args.strokeWidth)
+            put("erasing", erasing || args.eraser)
+            if (points != null) put("points", points)
+        })
+    }
+
+    private fun begin() {
+        if (config == null || helper?.isRawDrawingInputEnabled != true) return
+        drawing = true
+        webView.removeCallbacks(refresh)
+        val position = IntArray(2)
+        webView.getLocationOnScreen(position)
+        val palm = Rect(limit).apply { offset(position[0], position[1]) }
+        EpdController.setAppCTPDisableRegion(activity, arrayOf(palm))
+        send("begin")
+    }
+
+    private fun end() {
+        if (!drawing) return
+        drawing = false
+        resetPalm()
+        send("end")
+        webView.postDelayed(refresh, 120)
+    }
+
+    private fun stroke(list: TouchPointList, erasing: Boolean) {
+        if (!drawing || config == null || list.isEmpty) return
+        val points = JSONArray()
+        var pressure = 0.5
+        // Same point budget as the portable draft. Never silently retain an unbounded native list.
+        for (point in list.points.take(150_000)) {
+            if (!point.x.isFinite() || !point.y.isFinite() || !point.pressure.isFinite()) continue
+            if (point.pressure > 0) pressure = (point.pressure / maxPressure).toDouble().coerceIn(0.0, 1.0)
+            points.put(JSONObject().apply {
+                put("x", ((point.x - sheet.left) / sheet.width() * 1000).toDouble().coerceIn(0.0, 1000.0))
+                put("y", ((point.y - sheet.top) / sheet.height() * 1400).toDouble().coerceIn(0.0, 1400.0))
+                put("pressure", pressure)
+                put("tiltX", point.tiltX.coerceIn(-90, 90))
+                put("tiltY", point.tiltY.coerceIn(-90, 90))
+                put("time", point.timestamp.coerceAtLeast(0))
+            })
+        }
+        if (points.length() > 0) {
+            sequence++
+            send("stroke", points, erasing)
+        }
+    }
+
+    private fun callback(epoch: Long) = object : RawInputCallback() {
+        override fun onBeginRawDrawing(shortcut: Boolean, point: TouchPoint) { if (epoch == generation) begin() }
+        override fun onEndRawDrawing(outside: Boolean, point: TouchPoint) { if (epoch == generation) end() }
+        override fun onRawDrawingTouchPointMoveReceived(point: TouchPoint) {}
+        override fun onRawDrawingTouchPointListReceived(points: TouchPointList) { if (epoch == generation) stroke(points, false) }
+        override fun onBeginRawErasing(shortcut: Boolean, point: TouchPoint) { if (epoch == generation) begin() }
+        override fun onEndRawErasing(outside: Boolean, point: TouchPoint) { if (epoch == generation) end() }
+        override fun onRawErasingTouchPointMoveReceived(point: TouchPoint) {}
+        override fun onRawErasingTouchPointListReceived(points: TouchPointList) { if (epoch == generation) stroke(points, true) }
+    }
+}

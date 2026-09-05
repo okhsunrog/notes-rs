@@ -94,6 +94,10 @@ android {
     buildFeatures {
         buildConfig = true
     }
+    packaging {
+        // ONYX's native modules bundle the same C++ runtime (as in the vendor demo).
+        jniLibs.pickFirsts.add("lib/*/libc++_shared.so")
+    }
 }
 
 rust {

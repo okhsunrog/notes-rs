@@ -1,4 +1,6 @@
 const COMMANDS: &[&str] = &[
+    "configure_onyx_ink",
+    "commit_onyx_frame",
     "get_stylus_capabilities",
     "get_safe_area_insets",
     "get_device_name",

@@ -1,6 +1,8 @@
 [default]
 description = "Default permissions for non-sensitive mobile system integration"
 permissions = [
+  "allow-configure-onyx-ink",
+  "allow-commit-onyx-frame",
   "allow-get-safe-area-insets",
   "allow-get-device-name",
   "allow-set-system-bars-style",
