@@ -10,7 +10,7 @@ use jni::{
 /// This is called synchronously from `MainActivity.onCreate`. The explicit JNI entrypoint is
 /// intentional: Tauri's Rust setup hook runs after the Android activity and does not expose the
 /// `JNIEnv` and `Context` handles required by rustls-platform-verifier.
-#[unsafe(export_name = "Java_dev_okhsunrog_notes_1rs_MainActivity_initializeRustlsPlatformVerifier")]
+#[unsafe(export_name = "Java_dev_okhsunrog_tangleaf_MainActivity_initializeRustlsPlatformVerifier")]
 pub extern "system" fn initialize_rustls_platform_verifier<'caller>(
     mut env: EnvUnowned<'caller>,
     _activity: JObject<'caller>,
