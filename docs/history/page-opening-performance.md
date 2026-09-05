@@ -95,3 +95,7 @@ launch worked. This behavior was also present in the baseline. Native
 with diagnostic builds, but the final release's exit history reported
 `EXIT_SELF`, status 0. These observations do not establish a common cause.
 The startup issue has not been diagnosed or classified as fixed by this work.
+
+Follow-up: [Android update lifecycle investigation](android-update-lifecycle.md)
+identified an immediate manual launch racing with SystemUI's post-update
+restoration and traced the resulting runtime exit.

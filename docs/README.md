@@ -27,6 +27,7 @@ not as instructions to execute against the current codebase:
 - [Markdown import and export](history/markdown-import-export.md)
 - [Image-preview performance](history/image-preview-performance.md)
 - [Page-opening responsiveness](history/page-opening-performance.md)
+- [Android update lifecycle and image viewer Back](history/android-update-lifecycle.md)
 
 Keep product-facing setup and usage information in the root README. Put durable
 design documentation here; do not add session handoffs or temporary merge reports
