@@ -424,6 +424,13 @@ html::before {
     background: transparent;
   }
 
+  .app-chrome {
+    background: var(--app-viewport-background);
+    background-attachment: fixed;
+    background-position: top left;
+    background-size: 100vw 100dvh;
+  }
+
   .workspace-frame {
     background: var(--canvas);
   }

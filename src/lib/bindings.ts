@@ -531,9 +531,14 @@ export type SearchTokenMode = "plain" | "prefix";
 
 export type SecretKey = "SYNC_TOKEN";
 
+export type SettingsCapabilities = {
+	windowDecorations: boolean,
+	windowCornerRounding: boolean,
+};
+
 export type SettingsSnapshot = {
+	capabilities: SettingsCapabilities,
 	windowCornerRadius: number,
-	windowCornerRoundingSupported: boolean,
 	windowDecorationMode: WindowDecorationMode,
 	activeWindowDecorationMode: WindowDecorationMode,
 	windowDecorationsRequireRestart: boolean,

@@ -5,8 +5,11 @@ import { toSettingsUpdate } from "./settings-update";
 describe("settings update mapping", () => {
   it("keeps the persisted settings contract in one place", () => {
     const snapshot = {
+      capabilities: {
+        windowDecorations: true,
+        windowCornerRounding: true,
+      },
       windowCornerRadius: 10,
-      windowCornerRoundingSupported: true,
       windowDecorationMode: "native",
       activeWindowDecorationMode: "borderless",
       windowDecorationsRequireRestart: true,
@@ -27,6 +30,7 @@ describe("settings update mapping", () => {
     expect(update).not.toHaveProperty("configPath");
     expect(update).not.toHaveProperty("activeWindowDecorationMode");
     expect(update).not.toHaveProperty("windowDecorationsRequireRestart");
+    expect(update).not.toHaveProperty("capabilities");
     expect(update.windowDecorationMode).toBe("native");
     expect(update.apiKeys).toEqual({ SYNC_TOKEN: "secret" });
     expect(update.clearKeys).toEqual(["SYNC_TOKEN"]);

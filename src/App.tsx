@@ -61,7 +61,8 @@ function App() {
     enabled: ready,
   });
   useWindowCorners(
-    windowDecorationMode === "borderless" && !!settingsQuery.data?.windowCornerRoundingSupported,
+    windowDecorationMode === "borderless" &&
+      !!settingsQuery.data?.capabilities.windowCornerRounding,
     settingsQuery.data?.windowCornerRadius ?? 10,
   );
   useEffect(() => {

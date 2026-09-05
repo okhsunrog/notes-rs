@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { onBackButtonPress } from "@tauri-apps/api/app";
+import { TangleafMark } from "@/brand/TangleafMark";
+import "@/brand/brand.css";
 import { SettingsSelect } from "./settings-select";
 import { dismissBackOverlay } from "@/lib/back-overlays";
 import { useTheme } from "next-themes";
@@ -242,28 +244,37 @@ export function SettingsPage({
     <div className="app-shell h-full overflow-y-auto text-foreground">
       <header
         data-tauri-drag-region
-        className="sticky top-0 z-20 flex h-16 items-center justify-between border-b border-border/50 bg-background/80 px-5 backdrop-blur-xl"
+        className={cn(
+          "app-chrome sticky top-0 z-20 flex items-center justify-between border-b border-border/50",
+          compact ? "h-14 px-3" : "h-16 px-5",
+        )}
       >
-        <div className="flex items-center gap-3">
+        <div className={cn("flex items-center", compact ? "gap-2" : "gap-3")}>
           <Button
             variant="ghost"
-            size="icon-sm"
+            size={compact ? "icon-lg" : "icon-sm"}
             className="rounded-xl"
             onClick={onBack}
             aria-label="Back to notes"
           >
-            <ArrowLeft className="size-4" />
+            <ArrowLeft className={compact ? "size-5" : "size-4"} />
           </Button>
-          <TangleafMark width={32} height={32} />
+          {!compact && <TangleafMark width={32} height={32} />}
           <div>
-            <h1 className="font-semibold tracking-tight">Settings</h1>
-            <p className="text-xs text-muted-foreground">Device, appearance, and server</p>
+            <h1 className={cn("font-semibold tracking-tight", compact && "text-base")}>Settings</h1>
+            {!compact && (
+              <p className="text-xs text-muted-foreground">Device, appearance, and server</p>
+            )}
           </div>
         </div>
-        {settings.activeWindowDecorationMode === "borderless" && <WindowControls />}
+        {settings.capabilities.windowDecorations &&
+          settings.activeWindowDecorationMode === "borderless" && <WindowControls />}
       </header>
 
-      <form onSubmit={submit} className="mx-auto max-w-4xl space-y-7 p-6 pb-24 sm:p-10">
+      <form
+        onSubmit={submit}
+        className="mx-auto max-w-4xl space-y-7 px-4 py-5 pb-[calc(6rem+var(--safe-area-inset-bottom))] sm:p-10"
+      >
         <SettingsSection
           title="Appearance"
           description="Choose a brightness mode and a color atmosphere. Every palette has a tuned light and dark version."
@@ -323,51 +334,54 @@ export function SettingsPage({
           </FieldGroup>
         </SettingsSection>
 
-        <SettingsSection
-          title="Window"
-          description="Choose the native window frame or a borderless Tangleaf frame."
-        >
-          <Field label="Decoration mode">
-            <SettingsSelect
-              label="Decoration mode"
-              value={settings.windowDecorationMode}
-              onValueChange={(value) => update("windowDecorationMode", value)}
-              options={[
-                { value: "native", label: "Native (system decorations)" },
-                { value: "borderless", label: "Borderless (Tangleaf controls)" },
-              ]}
-            />
-          </Field>
-          <p className="text-xs text-muted-foreground">
-            Native mode uses system decorations. On Wayland, save your choice and restart the app to
-            change the frame; the current window keeps its existing controls.
-          </p>
-          <Field label="Borderless corner radius">
-            <SettingsSelect
-              label="Borderless corner radius"
-              value={settings.windowCornerRadius}
-              disabled={
-                !settings.windowCornerRoundingSupported ||
-                settings.windowDecorationMode !== "borderless"
-              }
-              onValueChange={(value) => update("windowCornerRadius", value)}
-              options={[0, 6, 10, 16, 24].map((radius) => ({
-                value: radius,
-                label: radius === 0 ? "Square" : `${radius} px${radius === 10 ? " (default)" : ""}`,
-              }))}
-            />
-          </Field>
-          <p className="text-xs text-muted-foreground">
-            Applies after saving on Linux and Windows, only in borderless mode. Maximized and
-            fullscreen windows stay square.
-          </p>
-          {settings.windowDecorationsRequireRestart &&
-            settingsQuery.data?.windowDecorationMode !== settings.activeWindowDecorationMode && (
-              <p role="status" className="text-sm text-muted-foreground">
-                Saved window frame change will apply after restarting the app.
-              </p>
-            )}
-        </SettingsSection>
+        {settings.capabilities.windowDecorations && (
+          <SettingsSection
+            title="Window"
+            description="Choose the native window frame or a borderless Tangleaf frame."
+          >
+            <Field label="Decoration mode">
+              <SettingsSelect
+                label="Decoration mode"
+                value={settings.windowDecorationMode}
+                onValueChange={(value) => update("windowDecorationMode", value)}
+                options={[
+                  { value: "native", label: "Native (system decorations)" },
+                  { value: "borderless", label: "Borderless (Tangleaf controls)" },
+                ]}
+              />
+            </Field>
+            <p className="text-xs text-muted-foreground">
+              Native mode uses system decorations. On Wayland, save your choice and restart the app
+              to change the frame; the current window keeps its existing controls.
+            </p>
+            <Field label="Borderless corner radius">
+              <SettingsSelect
+                label="Borderless corner radius"
+                value={settings.windowCornerRadius}
+                disabled={
+                  !settings.capabilities.windowCornerRounding ||
+                  settings.windowDecorationMode !== "borderless"
+                }
+                onValueChange={(value) => update("windowCornerRadius", value)}
+                options={[0, 6, 10, 16, 24].map((radius) => ({
+                  value: radius,
+                  label:
+                    radius === 0 ? "Square" : `${radius} px${radius === 10 ? " (default)" : ""}`,
+                }))}
+              />
+            </Field>
+            <p className="text-xs text-muted-foreground">
+              Applies after saving on Linux and Windows, only in borderless mode. Maximized and
+              fullscreen windows stay square.
+            </p>
+            {settings.windowDecorationsRequireRestart &&
+              settingsQuery.data?.windowDecorationMode !== settings.activeWindowDecorationMode && (
+                <p role="status" className="text-sm text-muted-foreground">
+                  Saved window frame change will apply after restarting the app.
+                </p>
+              )}
+          </SettingsSection>
+        )}
 
         <SettingsSection
           title="Startup"
@@ -611,5 +625,3 @@ export function SettingsPage({
     </div>
   );
 }
-import { TangleafMark } from "@/brand/TangleafMark";
-import "@/brand/brand.css";

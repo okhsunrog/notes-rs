@@ -85,9 +85,25 @@ pub enum SecretKey {
 
 #[derive(Debug, Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
+pub struct SettingsCapabilities {
+    pub window_decorations: bool,
+    pub window_corner_rounding: bool,
+}
+
+impl SettingsCapabilities {
+    const fn current() -> Self {
+        Self {
+            window_decorations: cfg!(not(mobile)),
+            window_corner_rounding: cfg!(any(target_os = "linux", target_os = "windows")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
 pub struct SettingsSnapshot {
+    pub capabilities: SettingsCapabilities,
     pub window_corner_radius: u8,
-    pub window_corner_rounding_supported: bool,
     pub window_decoration_mode: WindowDecorationMode,
     pub active_window_decoration_mode: WindowDecorationMode,
     pub window_decorations_require_restart: bool,
@@ -246,8 +262,8 @@ fn snapshot(stored: StoredSettings, path: PathBuf) -> Result<SettingsSnapshot> {
         .into_iter()
         .collect();
     Ok(SettingsSnapshot {
+        capabilities: SettingsCapabilities::current(),
         window_corner_radius: stored.window_corner_radius,
-        window_corner_rounding_supported: cfg!(any(target_os = "linux", target_os = "windows")),
         window_decoration_mode: stored.window_decoration_mode,
         active_window_decoration_mode: stored.window_decoration_mode,
         window_decorations_require_restart: false,
@@ -542,6 +558,11 @@ mod tests {
         assert_eq!(snapshot.ai_search_trigger, AiSearchTrigger::EnterOnly);
         assert!(!snapshot.ai_search_rerank);
         assert!(snapshot.search_debug_sources);
+        assert_eq!(snapshot.capabilities.window_decorations, cfg!(not(mobile)));
+        assert_eq!(
+            snapshot.capabilities.window_corner_rounding,
+            cfg!(any(target_os = "linux", target_os = "windows"))
+        );
     }
 
     #[test]
