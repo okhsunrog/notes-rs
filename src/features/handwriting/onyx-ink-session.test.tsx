@@ -310,7 +310,7 @@ it("coalesces queued previews and discards them when the full stroke arrives", a
   });
   expect(input).toHaveBeenCalledTimes(1); // Only begin; 100 positions wait for one frame.
   await act(async () => flushFrames());
-  expect(input).toHaveBeenLastCalledWith(preview(100));
+  expect(input).toHaveBeenLastCalledWith(preview(100), latest);
   expect(input).toHaveBeenCalledTimes(2);
   await act(async () => {
     bridge.event(preview(101));
@@ -325,4 +325,37 @@ it("coalesces queued previews and discards them when the full stroke arrives", a
   });
   expect(input.mock.calls.filter(([e]) => e.kind === "preview")).toHaveLength(1);
   expect(latest.strokes[0]!.points[1]!.x).toBe(200);
+});
+
+it("starts hardware erasing from newly received ink before React renders the previous batch", async () => {
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+  await act(async () => root.render(<EditorSheet tool="pen" />));
+  const { session } = bridge.invoke.mock.calls.find(([command]) =>
+    command.endsWith("configure_onyx_ink"),
+  )![1];
+  const point = { x: 500, y: 500, pressure: 0.7, tiltX: 0, tiltY: 0, time: 1 };
+  const event: OnyxInkEvent = {
+    session,
+    kind: "stroke",
+    sequence: 1,
+    width: 3,
+    erasing: false,
+    points: [point],
+  };
+  await act(async () => {
+    bridge.event(event);
+    // Flip the pen and erase elsewhere before React has rendered the new dot.
+    bridge.event({ ...event, kind: "begin", erasing: true, points: [{ ...point, x: 900 }] });
+    bridge.event({ ...event, sequence: 2, erasing: true, points: [{ ...point, x: 900 }] });
+    bridge.event({ ...event, sequence: 2, kind: "end", erasing: true });
+  });
+  expect(latest.strokes).toHaveLength(2);
+  expect(latest.strokes[1]!.points).toEqual([point]);
+  await act(async () => {
+    bridge.event({ ...event, kind: "begin", sequence: 2, erasing: true });
+    bridge.event({ ...event, sequence: 3, erasing: true });
+    bridge.event({ ...event, sequence: 3, kind: "end", erasing: true });
+  });
+  expect(latest.strokes).toHaveLength(1);
+  expect(latest.strokes[0]!.id).toBe("line");
 });

@@ -68,7 +68,7 @@ export function useOnyxInk({
   lassoMode?: LassoMode;
   selection?: Bounds | null;
   damage?: { take: () => Bounds | null; invalidate: () => void };
-  onInput?: (event: OnyxInkEvent) => void;
+  onInput?: (event: OnyxInkEvent, draft: InkDraft) => void;
   onStroke?: (draft: InkDraft, event: OnyxInkEvent) => InkDraft;
 }) {
   const [native, setNative] = useState(false);
@@ -198,14 +198,15 @@ export function useOnyxInk({
             previewFrame = undefined;
             const preview = latestPreview;
             latestPreview = undefined;
-            if (!disposed && gestureOpen && preview) state.current.onInput?.(preview);
+            if (!disposed && gestureOpen && preview)
+              state.current.onInput?.(preview, state.current.draft);
           });
         return;
       }
       // Completed gestures use the full SDK point list, never a pending preview frame.
       cancelPreview();
       gestureOpen = event.kind === "begin";
-      if (event.kind !== "stroke") current.onInput?.(event);
+      if (event.kind !== "stroke") current.onInput?.(event, current.draft);
       if (event.kind === "begin") current.onActiveChange(true);
       else if (event.kind === "end" || event.kind === "cancel") {
         current.onActiveChange(false);

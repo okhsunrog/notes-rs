@@ -328,16 +328,16 @@ export function InkCanvas({
     publish(strokes);
     return strokes === base.strokes ? base : { ...base, strokes };
   };
-  const nativeInput = (event: OnyxInkEvent) => {
+  const nativeInput = (event: OnyxInkEvent, base: InkDraft) => {
     const point = event.points?.[0];
     if (event.kind === "begin" && point && (tool !== "pen" || event.erasing))
-      beginGesture(point, event.erasing, -1, draft, event.fastPreview);
+      beginGesture(point, event.erasing, -1, base, event.fastPreview);
     else if (event.kind === "preview" && point) sampleGesture(point);
     else if (event.kind === "cancel" || event.kind === "end") {
       if (active.current) {
         if (event.kind === "cancel") onSelectionChange?.(active.current.ids);
         active.current = null;
-        publish(draft.strokes);
+        publish(base.strokes);
       }
     }
   };

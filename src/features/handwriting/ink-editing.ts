@@ -5,6 +5,20 @@ export type LassoMode = "free" | "rectangle";
 export type XY = { x: number; y: number };
 export type Bounds = { left: number; top: number; right: number; bottom: number };
 const EPS = 1e-8;
+const strokeBoundsCache = new WeakMap<InkStroke, Bounds | null>();
+export function strokeBounds(stroke: InkStroke): Bounds | null {
+  if (!strokeBoundsCache.has(stroke)) strokeBoundsCache.set(stroke, boundsOf(stroke.points));
+  return strokeBoundsCache.get(stroke)!;
+}
+function overlaps(a: Bounds | null, b: Bounds, margin = 0): boolean {
+  return (
+    !!a &&
+    a.left <= b.right + margin &&
+    a.right >= b.left - margin &&
+    a.top <= b.bottom + margin &&
+    a.bottom >= b.top - margin
+  );
+}
 const mix = (a: number, b: number, t: number) => a + (b - a) * t;
 function interpolate(a: InkPoint, b: InkPoint, t: number): InkPoint {
   return {
@@ -85,15 +99,17 @@ export function selectLasso(strokes: InkStroke[], polygon: XY[]): string[] {
   const bounds = boundsOf(polygon)!;
   if (bounds.right - bounds.left < 2 || bounds.bottom - bounds.top < 2) return [];
   return strokes
-    .filter((stroke) =>
-      stroke.points.some(
-        (p, i) =>
-          inside(p, polygon) ||
-          (i > 0 &&
-            polygon.some((q, j) =>
-              crosses(stroke.points[i - 1]!, p, q, polygon[(j + 1) % polygon.length]!),
-            )),
-      ),
+    .filter(
+      (stroke) =>
+        overlaps(strokeBounds(stroke), bounds) &&
+        stroke.points.some(
+          (p, i) =>
+            inside(p, polygon) ||
+            (i > 0 &&
+              polygon.some((q, j) =>
+                crosses(stroke.points[i - 1]!, p, q, polygon[(j + 1) % polygon.length]!),
+              )),
+        ),
     )
     .map((s) => s.id);
 }
@@ -183,8 +199,21 @@ function circleInterval(a: XY, b: XY, center: XY, radius: number): Interval | nu
 /** Intersect a line with the swept round eraser, including between sparse pointer samples. */
 function cutIntervals(a: XY, b: XY, path: XY[], radius: number): Interval[] {
   const intervals: Interval[] = [];
+  const left = Math.min(a.x, b.x),
+    right = Math.max(a.x, b.x);
+  const top = Math.min(a.y, b.y),
+    bottom = Math.max(a.y, b.y);
   for (let i = 0; i < path.length; i++) {
-    const c = path[i]!;
+    const c = path[i]!,
+      previous = path[Math.max(0, i - 1)]!;
+    // Exact broad-phase rejection of the swept capsule, including sparse samples.
+    if (
+      left > Math.max(c.x, previous.x) + radius ||
+      right < Math.min(c.x, previous.x) - radius ||
+      top > Math.max(c.y, previous.y) + radius ||
+      bottom < Math.min(c.y, previous.y) - radius
+    )
+      continue;
     const circle = circleInterval(a, b, c, radius);
     if (circle) intervals.push(circle);
     if (!i) continue;
@@ -238,7 +267,12 @@ export function eraseGesture(
   }
   let changed = false;
   const result: InkStroke[] = [];
+  const pathBounds = boundsOf(path)!;
   for (const stroke of strokes) {
+    if (!overlaps(strokeBounds(stroke), pathBounds, radius + (stroke.width * 1.75) / 2)) {
+      result.push(stroke);
+      continue;
+    }
     let touched = false;
     const fragments: InkPoint[][] = [];
     let fragment: InkPoint[] = [];
@@ -262,8 +296,10 @@ export function eraseGesture(
         radius + (stroke.width * (0.25 + 1.5 * Math.max(a.pressure, b.pressure))) / 2,
       );
       if (!cuts.length) {
-        push(a);
-        push(b);
+        if (mode === "pixel") {
+          push(a);
+          push(b);
+        }
         continue;
       }
       touched = true;

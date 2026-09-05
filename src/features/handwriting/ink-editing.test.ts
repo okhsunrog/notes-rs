@@ -59,3 +59,11 @@ it("moves the whole selection together at sheet edges and preserves input metada
   ]);
   expect(scaleSelection(moved, ["a"], 2)[0]!.points).toEqual(moved[0]!.points);
 });
+
+it("broad-phase erasing includes pressure width and keeps distant strokes by identity", () => {
+  const thick = { ...stroke, width: 20, points: [{ ...point(100, 100), pressure: 1 }] };
+  const distant = { ...stroke, id: "distant", points: [point(800, 800)] };
+  expect(eraseGesture([thick, distant], [point(126, 100)], "stroke", 9)).toEqual([distant]);
+  expect(eraseGesture([thick, distant], [point(127, 100)], "stroke", 9)).toEqual([thick, distant]);
+  expect(eraseGesture([distant], [point(0, 0), point(200, 200)], "pixel", 12)[0]).toBe(distant);
+});
