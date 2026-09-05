@@ -19,6 +19,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::input_capabilities,
             commands::load_handwriting_draft,
             commands::save_handwriting_draft,
+            commands::save_handwriting_patch,
             commands::set_system_bars_style,
             commands::sync_status,
             commands::server_ai_status,

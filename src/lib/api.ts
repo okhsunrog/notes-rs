@@ -221,6 +221,7 @@ export const getMobileSystemInfo = checkedCommand(commands.mobileSystemInfo);
 export const getInputCapabilities = checkedCommand(commands.inputCapabilities);
 export const loadHandwritingDraft = checkedCommand(commands.loadHandwritingDraft);
 export const saveHandwritingDraft = checkedCommand(commands.saveHandwritingDraft);
+export const saveHandwritingPatch = checkedCommand(commands.saveHandwritingPatch);
 export const setSystemBarsStyle = checkedCommand(commands.setSystemBarsStyle);
 export const loadSettings = checkedCommand(commands.loadSettings);
 export const exportDeviceConfiguration = checkedCommand(commands.exportDeviceConfiguration);

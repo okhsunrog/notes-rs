@@ -58,6 +58,15 @@ pub struct InkDraft {
     pub background: InkBackground,
 }
 
+/// An IPC update against an acknowledged snapshot. Disk storage remains a complete draft.
+#[derive(Debug, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InkDraftPatch {
+    pub order: Vec<uuid::Uuid>,
+    pub upserts: Vec<InkStroke>,
+    pub background: InkBackground,
+}
+
 impl Default for InkDraft {
     fn default() -> Self {
         Self {
@@ -179,6 +188,83 @@ fn write_draft(
     Ok(format!("{:x}", Sha256::digest(&bytes)))
 }
 
+fn write_patch(
+    path: &Path,
+    patch: InkDraftPatch,
+    expected_revision: Option<String>,
+) -> CommandResult<String> {
+    let current = read_draft(path)?;
+    if current.revision != expected_revision {
+        return Err(CommandError::conflict(
+            "The handwriting draft changed. Reopen it before saving.",
+        ));
+    }
+    if patch.order.len() > MAX_POINTS || patch.upserts.len() > MAX_POINTS {
+        return Err(CommandError::invalid("Handwriting patch is too large"));
+    }
+    let order: std::collections::HashSet<_> = patch.order.iter().copied().collect();
+    if order.len() != patch.order.len() {
+        return Err(CommandError::invalid("Duplicate handwriting stroke order"));
+    }
+    let mut strokes: std::collections::HashMap<_, _> = current
+        .draft
+        .strokes
+        .into_iter()
+        .map(|stroke| (stroke.id, stroke))
+        .collect();
+    let mut changed = std::collections::HashSet::new();
+    let mut count = 0;
+    for stroke in patch.upserts {
+        count += stroke.points.len();
+        if count > MAX_POINTS || !order.contains(&stroke.id) || !changed.insert(stroke.id) {
+            return Err(CommandError::invalid("Invalid handwriting patch"));
+        }
+        strokes.insert(stroke.id, stroke);
+    }
+    let ordered = patch
+        .order
+        .into_iter()
+        .map(|id| {
+            strokes.remove(&id).ok_or_else(|| {
+                CommandError::invalid("Handwriting patch references an unknown stroke")
+            })
+        })
+        .collect::<CommandResult<Vec<_>>>()?;
+    write_draft(
+        path,
+        InkDraft {
+            strokes: ordered,
+            background: patch.background,
+            ..InkDraft::default()
+        },
+        expected_revision,
+    )
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn save_handwriting_patch(
+    app: AppHandle,
+    store: State<'_, HandwritingStore>,
+    patch: InkDraftPatch,
+    expected_revision: Option<String>,
+) -> CommandResult<String> {
+    let path = app
+        .path()
+        .app_data_dir()
+        .map_err(err)?
+        .join("handwriting/draft-v1.json");
+    let lock = store.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock
+            .lock()
+            .map_err(|error| err(anyhow::anyhow!(error.to_string())))?;
+        write_patch(&path, patch, expected_revision)
+    })
+    .await
+    .map_err(err)?
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn load_handwriting_draft(
@@ -245,6 +331,98 @@ mod tests {
             }],
             ..InkDraft::default()
         }
+    }
+
+    #[test]
+    fn patches_preserve_unchanged_points_delete_and_restore_strokes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("draft.json");
+        let a = sample().strokes.remove(0);
+        let b = sample().strokes.remove(0);
+        let original = InkDraft {
+            strokes: vec![a.clone(), b.clone()],
+            ..InkDraft::default()
+        };
+        let revision = write_draft(&path, original, None).unwrap();
+        let revision = write_patch(
+            &path,
+            InkDraftPatch {
+                order: vec![b.id],
+                upserts: vec![],
+                background: InkBackground::Grid,
+            },
+            Some(revision),
+        )
+        .unwrap();
+        let saved = read_draft(&path).unwrap();
+        assert_eq!(saved.draft.strokes.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&saved.draft.strokes[0]).unwrap(),
+            serde_json::to_value(&b).unwrap()
+        );
+        assert!(matches!(saved.draft.background, InkBackground::Grid));
+        write_patch(
+            &path,
+            InkDraftPatch {
+                order: vec![b.id, a.id],
+                upserts: vec![a.clone()],
+                background: InkBackground::Plain,
+            },
+            Some(revision),
+        )
+        .unwrap();
+        let restored = read_draft(&path).unwrap();
+        assert_eq!(restored.draft.strokes[1].id, a.id);
+    }
+
+    #[test]
+    fn invalid_or_stale_patches_never_change_saved_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("draft.json");
+        let draft = sample();
+        let stroke = draft.strokes[0].clone();
+        let revision = write_draft(&path, draft, None).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let mut invalid = stroke.clone();
+        invalid.points[0].x = -1.0;
+        for patch in [
+            InkDraftPatch {
+                order: vec![stroke.id, stroke.id],
+                upserts: vec![],
+                background: InkBackground::Plain,
+            },
+            InkDraftPatch {
+                order: vec![uuid::Uuid::now_v7()],
+                upserts: vec![],
+                background: InkBackground::Plain,
+            },
+            InkDraftPatch {
+                order: vec![stroke.id],
+                upserts: vec![stroke.clone(), stroke.clone()],
+                background: InkBackground::Plain,
+            },
+            InkDraftPatch {
+                order: vec![stroke.id],
+                upserts: vec![invalid],
+                background: InkBackground::Plain,
+            },
+        ] {
+            assert!(write_patch(&path, patch, Some(revision.clone())).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+        assert!(
+            write_patch(
+                &path,
+                InkDraftPatch {
+                    order: vec![],
+                    upserts: vec![],
+                    background: InkBackground::Plain
+                },
+                None
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
 
     #[test]

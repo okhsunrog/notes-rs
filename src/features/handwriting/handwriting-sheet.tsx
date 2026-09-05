@@ -16,9 +16,10 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import { loadHandwritingDraft, saveHandwritingDraft } from "@/lib/api";
+import { loadHandwritingDraft, saveHandwritingPatch } from "@/lib/api";
 import type { InkDraft } from "@/lib/bindings";
 import { registerBackOverlay } from "@/lib/back-overlays";
+import { incrementalDraftSaver } from "./ink-patch";
 import { DraftWriter, type DraftSaveState } from "./draft-writer";
 import { InkCanvas, type InkMetrics, type InkTool } from "./ink-canvas";
 import { useHandwritingSession } from "./handwriting-session";
@@ -55,9 +56,13 @@ export function HandwritingSheet() {
     void loadHandwritingDraft()
       .then((snapshot) => {
         if (disposed) return;
-        writer.current = new DraftWriter(snapshot.revision, saveHandwritingDraft, (state) => {
-          if (!disposed) setSaveState(state);
-        });
+        writer.current = new DraftWriter(
+          snapshot.revision,
+          incrementalDraftSaver(snapshot.draft, saveHandwritingPatch),
+          (state) => {
+            if (!disposed) setSaveState(state);
+          },
+        );
         latestDraft.current = snapshot.draft;
         setDraft(snapshot.draft);
       })
