@@ -42,12 +42,15 @@ of portaled menus. Reconsider separately if large-page profiling warrants it.
   all eight notes-sync tests passed before the UTF-8 extraction follow-up.
 - Attachment regression tests: all seven passed after `287c9cc`, including
   malformed Unicode references. Clippy passed with the narrow allowance below.
-- Pending: final desktop release executable build and arm64 Android release APK
-  build. Both have been started. Desktop build uses `--no-bundle`;
-  it does not validate AppImage/deb packaging.
+- Desktop release executable and arm64 Android release APK builds completed
+  successfully. Desktop used `--no-bundle`; AppImage/deb packaging is not tested.
+- The release APK was installed with data preserved on Pixel 8 Pro; the user
+  confirmed that testing was successful.
+- Desktop release reached `notes-rs ready` with a fresh isolated profile under
+  Xvfb/X11 and ran until the 12-second test timeout. This is startup validation,
+  not visual Wayland or accelerated-rendering validation. Existing user data was
+  not used. Prior KDE visual checks were on the development build.
 - Clippy currently uses a narrow allowance for the pre-existing Rust 1.98
   `chunks_exact_to_as_chunks` lint in notes-blob; no other warnings are allowed.
-- Earlier device and KDE checks are documented in the image plan and session;
-  they do not establish final-release runtime validation. Smoke-test final builds
-  before merging. No merger or push is implied by a build merely starting.
-- Until these gates finish, stay on the performance branch and do not merge.
+- The scoped build and smoke-test gates are complete with the limitations above.
+  The branch is ready for a local direct merge; publishing remains a separate action.
