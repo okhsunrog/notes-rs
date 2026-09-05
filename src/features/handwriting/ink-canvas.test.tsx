@@ -47,6 +47,12 @@ beforeEach(() => {
       let context = contexts.get(this);
       if (context) return context;
       context = {
+        canvas: this,
+        getTransform: () => ({ a: 1, d: 1 }),
+        save: vi.fn(),
+        restore: vi.fn(),
+        rect: vi.fn(),
+        clip: vi.fn(),
         setLineDash: vi.fn(),
         beginPath: vi.fn(),
         arc: vi.fn(),

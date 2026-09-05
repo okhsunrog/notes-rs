@@ -152,6 +152,14 @@ function EditorSheet({
 }
 it("routes native hardware erasing and lasso gestures to the shared editor without adding ink", async () => {
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
+    canvas: { width: 300, height: 150 },
+    getTransform() {
+      return { a: 1, d: 1 };
+    },
+    save() {},
+    restore() {},
+    rect() {},
+    clip() {},
     setTransform() {},
     clearRect() {},
     fillRect() {},
@@ -207,6 +215,14 @@ it("routes native hardware erasing and lasso gestures to the shared editor witho
 it("keeps fast native lasso transient and sends selection bounds for subsequent dragging", async () => {
   const publish = vi.fn();
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
+    canvas: { width: 300, height: 150 },
+    getTransform() {
+      return { a: 1, d: 1 };
+    },
+    save() {},
+    restore() {},
+    rect() {},
+    clip() {},
     setTransform() {},
     clearRect() {},
     fillRect() {},

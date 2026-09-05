@@ -7,6 +7,7 @@ import {
 } from "react";
 import type { InkDraft, InkPoint, InkStroke } from "@/lib/bindings";
 import { drawSegment, drawSheet, inkPoint, MAX_INK_POINTS } from "./ink-model";
+import { changedInkBounds, drawInkRegion } from "./ink-region";
 import {
   eraseGesture,
   lassoPolygon,
@@ -108,12 +109,23 @@ export function InkCanvas({
       scene.height !== canvas.height
     ) {
       scene ??= document.createElement("canvas");
-      scene.width = canvas.width;
-      scene.height = canvas.height;
+      const reusable =
+        cached &&
+        cached.background === draft.background &&
+        scene.width === canvas.width &&
+        scene.height === canvas.height;
+      if (!reusable) {
+        scene.width = canvas.width;
+        scene.height = canvas.height;
+      }
       const sceneContext = scene.getContext("2d");
       if (!sceneContext) return;
       sceneContext.setTransform(canvas.width / 1000, 0, 0, canvas.height / 1400, 0, 0);
-      drawSheet(sceneContext, sceneStrokes, draft.background);
+      if (reusable) {
+        const dirty = changedInkBounds(cached.strokes, sceneStrokes);
+        if (dirty)
+          drawInkRegion(sceneContext, sceneStrokes, draft.background ?? "plain", dirty, staging);
+      } else drawSheet(sceneContext, sceneStrokes, draft.background);
       sceneRef.current = { canvas: scene, strokes: sceneStrokes, background: draft.background };
     }
     staging.setTransform(1, 0, 0, 1, 0, 0);
