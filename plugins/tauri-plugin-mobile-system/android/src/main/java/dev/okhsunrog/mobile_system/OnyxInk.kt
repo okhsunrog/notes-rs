@@ -7,6 +7,7 @@ import android.graphics.RectF
 import android.os.Build
 import android.os.SystemClock
 import android.util.Log
+import android.view.View
 import android.view.ViewTreeObserver
 import android.webkit.WebView
 import app.tauri.annotation.InvokeArg
@@ -78,6 +79,7 @@ class OnyxInk(
     private val refresh = Runnable { refreshFrame() }
 
     private var previousViewMode: UpdateMode? = null
+    private var previousViewModeRaw: Int? = null
     private var qualityOwned = false
     private var fastModeAccepted: Boolean? = null
     private var fastModeRequests = 0L
@@ -184,7 +186,9 @@ class OnyxInk(
         put("repaintCount", repaintCount)
         put("qualityModeOwned", qualityOwned)
         put("viewUpdateMode", EpdController.getViewDefaultUpdateMode(webView)?.name)
+        put("viewUpdateModeRaw", readViewModeRaw())
         put("previousViewMode", previousViewMode?.name)
+        put("previousViewModeRaw", previousViewModeRaw)
         put("fastModeRequested", displayPolicy.fastRequested)
         put("fastModeAccepted", fastModeAccepted)
         put("fastModeRequests", fastModeRequests)
@@ -252,6 +256,8 @@ class OnyxInk(
         val acquiredQuality = !qualityOwned
         if (acquiredQuality) {
             previousViewMode = EpdController.getViewDefaultUpdateMode(webView)
+            // SDK enum conversion loses the firmware's "no view override" sentinel.
+            previousViewModeRaw = readViewModeRaw()
             EpdController.setViewDefaultUpdateMode(webView, UpdateMode.GU)
             qualityOwned = true
             Log.d("OnyxInk", "view quality mode: ${EpdController.getViewDefaultUpdateMode(webView)}, previous: $previousViewMode")
@@ -278,14 +284,22 @@ class OnyxInk(
         }
     }
 
+    private fun readViewModeRaw(): Int? = runCatching {
+        View::class.java.getMethod("getDefaultUpdateMode").invoke(webView) as? Int
+    }.getOrNull()
+
     private fun releaseDisplayMode() {
         webView.removeCallbacks(settleDisplay)
         displayPolicy.reset()
         if (qualityOwned) {
-            previousViewMode?.let { EpdController.setViewDefaultUpdateMode(webView, it) }
-                ?: EpdController.resetViewUpdateMode(webView)
+            val restored = previousViewModeRaw?.let { raw -> runCatching {
+                View::class.java.getMethod("setDefaultUpdateMode", Int::class.javaPrimitiveType)
+                    .invoke(webView, raw)
+            }.isSuccess } ?: false
+            if (!restored) EpdController.resetViewUpdateMode(webView)
             qualityOwned = false
             previousViewMode = null
+            previousViewModeRaw = null
         }
     }
 
