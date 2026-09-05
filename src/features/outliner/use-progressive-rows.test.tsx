@@ -8,8 +8,9 @@ let count = 0;
 let total = 40;
 let enabled = true;
 let root: ReturnType<typeof createRoot>;
+let scroller: HTMLElement;
 function Probe() {
-  count = useProgressiveRows(total, enabled);
+  count = useProgressiveRows(total, enabled, scroller);
   return null;
 }
 beforeEach(() => {
@@ -18,6 +19,7 @@ beforeEach(() => {
   vi.stubGlobal("requestAnimationFrame", (cb: () => void) => setTimeout(cb, 16));
   vi.stubGlobal("cancelAnimationFrame", clearTimeout);
   total = 40;
+  scroller = document.createElement("div");
   enabled = true;
   root = createRoot(document.createElement("div"));
   act(() => root.render(<Probe />));
@@ -55,5 +57,28 @@ describe("progressive rows", () => {
     act(() => root.unmount());
     expect(vi.getTimerCount()).toBe(0);
     root = createRoot(document.createElement("div"));
+  });
+  it("pauses mounting during scrolling and resumes after the quiet period", () => {
+    act(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+      vi.advanceTimersByTime(150);
+    });
+    expect(count).toBe(0);
+    act(() => {
+      vi.advanceTimersByTime(60);
+    });
+    expect(count).toBe(16);
+  });
+  it("waits for a held pointer to be released", () => {
+    act(() => {
+      scroller.dispatchEvent(new Event("pointerdown"));
+      vi.advanceTimersByTime(500);
+    });
+    expect(count).toBe(0);
+    act(() => {
+      window.dispatchEvent(new Event("pointerup"));
+      vi.advanceTimersByTime(210);
+    });
+    expect(count).toBe(16);
   });
 });

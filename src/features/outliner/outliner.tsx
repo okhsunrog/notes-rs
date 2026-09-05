@@ -130,6 +130,7 @@ function VirtualOutline({
   const progressiveCount = useProgressiveRows(
     rows.length,
     !virtualize && rows.length > ROW_BATCH_SIZE,
+    scrollElement,
   );
   // Navigation to a specific block must never wait behind the background batches.
   const editingIndex = rows.findIndex((row) => row.block.uuid === store.editingUuid);
