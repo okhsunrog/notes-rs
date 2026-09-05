@@ -144,6 +144,15 @@ pub fn run() {
         .plugin(tauri_plugin_android_fs::init())
         .plugin(tauri_plugin_mobile_system::init());
 
+    #[cfg(target_os = "android")]
+    let builder = builder.on_window_event(|window, event| {
+        if matches!(event, tauri::WindowEvent::Resumed)
+            && let Some(sync) = window.app_handle().try_state::<sync::SyncRuntime>()
+        {
+            sync.request_retry();
+        }
+    });
+
     // Development-only bridge for MCP-powered UI inspection and automation.
     // Restrict it to localhost; release builds do not register the plugin. Reachable on Android
     // over `adb forward tcp:9223 tcp:9223`, same as desktop; not yet enabled on iOS (untested).
