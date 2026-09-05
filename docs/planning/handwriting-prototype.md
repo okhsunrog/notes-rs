@@ -310,3 +310,38 @@ byte-identical, rotation settings were restored, and USB stay-awake remains enab
 SDK logs some unavailable optional reflective APIs on initialization; no application crash
 occurred during these checks. Physical acceptance of the new regional gesture cleanup and
 its performance remains pending. Validation: 392 frontend tests and nine Android unit tests.
+
+### Eraser profiling and incremental saves
+
+The user confirmed the regional lasso cleanup left no old ink or selection frames. A second
+trial still showed 250–331 ms final long tasks. Those should not be attributed solely to
+rasterization: a read-only Android bridge probe with the same 2.3 MB snapshot measured
+346–383 ms synchronous invocation overhead, while plain JSON.stringify took 8–10 ms.
+
+A CPU profile of hardware erasing identified cutIntervals/eraseGesture and allocation/GC as
+major gesture costs. Stroke and swept-capsule bounding checks now skip provably unrelated
+geometry; whole-stroke mode no longer builds unused pixel fragments. No additional gesture
+simplification is introduced. In 450 randomized comparisons against the previous algorithm,
+the resulting geometry matched (new fragment UUIDs normalized for comparison). A read-only
+WebView benchmark of ten swept paths over the 35-stroke corpus measured 60–125 ms before and
+0.2–12.1 ms after for geometry alone, not end-to-end panel latency.
+
+Native begin/preview/cancel handlers also now receive the hook's latest acknowledged draft,
+including stroke batches which arrived before React rendered. A regression test writes a
+new point and immediately starts hardware erasing elsewhere in the same batch: unrelated
+new ink must survive; a subsequent hit must erase it. The user reported a newly written word
+not disappearing under the hardware eraser; whether this race explains that observation
+still needs the updated physical retest.
+
+Saving sends an incremental IPC patch with page order, changed strokes and background.
+Unchanged stroke points stay in Rust. Whole-stroke deletion sends no point arrays, reducing
+a representative bridge payload from 2301833 to 1370 bytes; the read-only bridge probe then
+measured 1.2–5.3 ms synchronous work. Disk storage remains the original complete JSON draft.
+The backend checks the acknowledged revision, reconstructs and validates the full document,
+and uses the same atomic write. The frontend advances its comparison snapshot only after
+success, preserving retries, queued edits and Undo. New Rust tests cover unchanged points,
+order/deletion/restoration, stale writes, duplicate/missing IDs and invalid geometry.
+
+Validation before hardware retest: 396 frontend tests, five handwriting storage Rust tests;
+native renderer unchanged since the nine passing Android tests. The proposed CBOR/column
+storage draft was reviewed separately; no storage migration was performed.
