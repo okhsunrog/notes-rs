@@ -5,11 +5,15 @@ import android.graphics.Color
 import android.graphics.Rect
 import android.graphics.RectF
 import android.os.Build
+import android.os.SystemClock
+import android.util.Log
 import android.view.ViewTreeObserver
 import android.webkit.WebView
 import app.tauri.annotation.InvokeArg
 import app.tauri.plugin.JSObject
 import com.onyx.android.sdk.api.device.epd.EpdController
+import com.onyx.android.sdk.api.device.epd.UpdateMode
+import com.onyx.android.sdk.device.Device
 import com.onyx.android.sdk.data.note.TouchPoint
 import com.onyx.android.sdk.pen.RawInputCallback
 import com.onyx.android.sdk.pen.TouchHelper
@@ -73,6 +77,34 @@ class OnyxInk(
     private var failed: String? = null
     private val refresh = Runnable { refreshFrame() }
 
+    private var previousViewMode: UpdateMode? = null
+    private var qualityOwned = false
+    private var fastModeAccepted: Boolean? = null
+    private var fastModeRequests = 0L
+    private var qualityRestores = 0L
+    private val displayPolicy = InkRefreshPolicy(
+        enter = {
+            fastModeAccepted = EpdController.applyTransientUpdate(UpdateMode.ANIMATION_QUALITY)
+            fastModeRequests++
+            Log.d("OnyxInk", "transient animation quality requested: $fastModeAccepted")
+        },
+        leave = {
+            // The EpdController wrapper discards this return value; retain it for diagnosis.
+            val accepted = Device.currentDevice().clearTransientUpdate(false)
+            qualityRestores++
+            Log.d("OnyxInk", "transient mode cleared: $accepted")
+        },
+    )
+    private val settleDisplay = Runnable {
+        if (!drawing && displayPolicy.settle(SystemClock.uptimeMillis())) {
+            // Repaint even if the last content revision was already presented in fast mode.
+            config?.let { args -> commit(OnyxFrameArgs().apply {
+                session = args.session
+                sequence = this@OnyxInk.sequence
+            }) }
+        }
+    }
+
     companion object {
         fun supported(): Boolean = Build.MANUFACTURER.equals("ONYX", true)
     }
@@ -107,7 +139,7 @@ class OnyxInk(
         if (config?.session != args.session) {
             close()
         }
-        pause()
+        pause(releaseDisplay = false)
         config = args
         // CSS pixels may differ from Android density because BOOX has per-app DPI settings.
         val scale = webView.width / args.viewportWidth
@@ -150,6 +182,13 @@ class OnyxInk(
         put("active", helper?.isRawDrawingInputEnabled == true)
         put("error", failed)
         put("repaintCount", repaintCount)
+        put("qualityModeOwned", qualityOwned)
+        put("viewUpdateMode", EpdController.getViewDefaultUpdateMode(webView)?.name)
+        put("previousViewMode", previousViewMode?.name)
+        put("fastModeRequested", displayPolicy.fastRequested)
+        put("fastModeAccepted", fastModeAccepted)
+        put("fastModeRequests", fastModeRequests)
+        put("qualityRestores", qualityRestores)
     }
 
     fun commit(args: OnyxFrameArgs) {
@@ -210,12 +249,24 @@ class OnyxInk(
 
     private fun resume() {
         if (!resumed || !webView.hasWindowFocus() || config == null || limit.isEmpty) return
+        val acquiredQuality = !qualityOwned
+        if (acquiredQuality) {
+            previousViewMode = EpdController.getViewDefaultUpdateMode(webView)
+            EpdController.setViewDefaultUpdateMode(webView, UpdateMode.GU)
+            qualityOwned = true
+            Log.d("OnyxInk", "view quality mode: ${EpdController.getViewDefaultUpdateMode(webView)}, previous: $previousViewMode")
+        }
         helper?.setRawDrawingEnabled(true)
         helper?.setRawDrawingRenderEnabled(config?.eraser == false &&
             (config?.interaction == false || (config?.fastLasso == true && config?.hasSelection == false)))
+        if (acquiredQuality) config?.let { args -> commit(OnyxFrameArgs().apply {
+            session = args.session
+            sequence = this@OnyxInk.sequence
+        }) }
     }
 
-    private fun pause() {
+    private fun pause(releaseDisplay: Boolean = true) {
+        if (releaseDisplay || drawing) releaseDisplayMode()
         webView.removeCallbacks(refresh)
         frames.request() // Invalidate visual/frame callbacks from the old geometry or lifecycle.
         cancelFrameSubmission()
@@ -224,6 +275,17 @@ class OnyxInk(
         if (drawing) {
             drawing = false
             send("cancel")
+        }
+    }
+
+    private fun releaseDisplayMode() {
+        webView.removeCallbacks(settleDisplay)
+        displayPolicy.reset()
+        if (qualityOwned) {
+            previousViewMode?.let { EpdController.setViewDefaultUpdateMode(webView, it) }
+                ?: EpdController.resetViewUpdateMode(webView)
+            qualityOwned = false
+            previousViewMode = null
         }
     }
 
@@ -268,6 +330,8 @@ class OnyxInk(
         fastPreview = args.fastLasso && !erasing && !args.eraser && !movingSelection
         if (args.interaction) helper?.setRawDrawingRenderEnabled(fastPreview)
         drawing = true
+        webView.removeCallbacks(settleDisplay)
+        displayPolicy.begin((args.interaction || args.eraser || erasing) && !fastPreview)
         webView.removeCallbacks(refresh)
         cancelFrameSubmission()
         val position = IntArray(2)
@@ -282,6 +346,11 @@ class OnyxInk(
         if (!drawing) return
         drawing = false
         resetPalm()
+        displayPolicy.end(SystemClock.uptimeMillis())
+        if (displayPolicy.fastRequested) {
+            webView.removeCallbacks(settleDisplay)
+            webView.postDelayed(settleDisplay, InkRefreshPolicy.QUIET_MS)
+        }
         send("end")
         webView.postDelayed(refresh, 120)
     }

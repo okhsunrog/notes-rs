@@ -221,7 +221,29 @@ the resulting weight on Regal needs physical acceptance.
 
 EinkWise opens for the foreground app via action.open.eink.center.request, verified from ADB.
 The official SDK exposes getAppScopeRefreshMode/setAppScopeRefreshMode, distinct from persistent
-EinkWise color, contrast, layout, and refresh profiles. Automatic mode switching is not yet
-implemented: test a scoped quality mode and restoration on sheet close/focus changes before
-adopting it. SDK reflective setters can fail silently; verify actual behavior on firmware.
+EinkWise color, contrast, layout, and refresh profiles. Scoped view/gesture mode switching is now implemented experimentally as described below. SDK reflective setters can fail silently; verify actual behavior on firmware.
 The device is left in Regal for this trial.
+
+### Scoped display modes inspired by stock Notes
+
+While the sheet owns the focused WebView, its previous view update mode is saved and GU
+(16-level grayscale partial refresh) is requested. This is a view waveform request, not a
+persistent HD/Regal EinkWise profile change. Closing the sheet, losing focus, or pausing the
+activity restores the previous view mode; resuming requests a fresh, fenced repaint.
+
+Software gestures (selection dragging, rectangular lasso, eraser previews) request transient
+ANIMATION_QUALITY. Pen writing and the SDK freehand lasso do not start this request. Like the
+stock Notes quiet-period policy, it is cleared five seconds after pen-up; a new pen-down
+cancels the pending cleanup. Consecutive gestures share one request. Clearing it requests a
+fresh WebView frame acknowledgement and handwritingRepaint even if the last content revision
+was already presented. Configuration changes after a completed selection retain the pending
+cleanup; geometry changes during a gesture cancel it and release the display modes.
+
+EinkWise profiles, contrast, dithering thresholds and turbo settings are not changed. The
+implementation uses documented SDK entry points for transient/view modes, rather than the
+stock app's private EAC configuration pathway. Native status reports the queried view mode,
+request counts, and the SDK return value for entering transient mode. These report firmware
+calls, not measured physical display latency. Three new unit tests cover timing/lifecycle
+ownership alongside the four frame-fence tests; all 388 frontend tests pass.
+
+Physical acceptance of the transient mode and grayscale restoration on Note Air 4C is pending.
