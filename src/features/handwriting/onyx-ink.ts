@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "re
 import { addPluginListener, invoke } from "@tauri-apps/api/core";
 import type { InkDraft, InkPoint } from "@/lib/bindings";
 import type { InkMetrics, InkTool } from "./ink-canvas";
+import type { Bounds, LassoMode } from "./ink-editing";
 import { eraseAt, MAX_INK_POINTS } from "./ink-model";
 
 export type OnyxInkEvent = {
@@ -10,6 +11,7 @@ export type OnyxInkEvent = {
   sequence: number;
   width: number;
   erasing: boolean;
+  fastPreview?: boolean;
   points?: InkPoint[];
 };
 export type OnyxInkStatus = { available: boolean; active: boolean; error?: string };
@@ -48,6 +50,8 @@ export function useOnyxInk({
   onInput,
   onStroke,
   decoration,
+  lassoMode,
+  selection,
 }: {
   canvasRef: RefObject<HTMLCanvasElement | null>;
   enabled: boolean;
@@ -60,6 +64,8 @@ export function useOnyxInk({
   onLimit: () => void;
   onStatus?: (status: OnyxInkStatus) => void;
   decoration?: string;
+  lassoMode?: LassoMode;
+  selection?: Bounds | null;
   onInput?: (event: OnyxInkEvent) => void;
   onStroke?: (draft: InkDraft, event: OnyxInkEvent) => InkDraft;
 }) {
@@ -76,6 +82,8 @@ export function useOnyxInk({
     onStatus,
     onInput,
     onStroke,
+    lassoMode,
+    selection,
   });
   const session = useRef<string | null>(null);
   const sequence = useRef(0);
@@ -92,6 +100,8 @@ export function useOnyxInk({
       onStatus,
       onInput,
       onStroke,
+      lassoMode,
+      selection,
     };
   });
 
@@ -135,6 +145,12 @@ export function useOnyxInk({
         strokeWidth: state.current.width,
         eraser: state.current.tool === "eraser",
         interaction: state.current.tool === "lasso",
+        fastLasso: state.current.tool === "lasso" && state.current.lassoMode === "free",
+        hasSelection: !!state.current.selection,
+        selectionLeft: state.current.selection?.left ?? 0,
+        selectionTop: state.current.selection?.top ?? 0,
+        selectionRight: state.current.selection?.right ?? 0,
+        selectionBottom: state.current.selection?.bottom ?? 0,
       };
       const key = JSON.stringify(args);
       if (key === lastConfig) return;
@@ -228,7 +244,15 @@ export function useOnyxInk({
 
   useEffect(() => {
     update.current?.();
-  }, [tool, width]);
+  }, [
+    tool,
+    width,
+    lassoMode,
+    selection?.left,
+    selection?.top,
+    selection?.right,
+    selection?.bottom,
+  ]);
   useEffect(() => {
     if (!native || !session.current) return;
     const id = session.current;

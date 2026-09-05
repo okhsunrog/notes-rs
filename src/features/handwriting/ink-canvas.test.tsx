@@ -235,3 +235,29 @@ it("hardware eraser uses the selected pixel mode and cancel leaves handwriting i
   expect(changed.mock.calls[0]![0].strokes).toHaveLength(2);
   expect(changed.mock.calls[0]![0].background).toBe("grid");
 });
+
+it("reuses the sheet bitmap during a contour and rebuilds it when paper changes", () => {
+  act(() =>
+    resize(
+      [{ contentRect: { width: 500, height: 700 } } as ResizeObserverEntry],
+      {} as ResizeObserver,
+    ),
+  );
+  const draft = emptyDraft();
+  act(() => renderDraft(draft, { tool: "lasso" }));
+  const visible = contexts.get(canvas)!;
+  const publishes = vi.spyOn(visible, "drawImage");
+  const buffer = publishes.mock.calls[publishes.mock.calls.length - 1]![0] as HTMLCanvasElement;
+  const staging = contexts.get(buffer)!;
+  const stages = vi.spyOn(staging, "drawImage").mock.calls;
+  const scene = stages[stages.length - 1]![0] as HTMLCanvasElement;
+  const redraw = vi.spyOn(contexts.get(scene)!, "fillRect");
+  redraw.mockClear();
+  pointer("pointerdown");
+  pointer("pointermove", { clientX: 80, clientY: 80 });
+  pointer("pointermove", { clientX: 100, clientY: 100 });
+  pointer("pointerup", { clientX: 100, clientY: 100 });
+  expect(redraw).not.toHaveBeenCalled();
+  act(() => renderDraft({ ...draft, background: "grid" }, { tool: "lasso" }));
+  expect(redraw).toHaveBeenCalledTimes(1);
+});

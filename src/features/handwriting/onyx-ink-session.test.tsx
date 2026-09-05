@@ -107,7 +107,13 @@ it("falls back to pointer input when the device has no BOOX SDK support", async 
 });
 
 let selectedResult: string[] = [];
-function EditorSheet({ tool }: { tool: InkTool }) {
+function EditorSheet({
+  tool,
+  lassoMode = "rectangle",
+}: {
+  tool: InkTool;
+  lassoMode?: "free" | "rectangle";
+}) {
   const [draft, setDraft] = useState(() => ({
     ...emptyDraft(),
     strokes: [
@@ -133,7 +139,7 @@ function EditorSheet({ tool }: { tool: InkTool }) {
       mouseEnabled={false}
       eraserMode="pixel"
       eraserRadius={9}
-      lassoMode="rectangle"
+      lassoMode={lassoMode}
       selected={selected}
       onSelectionChange={setSelected}
       onChange={setDraft}
@@ -195,4 +201,57 @@ it("routes native hardware erasing and lasso gestures to the shared editor witho
   });
   expect(latest.strokes).toHaveLength(2);
   expect(selectedResult).toEqual(["line"]);
+});
+
+it("keeps fast native lasso transient and sends selection bounds for subsequent dragging", async () => {
+  const publish = vi.fn();
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
+    setTransform() {},
+    clearRect() {},
+    fillRect() {},
+    setLineDash() {},
+    beginPath() {},
+    arc() {},
+    fill() {},
+    moveTo() {},
+    lineTo() {},
+    stroke() {},
+    drawImage: publish,
+  } as unknown as CanvasRenderingContext2D);
+  await act(async () => root.render(<EditorSheet tool="lasso" lassoMode="free" />));
+  const config = bridge.invoke.mock.calls.find(([command]) =>
+    command.endsWith("configure_onyx_ink"),
+  )![1];
+  expect(config).toMatchObject({ fastLasso: true, hasSelection: false });
+  const p = (x: number, y: number) => ({ x, y, pressure: 0.5, tiltX: 0, tiltY: 0, time: x });
+  const points = [p(0, 80), p(220, 80), p(220, 120), p(0, 120), p(0, 80)];
+  const event: OnyxInkEvent = {
+    session: config.session,
+    sequence: 1,
+    kind: "begin",
+    width: 3,
+    erasing: false,
+    fastPreview: true,
+    points: [points[0]!],
+  };
+  publish.mockClear();
+  await act(async () => bridge.event(event));
+  expect(publish).not.toHaveBeenCalled(); // Native layer owns the live trace.
+  await act(async () => {
+    bridge.event({ ...event, kind: "stroke", points });
+    bridge.event({ ...event, kind: "end" });
+  });
+  expect(latest.strokes).toHaveLength(1); // Lasso never becomes a stored stroke.
+  expect(selectedResult).toEqual(["line"]);
+  expect(bridge.invoke).toHaveBeenCalledWith(
+    "plugin:mobile-system|configure_onyx_ink",
+    expect.objectContaining({
+      fastLasso: true,
+      hasSelection: true,
+      selectionLeft: 0,
+      selectionRight: 200,
+      selectionTop: 100,
+      selectionBottom: 100,
+    }),
+  );
 });

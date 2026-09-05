@@ -36,6 +36,7 @@ type Gesture = {
   count: number;
   rect?: DOMRect;
   lastMetrics: number;
+  nativeFast: boolean;
 };
 const NO_SELECTION: string[] = [];
 
@@ -75,6 +76,11 @@ export function InkCanvas({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const bufferRef = useRef<HTMLCanvasElement | null>(null);
   const active = useRef<Gesture | null>(null);
+  const sceneRef = useRef<{
+    canvas: HTMLCanvasElement;
+    strokes: InkStroke[];
+    background: InkDraft["background"];
+  } | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
 
   const publish = (strokes: InkStroke[]) => {
@@ -87,8 +93,30 @@ export function InkCanvas({
     const staging = buffer.getContext("2d");
     if (!ctx || !staging) return;
     staging.setTransform(canvas.width / 1000, 0, 0, canvas.height / 1400, 0, 0);
+    const cached = sceneRef.current;
+    let scene = cached?.canvas;
+    if (
+      !scene ||
+      cached?.strokes !== strokes ||
+      cached.background !== draft.background ||
+      scene.width !== canvas.width ||
+      scene.height !== canvas.height
+    ) {
+      scene ??= document.createElement("canvas");
+      scene.width = canvas.width;
+      scene.height = canvas.height;
+      const sceneContext = scene.getContext("2d");
+      if (!sceneContext) return;
+      sceneContext.setTransform(canvas.width / 1000, 0, 0, canvas.height / 1400, 0, 0);
+      drawSheet(sceneContext, strokes, draft.background);
+      sceneRef.current = { canvas: scene, strokes, background: draft.background };
+    }
+    staging.setTransform(1, 0, 0, 1, 0, 0);
+    staging.globalCompositeOperation = "copy";
+    staging.drawImage(scene, 0, 0);
+    staging.globalCompositeOperation = "source-over";
+    staging.setTransform(canvas.width / 1000, 0, 0, canvas.height / 1400, 0, 0);
     staging.setLineDash([]);
-    drawSheet(staging, strokes, draft.background);
     // Frame and ink share the same staging bitmap, so e-ink cannot present them separately.
     const gesture = active.current;
     const ids =
@@ -136,7 +164,13 @@ export function InkCanvas({
     ctx.globalCompositeOperation = "source-over";
     ctx.setTransform(canvas.width / 1000, 0, 0, canvas.height / 1400, 0, 0);
   };
-  const beginGesture = (point: InkPoint, erasing: boolean, id: number, base: InkDraft) => {
+  const beginGesture = (
+    point: InkPoint,
+    erasing: boolean,
+    id: number,
+    base: InkDraft,
+    nativeFast = false,
+  ) => {
     const bounds = selectionBounds(base.strokes, selected);
     const hit =
       bounds &&
@@ -159,8 +193,8 @@ export function InkCanvas({
       ids: selected,
       count,
       lastMetrics: -Infinity,
+      nativeFast,
     };
-    if (action === "select" || action === "erase") onSelectionChange?.([]);
     sampleGesture(point);
     return active.current;
   };
@@ -174,6 +208,7 @@ export function InkCanvas({
     if (current.points.length >= MAX_INK_POINTS) return;
     if (current.action === "pen" && current.count + current.points.length >= MAX_INK_POINTS) return;
     current.points.push(point);
+    if (current.nativeFast) return;
     if (current.action === "pen") {
       const ctx = canvasRef.current?.getContext("2d");
       if (ctx) drawSegment(ctx, last ?? point, point, width);
@@ -207,9 +242,10 @@ export function InkCanvas({
       const first = current.points[0] ?? gesture[0]!,
         last = gesture[gesture.length - 1]!;
       strokes = moveSelection(strokes, current.ids, last.x - first.x, last.y - first.y);
-    } else if (current.action === "erase")
+    } else if (current.action === "erase") {
       strokes = eraseGesture(strokes, gesture, eraserMode, eraserRadius);
-    else if (current.action === "pen" && gesture.length)
+      onSelectionChange?.([]);
+    } else if (current.action === "pen" && gesture.length)
       strokes = [...strokes, { id: crypto.randomUUID(), width, points: gesture }];
     active.current = null;
     if (strokes.reduce((count, s) => count + s.points.length, 0) > MAX_INK_POINTS) {
@@ -223,7 +259,7 @@ export function InkCanvas({
   const nativeInput = (event: OnyxInkEvent) => {
     const point = event.points?.[0];
     if (event.kind === "begin" && point && (tool !== "pen" || event.erasing))
-      beginGesture(point, event.erasing, -1, draft);
+      beginGesture(point, event.erasing, -1, draft, event.fastPreview);
     else if (event.kind === "preview" && point) sampleGesture(point);
     else if (event.kind === "cancel" || event.kind === "end") {
       if (active.current) {
@@ -251,6 +287,8 @@ export function InkCanvas({
     onLimit,
     onStatus: onNativeStatus,
     decoration: selected.join(","),
+    lassoMode,
+    selection: selectionBounds(draft.strokes, selected),
     onInput: nativeInput,
     onStroke: nativeStroke,
   });

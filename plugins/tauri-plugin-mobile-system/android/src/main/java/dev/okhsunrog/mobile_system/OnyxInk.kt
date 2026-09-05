@@ -35,6 +35,12 @@ class OnyxInkArgs {
     var strokeWidth: Double = 3.0
     var eraser: Boolean = false
     var interaction: Boolean = false
+    var fastLasso: Boolean = false
+    var hasSelection: Boolean = false
+    var selectionLeft: Double = 0.0
+    var selectionTop: Double = 0.0
+    var selectionRight: Double = 0.0
+    var selectionBottom: Double = 0.0
 }
 
 @InvokeArg
@@ -61,6 +67,7 @@ class OnyxInk(
     private var repaintCount = 0L
     private var pendingFrame: Runnable? = null
     private var pendingObserver: ViewTreeObserver? = null
+    private var fastPreview = false
     private var previewAt = 0L
     private var maxPressure = 4095f
     private var failed: String? = null
@@ -89,7 +96,8 @@ class OnyxInk(
         }
         require(args.session.length in 1..128)
         require(listOf(args.left, args.top, args.width, args.height, args.clipTop,
-            args.clipBottom, args.viewportWidth, args.strokeWidth).all { it.isFinite() })
+            args.clipBottom, args.viewportWidth, args.strokeWidth, args.selectionLeft, args.selectionTop,
+            args.selectionRight, args.selectionBottom).all { it.isFinite() })
         require(args.width > 0 && args.height > 0 && args.viewportWidth > 0)
         require(args.strokeWidth in 0.1..20.0)
         check(failed == null) { failed ?: "Pen SDK unavailable" }
@@ -124,9 +132,9 @@ class OnyxInk(
                 helper!!.enableSideBtnErase(true)
             }
             helper!!.setLimitRect(limit, emptyList())
-                .setStrokeWidth((args.strokeWidth * sheet.width() / 1000).toFloat())
+                .setStrokeWidth(((if (args.fastLasso) 1.5 else args.strokeWidth) * sheet.width() / 1000).toFloat())
                 .setStrokeColor(Color.BLACK)
-                .setStrokeStyle(TouchHelper.STROKE_STYLE_FOUNTAIN)
+                .setStrokeStyle(if (args.fastLasso) TouchHelper.STROKE_STYLE_PENCIL else TouchHelper.STROKE_STYLE_FOUNTAIN)
             resume()
             check(helper!!.isRawDrawingCreated) { "Pen SDK did not create a drawing session" }
             return status()
@@ -203,7 +211,8 @@ class OnyxInk(
     private fun resume() {
         if (!resumed || !webView.hasWindowFocus() || config == null || limit.isEmpty) return
         helper?.setRawDrawingEnabled(true)
-        helper?.setRawDrawingRenderEnabled(config?.eraser == false && config?.interaction == false)
+        helper?.setRawDrawingRenderEnabled(config?.eraser == false &&
+            (config?.interaction == false || (config?.fastLasso == true && config?.hasSelection == false)))
     }
 
     private fun pause() {
@@ -243,6 +252,7 @@ class OnyxInk(
             put("sequence", sequence)
             put("width", args.strokeWidth)
             put("erasing", erasing || args.eraser)
+            put("fastPreview", fastPreview)
             if (points != null) put("points", points)
         })
     }
@@ -250,6 +260,13 @@ class OnyxInk(
     private fun begin(point: TouchPoint, erasing: Boolean) {
         if (config == null || helper?.isRawDrawingInputEnabled != true) return
         if (!point.x.isFinite() || !point.y.isFinite() || !point.pressure.isFinite()) return
+        val args = config ?: return
+        val x = (point.x - sheet.left) / sheet.width() * 1000
+        val y = (point.y - sheet.top) / sheet.height() * 1400
+        val movingSelection = args.hasSelection && x >= args.selectionLeft - 12 && x <= args.selectionRight + 12 &&
+            y >= args.selectionTop - 12 && y <= args.selectionBottom + 12
+        fastPreview = args.fastLasso && !erasing && !args.eraser && !movingSelection
+        if (args.interaction) helper?.setRawDrawingRenderEnabled(fastPreview)
         drawing = true
         webView.removeCallbacks(refresh)
         cancelFrameSubmission()
@@ -295,7 +312,7 @@ class OnyxInk(
     }
 
     private fun preview(point: TouchPoint, erasing: Boolean) {
-        if (!drawing || (config?.interaction != true && config?.eraser != true && !erasing)) return
+        if (!drawing || fastPreview || (config?.interaction != true && config?.eraser != true && !erasing)) return
         val now = android.os.SystemClock.uptimeMillis()
         if (now - previewAt < 32) return
         if (!point.x.isFinite() || !point.y.isFinite() || !point.pressure.isFinite()) return
