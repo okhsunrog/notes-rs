@@ -1,6 +1,6 @@
-# notes-rs
+# Tangleaf
 
-notes-rs is a local-first personal knowledge app for desktop and Android. Typed pages contain addressable outline or document blocks connected by wikilinks, block references, and backlinks. React and Tauri provide the shared client; Rust, SQLite, and FTS5 keep writing and lexical search available offline; an optional self-hosted Axum server provides realtime sync and all AI functionality.
+Tangleaf is a local-first personal knowledge app for desktop and Android. Typed pages contain addressable outline or document blocks connected by wikilinks, block references, and backlinks. React and Tauri provide the shared client; Rust, SQLite, and FTS5 keep writing and lexical search available offline; an optional self-hosted Axum server provides realtime sync and all AI functionality.
 
 ## What works
 

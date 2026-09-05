@@ -17,8 +17,8 @@ members = [
 version = "0.1.0"
 edition = "2024"
 authors = ["okhsunrog <me@okhsunrog.dev>"]
-repository = "https://github.com/okhsunrog/notes-rs"
-homepage = "https://github.com/okhsunrog/notes-rs"
+repository = "https://github.com/okhsunrog/tangleaf"
+homepage = "https://github.com/okhsunrog/tangleaf"
 
 [workspace.dependencies]
 anyhow = "1.0.103"
