@@ -270,4 +270,12 @@ the complete SDK point list. During dragging, the paper/unselected ink and selec
 rasterized once, then composited with the translated selection frame. Full vector rasterization
 happens again at commit. This avoids repainting every stroke at the native event rate. Tests
 cover a burst of 100 previews followed by final input, cached drag rendering, clamping, and a
-single undoable final coordinate update. Physical retest of the fix is pending.
+single undoable final coordinate update.
+
+The user confirmed on the physical display that movement now stops immediately after pen-up
+and that dragging is substantially smoother and faster. The follow-up recording contained
+eight gestures: median preview delivery lag per gesture was 13–28 ms, versus 1475 ms for the
+previous measured drag. Per-gesture maxima were 30–395 ms. Final stroke delivery measured from
+the last SDK point was 66–474 ms, and some final rasterization tasks still took 301–365 ms;
+these are event-processing measurements, not pen-to-display latency. The multi-second preview
+backlog no longer appeared in this trial. Timing listeners were unregistered after capture.
