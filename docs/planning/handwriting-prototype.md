@@ -196,5 +196,6 @@ work. They then reported selection borders moving out of step with handwriting, 
 contrast for active tools. Selection/gesture overlays now render into the same staging bitmap
 as the ink, so one canvas publication contains both. Drag completion retains the same anchor
 as its live preview. Active tools, modes, paper and size choices use black/white contrast;
-transitions are disabled in the handwriting toolbars. Physical retest of these refinements is
-pending.
+transitions are disabled in the handwriting toolbars. After installing the refinement with the
+saved draft retained byte-for-byte, the user confirmed on the physical display that the frame
+and handwriting move together and the active tool is clearly visible.
