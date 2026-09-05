@@ -73,9 +73,9 @@ pub(crate) fn extract_attachment_uuids<'a>(
         let mut remaining = source;
         while let Some(index) = remaining.find(PREFIX) {
             let candidate = &remaining[index + PREFIX.len()..];
-            let mut consumed = 1;
-            if candidate.len() >= UUID_LEN
-                && let Ok(uuid) = candidate[..UUID_LEN].parse()
+            let mut consumed = 0;
+            if let Some(value) = candidate.get(..UUID_LEN)
+                && let Ok(uuid) = value.parse()
             {
                 uuids.insert(uuid);
                 consumed = UUID_LEN;
@@ -83,7 +83,9 @@ pub(crate) fn extract_attachment_uuids<'a>(
                     return uuids;
                 }
             }
-            remaining = &candidate[candidate.len().min(consumed)..];
+            // The prefix has already been consumed, so invalid UTF-8-width
+            // candidates can be searched again without slicing a character.
+            remaining = &candidate[consumed..];
         }
     }
     uuids
@@ -780,6 +782,23 @@ mod tests {
         let uuid = uuid::Uuid::now_v7();
         let markdown = format!("notes-attachment:bad then notes-attachment:{uuid}");
         assert_eq!(extract_attachment_uuids([markdown.as_str()]), [uuid].into());
+    }
+
+    #[test]
+    fn attachment_extraction_accepts_unicode_around_invalid_references() {
+        let uuid = uuid::Uuid::now_v7();
+        for invalid in [
+            "",
+            "я",
+            "🔋",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa🔋",
+            "я".repeat(40).as_str(),
+        ] {
+            let markdown = format!("notes-attachment:{invalid} notes-attachment:{uuid}");
+            assert_eq!(extract_attachment_uuids([markdown.as_str()]), [uuid].into());
+        }
+        assert!(extract_attachment_uuids(["notes-attachment:🔋"]).is_empty());
+        assert!(extract_attachment_uuids(["notes-attachment:"]).is_empty());
     }
 
     #[test]
