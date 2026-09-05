@@ -8,7 +8,6 @@ import android.hardware.input.InputManager
 import android.view.InputDevice
 import android.view.MotionEvent
 import android.webkit.WebView
-import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -32,11 +31,13 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
         inputManager.registerInputDeviceListener(this, Handler(Looper.getMainLooper()))
     }
 
-    override fun onDestroy(activity: AppCompatActivity) {
+    @Suppress("OVERRIDE_DEPRECATION") // This plugin does not depend on AppCompat types.
+    override fun onDestroy() {
         inputManager.unregisterInputDeviceListener(this)
     }
 
-    override fun onResume(activity: AppCompatActivity) {
+    @Suppress("OVERRIDE_DEPRECATION")
+    override fun onResume() {
         inputDevicesChanged()
     }
 
@@ -50,8 +51,9 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
 
     @Command
     fun getStylusCapabilities(invoke: Invoke) {
-        val devices = inputManager.inputDeviceIds.mapNotNull { inputManager.getInputDevice(it) }
+        val devices = inputManager.inputDeviceIds.asSequence().mapNotNull { inputManager.getInputDevice(it) }
             .filter { !it.isVirtual && it.supportsSource(InputDevice.SOURCE_STYLUS) }
+            .toList()
         val result = JSObject()
         result.put("available", devices.isNotEmpty())
         result.put("pressure", devices.any { device ->
