@@ -182,9 +182,11 @@ plain paper. Grid spacing is 25 logical units, aligned to the sheet rather than 
 erasing never removes the grid. The field is backward compatible when loading old drafts, but
 older application builds do not accept this new field.
 
-Portable and BOOX input share editing geometry. BOOX drawing still uses fast native ink. Editing
-previews use throttled native move events (at most once per 32 ms), while completed operations
-use the full SDK point list. A cancelled gesture discards its preview; a completed edit creates
+Portable and BOOX input share editing geometry. BOOX writing and freehand lasso use fast native
+ink; the latter is transient and never becomes a stored stroke. Dragging an existing selection,
+rectangle selection, and eraser previews use throttled native move events (at most once per 32 ms),
+while completed operations use the full SDK point list. Static sheet bitmaps are cached across
+contour updates; contours and ink are still published together. A cancelled gesture discards its preview; a completed edit creates
 one undo entry. Partial erasing interpolates pressure, tilt, and time at cut endpoints. Point
 budget checks reject an oversized edit without discarding the original handwriting.
 
@@ -199,3 +201,27 @@ as its live preview. Active tools, modes, paper and size choices use black/white
 transitions are disabled in the handwriting toolbars. After installing the refinement with the
 saved draft retained byte-for-byte, the user confirmed on the physical display that the frame
 and handwriting move together and the active tool is clearly visible.
+
+### Freehand lasso latency and EinkWise follow-up
+
+The earlier freehand lasso rendered through the throttled WebView preview path and redrew every
+stroke on each update. It now uses the SDK pencil trace with no intermediate JavaScript preview;
+the complete native point list selects strokes at pen-up. Selection bounds are sent to Android
+so dragging within the selection keeps its existing bitmap preview instead of drawing a trace.
+Regression tests cover transient native selection, propagation of selection bounds, and sheet
+bitmap reuse/invalidation. All 388 frontend tests and four native frame-fence tests pass; the
+arm64 debug APK builds. Physical acceptance of the new fast lasso remains pending.
+
+The grid was present in canvas and screencap but effectively invisible on the physical panel.
+ADB inspection of EinkWise on firmware 4.2-rel (2026-04-28) showed Customize / Speed, Vivid,
+Original layout, High Contrast OFF, Anti-flicker 10 for Tangleaf. Switching only the profile from
+Speed to Regal made the old grid visible, confirmed by the user before updating the APK.
+Grid lines are also darkened from #c4c4c4 / 0.65 to #777777 / 1 logical unit for better contrast;
+the resulting weight on Regal needs physical acceptance.
+
+EinkWise opens for the foreground app via action.open.eink.center.request, verified from ADB.
+The official SDK exposes getAppScopeRefreshMode/setAppScopeRefreshMode, distinct from persistent
+EinkWise color, contrast, layout, and refresh profiles. Automatic mode switching is not yet
+implemented: test a scoped quality mode and restoration on sheet close/focus changes before
+adopting it. SDK reflective setters can fail silently; verify actual behavior on firmware.
+The device is left in Regal for this trial.
