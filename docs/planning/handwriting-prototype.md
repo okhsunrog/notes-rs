@@ -82,10 +82,15 @@ Android density matches the BOOX per-app display settings.
 While the pen is down, the vendor draws transient ink on the physical display. Completed
 native point lists are normalized into the same portable draft coordinates, pressure, tilt,
 and timestamps as Pointer Events. JavaScript does not also record those pen gestures. The
-shared canvas draws completed strokes and the existing draft writer saves them. A Chromium
-visual-state callback acknowledges the canvas frame before the native adapter releases the
-transient drawing mode to refresh it. A 120 ms quiet period avoids doing that during a stroke;
-a sequence check prevents refreshing a frame which is missing a newer completed stroke.
+shared canvas draws completed strokes and the existing draft writer saves them. It renders full
+replacements offscreen and publishes them with one canvas copy, without resetting the visible
+backing store for each stroke. A Chromium visual-state callback establishes readiness for the
+next draw; an Android frame-commit callback then confirms that a frame has been rendered and
+submitted. Only then does the adapter call `EpdController.handwritingRepaint` for the sheet's
+visible region, keeping raw drawing enabled. Submission is not a physical display-present fence.
+A 120 ms quiet period groups updates between gestures. Stroke sequences, frame revisions, and
+submission generations reject stale callbacks, including undo with an unchanged stroke sequence.
+This handoff requires Android 10+ and hardware rendering; otherwise native setup falls back.
 
 This is a two-stage rendering experiment, not a second note format. The SDK fountain brush and
 our portable pressure brush have different shaping algorithms, so a small change in stroke
@@ -144,3 +149,18 @@ were not captured separately.
 `vp check` and all 377 frontend tests (71 files) passed. The debug Android APK build passed.
 Release shrinking, other BOOX firmware versions, and full rotation/notification-shade/eraser
 acceptance remain outside this first successful pen-latency check.
+
+### Intermittent word disappearance follow-up
+
+The user subsequently reported words briefly disappearing and returning after pen-up. The first
+implementation paused raw rendering, invalidated the entire WebView in DU mode, and resumed
+immediately. It also incorrectly treated the visual-state callback as a submitted frame and
+reset canvas dimensions on every draft update. The revised handoff above removes these sources
+of a blank transition. Tests cover uninterrupted canvas publication and stale frame/pen/lifecycle
+callbacks: 378 frontend tests and four native frame-fence tests pass. The disappearance must
+still be rechecked on the physical display; screenshots cannot verify its absence.
+
+API references:
+
+- https://developer.android.com/reference/android/webkit/WebView.VisualStateCallback
+- https://developer.android.com/reference/android/view/ViewTreeObserver#registerFrameCommitCallback(java.lang.Runnable)

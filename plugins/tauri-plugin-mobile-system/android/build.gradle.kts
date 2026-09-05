@@ -29,6 +29,7 @@ android {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
     implementation("com.onyx.android.sdk:onyxsdk-pen:1.5.4.3")
     implementation("org.lsposed.hiddenapibypass:hiddenapibypass:6.1")
     implementation("androidx.core:core-ktx:1.17.0")

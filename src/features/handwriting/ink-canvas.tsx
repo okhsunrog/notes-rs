@@ -42,6 +42,7 @@ export function InkCanvas({
   onNativeStatus?: (status: OnyxInkStatus) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const bufferRef = useRef<HTMLCanvasElement | null>(null);
   const onyx = useOnyxInk({
     canvasRef,
     enabled: nativeInk,
@@ -79,20 +80,34 @@ export function InkCanvas({
     const canvas = canvasRef.current;
     if (!canvas || !size.width) return;
     const ratio = Math.min(window.devicePixelRatio || 1, 3);
-    canvas.width = Math.round(size.width * ratio);
-    canvas.height = Math.round(size.height * ratio);
+    const pixelWidth = Math.round(size.width * ratio);
+    const pixelHeight = Math.round(size.height * ratio);
+    // Assigning even the same dimensions clears the visible backing store.
+    if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+    if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    ctx.setTransform(canvas.width / 1000, 0, 0, canvas.height / 1400, 0, 0);
+    const buffer = (bufferRef.current ??= document.createElement("canvas"));
+    if (buffer.width !== pixelWidth) buffer.width = pixelWidth;
+    if (buffer.height !== pixelHeight) buffer.height = pixelHeight;
+    const staging = buffer.getContext("2d");
+    if (!staging) return;
+    staging.setTransform(pixelWidth / 1000, 0, 0, pixelHeight / 1400, 0, 0);
     const current = active.current;
     drawSheet(
-      ctx,
+      staging,
       current
         ? current.erasing
           ? current.strokes
           : [...current.strokes, current.stroke]
         : draft.strokes,
     );
+    // Publish a complete image in one operation, including erasure/undo, with no blank frame.
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = "copy";
+    ctx.drawImage(buffer, 0, 0);
+    ctx.globalCompositeOperation = "source-over";
+    ctx.setTransform(pixelWidth / 1000, 0, 0, pixelHeight / 1400, 0, 0);
   }, [draft, size]);
 
   const sample = (event: PointerEvent, end = false) => {

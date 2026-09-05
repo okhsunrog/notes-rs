@@ -4,31 +4,62 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { InkCanvas } from "./ink-canvas";
 import { emptyDraft } from "./ink-model";
+import type { InkDraft } from "@/lib/bindings";
 
 let root: ReturnType<typeof createRoot>;
 let container: HTMLDivElement;
 let canvas: HTMLCanvasElement;
 const changed = vi.fn();
+let resize: ResizeObserverCallback;
+let contexts: WeakMap<HTMLCanvasElement, CanvasRenderingContext2D>;
+
+function renderDraft(draft: InkDraft) {
+  root.render(
+    <InkCanvas
+      draft={draft}
+      tool="pen"
+      width={3}
+      mouseEnabled={false}
+      onChange={changed}
+      onActiveChange={vi.fn()}
+      onMetrics={vi.fn()}
+      onLimit={vi.fn()}
+    />,
+  );
+}
 
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   vi.stubGlobal(
     "ResizeObserver",
     class {
+      constructor(callback: ResizeObserverCallback) {
+        resize = callback;
+      }
       observe() {}
       disconnect() {}
     },
   );
-  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
-    beginPath: vi.fn(),
-    arc: vi.fn(),
-    fill: vi.fn(),
-    moveTo: vi.fn(),
-    lineTo: vi.fn(),
-    stroke: vi.fn(),
-    clearRect: vi.fn(),
-    setTransform: vi.fn(),
-  } as unknown as CanvasRenderingContext2D);
+  contexts = new WeakMap();
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
+    function (this: HTMLCanvasElement) {
+      let context = contexts.get(this);
+      if (context) return context;
+      context = {
+        beginPath: vi.fn(),
+        arc: vi.fn(),
+        fill: vi.fn(),
+        moveTo: vi.fn(),
+        lineTo: vi.fn(),
+        stroke: vi.fn(),
+        clearRect: vi.fn(),
+        setTransform: vi.fn(),
+        drawImage: vi.fn(),
+      } as unknown as CanvasRenderingContext2D;
+      contexts.set(this, context);
+      return context;
+    },
+  );
   container = document.createElement("div");
   root = createRoot(container);
   changed.mockClear();
@@ -56,6 +87,37 @@ beforeEach(() => {
     width: 500,
     height: 700,
   } as DOMRect);
+});
+
+it("publishes complete replacement images without resizing or clearing the visible canvas", () => {
+  act(() =>
+    resize(
+      [{ contentRect: { width: 500, height: 700 } } as ResizeObserverEntry],
+      {} as ResizeObserver,
+    ),
+  );
+  const context = contexts.get(canvas)!;
+  const clear = vi.spyOn(context, "clearRect");
+  const publish = vi.spyOn(context, "drawImage");
+  const setWidth = vi.spyOn(canvas, "width", "set");
+  const setHeight = vi.spyOn(canvas, "height", "set");
+  const draft: InkDraft = {
+    ...emptyDraft(),
+    strokes: [
+      {
+        id: "stroke",
+        width: 3,
+        points: [{ x: 10, y: 20, pressure: 0.5, tiltX: 0, tiltY: 0, time: 1 }],
+      },
+    ],
+  };
+  act(() => renderDraft(draft));
+  act(() => renderDraft(emptyDraft())); // Undo also replaces the image without a visible clear.
+  expect(setWidth).not.toHaveBeenCalled();
+  expect(setHeight).not.toHaveBeenCalled();
+  expect(clear).not.toHaveBeenCalled();
+  expect(publish).toHaveBeenCalledTimes(3);
+  expect(context.globalCompositeOperation).toBe("source-over");
 });
 afterEach(() => {
   act(() => root.unmount());

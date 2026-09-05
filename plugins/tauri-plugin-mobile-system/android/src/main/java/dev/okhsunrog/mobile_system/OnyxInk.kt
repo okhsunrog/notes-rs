@@ -10,7 +10,6 @@ import android.webkit.WebView
 import app.tauri.annotation.InvokeArg
 import app.tauri.plugin.JSObject
 import com.onyx.android.sdk.api.device.epd.EpdController
-import com.onyx.android.sdk.api.device.epd.UpdateMode
 import com.onyx.android.sdk.data.note.TouchPoint
 import com.onyx.android.sdk.pen.RawInputCallback
 import com.onyx.android.sdk.pen.TouchHelper
@@ -57,7 +56,10 @@ class OnyxInk(
     private var drawing = false
     private var sequence = 0L
     private var generation = 0L
-    private var paintedSequence = -1L
+    private val frames = InkFrameFence()
+    private var repaintCount = 0L
+    private var pendingFrame: Runnable? = null
+    private var pendingObserver: ViewTreeObserver? = null
     private var maxPressure = 4095f
     private var failed: String? = null
     private val refresh = Runnable { refreshFrame() }
@@ -89,9 +91,11 @@ class OnyxInk(
         require(args.width > 0 && args.height > 0 && args.viewportWidth > 0)
         require(args.strokeWidth in 0.1..20.0)
         check(failed == null) { failed ?: "Pen SDK unavailable" }
+        check(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && webView.isHardwareAccelerated) {
+            "BOOX ink requires Android 10 or later with hardware rendering"
+        }
         if (config?.session != args.session) {
             close()
-            paintedSequence = -1
         }
         pause()
         config = args
@@ -135,15 +139,17 @@ class OnyxInk(
         put("available", failed == null)
         put("active", helper?.isRawDrawingInputEnabled == true)
         put("error", failed)
+        put("repaintCount", repaintCount)
     }
 
     fun commit(args: OnyxFrameArgs) {
         if (config?.session != args.session) return
-        // A visual-state callback waits for Chromium's compositor, not just JS execution.
-        webView.postVisualStateCallback(args.sequence, object : WebView.VisualStateCallback() {
+        cancelFrameSubmission()
+        val revision = frames.request()
+        // This only guarantees readiness for the next WebView draw, not a submitted frame.
+        webView.postVisualStateCallback(revision, object : WebView.VisualStateCallback() {
             override fun onComplete(requestId: Long) {
-                if (config?.session != args.session) return
-                paintedSequence = maxOf(paintedSequence, requestId)
+                if (config?.session != args.session || !frames.ready(requestId, args.sequence)) return
                 webView.removeCallbacks(refresh)
                 webView.postDelayed(refresh, 120)
             }
@@ -151,11 +157,39 @@ class OnyxInk(
     }
 
     private fun refreshFrame() {
-        if (drawing || paintedSequence < sequence || !resumed || !webView.hasWindowFocus()) return
-        val current = helper ?: return
-        current.setRawDrawingRenderEnabled(false)
-        EpdController.invalidate(webView, UpdateMode.DU)
-        current.setRawDrawingRenderEnabled(config?.eraser == false && !limit.isEmpty)
+        if (!canPresent() || pendingFrame != null) return
+        val observer = webView.viewTreeObserver
+        if (!observer.isAlive) return
+        val submission = frames.submission()
+        val submitted = Runnable {
+            // Frame callbacks may run off the UI thread. Recheck pen and lifecycle state there.
+            webView.post {
+                if (!frames.isCurrent(submission)) return@post
+                pendingFrame = null
+                pendingObserver = null
+                if (!canPresent() || !frames.present(submission, sequence, drawing)) return@post
+                // Keep the raw pen layer alive. The firmware reconciles ink from the new buffer.
+                EpdController.handwritingRepaint(webView, limit)
+                repaintCount++
+            }
+        }
+        pendingFrame = submitted
+        pendingObserver = observer
+        observer.registerFrameCommitCallback(submitted)
+        webView.invalidate()
+    }
+
+    private fun canPresent(): Boolean =
+        helper != null && frames.canSubmit(sequence, drawing) &&
+            resumed && webView.hasWindowFocus() && !limit.isEmpty
+
+    private fun cancelFrameSubmission() {
+        frames.cancelSubmission()
+        val callback = pendingFrame
+        val observer = pendingObserver
+        if (callback != null && observer?.isAlive == true) observer.unregisterFrameCommitCallback(callback)
+        pendingFrame = null
+        pendingObserver = null
     }
 
     fun onPause() { resumed = false; pause() }
@@ -172,6 +206,8 @@ class OnyxInk(
 
     private fun pause() {
         webView.removeCallbacks(refresh)
+        frames.request() // Invalidate visual/frame callbacks from the old geometry or lifecycle.
+        cancelFrameSubmission()
         helper?.setRawDrawingEnabled(false)
         resetPalm()
         if (drawing) {
@@ -213,6 +249,7 @@ class OnyxInk(
         if (config == null || helper?.isRawDrawingInputEnabled != true) return
         drawing = true
         webView.removeCallbacks(refresh)
+        cancelFrameSubmission()
         val position = IntArray(2)
         webView.getLocationOnScreen(position)
         val palm = Rect(limit).apply { offset(position[0], position[1]) }
