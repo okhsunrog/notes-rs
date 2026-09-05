@@ -157,8 +157,11 @@ implementation paused raw rendering, invalidated the entire WebView in DU mode, 
 immediately. It also incorrectly treated the visual-state callback as a submitted frame and
 reset canvas dimensions on every draft update. The revised handoff above removes these sources
 of a blank transition. Tests cover uninterrupted canvas publication and stale frame/pen/lifecycle
-callbacks: 378 frontend tests and four native frame-fence tests pass. The disappearance must
-still be rechecked on the physical display; screenshots cannot verify its absence.
+callbacks: 378 frontend tests and four native frame-fence tests pass. The updated arm64 debug
+APK was installed with existing strokes retained. During the physical-display retest, the user
+reported no longer noticing the disappearance. Native status remained active and recorded
+16 repaint calls, confirming the revised handoff executed during the trial. This is a successful
+qualitative check on this device, not a guarantee across firmware versions or all interactions.
 
 API references:
 
