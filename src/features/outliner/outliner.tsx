@@ -1,7 +1,9 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Loader2, Plus } from "lucide-react";
+import { Plus } from "lucide-react";
+import { OutlineSkeleton } from "./outline-skeleton";
+import { useProgressiveRows, ROW_BATCH_SIZE } from "./use-progressive-rows";
 import { type MarkdownOpenHandler, useResolvedAttachmentImages } from "@/features/markdown";
 import { PagePresentation } from "@/features/pages/page-presentation";
 import { createBlock, getPageRenderSnapshot, type Block, type Page } from "@/lib/api";
@@ -41,12 +43,7 @@ export function Outliner({
   const resolveImage = useResolvedAttachmentImages(snapshot?.images ?? []);
 
   if (snapshotQuery.isPending) {
-    return (
-      <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
-        <Loader2 className="size-4 animate-spin" />
-        Loading outline…
-      </div>
-    );
+    return <OutlineSkeleton />;
   }
   if (snapshotQuery.error) {
     return (
@@ -130,6 +127,13 @@ function VirtualOutline({
   // (verified: the same content rendered statically scrolls natively-smooth).
   // Render typical pages in full and only virtualize genuinely huge ones.
   const virtualize = rows.length > NON_VIRTUAL_MAX;
+  const progressiveCount = useProgressiveRows(
+    rows.length,
+    !virtualize && rows.length > ROW_BATCH_SIZE,
+  );
+  // Navigation to a specific block must never wait behind the background batches.
+  const editingIndex = rows.findIndex((row) => row.block.uuid === store.editingUuid);
+  const visibleCount = Math.max(progressiveCount, editingIndex + 1);
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -226,16 +230,18 @@ function VirtualOutline({
                 />
               );
             })
-          : rows.map((row) => (
-              <BlockNode
-                key={row.block.uuid}
-                block={row.block}
-                depth={row.depth}
-                ordinal={row.ordinal}
-                style={{ paddingInlineStart: `${row.depth * 1.75}rem` }}
-              />
-            ))}
+          : rows
+              .slice(0, visibleCount)
+              .map((row) => (
+                <StaticBlockRow
+                  key={row.block.uuid}
+                  block={row.block}
+                  depth={row.depth}
+                  ordinal={row.ordinal}
+                />
+              ))}
       </ul>
+      {!virtualize && visibleCount < rows.length && <OutlineSkeleton />}
       {!store.readOnly && (
         <button
           type="button"
@@ -252,6 +258,17 @@ function VirtualOutline({
     </>
   );
 }
+
+const StaticBlockRow = memo(function StaticBlockRow({ block, depth, ordinal }: FlatBlock) {
+  return (
+    <BlockNode
+      block={block}
+      depth={depth}
+      ordinal={ordinal}
+      style={{ paddingInlineStart: `${depth * 1.75}rem` }}
+    />
+  );
+});
 
 export function flattenBlocks(
   blocks: readonly Block[],
