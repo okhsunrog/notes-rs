@@ -118,6 +118,14 @@ export function useOnyxInk({
     let remove: (() => Promise<void>) | undefined;
     let queue = Promise.resolve();
     let lastConfig = "";
+    let previewFrame: number | undefined;
+    let latestPreview: OnyxInkEvent | undefined;
+    let gestureOpen = false;
+    const cancelPreview = () => {
+      if (previewFrame !== undefined) cancelAnimationFrame(previewFrame);
+      previewFrame = undefined;
+      latestPreview = undefined;
+    };
     const status = (value: OnyxInkStatus) => {
       if (!disposed) {
         setNative(value.available);
@@ -178,6 +186,21 @@ export function useOnyxInk({
     void addPluginListener<OnyxInkEvent>("mobile-system", "onyxInk", (event) => {
       if (disposed || event.session !== id) return;
       const current = state.current;
+      if (event.kind === "preview") {
+        if (!gestureOpen) return;
+        latestPreview = event;
+        if (previewFrame === undefined)
+          previewFrame = requestAnimationFrame(() => {
+            previewFrame = undefined;
+            const preview = latestPreview;
+            latestPreview = undefined;
+            if (!disposed && gestureOpen && preview) state.current.onInput?.(preview);
+          });
+        return;
+      }
+      // Completed gestures use the full SDK point list, never a pending preview frame.
+      cancelPreview();
+      gestureOpen = event.kind === "begin";
       if (event.kind !== "stroke") current.onInput?.(event);
       if (event.kind === "begin") current.onActiveChange(true);
       else if (event.kind === "end" || event.kind === "cancel") {
@@ -227,6 +250,7 @@ export function useOnyxInk({
     document.addEventListener("visibilitychange", configure);
     return () => {
       disposed = true;
+      cancelPreview();
       session.current = null;
       update.current = null;
       resize.disconnect();

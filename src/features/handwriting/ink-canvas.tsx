@@ -37,6 +37,9 @@ type Gesture = {
   rect?: DOMRect;
   lastMetrics: number;
   nativeFast: boolean;
+  backdrop?: InkStroke[];
+  movingInk?: InkStroke[];
+  movingBitmap?: HTMLCanvasElement;
 };
 const NO_SELECTION: string[] = [];
 
@@ -93,11 +96,13 @@ export function InkCanvas({
     const staging = buffer.getContext("2d");
     if (!ctx || !staging) return;
     staging.setTransform(canvas.width / 1000, 0, 0, canvas.height / 1400, 0, 0);
+    const gesture = active.current;
+    const sceneStrokes = gesture?.backdrop ?? strokes;
     const cached = sceneRef.current;
     let scene = cached?.canvas;
     if (
       !scene ||
-      cached?.strokes !== strokes ||
+      cached?.strokes !== sceneStrokes ||
       cached.background !== draft.background ||
       scene.width !== canvas.width ||
       scene.height !== canvas.height
@@ -108,8 +113,8 @@ export function InkCanvas({
       const sceneContext = scene.getContext("2d");
       if (!sceneContext) return;
       sceneContext.setTransform(canvas.width / 1000, 0, 0, canvas.height / 1400, 0, 0);
-      drawSheet(sceneContext, strokes, draft.background);
-      sceneRef.current = { canvas: scene, strokes, background: draft.background };
+      drawSheet(sceneContext, sceneStrokes, draft.background);
+      sceneRef.current = { canvas: scene, strokes: sceneStrokes, background: draft.background };
     }
     staging.setTransform(1, 0, 0, 1, 0, 0);
     staging.globalCompositeOperation = "copy";
@@ -118,7 +123,6 @@ export function InkCanvas({
     staging.setTransform(canvas.width / 1000, 0, 0, canvas.height / 1400, 0, 0);
     staging.setLineDash([]);
     // Frame and ink share the same staging bitmap, so e-ink cannot present them separately.
-    const gesture = active.current;
     const ids =
       gesture?.action === "move"
         ? gesture.ids
@@ -126,6 +130,29 @@ export function InkCanvas({
           ? NO_SELECTION
           : selected;
     const bounds = selectionBounds(strokes, ids);
+    if (gesture?.movingInk && bounds) {
+      let layer = gesture.movingBitmap;
+      if (!layer || layer.width !== canvas.width || layer.height !== canvas.height) {
+        layer ??= document.createElement("canvas");
+        layer.width = canvas.width;
+        layer.height = canvas.height;
+        const inkContext = layer.getContext("2d");
+        if (!inkContext) return;
+        inkContext.setTransform(canvas.width / 1000, 0, 0, canvas.height / 1400, 0, 0);
+        for (const stroke of gesture.movingInk) {
+          for (let i = 0; i < stroke.points.length; i++)
+            drawSegment(
+              inkContext,
+              stroke.points[Math.max(0, i - 1)]!,
+              stroke.points[i]!,
+              stroke.width,
+            );
+        }
+        gesture.movingBitmap = layer;
+      }
+      const original = selectionBounds(gesture.movingInk, ids)!;
+      staging.drawImage(layer, bounds.left - original.left, bounds.top - original.top, 1000, 1400);
+    }
     staging.strokeStyle = "#111111";
     staging.lineWidth = 1.5;
     staging.setLineDash([7, 5]);
@@ -194,6 +221,10 @@ export function InkCanvas({
       count,
       lastMetrics: -Infinity,
       nativeFast,
+      backdrop:
+        action === "move" ? base.strokes.filter((s) => !selected.includes(s.id)) : undefined,
+      movingInk:
+        action === "move" ? base.strokes.filter((s) => selected.includes(s.id)) : undefined,
     };
     sampleGesture(point);
     return active.current;

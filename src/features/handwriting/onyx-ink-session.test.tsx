@@ -20,7 +20,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 let root: ReturnType<typeof createRoot>;
 let container: HTMLDivElement;
 let latest: InkDraft;
-function Sheet() {
+function Sheet({ onInput }: { onInput?: (event: OnyxInkEvent) => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [draft, setDraft] = useState(emptyDraft);
   latest = draft;
@@ -30,6 +30,7 @@ function Sheet() {
     draft,
     tool: "pen",
     width: 3,
+    onInput,
     onChange: setDraft,
     onActiveChange: () => {},
     onMetrics: () => {},
@@ -254,4 +255,58 @@ it("keeps fast native lasso transient and sends selection bounds for subsequent 
       selectionBottom: 100,
     }),
   );
+});
+
+it("coalesces queued previews and discards them when the full stroke arrives", async () => {
+  const frames = new Map<number, FrameRequestCallback>();
+  let nextFrame = 0;
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+    frames.set(++nextFrame, callback);
+    return nextFrame;
+  });
+  vi.stubGlobal("cancelAnimationFrame", (id: number) => frames.delete(id));
+  const flushFrames = () => {
+    const pending = [...frames.values()];
+    frames.clear();
+    for (const callback of pending) callback(0);
+  };
+  const input = vi.fn();
+  await act(async () => root.render(<Sheet onInput={input} />));
+  const config = bridge.invoke.mock.calls.find(([command]) =>
+    command.endsWith("configure_onyx_ink"),
+  )![1];
+  const event: OnyxInkEvent = {
+    session: config.session,
+    kind: "begin",
+    sequence: 1,
+    erasing: false,
+    width: 3,
+    points: [{ x: 0, y: 20, pressure: 0.5, tiltX: 0, tiltY: 0, time: 1 }],
+  };
+  const preview = (x: number): OnyxInkEvent => ({
+    ...event,
+    kind: "preview",
+    points: [{ ...event.points![0]!, x }],
+  });
+  await act(async () => {
+    bridge.event(event);
+    for (let x = 1; x <= 100; x++) bridge.event(preview(x));
+  });
+  expect(input).toHaveBeenCalledTimes(1); // Only begin; 100 positions wait for one frame.
+  await act(async () => flushFrames());
+  expect(input).toHaveBeenLastCalledWith(preview(100));
+  expect(input).toHaveBeenCalledTimes(2);
+  await act(async () => {
+    bridge.event(preview(101));
+    bridge.event({
+      ...event,
+      kind: "stroke",
+      points: [event.points![0]!, preview(200).points![0]!],
+    });
+    bridge.event({ ...event, kind: "end" });
+    bridge.event(preview(102)); // A stale preview after pen-up cannot animate the committed ink.
+    flushFrames();
+  });
+  expect(input.mock.calls.filter(([e]) => e.kind === "preview")).toHaveLength(1);
+  expect(latest.strokes[0]!.points[1]!.x).toBe(200);
 });

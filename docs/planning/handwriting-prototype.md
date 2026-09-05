@@ -255,3 +255,19 @@ open/close check. Raw integer restoration preserves inherited/unknown firmware v
 SDK enum conversion can lose. Seven Android unit tests pass. Gesture acceleration and the
 five-second quality restoration still await physical-display feedback; readback of a view
 mode alone does not establish the effective waveform during a gesture.
+
+### Drag continues after pen-up: measured preview backlog
+
+The user reported continued movement after lifting the pen. A read-only WebView listener on
+Note Air 4C recorded 41 rectangle-selection previews with median/max event delivery lag of
+8/20 ms, followed by 92 drag previews with median/max lag of 1475/3696 ms. The JavaScript long
+task observer also recorded tasks of 50–77 ms and a final 350 ms task. This identifies an actual
+preview processing backlog; the five-second display-mode quiet period does not move vectors.
+
+Native previews now retain only the latest event for the next animation frame. Begin, final
+stroke, end, cancellation, and unmount discard any queued preview; final geometry always uses
+the complete SDK point list. During dragging, the paper/unselected ink and selected ink are
+rasterized once, then composited with the translated selection frame. Full vector rasterization
+happens again at commit. This avoids repainting every stroke at the native event rate. Tests
+cover a burst of 100 previews followed by final input, cached drag rendering, clamping, and a
+single undoable final coordinate update. Physical retest of the fix is pending.

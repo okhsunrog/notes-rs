@@ -261,3 +261,41 @@ it("reuses the sheet bitmap during a contour and rebuilds it when paper changes"
   act(() => renderDraft({ ...draft, background: "grid" }, { tool: "lasso" }));
   expect(redraw).toHaveBeenCalledTimes(1);
 });
+
+it("moves cached selection ink without rasterizing strokes again and clamps its frame with it", () => {
+  act(() =>
+    resize(
+      [{ contentRect: { width: 500, height: 700 } } as ResizeObserverEntry],
+      {} as ResizeObserver,
+    ),
+  );
+  const draft = {
+    ...emptyDraft(),
+    strokes: [
+      {
+        id: "a",
+        width: 3,
+        points: [
+          { x: 50, y: 60, pressure: 0.5, tiltX: 0, tiltY: 0, time: 0 },
+          { x: 100, y: 80, pressure: 0.5, tiltX: 0, tiltY: 0, time: 1 },
+        ],
+      },
+    ],
+  };
+  act(() => renderDraft(draft, { tool: "lasso", selected: ["a"] }));
+  pointer("pointerdown", { clientX: 30, clientY: 35 });
+  const visibleCalls = vi.spyOn(contexts.get(canvas)!, "drawImage").mock.calls;
+  const staging = contexts.get(visibleCalls[visibleCalls.length - 1]![0] as HTMLCanvasElement)!;
+  const copies = vi.spyOn(staging, "drawImage");
+  const layer = copies.mock.calls[copies.mock.calls.length - 1]![0] as HTMLCanvasElement;
+  const redraw = vi.spyOn(contexts.get(layer)!, "stroke");
+  redraw.mockClear();
+  pointer("pointermove", { clientX: 40, clientY: 50 });
+  expect(copies).toHaveBeenLastCalledWith(layer, 20, 30, 1000, 1400);
+  pointer("pointermove", { clientX: -100, clientY: -100 });
+  expect(copies).toHaveBeenLastCalledWith(layer, -50, -60, 1000, 1400);
+  expect(redraw).not.toHaveBeenCalled();
+  pointer("pointerup", { clientX: 40, clientY: 50 });
+  expect(changed).toHaveBeenCalledTimes(1);
+  expect(changed.mock.calls[0]![0].strokes[0].points[0]).toMatchObject({ x: 70, y: 90 });
+});
