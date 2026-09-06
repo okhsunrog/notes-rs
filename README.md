@@ -14,6 +14,7 @@ Tangleaf is a local-first personal knowledge app for desktop and Android. Typed 
 - Remote AI administration in Settings: provider URLs and models, write-only API keys, capability probes, automatic-indexing and extraction switches, queue progress, failures, and reindex controls.
 - A full-workspace graph view, six color palettes with light/dark/system brightness, responsive mobile navigation, Android edge-to-edge safe areas, and configurable native or client window decorations on desktop.
 - Handwritten notes as ordinary pages: pen input with pressure and tilt, erasing, lasso editing, persistent undo/redo, binary ink storage in the shared database, versioned sync with explicit conflict comparison, and a native fast-ink path on BOOX e-ink tablets.
+- An MCP endpoint on the server that exposes the workspace to outside assistants: create notes, append to journals and pages, rewrite blocks under a revision guard, rename pages, and read by search, subtree, ancestors, backlinks, or neighbors. Writes reach the oplog before the tool answers, so a note added from a phone is on every device moments later.
 - Debug-only, localhost-bound Tauri MCP integration for live screenshots, accessibility snapshots, input, logs, and IPC inspection.
 
 Select **New note** or press `Ctrl/Cmd+N` to start writing. Enter a title, then press `Enter` to focus the first block. `Ctrl/Cmd+K` opens search. The graph has its own full-workspace surface; the side companion is reserved for AI.
@@ -130,6 +131,43 @@ just deploy-server
 `just package-server` produces the ignored `release-server/` staging directory and `notes-server-release.tar.gz` archive locally; release binaries are not committed.
 
 TLS and public routing belong to the existing reverse proxy; the notes server binds privately and ships as one static binary plus its bootstrap TOML.
+
+### Connecting an assistant over MCP
+
+The server serves MCP at `POST /mcp`, behind the same bearer token as the sync API. Two settings
+matter for a public deployment:
+
+```toml
+public_url = "https://notes.example.com"
+mcp_allowed_hosts = ["notes.example.com", "notes.example.dev"]
+```
+
+`mcp_allowed_hosts` is `Host` validation, which the transport applies to protect against DNS
+rebinding; without it only loopback is accepted. `public_url` is the canonical origin and turns on
+the OAuth endpoints. A workspace reachable under several names describes each of them in its
+discovery documents, so any listed name can be connected to; the canonical one stays the issuer.
+
+A client that can send a header carries the server token directly:
+
+```sh
+claude mcp add --transport http tangleaf https://notes.example.com/mcp \
+  --header "Authorization: Bearer $TANGLEAF_TOKEN"
+```
+
+Codex takes the same shape in `~/.codex/config.toml` under `[mcp_servers.tangleaf]`, with `url`
+and `bearer_token_env_var`.
+
+A client that cannot — the Claude apps, whose connector dialog has a URL and an OAuth toggle and
+nowhere to paste a credential — goes through the authorization endpoints instead. Add the connector
+by URL with sign-in enabled and leave the client fields empty: it registers itself, and the consent
+screen asks for the same server token. Tokens are issued to that client alone, expire, and refresh
+without asking again.
+
+Editing tools are guarded by revisions. Every page and block carries the revision of its editable
+field, and a write hands it back; an edit built on text that changed in the meantime is refused
+rather than applied, so an assistant working from what it read a minute ago cannot overwrite what
+was typed on another device since. See
+[Sync, storage, and AI](docs/architecture/sync-storage-ai.md) for the invariants behind that.
 
 ## Remaining work
 

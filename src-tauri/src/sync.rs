@@ -864,6 +864,37 @@ fn emit_workspace_changed(app: &AppHandle) {
     crate::commands::emit_domain(app, crate::commands::DomainEvent::WorkspaceChanged);
 }
 
+/// Best-effort upload on orderly exit. The outbox remains authoritative on
+/// timeout/offline failure; shutting down never waits indefinitely for a server.
+pub(crate) async fn finish_before_exit(app: &AppHandle) {
+    let Some(state) = app.try_state::<crate::commands::AppState>() else {
+        return;
+    };
+    let attempt = async {
+        let Some((url, token)) = crate::settings::runtime(app)?.sync_credentials()? else {
+            return Ok::<(), anyhow::Error>(());
+        };
+        let transport = HttpTransport::new(url, token)?;
+        loop {
+            let pending = notes_core::pending_outbox(&state.conn, SYNC_BATCH_SIZE).await?;
+            if pending.is_empty() {
+                return Ok(());
+            }
+            upload_operation_blobs(&state.conn, &transport, &state.blob_store, &pending).await?;
+            let accepted = transport.push(pending).await?;
+            notes_core::acknowledge_server_ops(
+                &state.conn,
+                accepted.iter().map(|o| (o.envelope.op_id, o.seq)).collect(),
+            )
+            .await?;
+        }
+    };
+    match tokio::time::timeout(Duration::from_secs(3), attempt).await {
+        Ok(Ok(())) => {}
+        failure => tracing::warn!(?failure, "Exit synchronization deferred; outbox retained"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1053,36 +1084,5 @@ mod tests {
                 .expect("drained outbox")
                 .is_empty()
         );
-    }
-}
-
-/// Best-effort upload on orderly exit. The outbox remains authoritative on
-/// timeout/offline failure; shutting down never waits indefinitely for a server.
-pub(crate) async fn finish_before_exit(app: &AppHandle) {
-    let Some(state) = app.try_state::<crate::commands::AppState>() else {
-        return;
-    };
-    let attempt = async {
-        let Some((url, token)) = crate::settings::runtime(app)?.sync_credentials()? else {
-            return Ok::<(), anyhow::Error>(());
-        };
-        let transport = HttpTransport::new(url, token)?;
-        loop {
-            let pending = notes_core::pending_outbox(&state.conn, SYNC_BATCH_SIZE).await?;
-            if pending.is_empty() {
-                return Ok(());
-            }
-            upload_operation_blobs(&state.conn, &transport, &state.blob_store, &pending).await?;
-            let accepted = transport.push(pending).await?;
-            notes_core::acknowledge_server_ops(
-                &state.conn,
-                accepted.iter().map(|o| (o.envelope.op_id, o.seq)).collect(),
-            )
-            .await?;
-        }
-    };
-    match tokio::time::timeout(Duration::from_secs(3), attempt).await {
-        Ok(Ok(())) => {}
-        failure => tracing::warn!(?failure, "Exit synchronization deferred; outbox retained"),
     }
 }

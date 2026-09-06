@@ -105,7 +105,7 @@ pub(super) fn stage(
     root_hash: BlobHash,
     snapshot: &Snapshot,
 ) -> CommandResult<()> {
-    storage::history::persist(conn, &snapshot)?;
+    storage::history::persist(conn, snapshot)?;
     conn.execute(
         "INSERT OR IGNORE INTO ink_staged_roots VALUES(?1,?2)",
         params![root_hash.as_bytes().as_slice(), snapshot.root.id.as_slice()],

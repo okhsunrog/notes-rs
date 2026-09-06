@@ -131,5 +131,13 @@ impl Store {
 /// On process startup, interrupted sessions become candidates for completion.
 /// No geometry is imported from the former prototype database.
 pub async fn recoverable_notes(conn: &crate::Connection) -> anyhow::Result<Vec<uuid::Uuid>> {
-    conn.call(|db|Ok(db.prepare("SELECT d.page_uuid FROM ink_documents d JOIN pages p ON p.uuid=d.page_uuid WHERE dirty=1 OR publication_requested=1 OR editing=1")?.query_map([],|r|r.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?)).await
+    conn.call(|db| {
+        db.prepare(
+            "SELECT d.page_uuid FROM ink_documents d JOIN pages p ON p.uuid=d.page_uuid \
+             WHERE dirty=1 OR publication_requested=1 OR editing=1",
+        )?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+    })
+    .await
 }

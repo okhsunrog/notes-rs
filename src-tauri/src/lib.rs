@@ -319,10 +319,10 @@ pub fn run() {
             let app = app.clone();
             let finished = finished.clone();
             tauri::async_runtime::spawn(async move {
-                if let Some(ink) = app.try_state::<commands::HandwritingStore>() {
-                    if let Err(error) = ink.complete_all().await {
-                        tracing::warn!(?error, "Ink exit completion retained for recovery");
-                    }
+                if let Some(ink) = app.try_state::<commands::HandwritingStore>()
+                    && let Err(error) = ink.complete_all().await
+                {
+                    tracing::warn!(?error, "Ink exit completion retained for recovery");
                 }
                 sync::finish_before_exit(&app).await;
                 finished.store(true, Ordering::Relaxed);

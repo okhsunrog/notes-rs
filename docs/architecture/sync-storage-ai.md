@@ -246,6 +246,59 @@ The server assigns a gapless per-user `seq` in its oplog and materializes the sa
 its own notes-core replica. Server replay resumes from the materialized replica cursor rather than
 reapplying the log from zero.
 
+### Server-authored writes
+
+The server writes to the graph itself: the chat agent creates pages, and further server-side writers
+will follow. On the server the notes replica is a materialization of the oplog and nothing else, so
+such a write is complete only once every operation behind it carries a `seq`. Until then it is not
+durable, not visible to any device, and absent from the log that a snapshot taken meanwhile claims
+to represent — and it cannot be repaired afterwards, because only the operation envelope carries the
+HLC and it was never persisted.
+
+Two rules keep that from being possible to forget:
+
+- every code path that mutates `UserState::notes` goes through `UserState::write`, which publishes
+  the authored operations through `ingest` before returning. Server-side tools are handed a writer
+  handle, never the connection: a bare connection looks like a plain local database, and writing to
+  one is only half of a write.
+- `applied_ops` rows with a null `seq` and no matching `sync_outbox` row are a bug. The server counts
+  them when it opens a replica and logs them as an error.
+
+Whether a replica publishes what it authors is recorded as its role (`sync_meta.replica_role`), not
+inferred from having an upstream URL. Clients publish because they push to a server; the server
+publishes because it owns the log. Both answers are yes, for different reasons.
+
+### The MCP endpoint
+
+`POST /mcp` serves the workspace as tools for an external assistant, over the same bearer token as
+the sync API. Writes go through `UserState::write`, so they obey the rule above. Editing tools are
+guarded by revisions: a node carries the revision of its editable field, a write hands it back, and
+an edit built on text that has since changed is refused rather than applied.
+
+The transport validates the `Host` header and accepts only loopback unless `mcp_allowed_hosts`
+lists the name clients use.
+
+### Authorizing clients that cannot hold a token
+
+Some clients have nowhere to paste a bearer token — the Claude apps, for one — so the server can
+act as an OAuth authorization server for its own MCP endpoint. Setting `public_url` turns those
+endpoints on; leaving it unset keeps the server bearer-only.
+
+The flow is OAuth 2.1 as the MCP authorization spec profiles it: discovery documents under
+`/.well-known/`, dynamic client registration, authorization code with mandatory S256 PKCE, and
+rotating refresh tokens. It issues tokens but holds no identity of its own — the consent screen
+asks for a server token, the credential that already authorizes everything else — so there is no
+second password to manage. Issued material lives in `oauth.db` as digests and is short-lived:
+codes for a minute, access tokens for an hour, refresh tokens for thirty days from last use.
+
+Two details are load-bearing. An unauthorized request answers `401` with
+`WWW-Authenticate: Bearer resource_metadata=…`, which is the only way a client learns where to
+authorize. And a workspace reachable under several names describes each of them: a client checks
+that the resource it was told about matches the URL its user typed, so the protected resource
+metadata reports the name the request arrived on. That is decided by the configured list, never by
+the header alone — an unknown `Host` falls back to `public_url`, which also stays the issuer, since
+the spec expects a resource to be able to point at an authorization server elsewhere.
+
 ## 6. Local-first client behavior
 
 Desktop and Android always keep local source state and FTS. Without a configured or reachable

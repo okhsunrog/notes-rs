@@ -57,25 +57,25 @@ pub(crate) fn capture(conn: &Connection) -> CommandResult<(Manifest, Blobs)> {
         let mut variants = Vec::new();
         let mut seen = BTreeSet::new();
         // Include unpublished work even when other devices have published concurrent heads.
-        if let Some((Some(root), dirty, _)) = state.as_ref() {
-            if *dirty || heads.is_empty() {
-                let id: Id = root
-                    .clone()
-                    .try_into()
-                    .map_err(|_| CommandError::invalid("Invalid ink root ID"))?;
-                let graph = transfer::export_root(conn, id)?;
-                let bytes =
-                    conn.query_row("SELECT data FROM ink_records WHERE id=?1", [root], |r| {
-                        r.get::<_, Vec<u8>>(0)
-                    })?;
-                let hash = BlobHash::digest(&bytes);
-                blobs.extend(graph);
-                seen.insert(hash);
-                variants.push(Variant {
-                    root_hash: hash,
-                    device_name: "Local working copy".into(),
-                });
-            }
+        if let Some((Some(root), dirty, _)) = state.as_ref()
+            && (*dirty || heads.is_empty())
+        {
+            let id: Id = root
+                .clone()
+                .try_into()
+                .map_err(|_| CommandError::invalid("Invalid ink root ID"))?;
+            let graph = transfer::export_root(conn, id)?;
+            let bytes =
+                conn.query_row("SELECT data FROM ink_records WHERE id=?1", [root], |r| {
+                    r.get::<_, Vec<u8>>(0)
+                })?;
+            let hash = BlobHash::digest(&bytes);
+            blobs.extend(graph);
+            seen.insert(hash);
+            variants.push(Variant {
+                root_hash: hash,
+                device_name: "Local working copy".into(),
+            });
         }
         for head in heads {
             if state

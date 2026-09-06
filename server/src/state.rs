@@ -8,6 +8,7 @@ use notes_protocol::SequencedOp;
 use notes_sync::{Op, SyncSnapshot};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
@@ -16,6 +17,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 const REPLAY_BATCH_SIZE: usize = 1_000;
+const OUTBOX_BATCH_SIZE: u32 = 256;
 
 #[derive(Clone)]
 pub struct UserRegistry {
@@ -38,6 +40,31 @@ pub struct UserState {
     command_tx: mpsc::Sender<UserCommand>,
     operations_tx: broadcast::Sender<SequencedOp>,
     outbox_wake: Arc<Notify>,
+}
+
+/// The server's own graph writes. Every mutation goes through
+/// [`UserState::write`], so the operations behind it are in the oplog by the
+/// time the tool that asked for it sees a result.
+#[async_trait::async_trait]
+impl notes_ai::agent::GraphWriter for UserState {
+    async fn create_page(&self, title: String, markdown: String) -> Result<notes_core::db::Page> {
+        self.write(|conn| async move {
+            let page = notes_core::db::create_page(&conn, title).await?;
+            if !markdown.trim().is_empty() {
+                notes_core::db::create_block(
+                    &conn,
+                    page.uuid,
+                    None,
+                    None,
+                    notes_core::BlockStyle::Paragraph,
+                    markdown,
+                )
+                .await?;
+            }
+            Ok(page)
+        })
+        .await
+    }
 }
 
 enum UserCommand {
@@ -98,40 +125,30 @@ impl UserRegistry {
         matched
     }
 
+    /// Looks up a user by id, for callers that already established who is
+    /// asking by some means other than a token — an OAuth access token, say.
+    pub fn user(&self, id: &str) -> Option<Arc<UserState>> {
+        self.users.iter().find(|user| user.id == id).cloned()
+    }
+
     pub fn users(&self) -> impl Iterator<Item = &Arc<UserState>> {
         self.users.iter()
     }
 }
 
+/// Sweeps up operations that were authored but not published — a writer that
+/// failed midway, or a process that died between applying and publishing. The
+/// primary path is [`UserState::write`], which publishes before it returns;
+/// this loop only guarantees that nothing stays stranded when that path breaks.
 fn spawn_local_outbox_publisher(user: Arc<UserState>, shutdown: CancellationToken) {
     tokio::spawn(async move {
         loop {
-            loop {
-                let operations = tokio::select! {
-                    () = shutdown.cancelled() => return,
-                    result = notes_core::pending_outbox(&user.notes, 256) => match result {
-                        Ok(operations) => operations,
-                        Err(error) => {
-                            tracing::warn!(user = %user.id, ?error, "reading server outbox failed");
-                            break;
-                        }
-                    },
-                };
-                if operations.is_empty() {
-                    break;
-                }
-                let batch_is_full = operations.len() == 256;
-                let result = tokio::select! {
-                    () = shutdown.cancelled() => return,
-                    result = user.ingest(operations) => result,
-                };
-                if let Err(error) = result {
-                    tracing::warn!(user = %user.id, ?error, "publishing server-authored operations failed");
-                    break;
-                }
-                if !batch_is_full {
-                    break;
-                }
+            let published = tokio::select! {
+                () = shutdown.cancelled() => return,
+                result = user.publish_authored_ops() => result,
+            };
+            if let Err(error) = published {
+                tracing::warn!(user = %user.id, ?error, "publishing server-authored operations failed");
             }
             tokio::select! {
                 () = shutdown.cancelled() => return,
@@ -140,6 +157,37 @@ fn spawn_local_outbox_publisher(user: Arc<UserState>, shutdown: CancellationToke
             }
         }
     });
+}
+
+/// Counts operations this replica applied but never queued for publication.
+///
+/// On the server that count must be zero. An authored operation enters the
+/// outbox in the same transaction that applies it and leaves once the oplog has
+/// given it a seq, so a row with neither is a write the materialized state
+/// remembers and the log does not. It cannot be recovered as an operation
+/// either: only the envelope carries the HLC, and it was never persisted.
+async fn audit_unpublished_ops(notes: &Connection, user_id: &str) -> Result<()> {
+    let stranded = notes
+        .call(|database| {
+            database.query_row(
+                "SELECT COUNT(*) FROM applied_ops
+                 WHERE seq IS NULL AND op_id NOT IN (SELECT op_id FROM sync_outbox)",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .await
+        .context("auditing unpublished operations")?;
+    if stranded > 0 {
+        tracing::error!(
+            user = %user_id,
+            stranded,
+            "replica holds operations that never reached the oplog: they are invisible to \
+             every device, absent from the log a snapshot claims to represent, and cannot be \
+             reconstructed as operations"
+        );
+    }
+    Ok(())
 }
 
 impl UserState {
@@ -161,7 +209,11 @@ impl UserState {
             .await
             .with_context(|| format!("opening oplog for {}", user.id))?;
         oplog.assert_gapless().await?;
+        notes_core::set_replica_role(&notes, notes_core::ReplicaRole::Server)
+            .await
+            .with_context(|| format!("marking the replica of {} as server-owned", user.id))?;
         replay_oplog(&notes, &oplog).await?;
+        audit_unpublished_ops(&notes, &user.id).await?;
 
         let (command_tx, command_rx) = mpsc::channel(64);
         let (operations_tx, _) = broadcast::channel(1_024);
@@ -229,6 +281,61 @@ impl UserState {
 
     pub fn notify_outbox(&self) {
         self.outbox_wake.notify_one();
+    }
+
+    /// Runs a write that authors operations on this replica, and publishes them
+    /// before returning.
+    ///
+    /// Every server-side writer must come through here. On the server `notes`
+    /// is a materialization of the oplog and nothing else, so a mutation that
+    /// only touches it has changed what this process sees and nothing that any
+    /// device, snapshot or restart will agree with. Publishing before returning
+    /// also gives callers read-your-writes: a client polling `/v1/ops` the
+    /// moment this resolves already sees the operations.
+    pub async fn write<F, Fut, T>(&self, mutate: F) -> Result<T>
+    where
+        F: FnOnce(Connection) -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        // A mutation that fails partway can still have committed earlier
+        // operations, so publish regardless of the outcome and let the caller's
+        // error win when both fail.
+        let mutated = mutate(self.notes.clone()).await;
+        let published = self.publish_authored_ops().await;
+        match (mutated, published) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Ok(_), Err(error)) => Err(error.context("publishing a server-authored write")),
+            (Err(error), Ok(())) => Err(error),
+            (Err(error), Err(publish_error)) => {
+                tracing::warn!(
+                    user = %self.id,
+                    error = ?publish_error,
+                    "publishing after a failed write also failed"
+                );
+                Err(error)
+            }
+        }
+    }
+
+    /// Moves every authored-but-unsequenced operation into the oplog.
+    ///
+    /// Idempotent and safe to run concurrently with itself: `ingest` skips
+    /// operations already applied, stamps their seq, and clears them from the
+    /// outbox.
+    pub(crate) async fn publish_authored_ops(&self) -> Result<()> {
+        loop {
+            let operations = notes_core::pending_outbox(&self.notes, OUTBOX_BATCH_SIZE)
+                .await
+                .context("reading the server outbox")?;
+            if operations.is_empty() {
+                return Ok(());
+            }
+            let batch_is_full = operations.len() as u32 == OUTBOX_BATCH_SIZE;
+            self.ingest(operations).await?;
+            if !batch_is_full {
+                return Ok(());
+            }
+        }
     }
 }
 

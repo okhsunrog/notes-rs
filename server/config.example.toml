@@ -5,6 +5,17 @@ snapshot_every_ops = 10000
 max_blob_bytes = 1073741824
 max_user_blob_bytes = 10737418240
 
+# The origin clients reach this server at. Setting it turns on the OAuth
+# endpoints that let a client which cannot carry a bearer token — the Claude
+# apps — authorize itself. Every URL in the discovery documents is built from
+# this, so it has to match what users type into their client.
+# public_url = "https://notes.example.com"
+
+# Host names the MCP endpoint accepts. The transport allows only loopback by
+# default, as protection against DNS rebinding; a deployment reachable under
+# its own name has to list it.
+# mcp_allowed_hosts = ["notes.example.com"]
+
 [ai]
 retrieval_api_key = "replace-with-an-openrouter-key"
 retrieval_base_url = "https://openrouter.ai/api/v1"

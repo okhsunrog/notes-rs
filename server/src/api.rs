@@ -45,11 +45,14 @@ pub struct AppState {
     pub max_user_blob_bytes: u64,
     pub(crate) blob_ownership: crate::blob_ownership::BlobOwnership,
     pub ai: Option<Arc<crate::ai::AiRuntime>>,
+    pub mcp_allowed_hosts: Vec<String>,
+    pub public_origin: Option<crate::oauth::PublicOrigin>,
+    pub oauth: Option<crate::oauth::store::OAuthStore>,
     pub shutdown: CancellationToken,
 }
 
 #[derive(Clone)]
-struct AuthenticatedUser(Arc<UserState>);
+pub(crate) struct AuthenticatedUser(pub(crate) Arc<UserState>);
 
 #[derive(Debug)]
 pub struct ApiError {
@@ -222,13 +225,19 @@ pub fn router(state: AppState) -> Router {
             put(put_blob).get(get_blob).head(head_blob),
         )
         .layer(DefaultBodyLimit::disable());
+    let mcp_routes = Router::new().route_service(
+        "/mcp",
+        crate::mcp::service(state.mcp_allowed_hosts.clone(), state.ai.clone()),
+    );
     let protected = Router::new()
         .merge(json_routes)
         .merge(bootstrap_routes)
         .merge(stream_routes)
+        .merge(mcp_routes)
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
     Router::new()
         .route("/v1/health", get(health))
+        .merge(crate::oauth::routes())
         .merge(protected)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -422,23 +431,63 @@ async fn health() -> Json<HealthResponse> {
     })
 }
 
-async fn require_auth(
-    State(state): State<AppState>,
-    mut request: Request,
-    next: Next,
-) -> Result<Response, ApiError> {
-    let value = request
+/// Accepts either credential this server issues: a configured bearer token, or
+/// an OAuth access token obtained through the authorization endpoints.
+///
+/// The unauthorized response points at the protected resource metadata when a
+/// public origin is configured. That pointer is how an MCP client discovers
+/// where to authorize; the spec requires it on a 401 specifically, and a client
+/// that does not see it cannot start the flow at all.
+async fn require_auth(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
+    // The pointer names the origin this request arrived on, so a workspace
+    // reachable under more than one name sends each client to the document that
+    // describes the URL it actually used.
+    let host = request
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let unauthorized = || {
+        let mut response = ApiError::unauthorized().into_response();
+        if let Some(origin) = &state.public_origin
+            && let Ok(value) = HeaderValue::from_str(&format!(
+                "Bearer realm=\"tangleaf\", resource_metadata=\"{}\"",
+                origin.resource_metadata(host.as_deref(), &state.mcp_allowed_hosts)
+            ))
+        {
+            response.headers_mut().insert(WWW_AUTHENTICATE, value);
+        }
+        response
+    };
+    let presented = request
         .headers()
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .ok_or_else(ApiError::unauthorized)?;
-    let user = state
-        .registry
-        .authenticate(value)
-        .ok_or_else(ApiError::unauthorized)?;
+        .map(str::to_owned);
+    let Some(presented) = presented else {
+        return unauthorized();
+    };
+    let user = match state.registry.authenticate(&presented) {
+        Some(user) => Some(user),
+        None => authenticate_oauth(&state, &presented).await,
+    };
+    let Some(user) = user else {
+        return unauthorized();
+    };
     request.extensions_mut().insert(AuthenticatedUser(user));
-    Ok(next.run(request).await)
+    next.run(request).await
+}
+
+async fn authenticate_oauth(state: &AppState, presented: &str) -> Option<Arc<UserState>> {
+    let claims = state
+        .oauth
+        .as_ref()?
+        .token(presented, "access")
+        .await
+        .inspect_err(|error| tracing::warn!(?error, "reading an OAuth access token failed"))
+        .ok()??;
+    state.registry.user(&claims.user_id)
 }
 
 async fn get_ops(
@@ -940,6 +989,28 @@ const fn default_ops_limit() -> usize {
     256
 }
 
+fn ink_roots(ops: &[notes_core::Op]) -> Vec<BlobHash> {
+    ops.iter()
+        .filter_map(|op| {
+            if let notes_core::OpKind::InkPublish(p) = &op.kind {
+                Some(p.root_hash)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+async fn ingest_ink_checked(
+    state: &AppState,
+    user: &UserState,
+    ops: Vec<notes_core::Op>,
+) -> anyhow::Result<Vec<notes_protocol::SequencedOp>> {
+    ink::validate(state, user, ink_roots(&ops))
+        .await
+        .map_err(|e| notes_core::CoreError::invalid(e.message))?;
+    user.ingest(ops).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -964,6 +1035,8 @@ mod tests {
             max_blob_bytes: 1024,
             max_user_blob_bytes: 1024,
             ai: None,
+            mcp_allowed_hosts: Vec::new(),
+            public_url: None,
             users: vec![
                 UserConfig {
                     id: "owner".into(),
@@ -1009,6 +1082,8 @@ mod tests {
             max_blob_bytes: 1024,
             max_user_blob_bytes: 1024,
             ai: Some(ai),
+            mcp_allowed_hosts: Vec::new(),
+            public_url: None,
             users: vec![UserConfig {
                 id: "owner".into(),
                 admin: true,
@@ -2128,26 +2203,4 @@ mod tests {
             .expect("bootstrap response");
         assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
-}
-
-fn ink_roots(ops: &[notes_core::Op]) -> Vec<BlobHash> {
-    ops.iter()
-        .filter_map(|op| {
-            if let notes_core::OpKind::InkPublish(p) = &op.kind {
-                Some(p.root_hash)
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-async fn ingest_ink_checked(
-    state: &AppState,
-    user: &UserState,
-    ops: Vec<notes_core::Op>,
-) -> anyhow::Result<Vec<notes_protocol::SequencedOp>> {
-    ink::validate(state, user, ink_roots(&ops))
-        .await
-        .map_err(|e| notes_core::CoreError::invalid(e.message))?;
-    user.ingest(ops).await
 }

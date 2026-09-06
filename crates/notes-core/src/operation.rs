@@ -342,7 +342,7 @@ fn apply_local_kinds_with_policy(
         operations.push(operation);
         clock = Some(hlc);
     }
-    let configured = sync_is_configured(transaction)?;
+    let publishes = publishes_authored_ops(transaction)?;
     let mut effects = if deferred {
         ApplyEffects::deferred()
     } else {
@@ -354,7 +354,7 @@ fn apply_local_kinds_with_policy(
             "INSERT INTO applied_ops(op_id, seq) VALUES (?1, NULL)",
             [operation.op_id],
         )?;
-        if configured {
+        if publishes {
             transaction.execute(
                 "INSERT INTO sync_outbox(op_id, envelope, created_at) VALUES (?1, ?2, ?3)",
                 rusqlite::params![
@@ -381,6 +381,50 @@ fn apply_local_kinds_with_policy(
 pub async fn apply(conn: &Connection, op: &Op, origin: Origin) -> Result<ApplyOutcome> {
     let mut outcomes = apply_batch(conn, std::slice::from_ref(op), origin).await?;
     Ok(outcomes.pop().unwrap_or_default())
+}
+
+/// How a replica reaches the durable operation stream it authors into.
+///
+/// Every replica materializes the same stream, but they do not all reach it the
+/// same way, and an operation that never reaches it is not durable. Storing the
+/// role makes that difference explicit rather than inferring it from whichever
+/// sync setting happens to be present.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplicaRole {
+    /// Reaches the stream by pushing authored operations to an upstream server.
+    Client,
+    /// Owns the stream: authored operations reach it through the local oplog.
+    Server,
+}
+
+impl ReplicaRole {
+    const fn as_stored(self) -> &'static str {
+        match self {
+            Self::Client => "client",
+            Self::Server => "server",
+        }
+    }
+
+    fn from_stored(value: &str) -> Option<Self> {
+        match value {
+            "client" => Some(Self::Client),
+            "server" => Some(Self::Server),
+            _ => None,
+        }
+    }
+}
+
+/// Records the role of this replica. Idempotent, and safe to call on every open.
+pub async fn set_replica_role(conn: &Connection, role: ReplicaRole) -> Result<()> {
+    conn.call(move |database| {
+        database.execute(
+            "INSERT INTO sync_meta(key, value) VALUES ('replica_role', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [role.as_stored()],
+        )?;
+        Ok(())
+    })
+    .await
 }
 
 pub async fn configure_sync(conn: &Connection, server_url: &str) -> Result<()> {
@@ -1273,7 +1317,7 @@ pub async fn apply_batch(
     let operations = operations.to_vec();
     conn.call_domain(move |database| -> CoreResult<Vec<ApplyOutcome>> {
         let transaction = database.transaction()?;
-        let configured = sync_is_configured(&transaction)?;
+        let publishes = publishes_authored_ops(&transaction)?;
         let mut outcomes = Vec::with_capacity(operations.len());
         let mut effects = ApplyEffects::deferred();
         for operation in operations {
@@ -1295,7 +1339,7 @@ pub async fn apply_batch(
                 "INSERT INTO applied_ops(op_id, seq) VALUES (?1, NULL)",
                 [&operation.op_id],
             )?;
-            if origin == Origin::Local && configured {
+            if origin == Origin::Local && publishes {
                 transaction.execute(
                     "INSERT INTO sync_outbox(op_id, envelope, created_at) VALUES (?1, ?2, ?3)",
                     rusqlite::params![
@@ -2897,6 +2941,34 @@ fn sync_is_configured(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Resu
         .is_some_and(|value| !value.trim().is_empty()))
 }
 
+/// Whether operations authored on this replica must be queued in the outbox.
+///
+/// Both roles publish what they author; only the destination differs. A client
+/// pushes to the server it is configured against, so an upstream URL is a fair
+/// proxy for the question there. The server has no upstream — it owns the log
+/// its own writes must reach — so the URL is absent and the proxy answers the
+/// wrong way. Asking for the role keeps the two apart.
+fn publishes_authored_ops(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Result<bool> {
+    if replica_role_in_transaction(transaction)? == ReplicaRole::Server {
+        return Ok(true);
+    }
+    sync_is_configured(transaction)
+}
+
+fn replica_role_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+) -> rusqlite::Result<ReplicaRole> {
+    Ok(transaction
+        .query_row(
+            "SELECT value FROM sync_meta WHERE key = 'replica_role'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .and_then(|value| ReplicaRole::from_stored(&value))
+        .unwrap_or(ReplicaRole::Client))
+}
+
 fn meta_or_insert_device_id(
     transaction: &rusqlite::Transaction<'_>,
 ) -> rusqlite::Result<uuid::Uuid> {
@@ -2964,6 +3036,15 @@ fn observe_max_persisted_hlc(transaction: &rusqlite::Transaction<'_>) -> rusqlit
 
 fn operation_timestamp(operation: &Op) -> i64 {
     operation.hlc.timestamp_seconds()
+}
+
+fn ensure_text_note_target(conn: &rusqlite::Transaction<'_>, page: uuid::Uuid) -> CoreResult<()> {
+    if page_identity(conn, page)? == Some(PageKind::Handwriting) {
+        return Err(CoreError::invalid(
+            "Text blocks and text layouts are not supported for handwritten notes",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3076,13 +3157,4 @@ mod tests {
             attachment_uuid(AttachmentOwner::Block(uuid), &hash)
         );
     }
-}
-
-fn ensure_text_note_target(conn: &rusqlite::Transaction<'_>, page: uuid::Uuid) -> CoreResult<()> {
-    if page_identity(conn, page)? == Some(PageKind::Handwriting) {
-        return Err(CoreError::invalid(
-            "Text blocks and text layouts are not supported for handwritten notes",
-        ));
-    }
-    Ok(())
 }

@@ -21,6 +21,23 @@ pub struct ServerConfig {
     #[serde(default = "default_max_user_blob_bytes")]
     pub max_user_blob_bytes: u64,
     pub ai: Option<AiConfig>,
+    /// The origin clients reach this server at, for example
+    /// `https://notes.example.com`.
+    ///
+    /// Everything OAuth publishes is absolute and has to match what the user
+    /// typed into their client, so it comes from here rather than from a
+    /// request header an attacker could set. Without it the OAuth endpoints
+    /// stay off and only bearer tokens work.
+    #[serde(default)]
+    pub public_url: Option<Url>,
+    /// Hostnames the MCP endpoint accepts in the `Host` header.
+    ///
+    /// The transport only allows loopback by default, as protection against DNS
+    /// rebinding of locally running servers. A deployment reachable under its
+    /// own name has to say so: list the hostname clients use, with the port
+    /// when it is not the scheme's default.
+    #[serde(default)]
+    pub mcp_allowed_hosts: Vec<String>,
     pub users: Vec<UserConfig>,
 }
 
@@ -170,8 +187,9 @@ fn parse_sha256(encoded: &str) -> Result<[u8; 32]> {
         bail!("invalid SHA-256 length");
     }
     let mut digest = [0_u8; 32];
-    for (index, pair) in encoded.as_bytes().chunks_exact(2).enumerate() {
-        digest[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
+    let (pairs, _) = encoded.as_bytes().as_chunks::<2>();
+    for (index, &[high, low]) in pairs.iter().enumerate() {
+        digest[index] = (hex_nibble(high)? << 4) | hex_nibble(low)?;
     }
     Ok(digest)
 }
@@ -316,6 +334,8 @@ mod tests {
             max_blob_bytes: 1,
             max_user_blob_bytes: 1,
             ai: None,
+            mcp_allowed_hosts: Vec::new(),
+            public_url: None,
             users: vec![UserConfig {
                 id: "../owner".into(),
                 admin: false,
@@ -345,6 +365,8 @@ mod tests {
                 embedding_dimensions: 0,
                 ..ai
             }),
+            mcp_allowed_hosts: Vec::new(),
+            public_url: None,
             users: vec![UserConfig {
                 id: "owner".into(),
                 admin: false,
@@ -466,6 +488,8 @@ token = "a-token-with-at-least-thirty-two-characters"
             max_blob_bytes: 1,
             max_user_blob_bytes: 1,
             ai: None,
+            mcp_allowed_hosts: Vec::new(),
+            public_url: None,
             users: vec![
                 UserConfig {
                     id: "hashed".into(),

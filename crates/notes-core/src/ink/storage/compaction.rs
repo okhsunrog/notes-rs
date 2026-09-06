@@ -67,17 +67,17 @@ fn prepare_with_limits(
         }
         let doc = model::Document::read(&root).map_err(err)?;
         for (id, entry) in &doc.chunks {
-            if let Some(prior) = catalog.insert(*id, entry.clone()) {
-                if prior != *entry {
-                    return Err(CommandError::invalid("Conflicting chunk catalog"));
-                }
+            if let Some(prior) = catalog.insert(*id, entry.clone())
+                && prior != *entry
+            {
+                return Err(CommandError::invalid("Conflicting chunk catalog"));
             }
         }
         for (id, location) in &doc.segments {
-            if let Some(prior) = locations.insert(*id, location.clone()) {
-                if prior != *location {
-                    return Err(CommandError::invalid("Conflicting segment location"));
-                }
+            if let Some(prior) = locations.insert(*id, location.clone())
+                && prior != *location
+            {
+                return Err(CommandError::invalid("Conflicting segment location"));
             }
         }
         let entries = doc.records.len() + doc.chunks.len() + doc.segments.len() + doc.pages.len();

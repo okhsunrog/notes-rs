@@ -18,6 +18,8 @@ async fn bootstraps_and_fanouts_operations_over_the_real_network_protocol() {
         max_blob_bytes: 1024,
         max_user_blob_bytes: 1024,
         ai: None,
+        mcp_allowed_hosts: Vec::new(),
+        public_url: None,
         users: vec![UserConfig {
             id: "owner".into(),
             admin: true,

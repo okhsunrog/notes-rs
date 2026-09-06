@@ -70,10 +70,10 @@ impl HandwritingStore {
             .collect::<Vec<_>>();
         let mut failure = None;
         for session in sessions {
-            if let Err(error) = session.complete().await {
-                if !matches!(error, notes_core::CoreError::NotFound(_)) {
-                    failure = Some(err(error));
-                }
+            if let Err(error) = session.complete().await
+                && !matches!(error, notes_core::CoreError::NotFound(_))
+            {
+                failure = Some(err(error));
             }
         }
         failure.map_or(Ok(()), Err)

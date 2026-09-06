@@ -65,6 +65,8 @@ async fn binary_ink_sync_deduplicates_and_resolves_offline_branches_over_http() 
         max_blob_bytes: 16 * 1024 * 1024,
         max_user_blob_bytes: 64 * 1024 * 1024,
         ai: None,
+        mcp_allowed_hosts: Vec::new(),
+        public_url: None,
         users: vec![
             UserConfig {
                 id: "owner".into(),
