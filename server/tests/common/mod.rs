@@ -2,6 +2,10 @@
 
 use notes_server::config::{ServerConfig, UserConfig};
 use notes_sync::HttpTransport;
+use rmcp::service::RunningService;
+use rmcp::transport::StreamableHttpClientTransport;
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use rmcp::{RoleClient, ServiceExt};
 
 pub const TOKEN: &str = "integration-token-with-at-least-thirty-two-characters";
 
@@ -19,14 +23,32 @@ impl Harness {
         format!("http://{}{path}", self.address)
     }
 
+    /// Compiled into every test binary, reached from only some of them.
+    #[allow(dead_code)]
     pub fn sync_transport(&self) -> HttpTransport {
         HttpTransport::new(url::Url::parse(&self.url("")).expect("server URL"), TOKEN)
             .expect("transport")
     }
 }
 
+#[allow(dead_code)]
 pub async fn start_server() -> Harness {
+    start(false).await
+}
+
+/// A server that knows the origin it is reached at, which is what turns the
+/// OAuth endpoints on.
+#[allow(dead_code)]
+pub async fn start_public_server() -> Harness {
+    start(true).await
+}
+
+async fn start(public: bool) -> Harness {
     let directory = tempfile::tempdir().expect("server directory");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let address = listener.local_addr().expect("listener address");
     let config = ServerConfig {
         listen: "127.0.0.1:0".parse().expect("listen address"),
         log_filter: "info".into(),
@@ -36,6 +58,8 @@ pub async fn start_server() -> Harness {
         max_user_blob_bytes: 1024,
         ai: None,
         mcp_allowed_hosts: Vec::new(),
+        public_url: public
+            .then(|| url::Url::parse(&format!("http://{address}")).expect("public URL")),
         users: vec![UserConfig {
             id: "owner".into(),
             admin: true,
@@ -47,10 +71,6 @@ pub async fn start_server() -> Harness {
     let state = notes_server::build_state(&config)
         .await
         .expect("server state");
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("listener");
-    let address = listener.local_addr().expect("listener address");
     let served = state.clone();
     tokio::spawn(async move {
         axum::serve(listener, notes_server::router(served))
@@ -62,4 +82,18 @@ pub async fn start_server() -> Harness {
         address,
         _directory: directory,
     }
+}
+
+/// Opens an MCP session against the harness, carrying `token` as the bearer
+/// credential — a server token or an OAuth access token, the endpoint takes
+/// either.
+#[allow(dead_code)]
+pub async fn connect_mcp(
+    harness: &Harness,
+    token: &str,
+) -> Result<RunningService<RoleClient, ()>, String> {
+    let config = StreamableHttpClientTransportConfig::with_uri(harness.url("/mcp"))
+        .auth_header(token.to_owned());
+    let transport = StreamableHttpClientTransport::with_client(reqwest::Client::default(), config);
+    ().serve(transport).await.map_err(|error| error.to_string())
 }

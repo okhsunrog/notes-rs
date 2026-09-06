@@ -36,10 +36,12 @@ async-trait.workspace = true
 rmcp = { version = "3.2.0", features = ["server", "transport-streamable-http-server"] }
 http = "1.5.0"
 chrono.workspace = true
+rand = "0.10.2"
+base64 = "0.23.1"
 
 [dev-dependencies]
 http-body-util = "0.1.4"
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["json", "form", "query"] }
 rmcp = { version = "3.2.0", features = ["client", "transport-streamable-http-client-reqwest"] }
 tokio-tungstenite.workspace = true
 tower.workspace = true

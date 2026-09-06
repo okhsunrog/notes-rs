@@ -125,6 +125,12 @@ impl UserRegistry {
         matched
     }
 
+    /// Looks up a user by id, for callers that already established who is
+    /// asking by some means other than a token — an OAuth access token, say.
+    pub fn user(&self, id: &str) -> Option<Arc<UserState>> {
+        self.users.iter().find(|user| user.id == id).cloned()
+    }
+
     pub fn users(&self) -> impl Iterator<Item = &Arc<UserState>> {
         self.users.iter()
     }

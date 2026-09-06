@@ -268,6 +268,34 @@ Whether a replica publishes what it authors is recorded as its role (`sync_meta.
 inferred from having an upstream URL. Clients publish because they push to a server; the server
 publishes because it owns the log. Both answers are yes, for different reasons.
 
+### The MCP endpoint
+
+`POST /mcp` serves the workspace as tools for an external assistant, over the same bearer token as
+the sync API. Writes go through `UserState::write`, so they obey the rule above. Editing tools are
+guarded by revisions: a node carries the revision of its editable field, a write hands it back, and
+an edit built on text that has since changed is refused rather than applied.
+
+The transport validates the `Host` header and accepts only loopback unless `mcp_allowed_hosts`
+lists the name clients use.
+
+### Authorizing clients that cannot hold a token
+
+Some clients have nowhere to paste a bearer token — the Claude apps, for one — so the server can
+act as an OAuth authorization server for its own MCP endpoint. Setting `public_url` turns those
+endpoints on; leaving it unset keeps the server bearer-only.
+
+The flow is OAuth 2.1 as the MCP authorization spec profiles it: discovery documents under
+`/.well-known/`, dynamic client registration, authorization code with mandatory S256 PKCE, and
+rotating refresh tokens. It issues tokens but holds no identity of its own — the consent screen
+asks for a server token, the credential that already authorizes everything else — so there is no
+second password to manage. Issued material lives in `oauth.db` as digests and is short-lived:
+codes for a minute, access tokens for an hour, refresh tokens for thirty days from last use.
+
+Two details are load-bearing. Every published URL derives from `public_url` rather than from a
+request header, so a forged `Host` cannot redirect discovery. And an unauthorized request answers
+`401` with `WWW-Authenticate: Bearer resource_metadata=…`, which is the only way a client learns
+where to authorize.
+
 ## 6. Local-first client behavior
 
 Desktop and Android always keep local source state and FTS. Without a configured or reachable

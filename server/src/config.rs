@@ -21,6 +21,15 @@ pub struct ServerConfig {
     #[serde(default = "default_max_user_blob_bytes")]
     pub max_user_blob_bytes: u64,
     pub ai: Option<AiConfig>,
+    /// The origin clients reach this server at, for example
+    /// `https://notes.example.com`.
+    ///
+    /// Everything OAuth publishes is absolute and has to match what the user
+    /// typed into their client, so it comes from here rather than from a
+    /// request header an attacker could set. Without it the OAuth endpoints
+    /// stay off and only bearer tokens work.
+    #[serde(default)]
+    pub public_url: Option<Url>,
     /// Hostnames the MCP endpoint accepts in the `Host` header.
     ///
     /// The transport only allows loopback by default, as protection against DNS
@@ -326,6 +335,7 @@ mod tests {
             max_user_blob_bytes: 1,
             ai: None,
             mcp_allowed_hosts: Vec::new(),
+            public_url: None,
             users: vec![UserConfig {
                 id: "../owner".into(),
                 admin: false,
@@ -356,6 +366,7 @@ mod tests {
                 ..ai
             }),
             mcp_allowed_hosts: Vec::new(),
+            public_url: None,
             users: vec![UserConfig {
                 id: "owner".into(),
                 admin: false,
@@ -478,6 +489,7 @@ token = "a-token-with-at-least-thirty-two-characters"
             max_user_blob_bytes: 1,
             ai: None,
             mcp_allowed_hosts: Vec::new(),
+            public_url: None,
             users: vec![
                 UserConfig {
                     id: "hashed".into(),

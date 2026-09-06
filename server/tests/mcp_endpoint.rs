@@ -7,24 +7,13 @@
 
 mod common;
 
+use common::connect_mcp as connect;
+use rmcp::RoleClient;
 use rmcp::model::CallToolRequestParams;
 use rmcp::service::RunningService;
-use rmcp::transport::StreamableHttpClientTransport;
-use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-use rmcp::{RoleClient, ServiceExt};
 
 fn arguments(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
     value.as_object().cloned().expect("an object of arguments")
-}
-
-async fn connect(
-    harness: &common::Harness,
-    token: &str,
-) -> Result<RunningService<RoleClient, ()>, String> {
-    let config = StreamableHttpClientTransportConfig::with_uri(harness.url("/mcp"))
-        .auth_header(token.to_owned());
-    let transport = StreamableHttpClientTransport::with_client(reqwest::Client::default(), config);
-    ().serve(transport).await.map_err(|error| error.to_string())
 }
 
 async fn call(

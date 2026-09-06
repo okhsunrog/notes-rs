@@ -4,6 +4,7 @@ mod blob_ownership;
 pub mod config;
 pub mod eval;
 pub mod mcp;
+pub mod oauth;
 mod oplog;
 pub mod state;
 
@@ -25,6 +26,10 @@ pub async fn build_state(config: &ServerConfig) -> Result<AppState> {
         )),
         None => None,
     };
+    let oauth = match &config.public_url {
+        Some(_) => Some(oauth::store::OAuthStore::open(&config.data_dir.join("oauth.db")).await?),
+        None => None,
+    };
     Ok(AppState {
         registry,
         data_dir: config.data_dir.clone(),
@@ -33,6 +38,8 @@ pub async fn build_state(config: &ServerConfig) -> Result<AppState> {
         blob_ownership,
         ai,
         mcp_allowed_hosts: config.mcp_allowed_hosts.clone(),
+        public_origin: config.public_url.clone().map(oauth::PublicOrigin),
+        oauth,
         shutdown,
     })
 }
