@@ -133,6 +133,16 @@ impl ApiError {
         }
     }
 
+    /// 426 so an old client can tell "update the app" apart from every other
+    /// refusal without reading the message text.
+    fn format_unsupported(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UPGRADE_REQUIRED,
+            code: ApiErrorCode::FormatUnsupported,
+            message: message.into(),
+        }
+    }
+
     fn too_large(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::PAYLOAD_TOO_LARGE,
@@ -253,6 +263,7 @@ async fn info(
     Ok(Json(ServerInfo {
         workspace_uuid,
         ai_enabled: state.ai.is_some(),
+        format_version: notes_sync::FORMAT_VERSION,
     }))
 }
 
@@ -490,10 +501,30 @@ async fn authenticate_oauth(state: &AppState, presented: &str) -> Option<Arc<Use
     state.registry.user(&claims.user_id)
 }
 
+/// Operations are only useful to a client that can decode them. A client
+/// declaring an older format — or none at all, which every pre-gate build does
+/// — is refused here instead of being handed a batch it drops silently and
+/// then reports as a decoding failure forever.
+fn require_supported_format(headers: &axum::http::HeaderMap) -> Result<(), ApiError> {
+    let declared = headers
+        .get(notes_protocol::FORMAT_VERSION_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u32>().ok());
+    if declared.is_some_and(|version| version >= notes_sync::FORMAT_VERSION) {
+        return Ok(());
+    }
+    Err(ApiError::format_unsupported(format!(
+        "this server writes sync format {}; update the app to keep syncing",
+        notes_sync::FORMAT_VERSION
+    )))
+}
+
 async fn get_ops(
     Extension(user): Extension<AuthenticatedUser>,
     Query(query): Query<OpsQuery>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<OpsBatch>, ApiError> {
+    require_supported_format(&headers)?;
     let limit = query.limit.clamp(1, MAX_OPS_PAGE);
     let ops = user
         .0
@@ -507,8 +538,10 @@ async fn get_ops(
 async fn push_ops(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<PushOps>,
 ) -> Result<Json<AcceptedOps>, ApiError> {
+    require_supported_format(&headers)?;
     if request.ops.len() > 256 {
         return Err(ApiError::bad_request(
             "a sync batch cannot contain more than 256 operations",
@@ -562,11 +595,13 @@ async fn sync_socket(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Query(query): Query<SyncQuery>,
+    headers: axum::http::HeaderMap,
     socket: WebSocketUpgrade,
-) -> Response {
-    socket
+) -> Result<Response, ApiError> {
+    require_supported_format(&headers)?;
+    Ok(socket
         .max_message_size(JSON_BODY_LIMIT)
-        .on_upgrade(move |socket| websocket_session(state, user.0, query.since, socket))
+        .on_upgrade(move |socket| websocket_session(state, user.0, query.since, socket)))
 }
 
 async fn websocket_session(state: AppState, user: Arc<UserState>, since: u64, socket: WebSocket) {
@@ -1163,7 +1198,12 @@ mod tests {
         request: axum::http::request::Builder,
         token: &str,
     ) -> axum::http::request::Builder {
-        request.header(AUTHORIZATION, format!("Bearer {token}"))
+        request
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header(
+                notes_protocol::FORMAT_VERSION_HEADER,
+                notes_sync::FORMAT_VERSION.to_string(),
+            )
     }
 
     async fn reference_blob(app: &Router, page_uuid: uuid::Uuid, hash: BlobHash, size: u64) {

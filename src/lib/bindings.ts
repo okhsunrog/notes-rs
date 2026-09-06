@@ -740,7 +740,9 @@ export type StartupView = "dashboard" | "last_session" | "today" | "specific_pag
 
 export type StylusAvailability = "available" | "not_detected" | "unknown";
 
-export type SyncConnectionState = "disabled" | "connecting" | "syncing" | "online" | "offline" | "conflict" | "error";
+export type SyncConnectionState = "disabled" | "connecting" | "syncing" | "online" | "offline" | "conflict" | 
+/**  Terminal: the server writes a sync format this build cannot read. */
+"update_required" | "error";
 
 export type SyncStatus = {
 	state: SyncConnectionState,
@@ -748,6 +750,11 @@ export type SyncStatus = {
 	lastServerSeq: number,
 	pendingOperations: number,
 	message: string | null,
+	/**
+	 *  Sync format the server writes, known only once it has refused this
+	 *  build. `None` at every other time, including a plain offline server.
+	 */
+	serverFormatVersion: number | null,
 };
 
 /**  Durable workflow state carried only by a task block. */

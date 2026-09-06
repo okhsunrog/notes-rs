@@ -11,11 +11,22 @@ pub struct SequencedOp {
     pub envelope: Op,
 }
 
+/// Request header carrying the sync format version a client can decode.
+///
+/// The same header is sent on the operation endpoints and on the sync
+/// WebSocket handshake, so both paths refuse an unreadable exchange the same
+/// way instead of streaming operations the client silently drops.
+pub const FORMAT_VERSION_HEADER: &str = "x-sync-format-version";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerInfo {
     pub workspace_uuid: uuid::Uuid,
     pub ai_enabled: bool,
+    /// Sync format the server writes. A server predating this field reports 0,
+    /// which no client treats as a reason to stop.
+    #[serde(default)]
+    pub format_version: u32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
@@ -210,6 +221,9 @@ pub enum ApiErrorCode {
     NotFound,
     Conflict,
     PayloadTooLarge,
+    /// The caller decodes an older sync format than this server writes.
+    /// Terminal: retrying the same build can only fail again.
+    FormatUnsupported,
     Unavailable,
     Internal,
 }

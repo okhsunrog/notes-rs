@@ -131,7 +131,8 @@ function statusIcon(status: SyncStatus) {
   if (status.state === "connecting" || status.state === "syncing" || status.pendingOperations > 0)
     return RefreshCw;
   if (status.state === "offline") return CloudOff;
-  if (status.state === "error" || status.state === "conflict") return AlertTriangle;
+  if (status.state === "error" || status.state === "conflict" || status.state === "update_required")
+    return AlertTriangle;
   return Cloud;
 }
 

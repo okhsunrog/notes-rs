@@ -64,6 +64,17 @@ export function presentSyncStatus(status: SyncStatus): SyncStatusPresentation {
         animated: false,
         canRetry: true,
       };
+    case "update_required":
+      return {
+        label: "Update required",
+        description:
+          status.serverFormatVersion === null
+            ? "The sync server uses a newer data format. Update the app to keep syncing."
+            : `The sync server uses data format ${status.serverFormatVersion}. Update the app to keep syncing.`,
+        tone: "danger",
+        animated: false,
+        canRetry: false,
+      };
     case "error":
       return {
         label: "Sync error",

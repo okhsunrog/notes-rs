@@ -9,6 +9,7 @@ function status(state: SyncStatus["state"], pendingOperations = 0): SyncStatus {
     lastServerSeq: 42,
     pendingOperations,
     message: null,
+    serverFormatVersion: null,
   };
 }
 
@@ -47,5 +48,18 @@ describe("presentSyncStatus", () => {
       tone: "danger",
       canRetry: true,
     });
+  });
+
+  it("asks for an app update instead of offering a retry that cannot help", () => {
+    expect(presentSyncStatus(status("update_required"))).toMatchObject({
+      label: "Update required",
+      description: "The sync server uses a newer data format. Update the app to keep syncing.",
+      tone: "danger",
+      animated: false,
+      canRetry: false,
+    });
+    expect(
+      presentSyncStatus({ ...status("update_required"), serverFormatVersion: 9 }).description,
+    ).toBe("The sync server uses data format 9. Update the app to keep syncing.");
   });
 });

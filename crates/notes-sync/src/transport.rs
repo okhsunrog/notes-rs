@@ -77,8 +77,17 @@ impl HttpTransport {
         if token.trim().is_empty() {
             bail!("sync token cannot be empty");
         }
+        // Declared on every request rather than per endpoint: the server only
+        // gates the operation endpoints today, and a header the rest ignore
+        // costs nothing while keeping one source of truth for the version.
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::HeaderName::from_static(notes_protocol::FORMAT_VERSION_HEADER),
+            reqwest::header::HeaderValue::from(crate::FORMAT_VERSION),
+        );
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            .default_headers(headers)
             .build()
             .context("building sync HTTP client")?;
         Ok(Self {
@@ -222,9 +231,29 @@ impl HttpTransport {
                 .parse()
                 .context("sync token cannot be represented as an HTTP header")?,
         );
-        let (socket, _) = tokio_tungstenite::connect_async(request)
-            .await
-            .context("connecting sync websocket")?;
+        request.headers_mut().insert(
+            notes_protocol::FORMAT_VERSION_HEADER,
+            crate::FORMAT_VERSION.into(),
+        );
+        let socket = match tokio_tungstenite::connect_async(request).await {
+            Ok((socket, _)) => socket,
+            // A refused handshake is an ordinary HTTP response; without this
+            // the status and code are flattened into an opaque string and the
+            // client cannot tell "update required" from "server is down".
+            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                let (parts, body) = response.into_parts();
+                let body = body.unwrap_or_default();
+                return Err(transport_error_from_response(
+                    StatusCode::from_u16(parts.status.as_u16())
+                        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                    &String::from_utf8_lossy(&body),
+                )
+                .into());
+            }
+            Err(error) => {
+                return Err(anyhow::Error::new(error).context("connecting sync websocket"));
+            }
+        };
         Ok(socket)
     }
 

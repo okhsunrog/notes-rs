@@ -53,6 +53,37 @@ enum SyncSessionError {
     WorkspaceConflict,
     #[error("sync server rejected the session: {0}")]
     ServerConflict(String),
+    #[error(
+        "the sync server writes format {server_version}; this app reads {}. Update the app to keep syncing",
+        notes_sync::FORMAT_VERSION
+    )]
+    UpdateRequired { server_version: u32 },
+}
+
+/// The server refused the exchange because this build is too old. Retrying the
+/// same binary can only fail again, so the worker parks instead of backing off.
+///
+/// Either the announced version was ahead of ours, or an operation endpoint
+/// answered with the dedicated refusal code — the case an already-shipped old
+/// client hits, where nothing but the code identifies the reason.
+fn update_required(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<SyncSessionError>(),
+        Some(SyncSessionError::UpdateRequired { .. })
+    ) || matches!(
+        notes_sync::transport_error(error),
+        Some(TransportError::Http {
+            code: Some(notes_protocol::ApiErrorCode::FormatUnsupported),
+            ..
+        })
+    )
+}
+
+fn announced_server_version(error: &anyhow::Error) -> Option<u32> {
+    match error.downcast_ref::<SyncSessionError>() {
+        Some(SyncSessionError::UpdateRequired { server_version }) => Some(*server_version),
+        _ => None,
+    }
 }
 
 fn is_permanent_failure(error: &anyhow::Error) -> bool {
@@ -109,6 +140,8 @@ pub enum SyncConnectionState {
     Online,
     Offline,
     Conflict,
+    /// Terminal: the server writes a sync format this build cannot read.
+    UpdateRequired,
     Error,
 }
 
@@ -120,6 +153,9 @@ pub struct SyncStatus {
     pub last_server_seq: u64,
     pub pending_operations: u32,
     pub message: Option<String>,
+    /// Sync format the server writes, known only once it has refused this
+    /// build. `None` at every other time, including a plain offline server.
+    pub server_format_version: Option<u32>,
 }
 
 pub struct SyncRuntime {
@@ -137,6 +173,7 @@ impl SyncRuntime {
                 last_server_seq: 0,
                 pending_operations: 0,
                 message: None,
+                server_format_version: None,
             })),
             retry,
         }
@@ -179,6 +216,7 @@ pub fn spawn_worker(
                         last_server_seq: notes_core::sync_cursor(&connection).await.unwrap_or(0),
                         pending_operations: 0,
                         message: None,
+                        server_format_version: None,
                     },
                 );
                 return;
@@ -195,6 +233,7 @@ pub fn spawn_worker(
                             last_server_seq: 0,
                             pending_operations: 0,
                             message: Some(error.to_string()),
+                            server_format_version: None,
                         },
                     );
                     return;
@@ -212,6 +251,7 @@ pub fn spawn_worker(
                         last_server_seq: 0,
                         pending_operations: 0,
                         message: Some(error.to_string()),
+                        server_format_version: None,
                     },
                 );
                 return;
@@ -271,16 +311,29 @@ pub fn spawn_worker(
                     .as_ref()
                     .err()
                     .map_or(SyncConnectionState::Offline, failure_state);
-                if failure_state == SyncConnectionState::Conflict {
-                    set_connection_state(
+                // Both parked states stop the backoff loop: neither an
+                // identity conflict nor an out-of-date build resolves itself by
+                // reconnecting. They wait for changed settings or an explicit
+                // retry instead.
+                if matches!(
+                    failure_state,
+                    SyncConnectionState::Conflict | SyncConnectionState::UpdateRequired
+                ) {
+                    let server_format_version =
+                        result.as_ref().err().and_then(announced_server_version);
+                    let parked_message = if failure_state == SyncConnectionState::UpdateRequired {
+                        message
+                    } else {
+                        format!("{message}; update sync settings or retry explicitly")
+                    };
+                    set_connection_detail(
                         &app,
                         &status,
                         &connection,
                         &server_url,
                         failure_state,
-                        Some(format!(
-                            "{message}; update sync settings or retry explicitly"
-                        )),
+                        Some(parked_message),
+                        server_format_version,
                     )
                     .await;
                     if !wait_for_retry(&mut retries, retry_generation).await {
@@ -341,7 +394,9 @@ pub fn spawn_worker(
 }
 
 fn failure_state(error: &anyhow::Error) -> SyncConnectionState {
-    if matches!(
+    if update_required(error) {
+        SyncConnectionState::UpdateRequired
+    } else if matches!(
         error.downcast_ref::<SyncSessionError>(),
         Some(SyncSessionError::WorkspaceConflict)
     ) {
@@ -381,6 +436,16 @@ async fn synchronize_session(
     blob_store: &BlobStore,
 ) -> Result<()> {
     transport.health().await?;
+    // Checked before any exchange: a server writing a newer format would hand
+    // this build operations it cannot decode, and the replica initialization
+    // below would import them.
+    let announced = transport.info().await?;
+    if announced.format_version > notes_sync::FORMAT_VERSION {
+        return Err(SyncSessionError::UpdateRequired {
+            server_version: announced.format_version,
+        }
+        .into());
+    }
     initialize_replica(app, connection, transport, blob_store).await?;
     let server_info = transport.info().await?;
     if notes_core::db::workspace_uuid(connection).await? != server_info.workspace_uuid {
@@ -835,6 +900,18 @@ async fn set_connection_state(
     state: SyncConnectionState,
     message: Option<String>,
 ) {
+    set_connection_detail(app, status, connection, server_url, state, message, None).await;
+}
+
+async fn set_connection_detail(
+    app: &AppHandle,
+    status: &Arc<RwLock<SyncStatus>>,
+    connection: &Connection,
+    server_url: &url::Url,
+    state: SyncConnectionState,
+    message: Option<String>,
+    server_format_version: Option<u32>,
+) {
     let cursor = notes_core::sync_cursor(connection)
         .await
         .unwrap_or_default();
@@ -851,6 +928,7 @@ async fn set_connection_state(
             last_server_seq: cursor,
             pending_operations: pending,
             message,
+            server_format_version,
         },
     );
 }
@@ -897,6 +975,43 @@ pub(crate) async fn finish_before_exit(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
+    /// Both routes into the terminal state: the version the server announces,
+    /// and the refusal code an already-shipped old client would receive.
+    #[test]
+    fn a_newer_server_format_parks_sync_instead_of_retrying() {
+        let announced =
+            anyhow::Error::new(super::SyncSessionError::UpdateRequired { server_version: 9 });
+        assert_eq!(
+            super::failure_state(&announced),
+            super::SyncConnectionState::UpdateRequired
+        );
+        assert_eq!(super::announced_server_version(&announced), Some(9));
+        assert!(super::is_permanent_failure(&announced));
+        assert!(announced.to_string().contains("Update the app"));
+
+        let refused = anyhow::Error::new(notes_sync::TransportError::Http {
+            status: 426,
+            code: Some(notes_protocol::ApiErrorCode::FormatUnsupported),
+            message: "update the app to keep syncing".into(),
+        });
+        assert_eq!(
+            super::failure_state(&refused),
+            super::SyncConnectionState::UpdateRequired
+        );
+        assert!(super::is_permanent_failure(&refused));
+
+        // An ordinary server error stays an ordinary, retried failure.
+        let unavailable = anyhow::Error::new(notes_sync::TransportError::Http {
+            status: 503,
+            code: None,
+            message: "restarting".into(),
+        });
+        assert_eq!(
+            super::failure_state(&unavailable),
+            super::SyncConnectionState::Offline
+        );
+    }
+
     #[test]
     fn heartbeat_waits_for_pong_and_detects_dead_peer() {
         let start = tokio::time::Instant::now();
