@@ -14,7 +14,6 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/compone
 import { getPage, getSyncStatus, loadSettings, type WindowDecorationMode } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
 import { useAppShortcuts } from "@/app/use-app-shortcuts";
-import { useHandwritingSession } from "@/features/handwriting/handwriting-session";
 import { useStartupState } from "@/app/use-startup-state";
 import { useNotesWorkspace } from "@/features/pages/use-notes-workspace";
 import { useAssistantController } from "@/features/chat/use-assistant-controller";
@@ -36,7 +35,6 @@ const SettingsPage = lazy(() =>
 );
 
 function App() {
-  const handwritingOpen = useHandwritingSession((state) => state.open);
   const compact = useCompactLayout();
   const { ready, startupError } = useStartupState();
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -73,8 +71,13 @@ function App() {
     }
   }, [settingsQuery.data]);
 
+  // The handwriting editor owns Ctrl/Cmd+Z for ink history while it is focused.
+  const handwritingActive =
+    activePane.content.kind === PaneContentKind.Page &&
+    workspace.activePage?.kind.kind === "handwriting";
+
   useAppShortcuts({
-    enabled: ready && !handwritingOpen,
+    enabled: ready && !handwritingActive,
     createNote: () => void workspace.createNewNote(),
     openSearch: () => setSearchOpen(true),
     undo: () => void workspace.moveHistory("undo"),

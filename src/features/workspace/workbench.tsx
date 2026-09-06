@@ -7,6 +7,7 @@ import { useCompactBackToHome } from "@/app/compact-navigation";
 import { Button } from "@/components/ui/button";
 import { EmptyJournalView } from "@/features/journal/empty-journal-view";
 import { GraphWorkspace } from "@/features/graph/knowledge-panel";
+import { HandwritingNoteView } from "@/features/handwriting/handwriting-note-view";
 import { HomeView } from "@/features/home/home-view";
 import { PagePresentation } from "@/features/pages/page-presentation";
 import { AllNotesView } from "@/features/pages/all-notes-view";
@@ -348,6 +349,18 @@ function PagePane({
   }
   if (!page) {
     return <PaneError message="This page no longer exists." />;
+  }
+
+  if (page.kind.kind === "handwriting") {
+    return (
+      <HandwritingNoteView
+        key={page.uuid}
+        paneId={paneId}
+        page={page}
+        onSaved={controller.onSaved}
+        onDelete={controller.onDelete}
+      />
+    );
   }
 
   return (

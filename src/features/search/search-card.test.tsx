@@ -340,6 +340,7 @@ function pageHit(record: Page): SearchHit {
 
 const controller: WorkspaceController = {
   createNewNote: api.createNewNote,
+  createHandwrittenNote: () => undefined,
   openAllNotes: () => undefined,
   openContent: () => undefined,
   openJournal: () => undefined,

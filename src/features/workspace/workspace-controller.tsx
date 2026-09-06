@@ -5,6 +5,7 @@ import type { OpenDisposition } from "./workspace-model";
 
 export type WorkspaceController = {
   createNewNote: (title?: string, disposition?: OpenDisposition) => void | Promise<void>;
+  createHandwrittenNote: (disposition?: OpenDisposition) => void | Promise<void>;
   openContent: (content: Content, disposition?: OpenDisposition) => void | Promise<void>;
   openJournal: (date: JournalDate, disposition?: OpenDisposition) => void | Promise<void>;
   openAllNotes: (disposition?: OpenDisposition) => void;

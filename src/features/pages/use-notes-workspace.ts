@@ -9,6 +9,7 @@ import {
 } from "@/features/journal/journal-date";
 import {
   appendToJournal,
+  createHandwrittenNote as createHandwrittenNoteCommand,
   createNote,
   deletePage,
   getBlock,
@@ -143,6 +144,30 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
         if (note.page.title === null) {
           notifyInfo("New note ready — name it, then press Enter to write.");
         }
+        showEditor();
+      } catch (error) {
+        notifyError("create", error);
+      } finally {
+        creatingNoteRef.current = false;
+        setCreatingNote(false);
+      }
+    },
+    [openTarget, queryClient, showEditor],
+  );
+
+  const createHandwrittenNote = useCallback(
+    async (disposition: OpenDisposition = currentDisposition) => {
+      if (creatingNoteRef.current) return;
+      const navigationEpoch = ++navigationEpochRef.current;
+      creatingNoteRef.current = true;
+      setCreatingNote(true);
+      try {
+        const page = await createHandwrittenNoteCommand(null);
+        queryClient.setQueryData(queryKeys.page(page.uuid), page);
+        await queryClient.invalidateQueries({ queryKey: queryKeys.pages });
+        if (navigationEpoch !== navigationEpochRef.current) return;
+        setNewNote(null);
+        openTarget(pageTarget(page.uuid), disposition);
         showEditor();
       } catch (error) {
         notifyError("create", error);
@@ -458,6 +483,7 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
   const controller = useMemo<WorkspaceController>(
     () => ({
       createNewNote,
+      createHandwrittenNote,
       openAllNotes,
       openContent,
       openJournal,
@@ -469,6 +495,7 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
     [
       applyUpdated,
       captureJournal,
+      createHandwrittenNote,
       createNewNote,
       openAllNotes,
       openContent,
@@ -486,6 +513,7 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
     captureJournal,
     controller,
     closePage,
+    createHandwrittenNote,
     createNewNote,
     creatingNote,
     history: historyQuery.data ?? { undoCount: 0, redoCount: 0 },

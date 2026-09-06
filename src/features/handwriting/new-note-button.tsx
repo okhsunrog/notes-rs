@@ -3,8 +3,8 @@ import { Menu } from "@base-ui/react/menu";
 import { ChevronDown, PenLine } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { useWorkspaceController } from "@/features/workspace/workspace-controller";
 import { useHandwritingAvailability } from "./input-capabilities";
-import { useHandwritingSession } from "./handwriting-session";
 
 export function NewNoteButton({
   children,
@@ -20,7 +20,7 @@ export function NewNoteButton({
   fullWidth?: boolean;
 }) {
   const { available } = useHandwritingAvailability();
-  const open = useHandwritingSession((state) => state.setOpen);
+  const controller = useWorkspaceController();
   return (
     <div className={cn("inline-flex min-w-0", fullWidth && "w-full")}>
       <Button
@@ -50,7 +50,7 @@ export function NewNoteButton({
               <Menu.Popup className="z-50 min-w-48 rounded-xl border bg-popover p-1 text-popover-foreground shadow-lg outline-none">
                 <Menu.Item
                   className="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2.5 text-sm outline-none data-[highlighted]:bg-accent"
-                  onClick={() => open(true)}
+                  onClick={() => void controller.createHandwrittenNote()}
                 >
                   <PenLine className="size-4" />
                   Write by hand
