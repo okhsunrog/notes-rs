@@ -21,20 +21,22 @@ It ignores touch input to avoid palm marks. Mouse drawing can be explicitly enab
 The eraser removes whole strokes; hardware eraser input uses the same behavior. Cancellation drops
 the unfinished gesture, and undo/redo is local to the open editing session.
 
-Completed strokes are saved after each gesture. The versioned JSON draft is kept at
-`<app-data>/handwriting/draft-v1.json`, separate from notes, sync, and workspace backups.
-It stores vector points rather than a screenshot. Saves are serialized, revision-checked, and
-published through a synced temporary file and atomic replacement. A failed save retains the
-current in-memory draft for retry and prevents Done from closing the sheet. Invalid saved data
-is reported rather than overwritten. An interrupted, unfinished stroke is not guaranteed to survive.
+Completed strokes are saved after each gesture in `<app-data>/handwriting/ink-v1.sqlite3`,
+separate from notes, sync, and workspace backups. Canonical CBOR metadata and lossless
+INKCHNK/PCO-8 columns are SQLite BLOBs. A serialized blocking worker checks the expected
+root revision, reuses unchanged chunks, and atomically publishes the next root using WAL/FULL.
+Failed transactions preserve the saved page; failed saves retain the in-memory draft for retry.
+Unfinished gestures are not guaranteed to survive. There is no JSON storage/import/fallback;
+the original test corpus remains exported separately for compression benchmarks.
 
-JSON is an interim input-test format. The agreed production direction is columnar stroke data,
-with point offsets per stroke and separate coordinate, pressure, tilt, and time columns. Codec
-and quantization choices are being benchmarked separately. Preserve native source precision and
-store coordinate transforms/pressure ranges as metadata when comparing compression variants;
-the prototype's normalized f64 values must not silently become the production encoding contract.
+The independent `ink-format` crate owns codecs, core typed bodies and graph validation.
+The app adapter currently retains normalized f64 input without quantization and stores one
+chunk per changed stroke. Larger-chunk compaction and durable history are subsequent work;
+current Undo/Redo lasts for the open editing session. Data placement and chunk-size policy
+remain outside the crate. See [ink-format-v1.md](ink-format-v1.md) for the full design.
 
-This initial sheet is 1000 × 1400 logical units, limited to 150,000 points and 16 MiB on disk.
+This initial sheet is 1000 × 1400 logical units, limited to 150,000 points and a 64 MiB
+encoded snapshot budget (not a hard total SQLite/WAL disk quota).
 Recognition, note insertion, and handwriting sync are not included. BOOX acceleration is an
 optional native rendering path described below; the portable canvas remains the fallback.
 

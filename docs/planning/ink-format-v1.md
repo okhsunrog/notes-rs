@@ -1,7 +1,8 @@
-# Ink format v1 — уточнённый проект, revision 4
+# Ink format v1 — уточнённый проект, revision 5
 
 Дата: 2026-09-06. Статус: проект для реализации и проверки, не опубликованный
-стандарт и не уже работающий storage. Revision 4 документа не означает wire major 4:
+стандарт. Core-модель и SQLite adapter реализованы; остальные этапы отмечены ниже.
+Revision 5 документа не означает wire major 5:
 wire v1 ещё не фиксировался. Числовые реестры ниже — согласованная исходная точка
 реализации; замораживать их можно после реализации reader/writer и fixtures.
 
@@ -21,7 +22,8 @@ JSON перестаёт быть рабочим форматом после пе
 contract находится в `crates/ink-format/FORMAT.md` (копия для обмена —
 `INKCHNK-WIRE-V1.md`). Этот документ дополнительно описывает проект полной модели
 и её применение в Tangleaf; не все описанные части уже реализованы.
-Интеграция нового хранилища в приложение ещё не выполнена.
+Первая интеграция SQLite BLOB хранилища выполнена (§6.2); durable history, compaction,
+OCR и полноценный portable container ещё не реализованы.
 
 ## 1. Область и термины
 
@@ -519,28 +521,37 @@ catalog. Настоящая конкурирующая правка страни
 
 ### 6.2. Storage в Tangleaf
 
-Предлагаемый backend: immutable CBOR records в SQLite BLOB, индексированные связи
-и версии каталогов в той же транзакции; физические chunks/resources через notes-blob
-с SHA-256. Разделение CBOR payload и индекса не даёт двух конкурирующих источников
-истины: индекс обязан соответствовать записи и обновляться той же транзакцией.
-Экспорт сериализует согласованный snapshot, а не SQLite-файлы.
+Первая реализация: отдельная device-local `handwriting/ink-v1.sqlite3`.
+И canonical CBOR metadata, и INKCHNK с PCO-8 хранятся как SQLite BLOB.
+`ink_records` и `ink_chunks` содержат immutable payload по ID; `ink_head`
+содержит текущий Document root и SHA-256 revision. Core-крейт не зависит от SQLite.
+Отдельных файлов chunks и интеграции с notes-blob на этом этапе нет.
+Экспорт полного документа в будущем сериализует согласованный snapshot;
+сам INKCHNK не является самодостаточной заметкой.
 
 Последовательность публикации:
 
-1. Worker получает semantic operations и expected Page Ref; не компрессирует в pen callback.
-2. Создаёт новые chunks, проверяет длину/hash, устанавливает их через notes-blob с fsync.
-3. В одной SQLite transaction проверяет expected page, вставляет CBOR records,
-   обновляет catalogs/head/history pins и индексирует OCR при необходимости.
-4. Commit с подтверждённой durability; лишь после него возвращает durable ack.
-5. При ошибке старый head остаётся видимым. Уже установленные blobs становятся
-   кандидатами на GC, а не поводом изменять старую запись.
+1. Сериализованный blocking worker получает patch и expected root revision;
+   pen callback не занимается сжатием или SQLite.
+2. BEGIN IMMEDIATE; проверяется текущая revision и целостность snapshot.
+3. Для изменённых штрихов создаются новые geometry/stroke records и PCO-8 chunks.
+   Неизменённые chunks переиспользуются без повторного сжатия. Обновляются каталоги.
+4. В той же транзакции записываются новые BLOB и переключается head.
+5. Commit, затем durable ack. Ошибка до commit откатывает и данные, и head.
 
-В текущем repo notes-core использует WAL+synchronous=NORMAL. Это не достаточная
-гарантия подтверждённого commit при потере питания. Для ink durability выбран WAL+FULL
-на записывающем соединении до начала transaction, при сохранении сериализованной
-границы worker. Изменять pragma внутри transaction нельзя. Это требование будущей
-реализации, текущая настройка здесь не менялась. Результат зависит от исправной
-реализации fsync/VFS/device; обычный kill процесса не эквивалентен power-cut test.
+Используется WAL+synchronous=FULL до начала transaction. Настройки общей базы
+notes-core не изменяются. Результат зависит от исправной реализации fsync/VFS/device;
+обычный kill процесса не эквивалентен power-cut test.
+
+Первый adapter сохраняет только текущее состояние одной экспериментальной страницы.
+Удаление недостижимых records/chunks выполняется в той же транзакции; durable history
+пока нет, frontend Undo/Redo повторно передаёт штрихи. Перед добавлением истории,
+экспорта или синхронизации GC должен учитывать соответствующие pins (§6.3).
+
+Первый writer создаёт один chunk на изменённый штрих. Это позволяет внедрить формат
+без ожидания накопления данных; это не итоговая политика compaction. Упаковка многих
+segments в крупные chunks после паузы — следующий отдельный этап по результатам
+бенчмарка (§7). Фиксированного target-size в core API нет.
 
 ### 6.3. Сборка мусора и снимки
 
@@ -730,7 +741,7 @@ Clippy и сборка/тесты/package из отдельной директо
 
 - src/features/handwriting/ink-model.ts: drawSegment/drawSheet/inkPoint.
 - src/features/handwriting/ink-editing.ts: f64 width после scale и interpolated samples.
-- src-tauri/src/commands/handwriting.rs: текущая JSON schema/validation/CAS.
+- src-tauri/src/commands/handwriting.rs и handwriting/storage.rs: IPC validation, SQLite BLOB storage и CAS.
 - plugins/tauri-plugin-mobile-system/android/.../OnyxInk.kt: capture normalization.
 - crates/notes-blob/src/lib.rs: SHA-256, install_reader, fsync, no-clobber publication.
 - crates/notes-core/src/db.rs: WAL+NORMAL; db/attachments.rs: существующие GC roots.
