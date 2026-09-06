@@ -220,6 +220,94 @@ Executor stops and reports. Verify on the tablet: REGAL acceptance, ghosting aft
 
 ---
 
+## Track E — Review fixes (2026-09-07 multi-agent review, all findings verified)
+
+Order: E1 → E7, one commit per task, then E8 (docs). Server and sync tasks run the full cargo gates; frontend tasks `vp check` + `vp test`; Kotlin tasks also `./gradlew :tauri-plugin-mobile-system:testDebugUnitTest --configure-on-demand` from `src-tauri/gen/android`. Every fix gets a regression test that fails before and passes after. Do not touch the ink frame fence / eraser gate semantics in `OnyxInk.kt` beyond what E7 lists.
+
+### E1. Blob authorization by ownership (server)
+
+`server/src/api.rs` `get_blob`/`open_authorized_blob` (~825) authorizes a download when the caller's oplog merely references the hash; `validate_declared_blob` (~899) checks size only. The WebSocket push path (`ingest_ink_checked`, ~1003) also skips `validate_operation_blobs` that the HTTP path runs.
+
+1. Require `blob_ownership.owned(user, hash)` in addition to the reference check before serving a blob; keep the 404 shape for both "unreferenced" and "not owned" so existence is not leaked.
+2. Run `validate_operation_blobs` for socket pushes too (same helper, same error mapping as HTTP).
+3. Tests in `server/tests/`: user B declares user A's hash via HTTP and via WebSocket → push rejected or blob download 404; A still downloads its own.
+
+**Accept:** both tests green; no existing network/ink sync test regresses.
+
+### E2. Sync format version gate (protocol + server + client)
+
+`ServerInfo` carries no format version; `/v1/health` publishes `sync_format_version` but `notes-sync` discards the body; `OpKind` cannot skip unknown kinds, so an older client decodes nothing and stays offline with "decoding sync response".
+
+1. Add `format_version` to `ServerInfo` (`crates/notes-protocol`) and have the client send its `FORMAT_VERSION` on `/v1/ops` and the `/v1/sync` WebSocket handshake (header `X-Sync-Format-Version` or a query parameter; pick one and use it for both).
+2. Server: when the client's version is lower than the server's, refuse with a dedicated error code (e.g. `format_unsupported`, HTTP 426 or 409 with the code in the body) instead of emitting ops the client cannot parse. A client that sends no version is treated as too old.
+3. Client (`crates/notes-sync`, `src-tauri/src/sync.rs`): map that code to a terminal sync state `UpdateRequired { server_version }` that does NOT retry; expose it through the sync status so the UI shows "Update the app to keep syncing" in the sync popover (`src/features/sync/sync-status-indicator.tsx`) instead of the generic offline error.
+4. Tests: server rejects an older version and accepts the current one; client transitions to the terminal state on that code; UI test for the indicator text.
+
+**Accept:** an old client now sees an explicit update message; current client unchanged.
+
+### E3. Rejected outbox batches must not poison sync (server + client)
+
+`ingest_ink_checked` (~1010) flattens the 409 from `ink::validate` into `CoreError::invalid`; the socket sends `IngestFailed`; the client bails and reconnects with the same outbox head forever.
+
+1. Preserve the `ApiError` status/code through `ingest_ink_checked` (409 → the protocol's conflict code; 413/quota → its own code).
+2. Client: on a _terminal_ rejection (invalid, conflict, quota) of a batch, quarantine the offending operation instead of retrying it: mark it in the outbox (new column or state) so `pending_outbox` skips it, keep later ops flowing, and surface it in sync status as "1 change could not be sent" with the server's message and a Retry action that un-quarantines. Never delete the op. Transient errors (network, 5xx) keep today's retry.
+3. Tests: a rejected InkPublish followed by a text op → the text op syncs; retry after fixing the cause sends the quarantined op.
+
+**Accept:** tests green; the handoff's "batch stalls" limitation is removed from `docs/planning/handwriting-integration.md`.
+
+### E4. Handwriting editor lifecycle gaps (frontend)
+
+`src/features/handwriting/handwriting-note-view.tsx` and `handwriting-session.ts`.
+
+1. When `editing` transitions false → true after mount (pen observed, or mouse drawing enabled), re-run `openNote` so the note is re-read with `editing=true` and a session begins; until then the canvas stays disabled. Test: read-only open, then pen observed → `loadHandwritingNote(uuid, true)` called and strokes are written.
+2. Register one module-level `pagehide`/`visibilitychange:hidden` drain (in `handwriting-session.ts`, imported once from `src/main.tsx`) that runs `flushAllSessions` then `completeAllHandwriting` even when no note view is mounted. Test with a retained writer and no view.
+3. Unmount cleanup: a flush that fails with `not_found` ends the session (mirror `completeInBackground`); `deleteNote` acts on the flush result. Test: deleted note leaves no writer behind.
+4. The container `onKeyDown` ignores events whose target is the title textarea (or any editable element).
+5. Conflict dialog: when "Keep all" is disabled because a head is not downloaded, show a one-line explanation next to the button.
+
+**Accept:** new tests green; existing handwriting tests untouched except harness changes.
+
+### E5. Workspace navigation, cache and draft safety (frontend)
+
+1. `src/features/workspace/workspace-model.ts` `forgetPage`: replace the pane's content directly and filter the dead uuid out of every pane's `back` and `forward`; do not go through `navigatePane`. Test: delete B after opening A → Back reaches A; no dead entries remain.
+2. `use-notes-workspace.ts` `selectPage`: only seed `queryKeys.page(uuid)` when nothing is cached, or when the incoming `titleRevision`/`updatedAt` is newer; then invalidate the page query. Test: a stale list record never overwrites a fresher cached page.
+3. Process-level text flush: add `flushAll()` to `PageSessionRegistry` (titles, blocks, documents with pending drafts) and call it from one `pagehide`/`visibilitychange:hidden` listener registered in `src/main.tsx` (share the listener module with E4.2). Block autosave additionally flushes on `visibilitychange:hidden`. Test: dirty block + hidden event → save called.
+4. `src/app/use-app-shortcuts.ts`: Ctrl/Cmd+N and K ignore editable targets like Z does; `App.tsx` gates only undo/redo on handwriting pages, not the whole hook.
+
+**Accept:** tests green; `vp check` clean.
+
+### E6. Ink storage correctness (notes-core + Tauri)
+
+1. `PageDelete` (and the snapshot-import purge path) removes `ink_documents`, `ink_history`, `ink_versions`, `ink_staged_roots` rows for the page, then runs `history::collect`. Test in `crates/notes-core/tests/handwriting_storage.rs`: delete → records/chunks gone, `versions::all` no longer exports them, sync of the delete op purges on a second replica.
+2. `storage/compaction.rs` `compact_snapshot`: "did not shrink" is success (return the input unchanged); only the budget case errors. Test: archive restore with an unshrinkable graph succeeds.
+3. `versions.rs` `Store::publish`: skip (and clear `dirty`) when the head root hash equals `base_version`'s `root_hash`. Test: undo+redo round trip publishes nothing.
+4. `src-tauri/src/commands/handwriting/maintenance.rs`: evict a session on `NotFound` from `complete`/`session`.
+5. `ink/runtime.rs` `complete()`: emit `PagesChanged` as soon as the publication is committed, independent of `close_editor`'s result.
+6. `crates/notes-core/src/sqlite.rs`: wrap worker jobs in `catch_unwind` and return the panic as an error so one bad job cannot kill the connection for the process. Test: a job that panics → error, next job succeeds.
+7. `src-tauri/src/lib.rs` exit hook: bound `complete_all().await` with a timeout (5 s) and still exit; log retained work.
+
+**Accept:** cargo gates green; existing 256+ Rust tests unchanged.
+
+### E7. Android plugin robustness (Kotlin)
+
+`plugins/tauri-plugin-mobile-system/android/src/main/java/dev/okhsunrog/mobile_system/`.
+
+1. `OnyxInk.configure`: clear `failed` at the start of an enabled configure (keep the last message only for `status()`), so a transient SDK failure does not disable fast ink for the process.
+2. `OnyxInk.begin`: if `drawing` is already true, run `end()` first so begin/end stay paired; add a unit test around the pairing logic if the class structure allows (extract the guard into a small testable helper if needed).
+3. `OnyxInk.init`: call `Device.currentDevice().clearTransientUpdate(false)` once after the hidden-API exemption, so a crashed session cannot leave the panel in transient mode.
+4. `OnyxInk.end`: call `cancelFrameSubmission()` before posting `refresh`, as `begin` does.
+5. `MobileSystemPlugin.commitOnyxFrame`: wrap the runnable body in try/catch and reject the invoke on error (mirror `configureOnyxInk`).
+6. `MobileSystemPlugin.getSafeAreaInsets`: if the decor view is not attached, resolve immediately with zero insets instead of posting.
+7. `MobileSystemPlugin.configureOnyxInk`: if the current WebView differs from the one `onyxInk` was built with (compare references, keep a `WeakReference`), `destroy()` the old instance and build a new one.
+
+**Accept:** Gradle unit tests green (existing 15 + new); the arm64 debug APK builds (`just build-android-debug`, once). Flag in the report that 1, 2, 4 and 7 need a device retest of pen input.
+
+### E8. Park the deferred findings (docs)
+
+Append to `docs/planning/backlog.md` under a new "2026-09-07 review, deferred" section, each with a trigger: per-gesture O(document) ink I/O and `ink_root_refs` growth (`storage.rs` patch path; trigger: first busy-timeout save failure or a sheet over ~50k points feeling slow); blob ownership never released / no blob GC (trigger: quota warning or second user); no server rate limiting on hashing endpoints (trigger: second user or public exposure); unbounded OAuth client registration (trigger: same); `pastey` duplicate versions in Cargo.lock (cosmetic).
+
+**Accept:** backlog updated; nothing else changed.
+
 ## Out of scope (do not do)
 
 - Paged scrolling, infinite canvas, multi-page handwritten notes, OCR/recognition, search over handwriting.
