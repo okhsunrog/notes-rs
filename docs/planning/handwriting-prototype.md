@@ -413,3 +413,33 @@ quickly and correctly with the back of the stylus while Pen remains selected. Th
 captured nine writing strokes and eight hardware eraser strokes; afterward Pen SDK remained
 active and the eraser render gate was released. Diagnostic listeners were stopped after
 the retest. This supersedes the failed fresh-word erasing retests above.
+
+## SQLite columnar storage validation — 2026-09-06
+
+The independent `ink-format` crate now supplies typed core bodies and full snapshot
+validation. `handwriting/storage.rs` stores canonical CBOR and INKCHNK/PCO-8 BLOBs
+in one SQLite transaction. The JSON reader/writer and fallback are removed.
+
+Validation at `3c2b0e1`:
+
+- Crate: 19 integration tests and one doctest, including an independent copy outside
+  the workspace with fresh registry resolution; package creation succeeded.
+- App: 45 Rust unit tests passed (one unrelated corpus import test remains ignored),
+  including seven handwriting tests covering float bits, CAS, removal/restoration,
+  immutable chunk reuse and rollback when a trigger aborts the head update.
+- `vp check` and all 396 frontend tests passed. Crate Clippy is clean. App-only Clippy
+  passes with the existing unrelated `collapsible_if` warning excluded; a fully
+  strict workspace check also hits an existing `notes-blob` `chunks_exact` lint.
+- Arm64 debug APK built and installed on BOOX a72aa394. A two-point test stroke was
+  saved through the real WebView IPC, loaded exactly, and survived force-stop/relaunch
+  with identical root revision, coordinates, pressure/tilt/time and grid background.
+  SQLite integrity check returned `ok`; the DB contained six CBOR records and one
+  787-byte INKCHNK BLOB. This small save took 33.4 ms including IPC; it is not a full-page
+  performance benchmark or a power-loss test.
+- The temporary stroke was removed, and the sheet reopened with zero strokes, Grid
+  selected and Saved status. The old device JSON draft was removed after taking an
+  additional local copy; the original exported benchmark corpus is retained.
+
+Physical pen/eraser/lasso acceptance on this storage build is pending. Rendering and
+BOOX refresh code were not changed in this step. Durable Undo/Redo, compaction and
+integration into regular notes remain subsequent work.
