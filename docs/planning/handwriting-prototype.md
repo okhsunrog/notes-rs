@@ -488,3 +488,13 @@ Tests cover delete/move/background -> Undo -> compaction/GC -> reopen -> Undo/Re
 bit preservation including negative zero, stable geometry records, chunk boundaries,
 stale preparation and a transaction failure during publication. Hardware acceptance
 of this history/compaction build is still pending.
+
+2026-09-06 device check: installed the incremental history build on Note Air 4C.
+The previous APK had no `handwriting_history` command (in-memory history only).
+Verified background change -> Undo through the actual UI, plus command-level
+Undo/Redo; all 68 existing strokes and original background were restored. For this
+page, a full history response was 1,573,666 JSON characters versus 2,856/2,857 for
+background-only Undo/Redo patches. Single observed calls were about 340 ms, not a
+benchmark or proof of physical e-ink latency. Fresh pen/Undo visual acceptance
+remains a manual check. The old snapshot becomes the initial history baseline;
+actions from the old APK's volatile history cannot be recovered after upgrade.
