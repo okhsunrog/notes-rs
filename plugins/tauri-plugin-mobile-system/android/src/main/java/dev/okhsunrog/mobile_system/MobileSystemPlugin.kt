@@ -127,6 +127,9 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
      * reloads into the new view asks for its profile again.
      */
     private fun displayMode(webView: WebView): ViewDisplayMode {
+        // The profile command can run before any ink session; the vendor calls it makes need
+        // the same hidden-API access the ink editor arranges for itself.
+        check(VendorAccess.ensure()) { "BOOX firmware display APIs are unavailable" }
         if (displayModeWebView?.get() !== webView) {
             displayMode = ViewDisplayMode(webView)
             displayModeWebView = java.lang.ref.WeakReference(webView)

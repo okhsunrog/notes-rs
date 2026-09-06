@@ -21,7 +21,6 @@ import com.onyx.android.sdk.pen.data.TouchPointList
 import com.onyx.android.sdk.utils.ResManager
 import org.json.JSONArray
 import org.json.JSONObject
-import org.lsposed.hiddenapibypass.HiddenApiBypass
 import kotlin.math.ceil
 import kotlin.math.floor
 
@@ -138,11 +137,7 @@ internal class OnyxInk(
     init {
         // Vendor firmware APIs are hidden from apps targeting recent Android versions.
         // Initialize before any EpdController/Device static lookup, including cleanup calls.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            check(HiddenApiBypass.addHiddenApiExemptions("Landroid/onyx/", "Landroid/view/View;")) {
-                "BOOX firmware drawing APIs are unavailable"
-            }
-        }
+        check(VendorAccess.ensure()) { "BOOX firmware drawing APIs are unavailable" }
         // A session killed mid-gesture leaves the panel in transient mode, and
         // nothing else ever clears it. Start from a known state.
         runCatching { Device.currentDevice().clearTransientUpdate(false) }
