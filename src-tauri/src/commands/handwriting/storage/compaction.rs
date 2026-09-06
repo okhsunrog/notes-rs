@@ -323,7 +323,11 @@ fn publish(
     }
     #[cfg(test)]
     let _span = profile::span("publish.commit_close");
+    #[cfg(test)]
+    profile::kill_point("before_commit");
     tx.commit().map_err(err)?;
+    #[cfg(test)]
+    profile::kill_point("after_commit");
     drop(conn);
     Ok(true)
 }
@@ -441,6 +445,10 @@ mod tests {
             .ok()
             .map(|v| v.parse::<usize>().unwrap())
             .unwrap_or(MAX_FRESH_CHUNKS);
+        println!(
+            "INK_PROFILE_BASE {}",
+            serde_json::json!({"revision":before.revision})
+        );
         profile::start();
         let mut prepare_ms = 0.;
         let mut repack_ms = 0.;
@@ -471,6 +479,74 @@ mod tests {
         println!(
             "INK_PROFILE {}",
             serde_json::json!({"max_chunks":max_chunks,"batches":batches,"strokes":after.draft.strokes.len(),"prepare_ms":prepare_ms,"decode_merge_encode_ms":repack_ms,"publish_ms":publish_ms,"phases":phases,"verified":true})
+        );
+    }
+
+    #[test]
+    #[ignore = "requires isolated crash fixture paths and expected revision"]
+    fn verify_recorded_recovery() {
+        let source = std::path::PathBuf::from(std::env::var("INK_PROFILE_SOURCE").unwrap());
+        let path = std::path::PathBuf::from(std::env::var("INK_PROFILE_DEST").unwrap());
+        for p in [&source, &path] {
+            assert!(p.is_absolute());
+            assert!(
+                !p.components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            );
+            assert!(
+                p.parent()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with("ink-compaction-")
+            );
+        }
+        // The fixture is closed and immutable. Ordinary read-only WAL access
+        // can still create sidecars, preventing a subsequent isolated copy.
+        for suffix in ["-wal", "-shm"] {
+            assert!(!std::path::PathBuf::from(format!("{}{suffix}", source.display())).exists());
+        }
+        let source = Connection::open_with_flags(
+            format!("file:{}?immutable=1", source.display()),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        )
+        .unwrap();
+        let mut recovered = open(&path).unwrap(); // SQLite recovers the interrupted WAL.
+        assert_eq!(
+            recovered
+                .query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+        assert!(
+            !recovered
+                .prepare("PRAGMA foreign_key_check")
+                .unwrap()
+                .exists([])
+                .unwrap()
+        );
+        let expected_roots = history::roots(&source).unwrap();
+        let actual_roots = history::roots(&recovered).unwrap();
+        assert_eq!(expected_roots.len(), actual_roots.len());
+        for ((a_seq, a_id), (b_seq, b_id)) in expected_roots.iter().zip(&actual_roots) {
+            assert_eq!(a_seq, b_seq);
+            let a = load_root(&source, get_record(&source, *a_id, None).unwrap()).unwrap();
+            let b = load_root(&recovered, get_record(&recovered, *b_id, None).unwrap()).unwrap();
+            equal(&to_draft(&a).unwrap(), &to_draft(&b).unwrap());
+        }
+        let tx = recovered.transaction().unwrap();
+        let (snapshot, revision) = load(&tx).unwrap().unwrap();
+        assert_eq!(revision, std::env::var("INK_EXPECTED_REVISION").unwrap());
+        assert_eq!(
+            history::cursor(&tx).unwrap(),
+            actual_roots.last().unwrap().0
+        );
+        assert_eq!(snapshot.root.id, actual_roots.last().unwrap().1);
+        println!(
+            "INK_RECOVERY {}",
+            serde_json::json!({"history_states":actual_roots.len(),"strokes":to_draft(&snapshot).unwrap().strokes.len(),"verified":true})
         );
     }
 

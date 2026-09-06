@@ -95,3 +95,13 @@ outer prepare/publish times and must not be summed together. `INK_PROFILE_CHUNKS
 may be set to 2..512 for a phase-only batch-size experiment; the application and
 normal scheduling benchmark still use 16. Encoded/decoded byte budgets and output
 chunk limits remain in force. This knob does not select a new shipping policy.
+
+`run-compaction-crashes.mjs REMOTE NEW.jsonl` uses a test harness staged as
+`profile-crash` and the closed `run-0.db` baseline fixture. It copies that fixture
+and sends SIGKILL to the isolated test process immediately before or after the
+publication commit (using the experimental 512-block limit). A fresh process
+recovers the WAL, checks SQLite integrity/foreign keys, compares every retained
+history state bit-for-bit to the read-only source, and verifies the head/cursor
+and unchanged user revision. No signal is sent to the installed application.
+This checks process termination, not physical power failure. All fault injection
+is cfg(test)-only and requires an explicitly enabled profiling session.

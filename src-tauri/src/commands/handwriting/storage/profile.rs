@@ -32,3 +32,18 @@ impl Drop for Span {
         });
     }
 }
+
+pub(super) fn kill_point(stage: &str) {
+    if COUNTERS.with(|c| c.borrow().is_some())
+        && std::env::var("INK_PROFILE_KILL").is_ok_and(|v| v == stage)
+    {
+        eprintln!("INK_KILL {stage}");
+        // External SIGKILL performs no Rust cleanup; used only in isolated test
+        // processes. A failure to deliver the signal fails the test instead.
+        let status = std::process::Command::new("kill")
+            .args(["-9", &std::process::id().to_string()])
+            .status()
+            .expect("run kill");
+        panic!("SIGKILL did not terminate test process: {status}");
+    }
+}
