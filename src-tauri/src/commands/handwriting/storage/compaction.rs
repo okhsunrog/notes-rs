@@ -345,6 +345,7 @@ fn publish(
     drop(conn);
     Ok(true)
 }
+#[cfg(test)]
 pub(in super::super) fn compact(path: &Path) -> CommandResult<bool> {
     compact_with_limits(path, MAX_FRESH_CHUNKS, MAX_JOB_BYTES)
 }

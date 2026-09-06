@@ -21,6 +21,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::handwriting_history,
             commands::save_handwriting_draft,
             commands::save_handwriting_patch,
+            commands::compact_handwriting_draft,
             commands::set_system_bars_style,
             commands::sync_status,
             commands::server_ai_status,
@@ -157,6 +158,19 @@ pub fn run() {
 
     #[cfg(target_os = "android")]
     let builder = builder.on_window_event(|window, event| {
+        if matches!(
+            event,
+            tauri::WindowEvent::Suspended | tauri::WindowEvent::Resumed
+        ) && let Ok(dir) = window.app_handle().path().app_data_dir()
+        {
+            window
+                .app_handle()
+                .state::<commands::HandwritingStore>()
+                .set_background(
+                    dir.join("handwriting/ink-v1.sqlite3"),
+                    matches!(event, tauri::WindowEvent::Suspended),
+                );
+        }
         if matches!(event, tauri::WindowEvent::Resumed)
             && let Some(sync) = window.app_handle().try_state::<sync::SyncRuntime>()
         {

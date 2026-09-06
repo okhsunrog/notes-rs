@@ -2,64 +2,29 @@
 //! It deliberately does not enter the synced note model before that format is designed.
 use super::*;
 use std::path::Path;
-use std::sync::Mutex;
 
 mod model;
 mod storage;
 pub use model::*;
 use model::{MAX_POINTS, validate};
 
-#[derive(Default)]
-struct MaintenanceState {
-    running: bool,
-    dirty: bool,
-}
-#[derive(Default)]
-pub struct HandwritingStore {
-    lock: Arc<Mutex<()>>,
-    maintenance: Arc<Mutex<MaintenanceState>>,
-}
-impl HandwritingStore {
-    fn schedule_compaction(&self, path: std::path::PathBuf) {
-        {
-            let mut state = self.maintenance.lock().expect("maintenance mutex poisoned");
-            state.dirty = true;
-            if state.running {
-                return;
-            }
-            state.running = true;
-        }
-        let maintenance = self.maintenance.clone();
-        tauri::async_runtime::spawn(async move {
-            loop {
-                // A fixed interval: continued writing never postpones the next batch.
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                maintenance
-                    .lock()
-                    .expect("maintenance mutex poisoned")
-                    .dirty = false;
-                let job_path = path.clone();
-                let packed =
-                    match tauri::async_runtime::spawn_blocking(move || storage::compact(&job_path))
-                        .await
-                    {
-                        Ok(Ok(packed)) => packed,
-                        result => {
-                            tracing::warn!(
-                                ?result,
-                                "Handwriting compaction deferred; saved history is unchanged"
-                            );
-                            false
-                        }
-                    };
-                let mut state = maintenance.lock().expect("maintenance mutex poisoned");
-                if !state.dirty && !packed {
-                    state.running = false;
-                    break;
-                }
-            }
-        });
-    }
+mod maintenance;
+pub use maintenance::HandwritingStore;
+
+/// Complete all currently useful packing jobs. The UI flushes its write queue
+/// first; future note publication must pin the resulting root atomically with its outbox.
+#[tauri::command]
+#[specta::specta]
+pub async fn compact_handwriting_draft(
+    app: AppHandle,
+    store: State<'_, HandwritingStore>,
+) -> CommandResult<()> {
+    let path = app
+        .path()
+        .app_data_dir()
+        .map_err(err)?
+        .join("handwriting/ink-v1.sqlite3");
+    store.finish_compaction(path).await
 }
 
 #[tauri::command]

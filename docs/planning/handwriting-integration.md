@@ -8,10 +8,29 @@ additional five-second autosave/publication timer and no Save button. Persist
 unsent changes for offline retry and recovery after an interrupted process;
 recovery must not depend on receiving a shutdown callback.
 
-Compaction scheduling remains under evaluation: periodic fresh-block packing
-versus packing on exit. The existing five-second maintenance worker is not a
-sync timer. Choose its replacement policy after the production-adapter device
-benchmarks; do not silently treat a candidate policy as an accepted decision.
+Accepted compaction policy (2026-09-06): one bounded job every 60 seconds while
+there is new geometry or unfinished packing; continued writing does not reset the
+deadline. Leaving the note or backgrounding drains all currently useful jobs.
+Use at most 512 fresh blocks, 8 MiB encoded input and 16 MiB decoded column values
+per job, keeping the existing whole-segment/250,000-point output target. All
+triggers share one compaction lane. Idle documents do not need recurring polling.
+The minute interval does not trigger synchronization.
+
+Before synchronizing an ink version, the required order is: finish its local write
+queue, complete useful compaction, atomically pin the resulting document root and
+enqueue that immutable version, then transfer missing records/chunks. This applies
+to exit, background publication, manual sync and retry after restart. Compaction
+failure postpones that version's publication; retain durable local writes and
+pending publication intent for retry. Do not block unrelated text-note sync.
+Already prepared versions can be retried without recompressing their sealed blocks.
+Singleton or non-shrinking input is a successful no-op, not an infinite sync barrier.
+
+Concurrent edits must not move the version being sent: validate the chosen logical
+revision when atomically pinning its compacted root/outbox entry. Later edits form
+the next unpublished version. Never upload mutable SQLite state by reading a live
+head repeatedly. Back can leave after durable writes; compaction/network completion
+runs in the background. Android may stop a background process, so the eventual
+outbox/recovery protocol cannot rely on finishing an onPause callback.
 
 ## Storage and portable export decision (2026-09-06)
 
@@ -35,9 +54,14 @@ without implementing a second working store or custom file journal now.
 
 ## Current implementation boundary
 
-The scratch sheet still has its own database and is not a synced note. Fresh-only
-packing and the five-second maintenance worker do not implement note autosave.
-Do not describe a maintenance completion as a synchronized note save.
+The scratch sheet still has its own database and is not a synced note. It now has
+the minute worker and an explicit awaited `compact_handwriting_draft` command.
+The frontend flushes queued writes before requesting completion on Back, visibility
+loss or pagehide. Android suspend also requests native completion; geometry writes
+acknowledged while suspended request immediate completion. This is not yet a durable
+publication/outbox barrier, because the synced ink version model is not implemented.
+That barrier must be enforced by the future backend publication transaction, not
+merely by a frontend sequence of calls. Do not describe compaction as sync.
 
 ## Integration constraints found in the current repository
 

@@ -16,6 +16,7 @@ mod history;
 #[cfg(test)]
 #[path = "storage/profile.rs"]
 mod profile;
+#[cfg(test)]
 pub(super) use compaction::compact;
 // The standalone benchmark varies policy while reusing the production algorithm.
 #[allow(unused_imports)]

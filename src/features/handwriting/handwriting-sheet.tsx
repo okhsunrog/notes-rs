@@ -16,7 +16,9 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import { handwritingHistory, saveHandwritingPatch } from "@/lib/api";
+import { compactHandwritingDraft, handwritingHistory, saveHandwritingPatch } from "@/lib/api";
+import { notifyError } from "@/lib/notify";
+import { completeDraft } from "./complete-draft";
 import type { InkDraft, InkHistorySnapshot } from "@/lib/bindings";
 import { registerBackOverlay } from "@/lib/back-overlays";
 import { applyHistoryUpdate, incrementalDraftSaver } from "./ink-patch";
@@ -83,10 +85,38 @@ export function HandwritingSheet() {
   const close = useCallback(async () => {
     if (active || closing || historyBusyRef.current) return;
     setClosing(true);
-    const saved = writer.current ? await writer.current.flush() : true;
-    if (saved) setOpen(false);
-    else setClosing(false);
+    const current = writer.current;
+    if (!current) {
+      setOpen(false);
+      return;
+    }
+    try {
+      const completed = await completeDraft(current, compactHandwritingDraft, () => setOpen(false));
+      if (!completed) setClosing(false);
+    } catch (error) {
+      notifyError("Handwriting compaction", error);
+      setClosing(false);
+    }
   }, [active, closing, setOpen]);
+
+  useEffect(() => {
+    const complete = () => {
+      const current = writer.current;
+      if (current)
+        void completeDraft(current, compactHandwritingDraft).catch((error: unknown) =>
+          notifyError("Handwriting compaction", error),
+        );
+    };
+    const visibility = () => {
+      if (document.visibilityState === "hidden") complete();
+    };
+    document.addEventListener("visibilitychange", visibility);
+    window.addEventListener("pagehide", complete);
+    return () => {
+      document.removeEventListener("visibilitychange", visibility);
+      window.removeEventListener("pagehide", complete);
+    };
+  }, []);
 
   useEffect(
     () =>

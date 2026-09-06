@@ -19,6 +19,11 @@ export const commands = {
 	handwritingHistory: (redo: boolean | null, expectedRevision: string | null) => typedError<InkHistoryUpdate, CommandError>(__TAURI_INVOKE("handwriting_history", { redo, expectedRevision })),
 	saveHandwritingDraft: (draft: InkDraft, expectedRevision: string | null) => typedError<string, CommandError>(__TAURI_INVOKE("save_handwriting_draft", { draft, expectedRevision })),
 	saveHandwritingPatch: (patch: InkDraftPatch, expectedRevision: string | null) => typedError<string, CommandError>(__TAURI_INVOKE("save_handwriting_patch", { patch, expectedRevision })),
+	/**
+	 *  Complete all currently useful packing jobs. The UI flushes its write queue
+	 *  first; future note publication must pin the resulting root atomically with its outbox.
+	 */
+	compactHandwritingDraft: () => typedError<null, CommandError>(__TAURI_INVOKE("compact_handwriting_draft")),
 	setSystemBarsStyle: (darkBackground: boolean) => typedError<null, CommandError>(__TAURI_INVOKE("set_system_bars_style", { darkBackground })),
 	syncStatus: () => __TAURI_INVOKE<SyncStatus>("sync_status"),
 	serverAiStatus: () => typedError<AiIndexStatus, CommandError>(__TAURI_INVOKE("server_ai_status")),

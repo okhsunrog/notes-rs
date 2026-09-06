@@ -223,6 +223,7 @@ export const loadHandwritingDraft = checkedCommand(commands.loadHandwritingDraft
 export const saveHandwritingDraft = checkedCommand(commands.saveHandwritingDraft);
 export const handwritingHistory = checkedCommand(commands.handwritingHistory);
 export const saveHandwritingPatch = checkedCommand(commands.saveHandwritingPatch);
+export const compactHandwritingDraft = checkedCommand(commands.compactHandwritingDraft);
 export const setSystemBarsStyle = checkedCommand(commands.setSystemBarsStyle);
 export const loadSettings = checkedCommand(commands.loadSettings);
 export const exportDeviceConfiguration = checkedCommand(commands.exportDeviceConfiguration);
