@@ -18,6 +18,9 @@ configuration, or workspace dependency inheritance is required.
 - Complete core-ink snapshot validation: reference closure, identities, hashes,
   profile/column agreement, segment mapping, timeline and resource checks.
 - Checksums, bounds, counts, duplicate IDs, malformed streams and fixed fixtures.
+- `Chunk::decoded_value_bytes` inspects decoded value sizes without decompressing
+  PCO, for callers that budget batches before decoding. It checks framing and CRCs,
+  not compressed stream semantics or sample values, and is not a process RSS bound.
 
 ```rust
 use ink_format::{DType, Encoding, chunk::{Chunk, Column, f64_column}};

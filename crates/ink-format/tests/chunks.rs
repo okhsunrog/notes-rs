@@ -46,6 +46,7 @@ fn roundtrip_both_codecs_preserves_bits_segments_and_missing_values() {
     for encoding in [Encoding::Raw, Encoding::Pco8] {
         let source = sample();
         let encoded = source.encode(encoding).unwrap();
+        assert_eq!(Chunk::decoded_value_bytes(&encoded).unwrap(), 91);
         let decoded = Chunk::decode(&encoded).unwrap();
         assert_eq!(source, decoded);
         assert_eq!(
@@ -93,11 +94,13 @@ fn rejects_every_truncation_and_checksum_corruption() {
         let bytes = sample().encode(encoding).unwrap();
         for n in 0..bytes.len() {
             assert!(Chunk::decode(&bytes[..n]).is_err(), "accepted prefix {n}");
+            assert!(Chunk::decoded_value_bytes(&bytes[..n]).is_err());
         }
         for i in [16, 80, bytes.len() - 1] {
             let mut bad = bytes.clone();
             bad[i] ^= 1;
             assert!(Chunk::decode(&bad).is_err());
+            assert!(Chunk::decoded_value_bytes(&bad).is_err());
         }
     }
 }

@@ -154,6 +154,18 @@ impl Chunk {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
+        Self::read_layout(bytes, true).map(|(chunk, _)| chunk)
+    }
+
+    /// Inspect the decoded column-value byte count without decompressing values.
+    /// Validates framing, directory invariants and payload CRCs. This is a budget
+    /// estimate, not full codec/sample validation or a bound on process memory:
+    /// decoding also needs metadata, validity bitmaps and codec scratch space.
+    pub fn decoded_value_bytes(bytes: &[u8]) -> Result<usize> {
+        Self::read_layout(bytes, false).map(|(_, bytes)| bytes)
+    }
+
+    fn read_layout(bytes: &[u8], decode_values: bool) -> Result<(Self, usize)> {
         ensure(
             bytes.len() >= HEADER && bytes.len() <= MAX_CHUNK,
             "chunk size",
@@ -320,12 +332,13 @@ impl Chunk {
                 uint(bytes, p + 48, 4)? == u64::from(crc32fast::hash(payload)),
                 "payload CRC",
             )?;
-            let values = match encoding {
-                Encoding::Raw => {
-                    ensure(payload_len == expected, "RAW length")?;
-                    payload.to_vec()
-                }
-                Encoding::Pco8 => codec::decompress(dtype, payload, valid)?,
+            if encoding == Encoding::Raw {
+                ensure(payload_len == expected, "RAW length")?;
+            }
+            let values = match (decode_values, encoding) {
+                (false, _) => Vec::new(),
+                (true, Encoding::Raw) => payload.to_vec(),
+                (true, Encoding::Pco8) => codec::decompress(dtype, payload, valid)?,
             };
             let column = Column {
                 semantic,
@@ -334,7 +347,12 @@ impl Chunk {
                 validity,
                 values,
             };
-            validate_values(&column)?;
+            if semantic == 12 {
+                ensure(dtype == DType::U8, "sample kind must be U8")?;
+            }
+            if decode_values {
+                validate_values(&column)?;
+            }
             columns.push(column);
         }
         for axis in [1, 2, 12] {
@@ -351,12 +369,15 @@ impl Chunk {
             end = hi;
         }
         ensure(end == bytes.len(), "trailing padding")?;
-        Ok(Self {
-            id: id(bytes, 16)?,
-            profile: id(bytes, 32)?,
-            segments,
-            columns,
-        })
+        Ok((
+            Self {
+                id: id(bytes, 16)?,
+                profile: id(bytes, 32)?,
+                segments,
+                columns,
+            },
+            decoded_total,
+        ))
     }
 }
 
