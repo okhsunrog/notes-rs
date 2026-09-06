@@ -363,3 +363,24 @@ release also unwind the temporary mode; no early raw-layer clear is introduced. 
 test covers idempotent acquisition/release. Ten Android tests pass and the arm64 APK built
 and installed with byte-identical draft data. Device readback at submission was raw 524290,
 then GU/raw 2 afterward. Physical acceptance of fresh-word erasing remains pending.
+
+### Density and font-scale changes without Activity recreation
+
+The Android manifest now declares density and fontScale in configChanges. This keeps the
+existing Activity/WebView through these changes; Tauri already forwards configuration
+updates, while the handwriting ResizeObserver and window resize handlers update canvas
+resolution and native pen geometry. The reported white-screen incident involved repeated
+Activity recreation; the exact earlier renderer failure has not been reproduced under a
+debugger. Tauri issue 15671 concerns a different task-removal/foreground-service trigger,
+so it is not treated as proof of the same root cause or a reason to recreate windows blindly.
+
+On the Note Air 4C, the installed arm64 build retained the same Activity, CDP page and a
+JavaScript sentinel through font scale 0.85 -> 1.0 -> 0.9 -> 0.85, EinkWise app density
+450 -> default 300, system densities 300 -> 360 -> 400 -> 320 -> 300 (400 -> 320 separated
+by approximately 150 ms), and restoring EinkWise to 450. JavaScript and plugin IPC stayed
+responsive; the open handwriting dialog survived, canvas dimensions adapted and Pen SDK
+reported active. System-density testing with EinkWise pinned to 450 was separately checked
+and did not count as a change to the application's density. The complete EinkWise profile
+and persisted draft were byte-identical before and after testing; system density and font
+scale were restored. Validation: vp check, 396 frontend tests and the arm64 debug APK build.
+This does not prevent an external force-stop or cover every other Activity recreation path.
