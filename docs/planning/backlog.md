@@ -45,6 +45,13 @@ Findings from the 2026-07-19 multi-agent review that are **deliberately not in a
 - **`reconcileRemoteDraft` is nearly vestigial** (`editor-sync.ts`) — real reconciliation lives in the page-session registry. _Trigger: next outliner refactor; fold/remove._
 - **Graph view is prototype-grade** (fixed ellipse layout, refetch-on-click). _Trigger: when the graph becomes a daily tool; consciously parked._
 
+## Handwriting integration (2026-09-06 review, accepted for now)
+
+- **Second pane of the same handwritten note stays read-only** after the editing pane closes; editor ownership is acquired once per mount (`handwriting-note-view.tsx`). _Trigger: first time two panes of one handwritten note are used on desktop; fix = re-acquire ownership on `pages_changed`/focus._
+- **Title editing hook duplicates `PageView` logic** (`src/features/pages/use-page-title-editor.ts` vs `page-view.tsx`) — extracted without touching the text page. _Trigger: next `PageView` title change; switch `PageView` to the hook._
+- **Two Back buttons on a handwritten note in compact layout**: the pane frame's Back and the editor's own Back (flush-then-leave). The frame's Back bypasses the editor lifecycle and lands on the unmount path, which also flushes and completes. _Trigger: e-ink profile UI pass (Track C of `HANDWRITING_UI_PLAN.md`); hide the frame's Back for handwriting panes or route it through the editor's `leave`._
+- **`removePage` gives no cancellation signal** (`use-notes-workspace.ts`), so the editor cannot mark itself as leaving before delete; harmless today because a `not_found` completion is ignored. _Trigger: when another caller needs to know whether a delete happened; return `boolean`._
+
 ## Recently resolved elsewhere (for context, keep list short)
 
 - 2026-07-19 frontend review findings → fixed in `f1c7dc3`.
