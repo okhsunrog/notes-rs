@@ -111,9 +111,7 @@ export function BlockChildren({
         >
           <Plus className="size-3.5 transition group-hover:rotate-90" />
           Add another block
-          <span className="ml-auto opacity-0 transition group-hover:opacity-70">
-            or press Enter
-          </span>
+          <span className="reveal-on-hover ml-auto transition">or press Enter</span>
         </button>
       )}
     </>

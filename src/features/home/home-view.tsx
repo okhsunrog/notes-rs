@@ -456,7 +456,7 @@ function DashboardSection({
                   </span>
                 )}
               </span>
-              <ArrowRight className="size-3.5 shrink-0 text-muted-foreground opacity-0 transition group-hover:opacity-100" />
+              <ArrowRight className="reveal-on-hover size-3.5 shrink-0 text-muted-foreground transition" />
             </button>
           ))}
         </div>

@@ -74,7 +74,7 @@ export function MarkdownImageViewer({
           title={title}
           width={image.width}
         />
-        <span className="pointer-events-none absolute right-2 bottom-2 flex size-8 items-center justify-center rounded-lg bg-black/65 text-white opacity-0 shadow-sm backdrop-blur-sm transition group-hover:opacity-100 group-focus-visible:opacity-100">
+        <span className="reveal-on-hover pointer-events-none absolute right-2 bottom-2 flex size-8 items-center justify-center rounded-lg bg-black/65 text-white shadow-sm backdrop-blur-sm transition">
           <Maximize2 className="size-4" />
         </span>
       </DialogTrigger>

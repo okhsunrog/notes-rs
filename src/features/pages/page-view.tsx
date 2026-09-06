@@ -364,7 +364,7 @@ export function PageView({
               variant="ghost"
               size="icon-sm"
               className={cn(
-                "rounded-lg text-muted-foreground opacity-0 transition group-hover:opacity-100 focus:opacity-100",
+                "reveal-on-hover rounded-lg text-muted-foreground transition",
                 favorite && "text-primary opacity-100",
               )}
               aria-label={favorite ? "Remove note from favorites" : "Add note to favorites"}

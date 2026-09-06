@@ -254,7 +254,7 @@ function AllNotesRow({
             <span>Edited {formatDate(page.updatedAt)}</span>
           </span>
         </span>
-        <ArrowRight className="size-4 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
+        <ArrowRight className="reveal-on-hover size-4 shrink-0 text-muted-foreground transition-opacity" />
       </button>
       <Button
         type="button"

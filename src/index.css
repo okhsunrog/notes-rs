@@ -998,6 +998,21 @@ html::before {
   }
 }
 
+/* Controls that fade in on hover. Pointer devices keep the quiet look; where hover
+   does not exist (touch, pen) the control is simply always visible, and keyboard
+   focus inside the group reveals it too. Unlayered so Tailwind utilities cannot
+   reorder it away. */
+@media (hover: hover) {
+  .reveal-on-hover {
+    opacity: 0;
+  }
+  .group:hover .reveal-on-hover,
+  .group:focus-within .reveal-on-hover,
+  .reveal-on-hover:focus-visible {
+    opacity: 1;
+  }
+}
+
 /* Promote the workspace scroller onto its own compositor layer. Without this the
    Android WebView (unlike Chrome) scrolls this nested overflow container on the main
    thread, repainting content every frame (measured: Paint 304ms per fling -> 0 after

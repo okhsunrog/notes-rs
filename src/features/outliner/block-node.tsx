@@ -695,7 +695,7 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
               {collapsed ? (
                 <ChevronRight className="size-3" />
               ) : (
-                <ChevronDown className="size-3 opacity-0 group-hover:opacity-100" />
+                <ChevronDown className="reveal-on-hover size-3" />
               )}
             </button>
             <BlockBullet state={saveState} />
@@ -863,9 +863,7 @@ function BlockStylePicker({
         title={`Block style: ${current.label}`}
         className={cn(
           "mt-0.5 h-7 min-w-0 shrink-0 gap-1 rounded-lg border-transparent bg-transparent px-1.5 shadow-none hover:border-border/70 hover:bg-card/80 focus-visible:border-border focus-visible:ring-2 [&>svg:last-child]:size-3",
-          editing || open
-            ? "opacity-100"
-            : "opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100",
+          editing || open ? "opacity-100" : "reveal-on-hover transition-opacity",
         )}
       >
         {busy ? (
