@@ -43,8 +43,16 @@ impl Store {
     ) -> CommandResult<InkHistoryUpdate> {
         storage::navigate_update(self, redo, expected)
     }
+    /// Benchmark/policy control; byte and chunk limits are validated by the packer.
+    pub fn compact_with_limits(
+        &self,
+        max_chunks: usize,
+        max_decoded_bytes: u64,
+    ) -> CommandResult<bool> {
+        storage::compact_with_limits(self, max_chunks, max_decoded_bytes)
+    }
     pub fn compact(&self) -> CommandResult<bool> {
-        storage::compact_with_limits(self, 512, 16 * 1024 * 1024)
+        self.compact_with_limits(512, 16 * 1024 * 1024)
     }
 }
 

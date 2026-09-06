@@ -89,7 +89,7 @@ pub(super) fn collect(conn: &Connection) -> CommandResult<()> {
     Ok(())
 }
 
-fn result(
+pub(in crate::ink) fn result(
     conn: &Connection,
     document: uuid::Uuid,
 ) -> CommandResult<(InkHistorySnapshot, BTreeMap<Id, Id>)> {

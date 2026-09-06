@@ -26,6 +26,7 @@ tracing.workspace = true
 unicode-normalization.workspace = true
 uuid.workspace = true
 ink-format = { version = "0.1.0", path = "../ink-format" }
+specta-typescript.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

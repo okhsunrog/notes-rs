@@ -17,11 +17,16 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::startup_status,
             commands::mobile_system_info,
             commands::input_capabilities,
-            commands::load_handwriting_draft,
+            commands::create_handwritten_note,
+            commands::load_handwriting_note,
+            commands::handwriting_note_status,
+            commands::preview_handwriting_version,
+            commands::resolve_handwriting_conflict,
+            commands::complete_all_handwriting,
+            commands::set_handwriting_background,
             commands::handwriting_history,
-            commands::save_handwriting_draft,
             commands::save_handwriting_patch,
-            commands::compact_handwriting_draft,
+            commands::complete_handwriting_note,
             commands::set_system_bars_style,
             commands::sync_status,
             commands::server_ai_status,
@@ -161,15 +166,11 @@ pub fn run() {
         if matches!(
             event,
             tauri::WindowEvent::Suspended | tauri::WindowEvent::Resumed
-        ) && let Ok(dir) = window.app_handle().path().app_data_dir()
-        {
+        ) {
             window
                 .app_handle()
                 .state::<commands::HandwritingStore>()
-                .set_background(
-                    dir.join("handwriting/ink-v1.sqlite3"),
-                    matches!(event, tauri::WindowEvent::Suspended),
-                );
+                .set_background(matches!(event, tauri::WindowEvent::Suspended));
         }
         if matches!(event, tauri::WindowEvent::Resumed)
             && let Some(sync) = window.app_handle().try_state::<sync::SyncRuntime>()
@@ -188,7 +189,7 @@ pub fn run() {
             .build(),
     );
 
-    builder
+    let builder = builder
         .setup(move |app| {
             #[cfg(not(mobile))]
             settings::create_main_window(app, &main_window_config)?;
@@ -263,6 +264,13 @@ pub fn run() {
                                 std::collections::HashMap::new(),
                             )),
                         });
+                        let ink = handle.state::<commands::HandwritingStore>().inner().clone();
+                        if let Err(error) = ink.recover(&handle, &conn).await {
+                            tracing::warn!(
+                                ?error,
+                                "Ink recovery deferred; existing notes remain available"
+                            );
+                        }
                         if let Some((server_url, token)) = sync_credentials {
                             sync::spawn_worker(
                                 handle.clone(),
@@ -294,8 +302,34 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(invoke_handler)
-        .run(context)
-        .expect("error while running tauri application");
+        .build(context)
+        .expect("error while building tauri application");
+    let finishing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    builder.run(move |app, event| {
+        if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+            use std::sync::atomic::Ordering;
+            if finished.load(Ordering::Relaxed) {
+                return;
+            }
+            api.prevent_exit();
+            if finishing.swap(true, Ordering::Relaxed) {
+                return;
+            }
+            let app = app.clone();
+            let finished = finished.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Some(ink) = app.try_state::<commands::HandwritingStore>() {
+                    if let Err(error) = ink.complete_all().await {
+                        tracing::warn!(?error, "Ink exit completion retained for recovery");
+                    }
+                }
+                sync::finish_before_exit(&app).await;
+                finished.store(true, Ordering::Relaxed);
+                app.exit(code.unwrap_or(0));
+            });
+        }
+    });
 }
 
 fn report_startup_error(

@@ -2803,6 +2803,7 @@ dependencies = [
  "anyhow",
  "ink-format",
  "libc",
+ "notes-core",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2810,6 +2811,7 @@ dependencies = [
  "specta",
  "specta-typescript",
  "tempfile",
+ "tokio",
  "uuid",
 ]
 
@@ -3557,6 +3559,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "specta",
+ "specta-typescript",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -6208,7 +6211,6 @@ dependencies = [
  "chrono",
  "futures",
  "image",
- "ink-format",
  "jni 0.22.4",
  "notes-blob",
  "notes-core",

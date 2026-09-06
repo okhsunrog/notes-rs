@@ -8,6 +8,7 @@ pub struct InkVersionInfo {
     pub root_hash: String,
     pub device_name: String,
     pub device_id: uuid::Uuid,
+    #[specta(type = specta_typescript::Number)]
     pub modified_at_ms: f64,
     pub available: bool,
 }
@@ -23,6 +24,32 @@ pub struct InkNoteStatus {
 }
 use serde::Serialize;
 impl Store {
+    /// Read the initial history and pin the editor's base in one transaction.
+    pub fn open_editor(&self, editing: bool) -> CommandResult<InkHistorySnapshot> {
+        let mut conn = storage::open(self)?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        storage::ensure_document(&tx, self.document)?;
+        let (history, _) = storage::history::result(&tx, self.document)?;
+        if editing {
+            tx.execute(
+                "UPDATE ink_documents SET editing=1 WHERE page_uuid=?1",
+                [self.document],
+            )?;
+        }
+        tx.commit()?;
+        Ok(history)
+    }
+    pub fn close_editor(&self) -> CommandResult<()> {
+        let mut conn = storage::open(self)?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE ink_documents SET editing=0 WHERE page_uuid=?1",
+            [self.document],
+        )?;
+        versions::adopt_single_head(&tx, self.document)?;
+        tx.commit()?;
+        Ok(())
+    }
     pub fn status(&self) -> CommandResult<InkNoteStatus> {
         let mut conn = storage::open(self)?;
         let tx = conn.transaction()?;
@@ -84,7 +111,7 @@ impl Store {
     pub fn request_publication(&self) -> CommandResult<()> {
         let conn = storage::open(self)?;
         conn.execute(
-            "UPDATE ink_documents SET publication_requested=1 WHERE page_uuid=?1",
+            "UPDATE ink_documents SET publication_requested=1 WHERE page_uuid=?1 AND dirty=1 AND publication_requested=0",
             [self.document],
         )?;
         Ok(())
@@ -104,5 +131,5 @@ impl Store {
 /// On process startup, interrupted sessions become candidates for completion.
 /// No geometry is imported from the former prototype database.
 pub async fn recoverable_notes(conn: &crate::Connection) -> anyhow::Result<Vec<uuid::Uuid>> {
-    conn.call(|db|Ok(db.prepare("SELECT d.page_uuid FROM ink_documents d JOIN pages p ON p.uuid=d.page_uuid WHERE dirty=1 OR publication_requested=1")?.query_map([],|r|r.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?)).await
+    conn.call(|db|Ok(db.prepare("SELECT d.page_uuid FROM ink_documents d JOIN pages p ON p.uuid=d.page_uuid WHERE dirty=1 OR publication_requested=1 OR editing=1")?.query_map([],|r|r.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?)).await
 }

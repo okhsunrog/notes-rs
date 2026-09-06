@@ -1,7 +1,6 @@
 //! Production SQLite adapter, driven by a deterministic recorded-stroke schedule.
 use anyhow::{Result, ensure};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
@@ -9,55 +8,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-// Share the exact application model, validation and adapter; only the command error
-// boundary and runtime scheduler are replaced. No Tauri, WebView or SDK is involved.
-#[derive(Debug)]
-pub struct CommandError(String);
-impl CommandError {
-    fn invalid(s: impl Into<String>) -> Self {
-        Self(s.into())
-    }
-    fn conflict(s: impl Into<String>) -> Self {
-        Self(s.into())
-    }
-}
-impl std::fmt::Display for CommandError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-impl std::error::Error for CommandError {}
-type CommandResult<T> = std::result::Result<T, CommandError>;
-fn err(e: impl std::fmt::Display) -> CommandError {
-    CommandError(e.to_string())
-}
-#[path = "../../../../src-tauri/src/commands/handwriting/model.rs"]
-mod model;
-use model::*;
-#[allow(dead_code, unused_imports)]
-#[path = "../../../../src-tauri/src/commands/handwriting/storage.rs"]
-mod storage;
-#[cfg(test)]
-fn write_draft(path: &Path, draft: InkDraft, revision: Option<String>) -> CommandResult<String> {
-    validate(&draft)?;
-    storage::patch(
-        path,
-        InkDraftPatch {
-            order: draft.strokes.iter().map(|s| s.id).collect(),
-            upserts: draft.strokes,
-            background: draft.background,
-        },
-        revision,
-    )
-}
-#[cfg(test)]
-fn write_patch(
-    path: &Path,
-    patch: InkDraftPatch,
-    revision: Option<String>,
-) -> CommandResult<String> {
-    storage::patch(path, patch, revision)
-}
+// Exercise the same workspace database adapter used by the application.
+use notes_core::ink::*;
+type CommandResult<T> = notes_core::CoreResult<T>;
 fn cpu_ms() -> f64 {
     unsafe {
         let mut t = std::mem::zeroed();
@@ -138,7 +91,7 @@ fn equal(actual: &InkDraft, expected: &InkDraft, count: usize) -> Result<()> {
 fn sizes(path: &Path) -> Result<serde_json::Value> {
     let db = rusqlite::Connection::open(path)?;
     let (root, revision): (Vec<u8>, String) = db.query_row(
-        "SELECT r.data,h.revision FROM ink_head h JOIN ink_records r ON r.id=h.root_id",
+        "SELECT r.data,h.revision FROM ink_documents h JOIN ink_records r ON r.id=h.root_id",
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
@@ -172,7 +125,7 @@ fn main() -> Result<()> {
         "refusing existing database"
     );
     let page: InkDraft = serde_json::from_slice(&fs::read(&a[1])?)?;
-    validate(&page)?;
+    page.validate()?;
     ensure!(!page.strokes.is_empty());
     let interval = match a[3].as_str() {
         "none" | "exit" => None,
@@ -198,8 +151,19 @@ fn main() -> Result<()> {
         .transpose()?
         .unwrap_or(128);
     ensure!((2..=512).contains(&max_chunks) && (16..=128).contains(&decoded_mib));
-    let compact = || storage::compact_with_limits(path, max_chunks, decoded_mib * 1024 * 1024);
-    storage::read(path)?; // schema creation excluded
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let (_connection, target) = runtime.block_on(async {
+        let conn = notes_core::db::open(path).await?;
+        let page = notes_core::db::create_handwritten_note_with_ops(&conn, None)
+            .await?
+            .value;
+        Ok::<_, anyhow::Error>((conn, Store::new(path, page.uuid)))
+    })?;
+    let compact = || target.compact_with_limits(max_chunks, decoded_mib * 1024 * 1024);
+    target.read()?; // Schema creation excluded from the measurements.
+
     let first = page.strokes[0].points[0].time;
     let mut strokes = vec![];
     let mut packs = vec![];
@@ -240,8 +204,7 @@ fn main() -> Result<()> {
         order.push(s.id);
         revision = Some(measure(
             || {
-                storage::patch(
-                    path,
+                target.patch(
                     InkDraftPatch {
                         order: order.clone(),
                         upserts: vec![s.clone()],
@@ -272,7 +235,7 @@ fn main() -> Result<()> {
     let wall = start.elapsed().as_secs_f64() * 1000.;
     let after_io = proc_values("/proc/self/io");
     let rss = proc_values("/proc/self/status").get("VmHWM").copied();
-    let snapshot = storage::read(path)?;
+    let snapshot = target.read()?;
     ensure!(snapshot.revision == revision);
     equal(&snapshot.draft, &page, page.strokes.len())?;
     let size = sizes(path)?;
@@ -283,7 +246,7 @@ fn main() -> Result<()> {
     drop(db);
     let mut history_states = 0;
     loop {
-        let state = storage::navigate_update(path, None, None)?;
+        let state = target.history(None, None)?;
         let InkHistoryUpdate::Snapshot { history } = state else {
             unreachable!()
         };
@@ -296,7 +259,7 @@ fn main() -> Result<()> {
         if !history.can_undo {
             break;
         }
-        storage::navigate_update(path, Some(false), history.snapshot.revision)?;
+        target.history(Some(false), history.snapshot.revision)?;
     }
     ensure!(history_states == 51.min(page.strokes.len() + 1));
     let delta = |to: &BTreeMap<String, u64>, key: &str| {

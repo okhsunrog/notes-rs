@@ -7,11 +7,17 @@ pub(super) const MAX_POINTS: usize = 150_000;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InkPoint {
     // validate() rejects non-finite values before persistence or return to the webview.
+    #[specta(type = specta_typescript::Number)]
     pub x: f64,
+    #[specta(type = specta_typescript::Number)]
     pub y: f64,
+    #[specta(type = specta_typescript::Number)]
     pub pressure: f64,
+    #[specta(type = specta_typescript::Number)]
     pub tilt_x: f64,
+    #[specta(type = specta_typescript::Number)]
     pub tilt_y: f64,
+    #[specta(type = specta_typescript::Number)]
     pub time: f64,
 }
 
@@ -19,6 +25,7 @@ pub struct InkPoint {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InkStroke {
     pub id: uuid::Uuid,
+    #[specta(type = specta_typescript::Number)]
     pub width: f64,
     pub points: Vec<InkPoint>,
 }
@@ -49,6 +56,12 @@ pub struct InkDraftPatch {
     pub order: Vec<uuid::Uuid>,
     pub upserts: Vec<InkStroke>,
     pub background: InkBackground,
+}
+
+impl InkDraft {
+    pub fn validate(&self) -> CommandResult<()> {
+        validate(self)
+    }
 }
 
 impl Default for InkDraft {

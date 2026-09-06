@@ -328,3 +328,60 @@ async fn publication_outbox_and_root_commit_together_and_reject_bad_ancestry() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn remote_arrival_does_not_swap_an_open_editor_before_its_first_gesture() {
+    let dir = tempfile::tempdir().unwrap();
+    let lp = dir.path().join("left.db");
+    let rp = dir.path().join("right.db");
+    let l = db::open(&lp).await.unwrap();
+    let r = db::open(&rp).await.unwrap();
+    let id = note(&l).await;
+    let left = Store::new(&lp, id);
+    let right = Store::new(&rp, id);
+    left.patch(patch(vec![stroke(1)]), None).unwrap();
+    let base = left.publish("Book".into()).unwrap().unwrap();
+    transfer::stage_graph(
+        &r,
+        base.root_hash,
+        transfer::export_graph(&l, base.root_hash).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    notes_core::import_sync_snapshot(&r, notes_core::export_sync_snapshot(&l, 0).await.unwrap())
+        .await
+        .unwrap();
+    let initial = right.open_editor(true).unwrap();
+    left.patch(patch(vec![stroke(2)]), left.read().unwrap().revision)
+        .unwrap();
+    let remote = left.publish("Book".into()).unwrap().unwrap();
+    transfer::stage_graph(
+        &r,
+        remote.root_hash,
+        transfer::export_graph(&l, remote.root_hash).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    notes_core::import_sync_snapshot(&r, notes_core::export_sync_snapshot(&l, 0).await.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(right.read().unwrap().revision, initial.snapshot.revision);
+    assert!(!right.status().unwrap().unpublished_changes);
+    right
+        .patch(patch(vec![stroke(3)]), initial.snapshot.revision)
+        .unwrap();
+    let local = right.publish("Desktop".into()).unwrap().unwrap();
+    assert_eq!(local.parents, vec![base.version_uuid]);
+    assert_eq!(right.versions().unwrap().len(), 2);
+    right
+        .resolve(
+            vec![remote.version_uuid, local.version_uuid],
+            vec![remote.version_uuid],
+            "Desktop".into(),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(right.read().unwrap().draft).unwrap(),
+        serde_json::to_value(left.read().unwrap().draft).unwrap()
+    );
+}

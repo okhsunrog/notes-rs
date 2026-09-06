@@ -1,6 +1,9 @@
 //! Host-independent per-note save serialization and shared compaction lane.
 use super::*;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 const INTERVAL: Duration = Duration::from_secs(60);
 #[derive(Default)]
@@ -12,6 +15,8 @@ struct Pending {
 pub struct Session {
     store: Store,
     input: Arc<Mutex<()>>,
+    modified: Arc<AtomicBool>,
+    editing: Arc<AtomicBool>,
     pending: Arc<Mutex<Pending>>,
     lane: Arc<tokio::sync::Mutex<()>>,
     wake: Arc<tokio::sync::Notify>,
@@ -28,6 +33,8 @@ impl Session {
         Self {
             store,
             input: Arc::default(),
+            modified: Arc::default(),
+            editing: Arc::default(),
             pending: Arc::default(),
             lane,
             wake: Arc::default(),
@@ -53,13 +60,45 @@ impl Session {
         expected: Option<String>,
     ) -> CommandResult<String> {
         let geometry = !patch.upserts.is_empty();
+        let modified = self.modified.clone();
         let revision = self
-            .access(move |store| store.patch(patch, expected))
+            .access(move |store| {
+                let revision = store.patch(patch, expected)?;
+                modified.store(true, Ordering::Relaxed);
+                Ok(revision)
+            })
             .await?;
         if geometry {
             self.schedule();
         }
         Ok(revision)
+    }
+    pub async fn open(&self, editing: bool) -> CommandResult<InkHistorySnapshot> {
+        let active = self.editing.clone();
+        self.access(move |store| {
+            let history = store.open_editor(editing)?;
+            if editing {
+                active.store(true, Ordering::Relaxed);
+            }
+            Ok(history)
+        })
+        .await
+    }
+    pub fn needs_completion(&self) -> bool {
+        self.modified.load(Ordering::Relaxed) || self.editing.load(Ordering::Relaxed)
+    }
+    pub async fn history(
+        &self,
+        redo: bool,
+        expected: Option<String>,
+    ) -> CommandResult<InkHistoryUpdate> {
+        let modified = self.modified.clone();
+        self.access(move |store| {
+            let result = store.history(Some(redo), expected)?;
+            modified.store(true, Ordering::Relaxed);
+            Ok(result)
+        })
+        .await
     }
     fn notify(&self, published: Option<Publish>) {
         if let Some(p) = published {
@@ -69,14 +108,21 @@ impl Session {
     /// The host flushes its JS/native write queue first. Publication intent is
     /// durable before packing; interrupted or failed completion is recoverable.
     pub async fn complete(&self) -> CommandResult<()> {
+        self.modified.store(true, Ordering::Relaxed);
         self.access(Store::request_publication).await?;
         let _lane = self.lane.lock().await;
         self.pending.lock().map_err(err)?.dirty = false;
         let device = self.device_name.clone();
+        let editing = self.editing.clone();
+        let modified = self.modified.clone();
         let result = self
             .access(move |store| {
                 while store.compact()? {}
-                store.publish(device)
+                let published = store.publish(device)?;
+                store.close_editor()?;
+                editing.store(false, Ordering::Relaxed);
+                modified.store(false, Ordering::Relaxed);
+                Ok(published)
             })
             .await;
         match result {
@@ -131,7 +177,13 @@ impl Session {
                             // Serialize this note only; the ordinary minute job never locks input.
                             let _input = target.input.lock().map_err(err)?;
                             while target.store.compact()? {}
-                            Ok((false, target.store.publish(target.device_name.clone())?))
+                            {
+                                let published = target.store.publish(target.device_name.clone())?;
+                                target.store.close_editor()?;
+                                target.editing.store(false, Ordering::Relaxed);
+                                target.modified.store(false, Ordering::Relaxed);
+                                Ok((false, published))
+                            }
                         } else {
                             Ok((target.store.compact()?, None))
                         }

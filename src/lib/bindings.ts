@@ -15,15 +15,16 @@ export const commands = {
 	safeArea: SafeAreaInsets,
 } | null, CommandError>(__TAURI_INVOKE("mobile_system_info")),
 	inputCapabilities: () => typedError<InputCapabilities, CommandError>(__TAURI_INVOKE("input_capabilities")),
-	loadHandwritingDraft: () => typedError<InkDraftSnapshot, CommandError>(__TAURI_INVOKE("load_handwriting_draft")),
-	handwritingHistory: (redo: boolean | null, expectedRevision: string | null) => typedError<InkHistoryUpdate, CommandError>(__TAURI_INVOKE("handwriting_history", { redo, expectedRevision })),
-	saveHandwritingDraft: (draft: InkDraft, expectedRevision: string | null) => typedError<string, CommandError>(__TAURI_INVOKE("save_handwriting_draft", { draft, expectedRevision })),
-	saveHandwritingPatch: (patch: InkDraftPatch, expectedRevision: string | null) => typedError<string, CommandError>(__TAURI_INVOKE("save_handwriting_patch", { patch, expectedRevision })),
-	/**
-	 *  Complete all currently useful packing jobs. The UI flushes its write queue
-	 *  first; future note publication must pin the resulting root atomically with its outbox.
-	 */
-	compactHandwritingDraft: () => typedError<null, CommandError>(__TAURI_INVOKE("compact_handwriting_draft")),
+	createHandwrittenNote: (title: string | null) => typedError<Page, CommandError>(__TAURI_INVOKE("create_handwritten_note", { title })),
+	loadHandwritingNote: (pageUuid: string, editing: boolean) => typedError<InkHistorySnapshot, CommandError>(__TAURI_INVOKE("load_handwriting_note", { pageUuid, editing })),
+	handwritingNoteStatus: (pageUuid: string) => typedError<InkNoteStatus, CommandError>(__TAURI_INVOKE("handwriting_note_status", { pageUuid })),
+	previewHandwritingVersion: (pageUuid: string, versionUuid: string) => typedError<InkDraft, CommandError>(__TAURI_INVOKE("preview_handwriting_version", { pageUuid, versionUuid })),
+	resolveHandwritingConflict: (pageUuid: string, expectedHeads: string[], keep: string[]) => typedError<string[], CommandError>(__TAURI_INVOKE("resolve_handwriting_conflict", { pageUuid, expectedHeads, keep })),
+	completeAllHandwriting: () => typedError<null, CommandError>(__TAURI_INVOKE("complete_all_handwriting")),
+	setHandwritingBackground: (background: boolean) => __TAURI_INVOKE<void>("set_handwriting_background", { background }),
+	handwritingHistory: (pageUuid: string, redo: boolean, expectedRevision: string | null) => typedError<InkHistoryUpdate, CommandError>(__TAURI_INVOKE("handwriting_history", { pageUuid, redo, expectedRevision })),
+	saveHandwritingPatch: (pageUuid: string, patch: InkDraftPatch, expectedRevision: string | null) => typedError<string, CommandError>(__TAURI_INVOKE("save_handwriting_patch", { pageUuid, patch, expectedRevision })),
+	completeHandwritingNote: (pageUuid: string) => typedError<InkNoteStatus, CommandError>(__TAURI_INVOKE("complete_handwriting_note", { pageUuid })),
 	setSystemBarsStyle: (darkBackground: boolean) => typedError<null, CommandError>(__TAURI_INVOKE("set_system_bars_style", { darkBackground })),
 	syncStatus: () => __TAURI_INVOKE<SyncStatus>("sync_status"),
 	serverAiStatus: () => typedError<AiIndexStatus, CommandError>(__TAURI_INVOKE("server_ai_status")),
@@ -468,6 +469,15 @@ export type InkHistorySnapshot = {
 
 export type InkHistoryUpdate = { kind: "snapshot"; history: InkHistorySnapshot } | { kind: "patch"; patch: InkDraftPatch; baseRevision: string | null; revision: string | null; canUndo: boolean; canRedo: boolean };
 
+export type InkNoteStatus = {
+	pageUuid: string,
+	revision: string | null,
+	unpublishedChanges: boolean,
+	publicationRequested: boolean,
+	baseVersion: string | null,
+	heads: InkVersionInfo[],
+};
+
 export type InkPoint = {
 	x: number,
 	y: number,
@@ -481,6 +491,16 @@ export type InkStroke = {
 	id: string,
 	width: number,
 	points: InkPoint[],
+};
+
+export type InkVersionInfo = {
+	versionUuid: string,
+	parents: string[],
+	rootHash: string,
+	deviceName: string,
+	deviceId: string,
+	modifiedAtMs: number,
+	available: boolean,
 };
 
 export type InputCapabilities = {
@@ -600,7 +620,7 @@ export type PageDocumentSnapshot = {
 	blocks: Block[],
 };
 
-export type PageKind = { kind: "note" } | { kind: "journal"; date: JournalDate };
+export type PageKind = { kind: "note" } | { kind: "handwriting" } | { kind: "journal"; date: JournalDate };
 
 /**
  *  The durable structural layout of a page. Reading is pane-local

@@ -136,12 +136,12 @@ pub(crate) fn adopt_single_head(conn: &Connection, page: Uuid) -> CommandResult<
         "INSERT OR IGNORE INTO ink_documents(page_uuid) VALUES(?1)",
         [page],
     )?;
-    let (dirty, base): (bool, Option<Uuid>) = conn.query_row(
-        "SELECT dirty,base_version FROM ink_documents WHERE page_uuid=?1",
+    let (dirty, base, editing): (bool, Option<Uuid>, bool) = conn.query_row(
+        "SELECT dirty,base_version,editing FROM ink_documents WHERE page_uuid=?1",
         [page],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
-    if dirty || base == Some(heads[0]) {
+    if dirty || editing || base == Some(heads[0]) {
         return Ok(());
     }
     let root: Option<Vec<u8>> = conn.query_row(
@@ -174,7 +174,7 @@ impl Store {
         )?;
         if !dirty {
             tx.execute(
-                "UPDATE ink_documents SET publication_requested=0 WHERE page_uuid=?1",
+                "UPDATE ink_documents SET publication_requested=0 WHERE page_uuid=?1 AND publication_requested=1",
                 [self.document],
             )?;
             tx.commit()?;
@@ -248,6 +248,10 @@ impl Store {
                 "Save local edits and reload handwriting conflict before resolving",
             ));
         }
+        tx.execute(
+            "UPDATE ink_documents SET editing=0 WHERE page_uuid=?1",
+            [self.document],
+        )?;
         let unique: std::collections::BTreeSet<_> = keep.iter().collect();
         if keep.is_empty()
             || unique.len() != keep.len()
