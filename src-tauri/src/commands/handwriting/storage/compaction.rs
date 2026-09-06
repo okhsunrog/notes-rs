@@ -15,6 +15,12 @@ struct Plan {
     locations: BTreeMap<Id, model::SegmentRef>,
 }
 fn prepare(path: &Path) -> CommandResult<Option<Plan>> {
+    prepare_with_limit(path, MAX_FRESH_CHUNKS)
+}
+fn prepare_with_limit(path: &Path, max_chunks: usize) -> CommandResult<Option<Plan>> {
+    if !(2..=512).contains(&max_chunks) {
+        return Err(CommandError::invalid("Unsupported compaction batch limit"));
+    }
     let mut conn = open(path)?;
     let tx = conn.transaction().map_err(err)?;
     // No roots need decoding if fewer than two fresh blocks remain. This also
@@ -74,7 +80,7 @@ fn prepare(path: &Path) -> CommandResult<Option<Plan>> {
     let mut selected_bytes = 0;
     let mut selected_count = 0;
     catalog.retain(|_, entry| {
-        if selected_count >= MAX_FRESH_CHUNKS || selected_bytes + entry.length > MAX_FRESH_BYTES {
+        if selected_count >= max_chunks || selected_bytes + entry.length > MAX_FRESH_BYTES {
             return false;
         }
         selected_count += 1;
@@ -430,6 +436,11 @@ mod tests {
             history::navigate(&path, Some(true), state.snapshot.revision).unwrap();
         }
         let before = read(&path).unwrap();
+        // Optional experiment only; the production scheduler retains its default.
+        let max_chunks = std::env::var("INK_PROFILE_CHUNKS")
+            .ok()
+            .map(|v| v.parse::<usize>().unwrap())
+            .unwrap_or(MAX_FRESH_CHUNKS);
         profile::start();
         let mut prepare_ms = 0.;
         let mut repack_ms = 0.;
@@ -437,7 +448,7 @@ mod tests {
         let mut batches = 0;
         loop {
             let t = Instant::now();
-            let plan = prepare(&path).unwrap();
+            let plan = prepare_with_limit(&path, max_chunks).unwrap();
             prepare_ms += t.elapsed().as_secs_f64() * 1000.;
             let Some(plan) = plan else {
                 break;
@@ -459,7 +470,7 @@ mod tests {
         equal(&before.draft, &after.draft);
         println!(
             "INK_PROFILE {}",
-            serde_json::json!({"batches":batches,"strokes":after.draft.strokes.len(),"prepare_ms":prepare_ms,"decode_merge_encode_ms":repack_ms,"publish_ms":publish_ms,"phases":phases,"verified":true})
+            serde_json::json!({"max_chunks":max_chunks,"batches":batches,"strokes":after.draft.strokes.len(),"prepare_ms":prepare_ms,"decode_merge_encode_ms":repack_ms,"publish_ms":publish_ms,"phases":phases,"verified":true})
         );
     }
 

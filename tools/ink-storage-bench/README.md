@@ -89,3 +89,9 @@ separately. Setup/redo and final bitwise/revision checks are excluded. Output ha
 an `INK_PROFILE` JSON line. Repack includes decode, merge and PCO encode; publish
 includes history remapping, persistence, GC, commit and connection teardown.
 This profiling code exists only under cfg(test), not in the installed app.
+
+The detailed profile also reports nested metadata/GC counters. These overlap with
+outer prepare/publish times and must not be summed together. `INK_PROFILE_CHUNKS`
+may be set to 2..512 for a phase-only batch-size experiment; the application and
+normal scheduling benchmark still use 16. Encoded/decoded byte budgets and output
+chunk limits remain in force. This knob does not select a new shipping policy.
