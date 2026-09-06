@@ -9,6 +9,8 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.ViewTreeObserver
 import android.webkit.WebView
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import app.tauri.annotation.InvokeArg
 import app.tauri.plugin.JSObject
 import com.onyx.android.sdk.api.device.epd.EpdController
@@ -62,6 +64,7 @@ internal class OnyxInk(
     private val activity: Activity,
     private val webView: WebView,
     private val displayMode: ViewDisplayMode,
+    private val pauses: InkPauseRegistry,
     private val emit: (JSObject) -> Unit,
 ) : ViewTreeObserver.OnWindowFocusChangeListener {
     private var helper: TouchHelper? = null
@@ -84,7 +87,17 @@ internal class OnyxInk(
     private var previewAt = 0L
     private var maxPressure = 4095f
     private var failed: String? = null
+    private var imeVisible = false
+    private var imeSource: String? = null
     private val refresh = Runnable { refreshFrame() }
+    private val gate = RawDrawingGate(object : RawDrawingSwitches {
+        override fun render(enabled: Boolean) { helper?.setRawDrawingRenderEnabled(enabled) }
+        override fun input(enabled: Boolean) { helper?.setRawInputReaderEnable(enabled) }
+        override fun pushRects() { helper?.setLimitRect(limit, emptyList()) }
+        override fun resetDefaults() { helper?.resetPenDefaultRawDrawing() }
+    })
+    // Resuming into the tail of an IME teardown leaves ghost ink; stock Notes waits too.
+    private val resumeGate = Runnable { resume() }
     private val eraserRenderGate = InkEraserRenderGate(
         pause = { helper?.setRawDrawingRenderEnabled(false) },
         resume = { restoreToolRendering() },
@@ -132,6 +145,10 @@ internal class OnyxInk(
 
     companion object {
         fun supported(): Boolean = Build.MANUFACTURER.equals("ONYX", true)
+
+        /** Stock Notes' `DELAY_ENABLE_RAW_DRAWING_MILLS` for a monochrome panel. */
+        const val RESUME_DELAY_MS = 150L
+        const val IME_REASON = "ime"
     }
 
     init {
@@ -142,7 +159,48 @@ internal class OnyxInk(
         // nothing else ever clears it. Start from a known state.
         runCatching { Device.currentDevice().clearTransientUpdate(false) }
             .onFailure { Log.d("OnyxInk", "no transient mode to clear: ${it.message}") }
+        // Nothing arms the capacitive-panel cutout any more (see resetPalm), but a build that
+        // still did may have died holding one. This is the only place it is touched.
+        runCatching { resetPalm() }
+            .onFailure { Log.d("OnyxInk", "no palm region to clear: ${it.message}") }
         webView.viewTreeObserver.addOnWindowFocusChangeListener(this)
+        watchIme()
+    }
+
+    /**
+     * The soft keyboard never takes our window focus — it is `FLAG_NOT_FOCUSABLE` — so
+     * `hasWindowFocus()` cannot see it, while the firmware happily paints ink over it: the limit
+     * rect is a screen region with no notion of window z-order. Insets are the one signal that
+     * arrives, and this window is edge-to-edge, so they do.
+     */
+    private fun watchIme() {
+        ViewCompat.setOnApplyWindowInsetsListener(webView) { _, insets ->
+            imeChanged(insets.getInsets(WindowInsetsCompat.Type.ime()).bottom > 0)
+            insets
+        }
+        ViewCompat.getRootWindowInsets(webView)?.let {
+            imeChanged(it.getInsets(WindowInsetsCompat.Type.ime()).bottom > 0)
+        }
+        ViewCompat.requestApplyInsets(webView)
+    }
+
+    private fun imeChanged(visible: Boolean) {
+        if (visible == imeVisible) return
+        imeVisible = visible
+        if (visible) imeSource = "insets"
+        if (visible) pauses.pause(IME_REASON) else pauses.resume(IME_REASON)
+        pauseStateChanged()
+    }
+
+    /**
+     * A reason was added or dropped. Pausing is immediate — the keyboard is already coming up —
+     * and resuming waits for the panel to settle, cancelled if something pauses again meanwhile.
+     */
+    fun pauseStateChanged() {
+        webView.removeCallbacks(resumeGate)
+        // Keep the editor's display mode: the sheet is still on screen, only the pen is down.
+        if (pauses.isPaused) pause(releaseDisplay = false)
+        else webView.postDelayed(resumeGate, RESUME_DELAY_MS)
     }
 
     fun configure(args: OnyxInkArgs): JSObject {
@@ -232,6 +290,9 @@ internal class OnyxInk(
         put("fastModeAccepted", fastModeAccepted)
         put("fastModeRequests", fastModeRequests)
         put("qualityRestores", qualityRestores)
+        put("paused", JSONArray(pauses.reasons()))
+        put("imeVisible", imeVisible)
+        put("imeSource", imeSource)
     }
 
     fun commit(args: OnyxFrameArgs) {
@@ -292,7 +353,7 @@ internal class OnyxInk(
 
     private fun canPresent(): Boolean =
         helper != null && frames.canSubmit(sequence, gesture.drawing) &&
-            resumed && webView.hasWindowFocus() && !limit.isEmpty
+            resumed && webView.hasWindowFocus() && !pauses.isPaused && !limit.isEmpty
 
     private fun cancelFrameSubmission() {
         repaintMode.release()
@@ -311,14 +372,14 @@ internal class OnyxInk(
     }
 
     private fun resume() {
-        if (!resumed || !webView.hasWindowFocus() || config == null || limit.isEmpty) return
+        if (!resumed || !webView.hasWindowFocus() || pauses.isPaused || config == null || limit.isEmpty) return
+        webView.removeCallbacks(resumeGate)
         val acquiredQuality = !displayMode.isSet(DisplayModeStack.Layer.SESSION)
         if (acquiredQuality) {
             displayMode.set(DisplayModeStack.Layer.SESSION, UpdateMode.GU)
             Log.d("OnyxInk", "view quality mode: ${displayMode.readMode()}, previous: ${displayMode.previousMode}")
         }
-        helper?.setRawDrawingEnabled(true)
-        restoreToolRendering()
+        gate.resume(toolRendering())
         if (acquiredQuality) config?.let { args -> commit(OnyxFrameArgs().apply {
             session = args.session
             sequence = this@OnyxInk.sequence
@@ -328,17 +389,20 @@ internal class OnyxInk(
     private fun pause(releaseDisplay: Boolean = true) {
         if (releaseDisplay || gesture.drawing) releaseDisplayMode()
         webView.removeCallbacks(refresh)
+        webView.removeCallbacks(resumeGate)
         frames.request() // Invalidate visual/frame callbacks from the old geometry or lifecycle.
         cancelFrameSubmission()
-        helper?.setRawDrawingEnabled(false)
+        gate.pause()
         eraserRenderGate.reset()
-        resetPalm()
         if (gesture.ended()) send("cancel")
     }
 
+    /** Whether the active tool wants firmware ink rather than only its raw points. */
+    private fun toolRendering(): Boolean = config?.eraser == false &&
+        (config?.interaction == false || (config?.fastLasso == true && config?.hasSelection == false))
+
     private fun restoreToolRendering() {
-        helper?.setRawDrawingRenderEnabled(config?.eraser == false &&
-            (config?.interaction == false || (config?.fastLasso == true && config?.hasSelection == false)))
+        helper?.setRawDrawingRenderEnabled(!pauses.isPaused && toolRendering())
     }
 
     private fun releaseDisplayMode() {
@@ -364,6 +428,14 @@ internal class OnyxInk(
         addDamage(x - margin, y - margin, x + margin, y + margin)
     }
 
+    /**
+     * Clears a capacitive-panel cutout left behind by an older build. The app never arms one: it
+     * kills every touch in that screen band, which is what made the soft keyboard unusable over
+     * the sheet, and no reference implementation needs it — palm rejection comes from the limit
+     * rect. See `/home/okhsunrog/tmp_zfs/reversed_onyx_notes_app/REPORT.md` (the stock app ships
+     * `setAppCTPDisableRegion` with no callers) and
+     * `/home/okhsunrog/tmp_zfs/reference_notes_apps/REPORT.md` (none of the five apps uses it).
+     */
     private fun resetPalm() {
         EpdController.appResetCTPDisableRegion(activity)
     }
@@ -379,7 +451,11 @@ internal class OnyxInk(
 
     fun destroy() {
         close()
+        webView.removeCallbacks(resumeGate)
         webView.viewTreeObserver.removeOnWindowFocusChangeListener(this)
+        ViewCompat.setOnApplyWindowInsetsListener(webView, null)
+        // The registry outlives this session; a keyboard held down here must not pause the next.
+        pauses.resume(IME_REASON)
     }
 
     private fun send(kind: String, points: JSONArray? = null, erasing: Boolean = false) {
@@ -417,17 +493,12 @@ internal class OnyxInk(
         markNativePoint(point)
         webView.removeCallbacks(refresh)
         cancelFrameSubmission()
-        val position = IntArray(2)
-        webView.getLocationOnScreen(position)
-        val palm = Rect(limit).apply { offset(position[0], position[1]) }
-        EpdController.setAppCTPDisableRegion(activity, arrayOf(palm))
         previewAt = 0L
         send("begin", JSONArray().put(normalize(point)), erasing)
     }
 
     private fun end() {
         if (!gesture.ended()) return
-        resetPalm()
         displayPolicy.end(SystemClock.uptimeMillis())
         if (displayPolicy.fastRequested) {
             webView.removeCallbacks(settleDisplay)

@@ -30,6 +30,12 @@ class DisplayProfileArgs {
     var eink: Boolean = false
 }
 
+@InvokeArg
+class InkSuppressArgs {
+    var reason: String = ""
+    var active: Boolean = false
+}
+
 /** No enum value means "the profile claims no base mode"; UpdateMode.None is a real mode. */
 private const val NO_BASE_MODE = "none"
 
@@ -49,6 +55,12 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
      */
     private var displayMode: ViewDisplayMode? = null
     private var displayModeWebView: java.lang.ref.WeakReference<WebView>? = null
+    /**
+     * Why the firmware pen is held down. Owned here rather than by the session: the page pauses
+     * for a dialog or a focused field before the editor is mounted and after it is gone, and one
+     * registry is what keeps `setRawDrawingEnabled` out of every call site.
+     */
+    private val inkPauses = InkPauseRegistry()
 
     override fun load(webView: WebView) {
         inkWebView = webView
@@ -96,12 +108,35 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
                 }
                 if (onyxInk == null && args.enabled) {
                     val webView = checkNotNull(current)
-                    onyxInk = OnyxInk(activity, webView, displayMode(webView)) { trigger("onyxInk", it) }
+                    onyxInk = OnyxInk(activity, webView, displayMode(webView), inkPauses) {
+                        trigger("onyxInk", it)
+                    }
                     onyxInkWebView = java.lang.ref.WeakReference(webView)
                 }
                 invoke.resolve(onyxInk?.configure(args) ?: JSObject().put("available", true).put("active", false))
             } catch (error: Throwable) {
                 invoke.reject("Could not start BOOX ink: ${error.message}")
+            }
+        }
+    }
+
+    /**
+     * The page reports what is covering or competing with the sheet: a focused text field, an open
+     * dialog, the soft keyboard the WebView itself put up. Each is a named reason; the pen comes
+     * back only once every one of them is gone.
+     */
+    @Command
+    fun suppressOnyxInk(invoke: Invoke) {
+        val args = invoke.parseArgs(InkSuppressArgs::class.java)
+        activity.runOnUiThread {
+            try {
+                require(args.reason.length in 1..128) { "a pause reason is required" }
+                val changed =
+                    if (args.active) inkPauses.pause(args.reason) else inkPauses.resume(args.reason)
+                if (changed) onyxInk?.pauseStateChanged()
+                invoke.resolve(JSObject().put("paused", org.json.JSONArray(inkPauses.reasons())))
+            } catch (error: Throwable) {
+                invoke.reject("Could not suspend BOOX ink: ${error.message}")
             }
         }
     }

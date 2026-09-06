@@ -4,6 +4,7 @@ permissions = [
   "allow-input-events",
   "allow-configure-onyx-ink",
   "allow-commit-onyx-frame",
+  "allow-suppress-onyx-ink",
   "allow-get-safe-area-insets",
   "allow-get-device-name",
   "allow-set-system-bars-style",

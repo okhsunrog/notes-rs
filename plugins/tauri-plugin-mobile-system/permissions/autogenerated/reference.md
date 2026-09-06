@@ -7,6 +7,7 @@ Default permissions for non-sensitive mobile system integration
 - `allow-input-events`
 - `allow-configure-onyx-ink`
 - `allow-commit-onyx-frame`
+- `allow-suppress-onyx-ink`
 - `allow-get-safe-area-insets`
 - `allow-get-device-name`
 - `allow-set-system-bars-style`
@@ -173,6 +174,32 @@ Enables the set_system_bars_style command without any pre-configured scope.
 <td>
 
 Denies the set_system_bars_style command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mobile-system:allow-suppress-onyx-ink`
+
+</td>
+<td>
+
+Enables the suppress_onyx_ink command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mobile-system:deny-suppress-onyx-ink`
+
+</td>
+<td>
+
+Denies the suppress_onyx_ink command without any pre-configured scope.
 
 </td>
 </tr>
