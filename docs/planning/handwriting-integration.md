@@ -52,38 +52,24 @@ There is no planned move from SQLite to individual note files. Keep the format
 library independent of persistence so an alternative adapter remains possible,
 without implementing a second working store or custom file journal now.
 
-## Current implementation boundary
+## Current implementation boundary (2026-09-06)
 
-The scratch sheet still has its own database and is not a synced note. It now has
-the minute worker and an explicit awaited `compact_handwriting_draft` command.
-The frontend flushes queued writes before requesting completion on Back, visibility
-loss or pagehide. Android suspend also requests native completion; geometry writes
-acknowledged while suspended request immediate completion. This is not yet a durable
-publication/outbox barrier, because the synced ink version model is not implemented.
-That barrier must be enforced by the future backend publication transaction, not
-merely by a frontend sequence of calls. Do not describe compaction as sync.
+The backend now uses note-scoped records, history and publication state in the
+common notes.db. The standalone scratch adapter and commands have been removed.
+Causal InkPublish operations, missing-blob HTTP batches, server validation and
+manual conflict-resolution APIs are implemented. Completion durably requests
+publication, finishes packing, and atomically pins a version in the sync outbox.
+Open editor bases are protected from replacement by incoming remote versions.
+Workspace archives include binary ink, unpublished working copies and conflict
+variants; restore publishes compacted versions transactionally.
 
-## Integration constraints found in the current repository
-
-- `notes-core` owns notes.db migrations and an asynchronous SQLite worker. The
-  scratch adapter must not set its own application_id or user_version on that DB.
-- The main connection uses synchronous=NORMAL; the scratch sheet uses FULL. A
-  migration must explicitly preserve the chosen durability semantics, rather than
-  silently inheriting a weaker setting for ink writes.
-- Scratch `ink_head`, `ink_cursor`, and `ink_history` are singleton tables. They
-  must become document-scoped before supporting more than one handwritten note.
-  Record/chunk GC must pin roots across all documents and retained local histories.
-- Current synchronization operations cover pages, text blocks and attachments.
-  A new ink version needs an explicit domain representation; do not hide a binary
-  root ID in markdown or send every stroke as a text operation.
-- Existing blob upload streams files. SQLite-resident ink blobs need an adapter
-  for that transport (or a bounded export cache), not a second authoritative copy.
-- Atomically publish a saved root and its sync outbox entry. Gesture-local drafts
-  must remain recoverable without being advertised as the last published version.
-- Physical compaction is not an edit: it must not change the user-visible revision
-  or force re-upload of previously acknowledged unchanged geometry.
-- Handle simultaneous remote/local edits explicitly; never overwrite a dirty local
-  draft merely because a newer remote root was received.
+Frontend routing, API wrappers and the integrated editor are deliberately deferred
+to the UI implementation. The installed BOOX build is still the preceding scratch
+prototype; its file has not been migrated or deleted. See
+[the backend handoff](handwriting-backend-handoff.md) for exact commands, lifecycle
+requirements, verified boundaries and remaining limitations. In particular,
+full snapshots currently fetch historical published graphs as well as current heads,
+and historical published-body retention has no pruning policy yet.
 
 ## Validation required before installation of integrated storage
 

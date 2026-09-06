@@ -1,5 +1,10 @@
 # Handwriting input prototype
 
+> Historical acquisition/rendering prototype log. The standalone storage and command
+> descriptions below have been superseded by the note-scoped backend in
+> [handwriting-backend-handoff.md](handwriting-backend-handoff.md). The rendering
+> findings remain relevant; the integrated UI has not yet been implemented.
+
 The first experiment is one device-local sheet opened with **New note → Write by hand**.
 It tests input and visible ink latency before introducing synced handwriting content.
 The existing Markdown note model and server API are unchanged.

@@ -528,20 +528,25 @@ mappings сохраняются. Альтернатива — версионир
 Compaction имеет отдельную физическую revision: ожидаемая semantic Page Ref не
 становится устаревшей только из-за переупаковки; transaction подбирает актуальный
 catalog. Настоящая конкурирующая правка страницы даёт conflict. Синхронизация не
-решается last-writer-wins заменой root: отдельный будущий adapter к notes-core ops
-обязан определить merge и guarded undo; wire v1 не объявляет этот adapter готовым.
+решается last-writer-wins заменой root: прикладной adapter в notes-core хранит
+causal версии и предлагает ручной выбор конфликтующих веток. Wire v1 сам по себе
+не определяет прикладной sync-протокол; актуальный контракт — в
+`handwriting-backend-handoff.md`.
 
 ### 6.2. Storage в Tangleaf
 
-Первая реализация: отдельная device-local `handwriting/ink-v1.sqlite3`.
-И canonical CBOR metadata, и INKCHNK с PCO-8 хранятся как SQLite BLOB.
-`ink_records` и `ink_chunks` содержат immutable payload по ID; `ink_head`
-содержит текущий Document root и уникальную revision пользовательского перехода. Core-крейт не зависит от SQLite.
-Отдельных файлов chunks и интеграции с notes-blob на этом этапе нет.
-Экспорт полного документа в будущем сериализует согласованный snapshot;
-сам INKCHNK не является самодостаточной заметкой.
+Текущая реализация использует общую `notes.db` и обычные UUID заметок.
+Отдельный prototype adapter `handwriting/ink-v1.sqlite3` удалён без переноса
+тестовых черновиков. Canonical CBOR metadata и INKCHNK с PCO-8 — SQLite BLOB.
+`ink_records` и `ink_chunks` содержат immutable payload по ID и SHA-256;
+`ink_documents` содержит текущий Document root и revision каждой заметки.
+Крейт `ink-format` не зависит от SQLite; прикладной adapter находится в notes-core.
+Клиент не создаёт отдельные постоянные файлы chunks, сервер принимает бинарные
+пакеты в существующее blob-хранилище. Workspace archive `.notes` включает эти
+блоки; отдельный переносимый контейнер одной заметки отложен.
+Сам INKCHNK не является самодостаточной заметкой.
 
-Последовательность публикации:
+Последовательность локальной записи жеста (не публикации в sync):
 
 1. Сериализованный blocking worker получает patch и expected root revision;
    pen callback не занимается сжатием или SQLite.
@@ -555,9 +560,9 @@ catalog. Настоящая конкурирующая правка страни
 notes-core не изменяются. Результат зависит от исправной реализации fsync/VFS/device;
 обычный kill процесса не эквивалентен power-cut test.
 
-Adapter сохраняет одну экспериментальную страницу и до 50 отменяемых действий.
-`ink_history(seq, root_id)` удерживает до 51 snapshot; `ink_cursor` задаёт выбранное
-состояние. Каждый завершённый жест получает отдельный durable snapshot; очередь
+Adapter сохраняет по одной странице на заметку и до 50 отменяемых действий
+для каждой заметки. `ink_history(page_uuid, seq, root_id)` удерживает до 51 snapshot;
+`ink_documents.cursor` задаёт выбранное состояние. Каждый завершённый жест получает отдельный durable snapshot; очередь
 фронтенда сохраняет отдельные жесты внутри удерживаемого окна истории. При длительном
 сбое IO очередь ограничена текущей попыткой и последним 51 состоянием: более старые
 промежуточные состояния могут истечь, итоговый рисунок сохраняется полностью. Undo/Redo сначала дожидается очереди, затем
