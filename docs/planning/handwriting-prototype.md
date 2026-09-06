@@ -1,9 +1,10 @@
 # Handwriting input prototype
 
-> Historical acquisition/rendering prototype log. The standalone storage and command
-> descriptions below have been superseded by the note-scoped backend in
-> [handwriting-backend-handoff.md](handwriting-backend-handoff.md). The rendering
-> findings remain relevant; the integrated UI has not yet been implemented.
+> Historical acquisition/rendering prototype log. The standalone storage, command and
+> scratch-dialog descriptions below have been superseded by the note-scoped backend in
+> [handwriting-backend-handoff.md](handwriting-backend-handoff.md) and by the pane-hosted
+> editor described in [handwriting-integration.md](handwriting-integration.md) (2026-09-06).
+> The rendering, latency and BOOX display findings remain relevant.
 
 The first experiment is one device-local sheet opened with **New note → Write by hand**.
 It tests input and visible ink latency before introducing synced handwriting content.

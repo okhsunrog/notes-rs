@@ -13,6 +13,7 @@ Tangleaf is a local-first personal knowledge app for desktop and Android. Typed 
 - Server-owned semantic retrieval, reranking, entity extraction, and streaming chat. Extracted entities remain disposable server-side AI data rather than client graph nodes; the clients contain no provider keys, vector database, embedding model, or AI background workers.
 - Remote AI administration in Settings: provider URLs and models, write-only API keys, capability probes, automatic-indexing and extraction switches, queue progress, failures, and reindex controls.
 - A full-workspace graph view, six color palettes with light/dark/system brightness, responsive mobile navigation, Android edge-to-edge safe areas, and configurable native or client window decorations on desktop.
+- Handwritten notes as ordinary pages: pen input with pressure and tilt, erasing, lasso editing, persistent undo/redo, binary ink storage in the shared database, versioned sync with explicit conflict comparison, and a native fast-ink path on BOOX e-ink tablets.
 - Debug-only, localhost-bound Tauri MCP integration for live screenshots, accessibility snapshots, input, logs, and IPC inspection.
 
 Select **New note** or press `Ctrl/Cmd+N` to start writing. Enter a title, then press `Enter` to focus the first block. `Ctrl/Cmd+K` opens search. The graph has its own full-workspace surface; the side companion is reserved for AI.
@@ -107,7 +108,7 @@ vp exec tauri-mcp webview-dom-snapshot --type accessibility
 vp exec tauri-mcp webview-screenshot --file screenshot.png
 ```
 
-Desktop dev must run via `vp run desktop:dev` (`tauri dev --config src-tauri/tauri.dev.conf.json`), which turns on `withGlobalTauri` so the bridge's JS bridge can reach `window.__TAURI__`; the default `tauri.conf.json` leaves it off for shipped builds. On Android, pass the same `--config` flag to `tauri android dev` and forward the port first: `adb forward tcp:9223 tcp:9223`.
+Desktop dev must run via `vp run desktop:dev` (`tauri dev --config src-tauri/tauri.dev.conf.json`), which turns on `withGlobalTauri` so the bridge can reach `window.__TAURI__` and relaxes `script-src` so it can execute scripts; the default `tauri.conf.json` keeps both strict for shipped builds. On Android, build the debug APK with `just build-android-debug` (or pass the same `--config` flag to `tauri android dev`) and forward the port first: `adb forward tcp:9223 tcp:9223`.
 
 The MCP bridge and relaxed development CSP are absent from release builds.
 
