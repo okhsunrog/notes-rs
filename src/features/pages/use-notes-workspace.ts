@@ -27,6 +27,7 @@ import {
 } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
 import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify";
+import { scrollBehavior } from "@/lib/motion";
 import { useConfirmation } from "@/app/confirmation";
 import {
   PaneContentKind,
@@ -382,7 +383,7 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
           const fragment = decodeFragment(target.fragment);
           const element = fragment ? document.getElementById(fragment) : null;
           if (element) {
-            element.scrollIntoView({ behavior: "smooth", block: "start" });
+            element.scrollIntoView({ behavior: scrollBehavior(), block: "start" });
           } else {
             notifyError(
               "open",

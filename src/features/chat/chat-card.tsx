@@ -5,6 +5,7 @@ import { pageDisplayTitle } from "@/features/journal/journal-date";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import type { MarkdownOpenHandler } from "@/features/markdown";
 import type { Page } from "@/lib/api";
+import { scrollBehavior } from "@/lib/motion";
 import type { AssistantController } from "./use-assistant-controller";
 const MarkdownResponse = lazy(() => import("@/features/chat/markdown-response"));
 
@@ -32,7 +33,10 @@ export function ChatCard({
   }, [chatInput]);
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ block: "end", behavior: chatBusy ? "smooth" : "auto" });
+    endRef.current?.scrollIntoView({
+      block: "end",
+      behavior: chatBusy ? scrollBehavior() : "auto",
+    });
   }, [chatLog, chatBusy]);
 
   function sendChat(e: React.FormEvent) {
