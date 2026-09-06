@@ -61,6 +61,7 @@ deliberately left out of it.
 - **Blob ownership is never released and there is no blob GC** (`server/src/blob_ownership.rs`): a user's quota only ever grows, and blobs no operation references any more stay on disk forever. _Trigger: the first quota warning, or a second user._
 - **No rate limiting on the hashing endpoints** (`PUT /v1/blobs/{hash}`, `POST /v1/ink/upload`): an authenticated caller can spend server CPU on SHA-256 without bound. _Trigger: a second user, or exposing the server publicly._
 - **OAuth client registration is unbounded** (`server/src/oauth`): anyone reaching the endpoint can register clients without limit. _Trigger: same as above._
+- **The floating Onyx keyboard is not handled** (`plugins/.../OnyxInk.kt`): the pause registry sees the ordinary IME through window insets, but a floating keyboard does not resize anything and reports no inset. The stock app subscribes to `onyx.action.kime.status.changed` and feeds its `floatingWindowRectList` to `setExcludeRect` instead of pausing. _Trigger: the first use of the floating keyboard over a sheet._
 - **`pastey` appears twice in `Cargo.lock`** (two semver-incompatible versions pulled in transitively). Cosmetic: build time and binary size only. _Trigger: next dependency sweep._
 
 ## Recently resolved elsewhere (for context, keep list short)

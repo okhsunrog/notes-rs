@@ -74,6 +74,24 @@ changes, and concurrent published branches are compared and resolved manually.
 Deferred, unchanged from the backend handoff: multi-page notes, infinite canvas and
 OCR/recognition, including search over handwriting.
 
+Pen, touch and the keyboard are separated by a pause registry rather than by
+window focus. The firmware paints the pen into a screen region above every
+window and the IME never takes our window focus, so nothing native can see it:
+the plugin keeps a set of named reasons — the keyboard (read from the WebView's
+window insets), a focused DOM field, an open dialog, popover, select or menu —
+and re-arms the pen only once the set is empty, re-pushing the limit rect and
+enabling input before render after 150 ms. `EpdController.setAppCTPDisableRegion`
+is gone from the gesture path: it killed every touch in that band, which is what
+made the soft keyboard unusable over a sheet, and palm rejection comes from the
+limit rect instead. Nothing editable lives on the drawing screen any more: a new
+note is named `Handwriting <yyyy-MM-dd HH:mm>` at creation and renaming happens
+in a dialog, which pauses the pen while it is open. The editor chrome is one
+toolbar row; per-tool options are in a popover anchored to the active tool.
+Evidence for the input model: `/home/okhsunrog/tmp_zfs/reversed_onyx_notes_app/REPORT.md`
+(the stock BOOX Notes app, decompiled) and
+`/home/okhsunrog/tmp_zfs/reference_notes_apps/REPORT.md` (Notate, Notable,
+PngNote, Saber, Mokke).
+
 The installed BOOX build is still the preceding scratch prototype; its file has not
 been migrated or deleted, and nothing in the application refers to it any more. See
 [the backend handoff](handwriting-backend-handoff.md) for exact commands, lifecycle
