@@ -308,6 +308,51 @@ Append to `docs/planning/backlog.md` under a new "2026-09-07 review, deferred" s
 
 **Accept:** backlog updated; nothing else changed.
 
+## Track F — Pen, touch and keyboard separation; naming off the canvas (2026-09-07)
+
+Background: on the tablet the soft keyboard over the handwriting sheet gets no taps and the pen draws over it. Two research reports explain why and what the stock Onyx Notes app and five open-source apps do instead: `/home/okhsunrog/tmp_zfs/reversed_onyx_notes_app/REPORT.md` (stock Notes, decompiled) and `/home/okhsunrog/tmp_zfs/reference_notes_apps/REPORT.md` (Notate, Notable, PngNote, Saber, Mokke). Read both before F1. Key facts they establish: the limit rect is a firmware _screen_ region, so raw ink paints over any window in it; the IME never takes our window focus, so `hasWindowFocus()` cannot pause the pen; `enableFingerTouch` is a no-op on the SF render path; `EpdController.setAppCTPDisableRegion` is unused by every reference app and is what physically kills touches in the keyboard band; the stock app pauses render+input through one predicate over UI-state flags and resumes input before render after a short delay, re-pushing limit/exclude rects first.
+
+Order F1 → F5, one commit per task; Kotlin gates via `./gradlew :tauri-plugin-mobile-system:testDebugUnitTest --configure-on-demand` from `src-tauri/gen/android`, TS via `vp check`/`vp test`, Rust via the cargo gates when the plugin's Rust side changes. Build the debug APK once after F4.
+
+### F1. Pause registry and IME detection (Kotlin)
+
+1. New `InkPauseRegistry` (pure, unit-tested): a set of reason strings; `pause(reason)`, `resume(reason)`, `isPaused`. OnyxInk consults it in `resume()`/`canPresent()` alongside `resumed && hasWindowFocus()`. While paused: `setRawDrawingRenderEnabled(false)` then `setRawInputReaderEnable(false)` (keep the two switches separate; do not use `setRawDrawingEnabled` for pausing). On resume (registry empty and window focused): re-push `setLimitRect`/`setExcludeRect`, then enable **input before render**, after a 150 ms delay (post to the view; cancel if paused again meanwhile).
+2. IME: register `ViewCompat.setOnApplyWindowInsetsListener(webView)` and read `WindowInsetsCompat.Type.ime()`; `ime.bottom > 0` → `pause("ime")`, else `resume("ime")`. The app is edge-to-edge (`setDecorFitsSystemWindows(false)`), so insets arrive; if a firmware never reports IME insets, also port the stock app's `KeyboardHookPopup` (0-width untouchable `PopupWindow` with `ADJUST_RESIZE`, `OnGlobalLayoutListener`, visible-frame delta > screenHeight/4) as a fallback and document which path fired in the status.
+3. Remove `EpdController.setAppCTPDisableRegion` / `appResetCTPDisableRegion` from the gesture path entirely (palm rejection comes from the limit rect; both reports confirm no reference app uses it). Keep `resetPalm()` as a one-time cleanup in init only.
+4. Plugin command `suppressOnyxInk { reason: string, active: boolean }` → registry; status() reports `paused: [reasons]`, `imeVisible`.
+5. Unit tests: registry semantics; the resume ordering (input before render) via an injected fake helper interface if OnyxInk cannot be instantiated in a unit test — extract a small `RawDrawingGate` around the helper calls so ordering is testable.
+
+**Accept:** Gradle tests green; status reports pause reasons; no CTP calls remain (grep).
+
+### F2. JS signals: text focus and modal overlays (TS)
+
+1. `src/features/handwriting/onyx-ink.ts` (or a small sibling module): on `focusin` of `input`, `textarea`, `[contenteditable="true"]` anywhere in the document → `suppressOnyxInk("text-focus", true)`; on `focusout` (when focus does not land on another editable) → `false`. Call it **before** the element requests focus where we control it (rename dialog, search).
+2. Base UI wrappers (`components/ui/dialog.tsx`, `popover.tsx`, `select.tsx`, `new-note-button.tsx` menu): on open → `suppressOnyxInk("overlay", true)`; on close → after ~300 ms `false`. Reuse the hook point Track D added for `refreshPanelAfterClose`. Handwriting conflict dialog and Settings therefore pause the pen automatically.
+3. Tests: focus in/out sequences (jsdom) call the command with the right reasons; overlay open/close.
+
+**Accept:** `vp test` green; on device (reviewer) the keyboard over the sheet takes taps and the pen no longer paints over it.
+
+### F3. Naming off the canvas (TS + Rust if needed)
+
+1. A new handwritten note gets an automatic title at creation: `Handwriting <yyyy-MM-dd HH:mm>` (local time) — done in the frontend at `createHandwrittenNote` time via `renamePage` if the backend cannot take a title; if `create_handwritten_note` accepts a title already, pass it there.
+2. Remove the inline title textarea from `HandwritingNoteView`. The header shows the title as static text; tapping it (or a "Rename" item) opens a `RenamePageDialog` (new, `src/features/pages/rename-page-dialog.tsx`, Base UI Dialog with one input, autofocus, Enter saves, uses the existing `renamePage` + revision conflict handling from `use-page-title-editor.ts`). Because dialogs pause the pen (F2) and the dialog sits above the sheet, the keyboard never meets an armed canvas.
+3. Offer the same rename dialog for handwritten notes from the page lists' context (where text notes expose rename/delete; if lists have no rename today, add it only for handwritten pages in `all-notes-view.tsx` via a small "…" menu; do not redesign the lists).
+4. Tests: rename dialog saves and closes; creation sets the default title; the note view no longer renders a textarea.
+
+**Accept:** no editable field lives on the drawing screen; `vp test` green.
+
+### F4. Maximize the sheet (TS + CSS)
+
+1. Collapse the two toolbars into one row: Back, title (static, tappable), Pen / Eraser / Lasso, paper toggle, Undo / Redo, and a "…" for delete/favorite. Tool options (pen width, eraser mode/size, lasso mode and selection actions) move into a popover anchored to the active tool button, opened by tapping the active tool again; the popover registers as an overlay (F2) so its taps work, and closes on selection. Keep the black/white inversion for the active tool.
+2. Sheet area gets everything below the single row; on the tablet's 661×882 viewport the sheet must be at least 80% of the height. Verify with a unit test on the layout constants or a jsdom measurement is not meaningful — instead assert the DOM: exactly one `[role="toolbar"]` in the editor, and `screenshot` acceptance by the reviewer.
+3. Keep `[data-ink-editor]` rules working (toolbar contrast on e-ink).
+
+**Accept:** one toolbar row; options popover works with pen and finger; `vp check`/`vp test` green.
+
+### F5. Docs
+
+Update `docs/planning/handwriting-integration.md` "Current implementation boundary" with the input model (pause registry, IME, no CTP region, naming via dialog) and add the two report paths as references. Add a backlog note: floating Onyx keyboard (`onyx.action.kime.status.changed` + `floatingWindowRectList` → exclude rects) is not handled; trigger: first use of the floating keyboard.
+
 ## Out of scope (do not do)
 
 - Paged scrolling, infinite canvas, multi-page handwritten notes, OCR/recognition, search over handwriting.
