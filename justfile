@@ -4,6 +4,14 @@ server_target := "x86_64-unknown-linux-musl"
 server_release_dir := "release-server"
 server_archive := "notes-server-release.tar.gz"
 
+# Debug APK with the dev config: optimized Rust, debug assertions, WebView inspection,
+# global Tauri API and a relaxed script-src so the MCP bridge can run scripts.
+build-android-debug:
+    CARGO_PROFILE_DEV_OPT_LEVEL=3 \
+        CARGO_PROFILE_DEV_DEBUG=1 \
+        vp run tauri android build --debug --apk --target aarch64 --split-per-abi \
+        --config src-tauri/tauri.dev.conf.json
+
 # Fast release APK for normal iteration: keep symbol stripping, but restore
 # Cargo's parallel release codegen and skip LTO.
 build-android-arm64:

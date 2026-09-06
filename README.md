@@ -59,8 +59,12 @@ Initialize and build Android from the same client source:
 
 ```sh
 vp run tauri android init
-vp run tauri android build --debug
+just build-android-debug
 ```
+
+The debug recipe applies `src-tauri/tauri.dev.conf.json`, which enables the global Tauri API and
+relaxes `script-src` so the development-only MCP bridge can execute scripts in the WebView. Release
+builds keep the strict CSP from `tauri.conf.json`.
 
 The Rust Tauri crate family and tao currently track upstream `dev` through workspace patches;
 `Cargo.lock` pins their commits. The JavaScript API and CLI remain released packages. The checked-in
