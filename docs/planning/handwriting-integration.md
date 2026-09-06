@@ -63,9 +63,19 @@ Open editor bases are protected from replacement by incoming remote versions.
 Workspace archives include binary ink, unpublished working copies and conflict
 variants; restore publishes compacted versions transactionally.
 
-Frontend routing, API wrappers and the integrated editor are deliberately deferred
-to the UI implementation. The installed BOOX build is still the preceding scratch
-prototype; its file has not been migrated or deleted. See
+The frontend is integrated. Panes route by `page.kind.kind`, so a handwritten note
+is listed, opened, renamed, favorited, deleted and synced like any other note, and
+the text editor is never mounted for it. One module-level session per note UUID owns
+the writer and the pending completion, so leaving, backgrounding or unmounting the
+view cannot strand unpublished work; reads wait for the completion the previous
+session owes. Capabilities gate creating and drawing only: without a pen or the
+mouse preference a note still opens read-only. Publication state is shown as unsent
+changes, and concurrent published branches are compared and resolved manually.
+Deferred, unchanged from the backend handoff: multi-page notes, infinite canvas and
+OCR/recognition, including search over handwriting.
+
+The installed BOOX build is still the preceding scratch prototype; its file has not
+been migrated or deleted, and nothing in the application refers to it any more. See
 [the backend handoff](handwriting-backend-handoff.md) for exact commands, lifecycle
 requirements, verified boundaries and remaining limitations. In particular,
 full snapshots currently fetch historical published graphs as well as current heads,
@@ -95,7 +105,7 @@ compact Back/title header, drawing tools, contextual tool options, and a large
 sheet. Back flushes pending local writes before leaving. Normal saving and input
 diagnostics do not need a permanent footer; save failures remain visible and
 retryable. Mouse drawing belongs in device settings. Until integration is real,
-the scratch editor retains its local-draft description.
+the integrated editor replaced it and its local-draft description.
 
 For the first integrated version, prefer explicit sheets with vertical navigation
 and an Add page action at the end. This preserves predictable page boundaries for

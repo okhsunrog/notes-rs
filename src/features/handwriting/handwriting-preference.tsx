@@ -14,7 +14,8 @@ export function HandwritingPreferenceField() {
       <div>
         <h2 className="text-base font-semibold">Handwriting</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          Show Write by hand in the New note menu. Applies immediately on this device.
+          Show Write by hand in the New note menu. Handwritten notes open and sync like any other
+          note; this only controls where writing is offered. Applies immediately on this device.
         </p>
       </div>
       <Select
@@ -34,14 +35,19 @@ export function HandwritingPreferenceField() {
           ))}
         </SelectContent>
       </Select>
-      <label className="flex items-center gap-2 text-sm">
-        <input
-          type="checkbox"
-          checked={mouseEnabled}
-          onChange={(event) => setMouseEnabled(event.target.checked)}
-        />
-        Allow mouse drawing
-      </label>
+      <div className="space-y-1">
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={mouseEnabled}
+            onChange={(event) => setMouseEnabled(event.target.checked)}
+          />
+          Allow mouse drawing
+        </label>
+        <p className="text-xs text-muted-foreground">
+          Also lets you edit an existing handwritten note on a device without a pen.
+        </p>
+      </div>
     </section>
   );
 }
