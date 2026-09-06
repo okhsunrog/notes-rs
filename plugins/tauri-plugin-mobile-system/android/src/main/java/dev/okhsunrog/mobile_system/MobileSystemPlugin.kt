@@ -33,6 +33,12 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
      * collectable, and the reference is only ever used for an identity check.
      */
     private var onyxInkWebView: java.lang.ref.WeakReference<WebView>? = null
+    /**
+     * The view's update-mode layers. It outlives every ink session — the display profile is set
+     * before one exists and stays after it closes — so the plugin owns it and lends it out.
+     */
+    private var displayMode: ViewDisplayMode? = null
+    private var displayModeWebView: java.lang.ref.WeakReference<WebView>? = null
 
     override fun load(webView: WebView) {
         inkWebView = webView
@@ -44,6 +50,8 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
         onyxInk?.destroy()
         onyxInk = null
         onyxInkWebView = null
+        displayMode = null
+        displayModeWebView = null
         inputManager.unregisterInputDeviceListener(this)
     }
 
@@ -78,7 +86,7 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
                 }
                 if (onyxInk == null && args.enabled) {
                     val webView = checkNotNull(current)
-                    onyxInk = OnyxInk(activity, webView) { trigger("onyxInk", it) }
+                    onyxInk = OnyxInk(activity, webView, displayMode(webView)) { trigger("onyxInk", it) }
                     onyxInkWebView = java.lang.ref.WeakReference(webView)
                 }
                 invoke.resolve(onyxInk?.configure(args) ?: JSObject().put("available", true).put("active", false))
@@ -101,6 +109,19 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
                 invoke.reject("Could not present the BOOX ink frame: ${error.message}")
             }
         }
+    }
+
+    /**
+     * The layer stack for the WebView currently on screen. wry re-creates the view on some
+     * configuration changes; the modes claimed on the old one go away with it, and the page that
+     * reloads into the new view asks for its profile again.
+     */
+    private fun displayMode(webView: WebView): ViewDisplayMode {
+        if (displayModeWebView?.get() !== webView) {
+            displayMode = ViewDisplayMode(webView)
+            displayModeWebView = java.lang.ref.WeakReference(webView)
+        }
+        return checkNotNull(displayMode)
     }
 
     override fun onInputDeviceAdded(deviceId: Int) = inputDevicesChanged()

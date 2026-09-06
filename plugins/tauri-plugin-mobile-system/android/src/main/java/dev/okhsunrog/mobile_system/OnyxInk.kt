@@ -7,7 +7,6 @@ import android.graphics.RectF
 import android.os.Build
 import android.os.SystemClock
 import android.util.Log
-import android.view.View
 import android.view.ViewTreeObserver
 import android.webkit.WebView
 import app.tauri.annotation.InvokeArg
@@ -60,9 +59,10 @@ class OnyxFrameArgs {
 }
 
 /** Vendor fast ink is transient. Completed points go to the ordinary, durable web canvas. */
-class OnyxInk(
+internal class OnyxInk(
     private val activity: Activity,
     private val webView: WebView,
+    private val displayMode: ViewDisplayMode,
     private val emit: (JSObject) -> Unit,
 ) : ViewTreeObserver.OnWindowFocusChangeListener {
     private var helper: TouchHelper? = null
@@ -91,16 +91,14 @@ class OnyxInk(
         resume = { restoreToolRendering() },
     )
 
-    private var previousViewMode: UpdateMode? = null
-    private var previousViewModeRaw: Int? = null
-    private var qualityOwned = false
     private var lastRepaintModeRaw: Int? = null
     private val repaintMode = InkRepaintMode(
         enter = {
-            EpdController.setViewDefaultUpdateMode(webView, UpdateMode.HAND_WRITING_REPAINT_MODE)
-            lastRepaintModeRaw = readViewModeRaw()
+            displayMode.set(DisplayModeStack.Layer.TRANSIENT, UpdateMode.HAND_WRITING_REPAINT_MODE)
+            lastRepaintModeRaw = displayMode.readRaw()
         },
-        leave = { if (qualityOwned) EpdController.setViewDefaultUpdateMode(webView, UpdateMode.GU) },
+        // Back to whatever still owns the view: the editor's fast mode, or the profile under it.
+        leave = { displayMode.clear(DisplayModeStack.Layer.TRANSIENT) },
     )
     private var fastModeAccepted: Boolean? = null
     private var fastModeRequests = 0L
@@ -229,11 +227,12 @@ class OnyxInk(
         put("lastRepaintModeRaw", lastRepaintModeRaw)
         put("repaintedPixels", repaintedPixels)
         put("visibleCanvasPixels", limit.width().toLong() * limit.height())
-        put("qualityModeOwned", qualityOwned)
-        put("viewUpdateMode", EpdController.getViewDefaultUpdateMode(webView)?.name)
-        put("viewUpdateModeRaw", readViewModeRaw())
-        put("previousViewMode", previousViewMode?.name)
-        put("previousViewModeRaw", previousViewModeRaw)
+        put("qualityModeOwned", displayMode.isSet(DisplayModeStack.Layer.SESSION))
+        put("viewUpdateMode", displayMode.readMode()?.name)
+        put("viewUpdateModeRaw", displayMode.readRaw())
+        put("requestedViewUpdateMode", displayMode.effective?.name)
+        put("previousViewMode", displayMode.previousMode?.name)
+        put("previousViewModeRaw", displayMode.previousRaw)
         put("fastModeRequested", displayPolicy.fastRequested)
         put("fastModeAccepted", fastModeAccepted)
         put("fastModeRequests", fastModeRequests)
@@ -318,14 +317,10 @@ class OnyxInk(
 
     private fun resume() {
         if (!resumed || !webView.hasWindowFocus() || config == null || limit.isEmpty) return
-        val acquiredQuality = !qualityOwned
+        val acquiredQuality = !displayMode.isSet(DisplayModeStack.Layer.SESSION)
         if (acquiredQuality) {
-            previousViewMode = EpdController.getViewDefaultUpdateMode(webView)
-            // SDK enum conversion loses the firmware's "no view override" sentinel.
-            previousViewModeRaw = readViewModeRaw()
-            EpdController.setViewDefaultUpdateMode(webView, UpdateMode.GU)
-            qualityOwned = true
-            Log.d("OnyxInk", "view quality mode: ${EpdController.getViewDefaultUpdateMode(webView)}, previous: $previousViewMode")
+            displayMode.set(DisplayModeStack.Layer.SESSION, UpdateMode.GU)
+            Log.d("OnyxInk", "view quality mode: ${displayMode.readMode()}, previous: ${displayMode.previousMode}")
         }
         helper?.setRawDrawingEnabled(true)
         restoreToolRendering()
@@ -351,25 +346,14 @@ class OnyxInk(
             (config?.interaction == false || (config?.fastLasso == true && config?.hasSelection == false)))
     }
 
-    private fun readViewModeRaw(): Int? = runCatching {
-        View::class.java.getMethod("getDefaultUpdateMode").invoke(webView) as? Int
-    }.getOrNull()
-
     private fun releaseDisplayMode() {
         repaintMode.release()
         webView.removeCallbacks(settleDisplay)
         displayPolicy.reset()
         qualityDamage.take()
-        if (qualityOwned) {
-            val restored = previousViewModeRaw?.let { raw -> runCatching {
-                View::class.java.getMethod("setDefaultUpdateMode", Int::class.javaPrimitiveType)
-                    .invoke(webView, raw)
-            }.isSuccess } ?: false
-            if (!restored) EpdController.resetViewUpdateMode(webView)
-            qualityOwned = false
-            previousViewMode = null
-            previousViewModeRaw = null
-        }
+        // The display profile may still hold the layer below; the stack restores the raw mode
+        // only once nothing is left above it.
+        displayMode.clear(DisplayModeStack.Layer.SESSION)
     }
 
     private fun addDamage(left: Double, top: Double, right: Double, bottom: Double) {
