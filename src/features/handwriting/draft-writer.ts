@@ -10,8 +10,22 @@ export class DraftWriter {
   constructor(
     private revision: string | null,
     private readonly save: (draft: InkDraft, revision: string | null) => Promise<string>,
-    private readonly onState: (state: DraftSaveState) => void,
+    private onState: (state: DraftSaveState) => void,
   ) {}
+
+  /** Adopt the writer in a new mount without losing what it still owes. */
+  setOnState(onState: (state: DraftSaveState) => void) {
+    this.onState = onState;
+  }
+
+  hasPending() {
+    return this.pending.length > 0;
+  }
+
+  /** The newest queued state: never older than what storage would return. */
+  latestDraft(): InkDraft | null {
+    return this.pending.length ? this.pending[this.pending.length - 1]! : null;
+  }
 
   write(draft: InkDraft) {
     this.pending.push(draft);

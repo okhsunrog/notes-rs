@@ -22,6 +22,7 @@ import { usePageTitleEditor } from "@/features/pages/use-page-title-editor";
 import { currentDisposition, homeTarget, type PaneId } from "@/features/workspace/workspace-model";
 import { useWorkspaceStore } from "@/features/workspace/workspace-store";
 import {
+  CommandFailure,
   completeAllHandwriting,
   completeHandwritingNote,
   handwritingHistory,
@@ -62,6 +63,8 @@ import type { OnyxInkStatus } from "./onyx-ink";
  */
 function completeInBackground(pageUuid: string) {
   requestCompletion(pageUuid, () => completeHandwritingNote(pageUuid)).catch((error: unknown) => {
+    // The note was deleted while it was being packed; there is nothing to send.
+    if (error instanceof CommandFailure && error.code === "not_found") return;
     notifyRetryableError("Could not prepare sync", error, () => completeInBackground(pageUuid));
   });
 }
@@ -118,6 +121,9 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
   // adopts whatever completion published while the window was hidden.
   const [suspended, setSuspended] = useState(false);
   const [conflictsOpen, setConflictsOpen] = useState(false);
+  // Gestures an earlier mount could not store are shown and retried before any
+  // snapshot from storage is allowed to replace them.
+  const [recovering, setRecovering] = useState(false);
   const [comparing, setComparing] = useState(false);
 
   const latestDraft = useRef<InkDraft | null>(null);
@@ -157,6 +163,7 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
       setSelected([]);
       setLimit(false);
       setSuspended(false);
+      setRecovering(false);
     },
     [uuid],
   );
@@ -169,15 +176,40 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
     const generation = ++generationRef.current;
     setLoadError(null);
     try {
+      const carried = getWriter(uuid);
+      if (carried?.hasPending()) {
+        // Adopt the queue of the mount that could not store it, show its newest
+        // state, and retry. Loading waits until storage has accepted it.
+        carried.setOnState(setSaveState);
+        const queued = carried.latestDraft();
+        if (queued) {
+          latestDraft.current = queued;
+          setDraft(queued);
+        }
+        setSuspended(false);
+        setRecovering(true);
+        if (!(await carried.flush())) return;
+        if (generation !== generationRef.current) return;
+      }
       await awaitCompletion(uuid);
       const history = await loadHandwritingNote(uuid, editingRef.current);
       if (generation !== generationRef.current) return;
+      // A gesture completed while the note was being read is newer than it.
+      if (getWriter(uuid)?.hasPending()) {
+        setRecovering(true);
+        return;
+      }
       adopt(history);
     } catch (error) {
       if (generation !== generationRef.current) return;
       setLoadError(unknownErrorMessage(error));
     }
   }, [adopt, uuid]);
+
+  // Once the carried gestures are stored, continue with the read they blocked.
+  useEffect(() => {
+    if (recovering && saveState === "saved") void openNote();
+  }, [openNote, recovering, saveState]);
 
   // Two editors of one note are not a shared session; the second view reads.
   useEffect(() => {
@@ -244,7 +276,7 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
         // retry it; only a clean queue may be handed to completion and dropped.
         if (!(await writer.flush())) return;
         if (!leavingRef.current) completeInBackground(uuid);
-        endSession(uuid);
+        endSession(uuid, writer);
       })();
     };
   }, [uuid]);
@@ -298,6 +330,17 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
     navigateAway();
     if (writer) completeInBackground(uuid);
   }, [busy, navigateAway, uuid]);
+
+  const deleteNote = useCallback(async () => {
+    if (busy) return;
+    // Store what is queued before the note goes away: the confirmation may be
+    // declined, and a cancelled delete must not have cost a stroke. The session
+    // is not closed here for the same reason — onDelete cannot report a
+    // declined confirmation — so the unmount path stays in charge, and a
+    // completion for a note that is gone is ignored rather than retried.
+    await getWriter(uuid)?.flush();
+    await onDelete(page);
+  }, [busy, onDelete, page, uuid]);
 
   const change = (next: InkDraft) => {
     const previous = latestDraft.current;
@@ -397,7 +440,8 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
           variant="ghost"
           size="icon-sm"
           aria-label="Delete page"
-          onClick={() => void onDelete(page)}
+          disabled={busy}
+          onClick={() => void deleteNote()}
           className="shrink-0 rounded-lg text-muted-foreground hover:text-destructive"
         >
           <Trash2 className="size-4" />

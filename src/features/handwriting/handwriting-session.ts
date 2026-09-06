@@ -32,8 +32,9 @@ export function releaseEditor(pageUuid: string, owner: object): void {
 }
 
 /**
- * Bind a writer to one note. Call it only with a freshly read snapshot: the
- * previous writer's queue belongs to the revision that snapshot replaced.
+ * Bind a writer to one note. A snapshot read from storage is older than any
+ * gesture the previous writer has not saved yet, so replacing a writer that
+ * still owes writes would silently discard them.
  */
 export function beginSession(
   pageUuid: string,
@@ -41,6 +42,9 @@ export function beginSession(
   onState: (state: DraftSaveState) => void,
   save: SavePatch = saveHandwritingPatch,
 ): DraftWriter {
+  if (writers.get(pageUuid)?.hasPending()) {
+    throw new Error("Unsaved handwriting is still queued for this note. Retry saving first.");
+  }
   const writer = new DraftWriter(
     snapshot.revision,
     incrementalDraftSaver(snapshot.draft, (patch, revision) => save(pageUuid, patch, revision)),
@@ -91,8 +95,13 @@ export function hasPendingCompletion(pageUuid: string): boolean {
   return completions.has(pageUuid);
 }
 
-export function endSession(pageUuid: string): void {
-  writers.delete(pageUuid);
+/**
+ * Close a session only while the registry still holds this exact writer: a
+ * reopened note installs its own writer while the previous cleanup is still
+ * awaiting a flush, and that later cleanup must not remove it.
+ */
+export function endSession(pageUuid: string, writer: DraftWriter): void {
+  if (writers.get(pageUuid) === writer) writers.delete(pageUuid);
 }
 
 export function openSessionUuids(): string[] {

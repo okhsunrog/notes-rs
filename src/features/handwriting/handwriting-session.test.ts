@@ -129,7 +129,7 @@ it("flushes every open session before a process-wide completion", async () => {
   expect(await flushAllSessions()).toBe(true);
   expect([...saved].sort()).toEqual(["page-a", "page-b"]);
 
-  endSession("page-a");
+  endSession("page-a", first);
   expect(openSessionUuids()).toEqual(["page-b"]);
 });
 
@@ -147,4 +147,61 @@ it("grants the editable view to one owner until it is released", () => {
 
   releaseEditor("page-a", first);
   expect(acquireEditor("page-a", second)).toBe(true);
+});
+
+it("refuses to replace a writer that still owes gestures", async () => {
+  let allow = false;
+  const save = vi.fn(async () => {
+    if (!allow) throw new Error("disk full");
+    return "revision-2";
+  });
+  const writer = beginSession("page-a", snapshot(), () => {}, save);
+  await writer.write({ ...emptyDraft(), background: "grid" });
+
+  expect(writer.hasPending()).toBe(true);
+  expect(() => beginSession("page-a", snapshot(), () => {}, save)).toThrow(
+    "Unsaved handwriting is still queued",
+  );
+  expect(getWriter("page-a")).toBe(writer);
+
+  allow = true;
+  expect(await writer.flush()).toBe(true);
+  expect(writer.hasPending()).toBe(false);
+  expect(beginSession("page-a", snapshot(), () => {}, save)).not.toBe(writer);
+});
+
+it("carries the newest queued gesture and its reporting into the next mount", async () => {
+  const save = vi.fn(async () => {
+    throw new Error("disk full");
+  });
+  const first = vi.fn();
+  const writer = beginSession("page-a", snapshot(), first, save);
+  const queued = { ...emptyDraft(), background: "grid" as const };
+  await writer.write(queued);
+
+  expect(writer.latestDraft()).toBe(queued);
+
+  const second = vi.fn();
+  first.mockClear();
+  writer.setOnState(second);
+  await writer.flush();
+
+  // The retry reports to the mount that adopted the queue, not the dead one.
+  expect(second).toHaveBeenCalledWith(expect.any(Error));
+  expect(first).not.toHaveBeenCalled();
+});
+
+it("closes only the session the caller still owns", async () => {
+  const save = vi.fn(async () => "revision-1");
+  const stale = beginSession("page-a", snapshot(), () => {}, save);
+  await stale.flush();
+  const reopened = beginSession("page-a", snapshot(), () => {}, save);
+
+  // The unmount of the previous view settles after the note was reopened.
+  endSession("page-a", stale);
+
+  expect(getWriter("page-a")).toBe(reopened);
+
+  endSession("page-a", reopened);
+  expect(getWriter("page-a")).toBeNull();
 });

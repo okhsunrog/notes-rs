@@ -110,7 +110,7 @@ function paneContentKind() {
   return state.panes[state.primaryPaneId]?.content.kind;
 }
 
-async function mount() {
+async function mount(onDelete: (page: Page) => void = () => {}) {
   const paneId = useWorkspaceStore.getState().primaryPaneId;
   useWorkspaceStore.getState().dispatch({
     type: "open_target",
@@ -125,7 +125,7 @@ async function mount() {
             paneId={paneId as PaneId}
             page={page}
             onSaved={() => {}}
-            onDelete={() => {}}
+            onDelete={onDelete}
           />
         </PageSessionProvider>
       </QueryClientProvider>,
@@ -239,4 +239,63 @@ it("opens read-only without a pen and without the mouse preference", async () =>
   expect(container.querySelector('[role="toolbar"]')).toBeNull();
   expect(container.textContent).toContain("Connect a pen or enable mouse drawing in Settings");
   expect(container.querySelector("canvas")).not.toBeNull();
+});
+
+it("retries the gestures an earlier mount could not store before reading again", async () => {
+  api.saveHandwritingPatch.mockRejectedValue(new Error("disk full"));
+  await mount();
+
+  await act(async () => {
+    button("Grid paper").click();
+  });
+  expect(container.textContent).toContain("Could not save your changes");
+
+  await act(async () => root.unmount());
+  root = createRoot(container);
+  api.loadHandwritingNote.mockClear();
+  api.saveHandwritingPatch.mockClear();
+
+  await mount();
+
+  // The unsaved gesture is on the canvas again and no snapshot replaced it.
+  expect(button("Grid paper").getAttribute("aria-pressed")).toBe("true");
+  expect(api.loadHandwritingNote).not.toHaveBeenCalled();
+  expect(container.textContent).toContain("Could not save your changes");
+
+  api.saveHandwritingPatch.mockResolvedValue("revision-2");
+  await act(async () => {
+    button("Retry saving").click();
+  });
+
+  expect(api.saveHandwritingPatch).toHaveBeenLastCalledWith(
+    page.uuid,
+    expect.objectContaining({ background: "grid" }),
+    "revision-1",
+  );
+  expect(api.loadHandwritingNote).toHaveBeenCalledWith(page.uuid, true);
+});
+
+it("stores queued gestures before deleting and never asks to retry sync", async () => {
+  const { CommandFailure } = await import("@/lib/api");
+  api.saveHandwritingPatch.mockResolvedValue("revision-2");
+  api.completeHandwritingNote.mockRejectedValue(
+    new CommandFailure({ code: "not_found", message: "page is gone" }),
+  );
+  const deleted = vi.fn();
+  await mount(deleted);
+
+  await act(async () => {
+    button("Grid paper").click();
+  });
+  await act(async () => {
+    button("Delete page").click();
+  });
+
+  expect(api.saveHandwritingPatch).toHaveBeenCalledTimes(1);
+  expect(deleted).toHaveBeenCalledWith(page);
+
+  await act(async () => root.unmount());
+  root = createRoot(container);
+
+  expect(api.notifyRetryableError).not.toHaveBeenCalled();
 });
