@@ -1,9 +1,37 @@
 # Handwriting integration boundaries
 
-The accepted workflow distinguishes durable local gesture writes from published
-note versions. New geometry stays PCO-8. Every five seconds with changes, on leaving
-the note, and on backgrounding, publish a saved note version and enqueue sync.
-There is no Save button. Recovery must not depend on receiving a shutdown callback.
+The accepted workflow distinguishes durable local gesture writes from versions
+queued for synchronization. New geometry stays PCO-8 and completed gestures are
+saved locally with their history. Leaving the note or backgrounding requests
+publication and synchronization after pending local writes finish. There is no
+additional five-second autosave/publication timer and no Save button. Persist
+unsent changes for offline retry and recovery after an interrupted process;
+recovery must not depend on receiving a shutdown callback.
+
+Compaction scheduling remains under evaluation: periodic fresh-block packing
+versus packing on exit. The existing five-second maintenance worker is not a
+sync timer. Choose its replacement policy after the production-adapter device
+benchmarks; do not silently treat a candidate policy as an accepted decision.
+
+## Storage and portable export decision (2026-09-06)
+
+SQLite remains the application storage backend. Integrate handwriting into the
+common notes database using separate immutable CBOR metadata records and INKCHNK
+geometry BLOBs, connected by document roots. One note is a graph of records and
+chunks, not one monolithic SQLite BLOB. Physical blocks may contain multiple
+logical strokes without reducing Undo granularity. Sync should transfer missing
+blocks in batches rather than equating each database row with a network request.
+
+A future self-contained single-note import/export container will package the
+root, required metadata, geometry and resources. Its name, extension and container
+layout are deliberately undecided; INKDOC was only a discussion placeholder.
+INKCHNK continues to identify an internal point-data chunk, not a complete note.
+The container belongs with the independent format library when that work is
+prioritized. It is not a prerequisite for common-database integration or sync.
+
+There is no planned move from SQLite to individual note files. Keep the format
+library independent of persistence so an alternative adapter remains possible,
+without implementing a second working store or custom file journal now.
 
 ## Current implementation boundary
 

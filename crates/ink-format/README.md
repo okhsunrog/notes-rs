@@ -68,7 +68,12 @@ manage an Undo stack, or decide where/when to store data. A database/filesystem
 adapter owns transactions, atomic publication, crash recovery, history retention,
 compaction scheduling and garbage collection. The codec never chooses chunk size.
 A complete portable document container is not implemented yet; a chunk is not a
-self-contained note.
+self-contained note. A future single-note import/export container will include
+metadata, chunks and required resources. Its name, extension and layout remain
+undecided. This is deferred export/import work, not a prerequisite for application
+sync or a plan to replace SQLite. The application stores document graphs as
+separate metadata/chunk BLOBs; that policy does not constrain this library to a
+database backend.
 
 No legacy application JSON import is planned: the test drafts will be discarded
 when the application switches storage. XOPP conversion should be an independent
