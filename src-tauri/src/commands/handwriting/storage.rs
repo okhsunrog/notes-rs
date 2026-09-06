@@ -30,7 +30,7 @@ fn open(path: &Path) -> CommandResult<Connection> {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .map_err(err)?;
-    if app != 0 && app != APP_ID || version > 2 {
+    if app != 0 && app != APP_ID || version > 3 {
         return Err(CommandError::invalid("Unsupported handwriting database"));
     }
     conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
@@ -41,7 +41,12 @@ fn open(path: &Path) -> CommandResult<Connection> {
         CREATE TABLE IF NOT EXISTS ink_cursor(singleton INTEGER PRIMARY KEY CHECK(singleton=1), seq INTEGER NOT NULL);
         INSERT OR IGNORE INTO ink_cursor VALUES(1,0);
         INSERT INTO ink_history SELECT 0,root_id FROM ink_head WHERE NOT EXISTS(SELECT 1 FROM ink_history);
-        PRAGMA application_id=1229867825; PRAGMA user_version=2;").map_err(err)?;
+        CREATE TABLE IF NOT EXISTS ink_sealed_chunks(id BLOB PRIMARY KEY REFERENCES ink_chunks(id) ON DELETE CASCADE) WITHOUT ROWID;
+        PRAGMA application_id=1229867825;").map_err(err)?;
+    if version < 3 {
+        // Existing blocks may already be packed. Never recompress them during upgrade.
+        conn.execute_batch("BEGIN IMMEDIATE; INSERT OR IGNORE INTO ink_sealed_chunks SELECT id FROM ink_chunks; PRAGMA user_version=3; COMMIT;").map_err(err)?;
+    }
     Ok(conn)
 }
 fn get_record(conn: &Connection, id: Id, expected_length: Option<u64>) -> CommandResult<Record> {

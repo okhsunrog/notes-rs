@@ -498,3 +498,14 @@ background-only Undo/Redo patches. Single observed calls were about 340 ms, not 
 benchmark or proof of physical e-ink latency. Fresh pen/Undo visual acceptance
 remains a manual check. The old snapshot becomes the initial history baseline;
 actions from the old APK's volatile history cannot be recovered after upgrade.
+
+## Fresh-only compaction
+
+SQLite schema 3 tracks sealed chunks in a local table, with cascading cleanup.
+An upgrade conservatively seals existing chunks, so opening an older database
+never schedules a rewrite of its historical geometry. New chunks are eligible;
+outputs of compaction are permanently sealed. Each preparation selects at most
+16 fresh blocks and 8 MiB encoded input (existing 128 MiB decoded work cap remains).
+Untouched block references are preserved across every retained history root.
+Tests verify that later compactions retain the exact bytes of earlier packs.
+This is a local storage-policy change, not a portable format version change.

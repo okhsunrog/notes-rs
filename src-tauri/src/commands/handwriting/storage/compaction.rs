@@ -3,6 +3,9 @@
 use super::*;
 const TARGET_POINTS: usize = 250_000;
 const MAX_JOB_BYTES: u64 = 128 * 1024 * 1024;
+// Each fresh block is one normalized stroke, at most 150k points * 49 bytes.
+const MAX_FRESH_CHUNKS: usize = 16;
+const MAX_FRESH_BYTES: u64 = 8 * 1024 * 1024;
 type Packed = (BTreeMap<Id, Vec<u8>>, BTreeMap<Id, model::SegmentRef>);
 struct Plan {
     roots: Vec<(i64, Id)>,
@@ -46,6 +49,25 @@ fn prepare(path: &Path) -> CommandResult<Option<Plan>> {
         }
         documents.push((*seq, doc));
     }
+    let sealed: BTreeSet<Vec<u8>> = tx
+        .prepare("SELECT id FROM ink_sealed_chunks")
+        .map_err(err)?
+        .query_map([], |r| r.get(0))
+        .map_err(err)?
+        .collect::<Result<_, _>>()
+        .map_err(err)?;
+    catalog.retain(|id, _| !sealed.contains(id.as_slice()));
+    let mut selected_bytes = 0;
+    let mut selected_count = 0;
+    catalog.retain(|_, entry| {
+        if selected_count >= MAX_FRESH_CHUNKS || selected_bytes + entry.length > MAX_FRESH_BYTES {
+            return false;
+        }
+        selected_count += 1;
+        selected_bytes += entry.length;
+        true
+    });
+    locations.retain(|_, location| catalog.contains_key(&location.chunk));
     let size = catalog
         .values()
         .try_fold(0u64, |n, b| n.checked_add(b.length))
@@ -183,12 +205,22 @@ fn publish(
     let mut replacements = Vec::new();
     for (seq, mut doc) in plan.documents {
         for (id, location) in &mut doc.segments {
-            *location = locations[id].clone();
+            if let Some(replacement) = locations.get(id) {
+                *location = replacement.clone();
+            }
         }
         doc.chunks = doc
             .segments
             .values()
-            .map(|r| (r.chunk, blob_ref(&chunks[&r.chunk])))
+            .map(|r| {
+                (
+                    r.chunk,
+                    chunks
+                        .get(&r.chunk)
+                        .map(|bytes| blob_ref(bytes))
+                        .unwrap_or_else(|| doc.chunks[&r.chunk].clone()),
+                )
+            })
             .collect();
         let size = doc
             .chunks
@@ -216,6 +248,8 @@ fn publish(
     }
     for (id, bytes) in &chunks {
         put(&tx, "ink_chunks", *id, bytes)?;
+        tx.execute("INSERT INTO ink_sealed_chunks VALUES(?1)", [id.as_slice()])
+            .map_err(err)?;
     }
     let cursor = history::cursor(&tx)?;
     for (seq, root) in replacements {
@@ -390,6 +424,36 @@ mod tests {
         assert_eq!(rows(&conn, "ink_chunks"), chunks);
         assert_eq!(read(&path).unwrap().revision, Some(new));
     }
+    #[test]
+    fn subsequent_packs_leave_sealed_blocks_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ink.sqlite3");
+        let mut draft = sheet();
+        let revision = write_draft(&path, draft.clone(), None).unwrap();
+        assert!(compact(&path).unwrap());
+        let sealed = rows(&open(&path).unwrap(), "ink_chunks");
+        let fresh = sheet().strokes;
+        draft.strokes.extend(fresh.clone());
+        write_patch(
+            &path,
+            InkDraftPatch {
+                order: draft.strokes.iter().map(|s| s.id).collect(),
+                upserts: fresh,
+                background: InkBackground::Plain,
+            },
+            Some(revision),
+        )
+        .unwrap();
+        let plan = prepare(&path).unwrap().unwrap();
+        assert_eq!(plan.chunks.len(), 3);
+        assert!(compact(&path).unwrap());
+        let after = rows(&open(&path).unwrap(), "ink_chunks");
+        assert_eq!(after.len(), 2);
+        assert!(sealed.iter().all(|row| after.contains(row)));
+        equal(&read(&path).unwrap().draft, &draft);
+        assert!(prepare(&path).unwrap().is_none());
+    }
+
     #[test]
     fn bounded_packs_keep_whole_segments_and_restore_the_same_page() {
         let dir = tempfile::tempdir().unwrap();
