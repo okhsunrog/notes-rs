@@ -38,13 +38,23 @@ impl HandwritingStore {
         sessions.insert(page, session.clone());
         Ok(session)
     }
+    /// A note that no longer exists cannot be completed or reopened, so its
+    /// cached session would otherwise be retried for the life of the process.
+    fn forget(&self, page: uuid::Uuid) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.remove(&page);
+        }
+    }
     pub(super) fn is_background(&self) -> bool {
         self.background.load(Ordering::Relaxed)
     }
     pub(super) fn finish_in_background(&self, session: Session) {
+        let store = self.clone();
         tauri::async_runtime::spawn(async move {
-            if let Err(error) = session.complete().await {
-                tracing::warn!(?error, "Ink publication deferred");
+            match session.complete().await {
+                Ok(()) => {}
+                Err(notes_core::CoreError::NotFound(_)) => store.forget(session.page()),
+                Err(error) => tracing::warn!(?error, "Ink publication deferred"),
             }
         });
     }
@@ -70,10 +80,10 @@ impl HandwritingStore {
             .collect::<Vec<_>>();
         let mut failure = None;
         for session in sessions {
-            if let Err(error) = session.complete().await
-                && !matches!(error, notes_core::CoreError::NotFound(_))
-            {
-                failure = Some(err(error));
+            match session.complete().await {
+                Ok(()) => {}
+                Err(notes_core::CoreError::NotFound(_)) => self.forget(session.page()),
+                Err(error) => failure = Some(err(error)),
             }
         }
         failure.map_or(Ok(()), Err)
@@ -81,8 +91,12 @@ impl HandwritingStore {
     pub(crate) async fn recover(&self, app: &AppHandle, conn: &Connection) -> CommandResult<()> {
         for page in ink::recoverable_notes(conn).await.map_err(err)? {
             let session = self.session(app, page)?;
-            if let Err(error) = session.complete().await {
-                tracing::warn!(?error,%page,"Interrupted ink session retained for retry");
+            match session.complete().await {
+                Ok(()) => {}
+                Err(notes_core::CoreError::NotFound(_)) => self.forget(page),
+                Err(error) => {
+                    tracing::warn!(?error,%page,"Interrupted ink session retained for retry");
+                }
             }
         }
         Ok(())

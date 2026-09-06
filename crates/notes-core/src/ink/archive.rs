@@ -243,17 +243,41 @@ pub(crate) fn prepare(
     Ok((manifest, packed))
 }
 
+/// The published heads as they stand before a restore deletes the pages it is
+/// about to recreate. A restore is a causal successor of what is already
+/// published; reading the heads afterwards would make it a competing branch
+/// that every other replica then shows as a conflict.
+pub(crate) fn heads_before_restore(
+    conn: &rusqlite::Transaction<'_>,
+    manifest: &Manifest,
+) -> CommandResult<BTreeMap<uuid::Uuid, Vec<uuid::Uuid>>> {
+    manifest
+        .documents
+        .iter()
+        .map(|document| {
+            Ok((
+                document.page_uuid,
+                versions::head_ids(conn, document.page_uuid)?,
+            ))
+        })
+        .collect()
+}
+
 pub(crate) fn restore(
     conn: &rusqlite::Transaction<'_>,
     manifest: Manifest,
     graphs: BTreeMap<BlobHash, Snapshot>,
+    prior_heads: &BTreeMap<uuid::Uuid, Vec<uuid::Uuid>>,
 ) -> CommandResult<usize> {
     for (hash, snapshot) in &graphs {
         transfer::stage(conn, *hash, snapshot)?;
     }
     let mut count = 0;
     for document in manifest.documents {
-        let parents = versions::head_ids(conn, document.page_uuid)?;
+        let parents = prior_heads
+            .get(&document.page_uuid)
+            .cloned()
+            .unwrap_or_default();
         conn.execute(
             "INSERT OR IGNORE INTO ink_documents(page_uuid) VALUES(?1)",
             [document.page_uuid],

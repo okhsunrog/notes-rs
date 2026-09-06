@@ -84,6 +84,11 @@ impl Session {
         })
         .await
     }
+    /// The note this session belongs to, so a host cache can drop it when the
+    /// note is gone.
+    pub fn page(&self) -> uuid::Uuid {
+        self.store.document()
+    }
     pub fn needs_completion(&self) -> bool {
         self.modified.load(Ordering::Relaxed) || self.editing.load(Ordering::Relaxed)
     }
@@ -119,17 +124,22 @@ impl Session {
             .access(move |store| {
                 while store.compact()? {}
                 let published = store.publish(device)?;
-                store.close_editor()?;
-                editing.store(false, Ordering::Relaxed);
-                modified.store(false, Ordering::Relaxed);
-                Ok(published)
+                // The publication is already committed at this point. Failing
+                // the whole call on the editor flag would hide a version that
+                // exists, so the close is reported alongside it instead.
+                let closed = store.close_editor();
+                if closed.is_ok() {
+                    editing.store(false, Ordering::Relaxed);
+                    modified.store(false, Ordering::Relaxed);
+                }
+                Ok((published, closed))
             })
             .await;
         match result {
-            Ok(published) => {
+            Ok((published, closed)) => {
                 self.notify(published);
                 self.wake.notify_waiters();
-                Ok(())
+                closed.inspect_err(|_| self.schedule())
             }
             Err(error) => {
                 self.schedule();

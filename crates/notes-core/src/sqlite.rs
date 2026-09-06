@@ -90,13 +90,31 @@ impl Connection {
         self.worker
             .sender
             .send(WorkerMessage::Call(Box::new(move |connection| {
-                let _ = result_tx.send(function(connection).map_err(Into::into));
+                // One bad job must not unwind the worker thread: the connection
+                // is shared by the whole process, and losing it would fail every
+                // later call for the rest of the run. A panic mid-transaction
+                // still rolls back as the transaction is dropped.
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    function(connection).map_err(Into::into)
+                }))
+                .unwrap_or_else(|payload| {
+                    Err(anyhow!("SQLite job panicked: {}", panic_message(&*payload)))
+                });
+                let _ = result_tx.send(outcome);
             })))
             .map_err(|_| anyhow!("SQLite connection worker has stopped"))?;
         result_rx
             .await
             .context("SQLite connection worker dropped a call")?
     }
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|message| (*message).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown payload".into())
 }
 
 #[cfg(test)]
@@ -139,6 +157,36 @@ mod tests {
             .await
             .expect("count rows");
         assert_eq!(count, 8);
+    }
+
+    #[tokio::test]
+    async fn a_panicking_job_fails_only_itself() {
+        let file = tempfile::NamedTempFile::new().expect("temporary database");
+        let connection = Connection::open(file.path()).await.expect("open database");
+        connection
+            .call(|db| {
+                db.execute("CREATE TABLE values_table (value INTEGER NOT NULL)", [])?;
+                Ok::<_, rusqlite::Error>(())
+            })
+            .await
+            .expect("create table");
+
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let error = connection
+            .call::<_, ()>(|_| panic!("bad job"))
+            .await
+            .expect_err("a panicking job reports an error");
+        std::panic::set_hook(previous);
+        assert!(error.to_string().contains("bad job"), "{error}");
+
+        // The connection is shared by the whole process; one bad job must not
+        // take it down with it.
+        let count: i64 = connection
+            .call(|db| db.query_row("SELECT COUNT(*) FROM values_table", [], |row| row.get(0)))
+            .await
+            .expect("the worker still answers");
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]

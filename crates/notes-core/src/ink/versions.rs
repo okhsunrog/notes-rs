@@ -183,11 +183,32 @@ impl Store {
         let Some((snapshot, _)) = storage::load(&tx, self.document)? else {
             return Ok(None);
         };
+        let root_hash = BlobHash::digest(&snapshot.root.encode().map_err(err)?);
+        // Undo and redo mark the document dirty even when they end where they
+        // started. Publishing that would add a version identical to its own
+        // parent, and every replica would then see a conflict to resolve.
+        let unchanged = base.is_some_and(|base| {
+            tx.query_row(
+                "SELECT root_hash FROM ink_versions WHERE version_uuid=?1",
+                [base],
+                |r| crate::db::row_blob_hash(r, 0),
+            )
+            .optional()
+            .is_ok_and(|hash| hash == Some(root_hash))
+        });
+        if unchanged {
+            tx.execute(
+                "UPDATE ink_documents SET dirty=0,publication_requested=0 WHERE page_uuid=?1",
+                [self.document],
+            )?;
+            tx.commit()?;
+            return Ok(None);
+        }
         let publication = Publish {
             version_uuid: Uuid::now_v7(),
             page_uuid: self.document,
             parents: base.into_iter().collect(),
-            root_hash: BlobHash::digest(&snapshot.root.encode().map_err(err)?),
+            root_hash,
             device_name,
         };
         operation::apply_local_kinds_in_transaction(

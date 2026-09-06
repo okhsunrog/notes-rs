@@ -1,4 +1,6 @@
-use notes_core::{Hlc, Op, OpKind, Origin, PageCreate, PageKind, PageLayout, db, ink::*};
+use notes_core::{
+    Hlc, Op, OpKind, Origin, PageCreate, PageDelete, PageKind, PageLayout, db, ink::*,
+};
 use uuid::Uuid;
 
 async fn note(conn: &notes_core::Connection) -> Uuid {
@@ -514,4 +516,137 @@ async fn remote_arrival_does_not_swap_an_open_editor_before_its_first_gesture() 
         serde_json::to_value(right.read().unwrap().draft).unwrap(),
         serde_json::to_value(left.read().unwrap().draft).unwrap()
     );
+}
+
+fn ink_body_rows(path: &std::path::Path) -> (i64, i64) {
+    let sql = rusqlite::Connection::open(path).unwrap();
+    (
+        sql.query_row("SELECT count(*) FROM ink_records", [], |r| r.get(0))
+            .unwrap(),
+        sql.query_row("SELECT count(*) FROM ink_chunks", [], |r| r.get(0))
+            .unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn deleting_a_note_purges_its_drawing_on_every_replica() {
+    let dir = tempfile::tempdir().unwrap();
+    let lp = dir.path().join("left.db");
+    let rp = dir.path().join("right.db");
+    let l = db::open(&lp).await.unwrap();
+    let r = db::open(&rp).await.unwrap();
+    let id = note(&l).await;
+    notes_core::import_sync_snapshot(&r, notes_core::export_sync_snapshot(&l, 0).await.unwrap())
+        .await
+        .unwrap();
+
+    let left = Store::new(&lp, id);
+    left.patch(patch(vec![stroke(1), stroke(2)]), None).unwrap();
+    while left.compact().unwrap() {}
+    let published = left.publish("Book".into()).unwrap().unwrap();
+    transfer::stage_graph(
+        &r,
+        published.root_hash,
+        transfer::export_graph(&l, published.root_hash)
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    notes_core::import_sync_snapshot(&r, notes_core::export_sync_snapshot(&l, 0).await.unwrap())
+        .await
+        .unwrap();
+    let right = Store::new(&rp, id);
+    assert_eq!(right.read().unwrap().draft.strokes.len(), 2);
+    for path in [&lp, &rp] {
+        let (records, chunks) = ink_body_rows(path);
+        assert!(records > 0 && chunks > 0, "the note has bodies to lose");
+    }
+
+    assert!(db::delete_page(&l, id).await.unwrap().is_some());
+
+    // The same delete operation arrives on the second replica through the
+    // ordinary apply path, and must purge there too.
+    let device = Uuid::now_v7();
+    notes_core::apply(
+        &r,
+        &Op {
+            op_id: Uuid::now_v7(),
+            workspace_uuid: db::workspace_uuid(&r).await.unwrap(),
+            device_id: device,
+            hlc: Hlc::new(9, 0, device),
+            format_version: notes_core::operation::FORMAT_VERSION,
+            kind: OpKind::PageDelete(PageDelete { uuid: id }),
+        },
+        Origin::Remote,
+    )
+    .await
+    .unwrap();
+
+    for (path, conn) in [(&lp, &l), (&rp, &r)] {
+        assert_eq!(
+            ink_body_rows(path),
+            (0, 0),
+            "a deleted note leaves no records or chunks behind"
+        );
+        assert!(
+            notes_core::export_sync_snapshot(conn, 0)
+                .await
+                .unwrap()
+                .ink_versions
+                .is_empty(),
+            "a deleted note is not exported as a published version"
+        );
+        let sql = rusqlite::Connection::open(path).unwrap();
+        for table in [
+            "ink_documents",
+            "ink_history",
+            "ink_versions",
+            "ink_staged_roots",
+        ] {
+            let rows: i64 = sql
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(rows, 0, "{table} still holds rows for the deleted note");
+        }
+    }
+    assert!(
+        Store::new(&lp, id).read().is_err()
+            || Store::new(&lp, id).read().unwrap().draft.strokes.is_empty()
+    );
+}
+
+/// Undo followed by redo leaves the document exactly where it started, but marks
+/// it dirty. Publishing that would add a version identical to its own parent and
+/// hand every other replica a conflict to resolve.
+#[tokio::test]
+async fn an_undo_redo_round_trip_publishes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("notes.db");
+    let conn = db::open(&path).await.unwrap();
+    let id = note(&conn).await;
+    let store = Store::new(&path, id);
+    let revision = store.patch(patch(vec![stroke(1)]), None).unwrap();
+    store
+        .patch(patch(vec![stroke(1), stroke(2)]), Some(revision))
+        .unwrap();
+    while store.compact().unwrap() {}
+    let base = store.publish("Book".into()).unwrap().unwrap();
+
+    store
+        .history(Some(false), store.read().unwrap().revision)
+        .unwrap();
+    store
+        .history(Some(true), store.read().unwrap().revision)
+        .unwrap();
+    assert!(store.status().unwrap().unpublished_changes);
+
+    assert!(
+        store.publish("Book".into()).unwrap().is_none(),
+        "an unchanged root must not become a second version"
+    );
+    let versions = store.versions().unwrap();
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].publication.version_uuid, base.version_uuid);
+    assert!(!store.status().unwrap().unpublished_changes);
 }

@@ -394,11 +394,20 @@ where
                 size: attachment.size,
             })
         }));
+        // Read before the page deletes below purge them: the restored version
+        // must descend from what this replica already published.
+        let prior_ink_heads =
+            crate::ink::archive::heads_before_restore(&transaction, &ink_manifest)?;
         let applied = operation::apply_local_kinds_deferred_in_transaction(
             &transaction,
             restore_kinds,
         )?;
-        let ink_operations = crate::ink::archive::restore(&transaction, ink_manifest, ink_graphs)?;
+        let ink_operations = crate::ink::archive::restore(
+            &transaction,
+            ink_manifest,
+            ink_graphs,
+            &prior_ink_heads,
+        )?;
         let stats = ArchiveImportStats {
             applied_operations: applied.operations.len() + ink_operations,
             structure_reconciliations: applied.stats.structure_reconciliations,

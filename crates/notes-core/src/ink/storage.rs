@@ -599,6 +599,28 @@ fn put(conn: &Connection, table: &str, id: Id, bytes: &[u8]) -> CommandResult<()
     }
     Ok(())
 }
+/// Everything a note owns in the ink tables. Runs in the caller's transaction
+/// so a deleted page can never leave its drawing behind: the bodies are large,
+/// they would be exported into every archive and snapshot afterwards, and no
+/// UI would ever show them again.
+pub(super) fn purge_page(conn: &Connection, page: uuid::Uuid) -> CommandResult<()> {
+    // Staged roots are keyed by hash, so they are reached through the versions
+    // that pin them, before those versions go.
+    conn.execute(
+        "DELETE FROM ink_staged_roots WHERE root_hash IN
+           (SELECT root_hash FROM ink_versions WHERE page_uuid=?1)",
+        [page],
+    )
+    .map_err(err)?;
+    conn.execute("DELETE FROM ink_versions WHERE page_uuid=?1", [page])
+        .map_err(err)?;
+    conn.execute("DELETE FROM ink_history WHERE page_uuid=?1", [page])
+        .map_err(err)?;
+    conn.execute("DELETE FROM ink_documents WHERE page_uuid=?1", [page])
+        .map_err(err)?;
+    history::collect(conn)
+}
+
 pub(super) fn read(path: &Store) -> CommandResult<InkDraftSnapshot> {
     let mut conn = open(path)?;
     let tx = conn.transaction().map_err(err)?;

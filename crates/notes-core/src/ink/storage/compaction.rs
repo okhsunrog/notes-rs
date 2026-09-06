@@ -10,7 +10,11 @@ const MAX_CACHED_ROOT_ENTRIES: usize = 65_536;
 type Packed = (BTreeMap<Id, Vec<u8>>, BTreeMap<Id, model::SegmentRef>);
 /// Archive restoration is also a publication boundary. Pack the validated
 /// detached graph before opening the restore transaction.
-pub(in crate::ink) fn compact_snapshot(mut snapshot: Snapshot) -> CommandResult<Snapshot> {
+pub(in crate::ink) fn compact_snapshot(snapshot: Snapshot) -> CommandResult<Snapshot> {
+    compact_snapshot_with_target(snapshot, TARGET_POINTS)
+}
+
+fn compact_snapshot_with_target(mut snapshot: Snapshot, target: usize) -> CommandResult<Snapshot> {
     if snapshot.chunks.len() < 2 {
         return Ok(snapshot);
     }
@@ -20,13 +24,34 @@ pub(in crate::ink) fn compact_snapshot(mut snapshot: Snapshot) -> CommandResult<
         chunks: std::mem::take(&mut snapshot.chunks),
         locations: doc.segments.clone(),
     };
-    let (chunks, locations) = repack(&plan)?
-        .ok_or_else(|| CommandError::invalid("Archive ink graph exceeds compaction budget"))?;
+    let (chunks, locations) = match repack_with_target(&plan, target)? {
+        Repack::Packed(packed) => packed,
+        // A graph the packer cannot make smaller is already in its final shape.
+        // Refusing it here failed the whole archive restore for a note that was
+        // simply written in one pass.
+        Repack::Unchanged => {
+            snapshot.chunks = plan.chunks;
+            return Ok(snapshot);
+        }
+        Repack::OverBudget => {
+            return Err(CommandError::invalid(
+                "Archive ink graph exceeds compaction budget",
+            ));
+        }
+    };
     doc.chunks = chunks.iter().map(|(id, b)| (*id, blob_ref(b))).collect();
     doc.segments = locations;
     snapshot.root = seal(&doc)?;
     snapshot.chunks = chunks;
     Ok(snapshot)
+}
+
+/// Why a packing pass produced no replacement. "Already minimal" and "too big
+/// to attempt" are different answers: the first is a success, the second is not.
+enum Repack {
+    Packed(Packed),
+    Unchanged,
+    OverBudget,
 }
 struct Plan {
     roots: BTreeMap<Id, model::Document>,
@@ -159,10 +184,10 @@ fn finish(
     }
     Ok(())
 }
-fn repack(plan: &Plan) -> CommandResult<Option<Packed>> {
+fn repack(plan: &Plan) -> CommandResult<Repack> {
     repack_with_target(plan, TARGET_POINTS)
 }
-fn repack_with_target(plan: &Plan, target: usize) -> CommandResult<Option<Packed>> {
+fn repack_with_target(plan: &Plan, target: usize) -> CommandResult<Repack> {
     let mut chunks = BTreeMap::new();
     let mut locations = BTreeMap::new();
     let mut builder: Option<Chunk> = None;
@@ -178,7 +203,7 @@ fn repack_with_target(plan: &Plan, target: usize) -> CommandResult<Option<Packed
             .map(|c| c.values.len() as u64)
             .sum::<u64>();
         if decoded_size > MAX_JOB_BYTES {
-            return Ok(None);
+            return Ok(Repack::OverBudget);
         }
         let mut first = 0;
         for (index, (segment, count)) in chunk.segments.iter().enumerate() {
@@ -234,9 +259,9 @@ fn repack_with_target(plan: &Plan, target: usize) -> CommandResult<Option<Packed
     let before: usize = plan.chunks.values().map(Vec::len).sum();
     let after: usize = chunks.values().map(Vec::len).sum();
     if after >= before {
-        return Ok(None);
+        return Ok(Repack::Unchanged);
     }
-    Ok(Some((chunks, locations)))
+    Ok(Repack::Packed((chunks, locations)))
 }
 fn publish(
     path: &Store,
@@ -349,8 +374,67 @@ pub(in super::super) fn compact_with_limits(
     let Some(plan) = plan else {
         return Ok(false);
     };
-    let Some((chunks, locations)) = repack(&plan)? else {
+    let Repack::Packed((chunks, locations)) = repack(&plan)? else {
         return Ok(false);
     };
     publish(path, plan, chunks, locations)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A graph the packer cannot make smaller is already in its final shape.
+    /// Reporting that as "over budget" failed the entire archive restore for a
+    /// note that simply had nothing left to merge.
+    #[tokio::test]
+    async fn a_graph_that_cannot_shrink_restores_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.db");
+        let conn = crate::db::open(&path).await.unwrap();
+        let id = crate::db::create_handwritten_note_with_ops(&conn, None)
+            .await
+            .unwrap()
+            .value
+            .uuid;
+        let store = Store::new(&path, id);
+        let strokes: Vec<_> = (0..2)
+            .map(|seed| InkStroke {
+                id: uuid::Uuid::now_v7(),
+                width: 2.,
+                points: (0..40)
+                    .map(|n| InkPoint {
+                        x: f64::from(n + seed * 100),
+                        y: f64::from(n),
+                        pressure: 0.5,
+                        tilt_x: 0.,
+                        tilt_y: 0.,
+                        time: f64::from(n),
+                    })
+                    .collect(),
+            })
+            .collect();
+        store
+            .patch(
+                InkDraftPatch {
+                    order: strokes.iter().map(|s| s.id).collect(),
+                    upserts: strokes,
+                    background: InkBackground::Plain,
+                },
+                None,
+            )
+            .unwrap();
+        let connection = open(&store).unwrap();
+        let (snapshot, _) = load(&connection, id).unwrap().unwrap();
+        assert!(snapshot.chunks.len() >= 2);
+
+        // One point per block leaves nothing to merge, so the packer produces
+        // no smaller graph — the same answer a fully packed note gives.
+        let unchanged = compact_snapshot_with_target(snapshot.clone(), 1).unwrap();
+        assert_eq!(unchanged.chunks, snapshot.chunks);
+        assert_eq!(unchanged.root.id, snapshot.root.id);
+        // The ordinary target still merges the blocks.
+        let packed = compact_snapshot(snapshot.clone()).unwrap();
+        assert!(packed.chunks.len() < snapshot.chunks.len());
+    }
 }

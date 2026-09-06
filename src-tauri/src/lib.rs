@@ -320,10 +320,24 @@ pub fn run() {
             let app = app.clone();
             let finished = finished.clone();
             tauri::async_runtime::spawn(async move {
-                if let Some(ink) = app.try_state::<commands::HandwritingStore>()
-                    && let Err(error) = ink.complete_all().await
-                {
-                    tracing::warn!(?error, "Ink exit completion retained for recovery");
+                if let Some(ink) = app.try_state::<commands::HandwritingStore>() {
+                    // Packing is bounded but not instant, and a busy database can
+                    // block it. Quitting must not hang on it: whatever is left is
+                    // durable and finishes on the next launch.
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        ink.complete_all(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => {
+                            tracing::warn!(?error, "Ink exit completion retained for recovery");
+                        }
+                        Err(_) => tracing::warn!(
+                            "Ink exit completion timed out; retained for recovery on next launch"
+                        ),
+                    }
                 }
                 sync::finish_before_exit(&app).await;
                 finished.store(true, Ordering::Relaxed);

@@ -971,6 +971,22 @@ pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> 
         if active_ink.iter().any(|id| !incoming_pages.contains(id)) {
             return Err(CoreError::conflict("Snapshot would remove an open or unpublished handwritten note"));
         }
+        // Notes the snapshot does not contain are gone; their drawings must go
+        // with them rather than surviving as unreachable bodies that every
+        // later export would carry.
+        let retained: HashSet<_> = snapshot
+            .page_identities
+            .iter()
+            .map(|identity| identity.uuid)
+            .chain(incoming_pages.iter().copied())
+            .collect();
+        let stored_ink = transaction
+            .prepare("SELECT page_uuid FROM ink_documents UNION SELECT page_uuid FROM ink_versions")?
+            .query_map([], |r| r.get::<_, uuid::Uuid>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for page in stored_ink.into_iter().filter(|page| !retained.contains(page)) {
+            crate::ink::purge_page(&transaction, page)?;
+        }
         transaction.execute_batch(
             "DELETE FROM page_links;
              DELETE FROM block_refs;
@@ -1898,6 +1914,10 @@ fn apply_one_with_effects(
                     effects.discard_block_refs(*block_uuid);
                 }
                 transaction.execute("DELETE FROM pages WHERE uuid = ?1", [payload.uuid])?;
+                // Same transaction as the delete, and on the shared apply path,
+                // so a delete arriving through sync purges the drawing on the
+                // receiving replica too.
+                crate::ink::purge_page(transaction, payload.uuid)?;
                 for alias in reference_aliases {
                     effects.request_page_links(transaction, alias)?;
                 }

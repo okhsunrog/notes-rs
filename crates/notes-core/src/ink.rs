@@ -13,6 +13,13 @@ pub(crate) mod versions;
 pub use input::*;
 use input::{MAX_POINTS, validate};
 pub use versions::{Publish, Version};
+/// Drops every ink row a deleted note owns, then collects the orphaned bodies.
+/// Called inside the caller's transaction so the drawing disappears exactly
+/// when the page does, on this replica and on every replica the delete reaches.
+pub(crate) fn purge_page(conn: &rusqlite::Connection, page: uuid::Uuid) -> CommandResult<()> {
+    storage::purge_page(conn, page)
+}
+
 fn err(error: impl std::fmt::Display) -> CommandError {
     CommandError::InkStorage(error.to_string())
 }
@@ -30,6 +37,9 @@ impl Store {
             path: path.as_ref().to_owned(),
             document,
         }
+    }
+    pub fn document(&self) -> uuid::Uuid {
+        self.document
     }
     pub fn read(&self) -> CommandResult<InkDraftSnapshot> {
         storage::read(self)
