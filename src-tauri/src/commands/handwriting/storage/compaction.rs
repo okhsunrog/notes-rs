@@ -6,8 +6,11 @@ const MAX_JOB_BYTES: u64 = 128 * 1024 * 1024;
 // Each fresh block is one normalized stroke, at most 150k points * 49 bytes.
 const MAX_FRESH_CHUNKS: usize = 16;
 const MAX_FRESH_BYTES: u64 = 8 * 1024 * 1024;
+// Bounded, job-local reuse of validated typed metadata (not decoded points).
+const MAX_CACHED_ROOT_ENTRIES: usize = 65_536;
 type Packed = (BTreeMap<Id, Vec<u8>>, BTreeMap<Id, model::SegmentRef>);
 struct Plan {
+    roots: BTreeMap<Id, model::Document>,
     chunks: BTreeMap<Id, Vec<u8>>,
     locations: BTreeMap<Id, model::SegmentRef>,
 }
@@ -21,6 +24,8 @@ fn prepare(path: &Path) -> CommandResult<Option<Plan>> {
         return Ok(None);
     }
     let roots = history::roots(&tx)?;
+    let mut cached_roots = BTreeMap::new();
+    let mut cached_entries = 0;
     let mut catalog = BTreeMap::new();
     let mut locations = BTreeMap::new();
     #[cfg(test)]
@@ -44,6 +49,16 @@ fn prepare(path: &Path) -> CommandResult<Option<Plan>> {
                     return Err(CommandError::invalid("Conflicting segment location"));
                 }
             }
+        }
+        let entries = doc.records.len() + doc.chunks.len() + doc.segments.len() + doc.pages.len();
+        // Unknown extension/resource payloads are not included in this entry budget.
+        if doc.extra.is_empty()
+            && doc.resources.is_empty()
+            && cached_entries + entries <= MAX_CACHED_ROOT_ENTRIES
+            && !cached_roots.contains_key(id)
+        {
+            cached_entries += entries;
+            cached_roots.insert(*id, doc);
         }
     }
     #[cfg(test)]
@@ -89,7 +104,11 @@ fn prepare(path: &Path) -> CommandResult<Option<Plan>> {
         chunks.insert(id, bytes);
     }
     tx.commit().map_err(err)?;
-    Ok(Some(Plan { chunks, locations }))
+    Ok(Some(Plan {
+        roots: cached_roots,
+        chunks,
+        locations,
+    }))
 }
 fn finish(
     builder: &mut Option<Chunk>,
@@ -210,7 +229,13 @@ fn publish(
         let mut doc = {
             #[cfg(test)]
             let _span = profile::span("publish.read_root");
-            model::Document::read(&get_record(&tx, root_id, None)?).map_err(err)?
+            // The transaction rereads the current history root IDs. Reuse only
+            // exact immutable roots validated during preparation; concurrent edits
+            // and competing compactions create different roots and take the fallback.
+            match plan.roots.get(&root_id) {
+                Some(doc) => doc.clone(),
+                None => model::Document::read(&get_record(&tx, root_id, None)?).map_err(err)?,
+            }
         };
         #[cfg(test)]
         let remap_span = profile::span("publish.remap");
