@@ -12,6 +12,7 @@ members = [
   "server",
   "src-tauri",
   "crates/ink-format",
+  "tools/ink-storage-bench",
 ]
 
 [workspace.package]
