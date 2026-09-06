@@ -345,3 +345,21 @@ order/deletion/restoration, stale writes, duplicate/missing IDs and invalid geom
 Validation before hardware retest: 396 frontend tests, five handwriting storage Rust tests;
 native renderer unchanged since the nine passing Android tests. The proposed CBOR/column
 storage draft was reviewed separately; no storage migration was performed.
+
+### Fresh words remained visible after erasing: display reconciliation
+
+The hardware retest recorded two new pen strokes and six hardware eraser strokes. Both new
+words were removed from the canonical canvas and persisted JSON; the resulting file was
+byte-identical to the pre-test draft. Neither the canvas export nor the Android screenshot
+contained the words, while the user still saw them on the physical panel. A fenced repaint
+of the full visible canvas through handwritingRepaint alone did not remove them. This
+isolates a fast-ink/display reconciliation failure, not an eraser geometry or save failure.
+The same recording contained no JavaScript long task over 50 ms after the preceding optimizations.
+
+Stock Notes GrayscaleRefreshAction and the SDK partial-refresh example mark the submitted
+buffer with HAND_WRITING_REPAINT_MODE. Tangleaf now holds this mode from invalidation through
+frame submission, then restores the sheet's GU mode. Cancellation, pen-down and display-mode
+release also unwind the temporary mode; no early raw-layer clear is introduced. A new unit
+test covers idempotent acquisition/release. Ten Android tests pass and the arm64 APK built
+and installed with byte-identical draft data. Device readback at submission was raw 524290,
+then GU/raw 2 afterward. Physical acceptance of fresh-word erasing remains pending.

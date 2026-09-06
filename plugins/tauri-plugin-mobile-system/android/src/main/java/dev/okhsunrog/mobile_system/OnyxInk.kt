@@ -90,6 +90,14 @@ class OnyxInk(
     private var previousViewMode: UpdateMode? = null
     private var previousViewModeRaw: Int? = null
     private var qualityOwned = false
+    private var lastRepaintModeRaw: Int? = null
+    private val repaintMode = InkRepaintMode(
+        enter = {
+            EpdController.setViewDefaultUpdateMode(webView, UpdateMode.HAND_WRITING_REPAINT_MODE)
+            lastRepaintModeRaw = readViewModeRaw()
+        },
+        leave = { if (qualityOwned) EpdController.setViewDefaultUpdateMode(webView, UpdateMode.GU) },
+    )
     private var fastModeAccepted: Boolean? = null
     private var fastModeRequests = 0L
     private var qualityRestores = 0L
@@ -205,6 +213,8 @@ class OnyxInk(
         put("error", failed)
         put("repaintCount", repaintCount)
         put("lastRepaint", lastRepaint.toShortString())
+        put("repaintModeActive", repaintMode.active)
+        put("lastRepaintModeRaw", lastRepaintModeRaw)
         put("repaintedPixels", repaintedPixels)
         put("visibleCanvasPixels", limit.width().toLong() * limit.height())
         put("qualityModeOwned", qualityOwned)
@@ -245,23 +255,30 @@ class OnyxInk(
                 if (!frames.isCurrent(submission)) return@post
                 pendingFrame = null
                 pendingObserver = null
-                if (!canPresent() || !frames.present(submission, sequence, drawing)) return@post
-                // Keep the raw pen layer alive. The firmware reconciles ink from the new buffer.
-                val dirty = damage.take() ?: return@post
-                val region = Rect(
-                    floor(sheet.left + dirty.left * sheet.width() / 1000).toInt() - 2,
-                    floor(sheet.top + dirty.top * sheet.height() / 1400).toInt() - 2,
-                    ceil(sheet.left + dirty.right * sheet.width() / 1000).toInt() + 2,
-                    ceil(sheet.top + dirty.bottom * sheet.height() / 1400).toInt() + 2)
-                if (!region.intersect(limit)) return@post
-                EpdController.handwritingRepaint(webView, region)
-                lastRepaint = Rect(region)
-                repaintedPixels += region.width().toLong() * region.height()
-                repaintCount++
+                try {
+                    if (!canPresent() || !frames.present(submission, sequence, drawing)) return@post
+                    // Keep the raw pen layer alive. The firmware reconciles ink from the new buffer.
+                    val dirty = damage.take() ?: return@post
+                    val region = Rect(
+                        floor(sheet.left + dirty.left * sheet.width() / 1000).toInt() - 2,
+                        floor(sheet.top + dirty.top * sheet.height() / 1400).toInt() - 2,
+                        ceil(sheet.left + dirty.right * sheet.width() / 1000).toInt() + 2,
+                        ceil(sheet.top + dirty.bottom * sheet.height() / 1400).toInt() + 2)
+                    if (!region.intersect(limit)) return@post
+                    EpdController.handwritingRepaint(webView, region)
+                    lastRepaint = Rect(region)
+                    repaintedPixels += region.width().toLong() * region.height()
+                    repaintCount++
+                } finally {
+                    repaintMode.release()
+                }
             }
         }
         pendingFrame = submitted
         pendingObserver = observer
+        // Stock Notes marks the actual submitted buffer as a handwriting repaint.
+        // A later handwritingRepaint call alone does not remove fast ink on this firmware.
+        repaintMode.acquire()
         observer.registerFrameCommitCallback(submitted)
         webView.invalidate()
     }
@@ -271,6 +288,7 @@ class OnyxInk(
             resumed && webView.hasWindowFocus() && !limit.isEmpty
 
     private fun cancelFrameSubmission() {
+        repaintMode.release()
         frames.cancelSubmission()
         val callback = pendingFrame
         val observer = pendingObserver
@@ -323,6 +341,7 @@ class OnyxInk(
     }.getOrNull()
 
     private fun releaseDisplayMode() {
+        repaintMode.release()
         webView.removeCallbacks(settleDisplay)
         displayPolicy.reset()
         qualityDamage.take()
