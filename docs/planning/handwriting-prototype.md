@@ -525,4 +525,8 @@ Device validation (2026-09-06): installed arm64 debug build; opened the current
 2 -> 3: chunk bytes, record bytes and head revision unchanged, integrity_check OK,
 one existing chunk marked sealed. Fifteen handwriting storage/history tests pass;
 scoped Clippy passes with the existing collapsible_if/chunks_exact_to_as_chunks
-baseline lints excluded. Fresh handwriting/eraser/Undo visual acceptance is pending.
+baseline lints excluded. User confirmed smooth writing, working eraser and Undo/Redo,
+and preserved strokes after closing/reopening the sheet. A subsequent device DB
+copy passed integrity_check and foreign_key_check: 10 chunks (9 sealed), 51 retained
+history states. Manual acceptance of this fresh-only packing build is complete;
+this does not validate future note autosave or synchronization integration.
