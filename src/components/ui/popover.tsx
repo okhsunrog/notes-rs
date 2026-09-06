@@ -28,12 +28,21 @@ function PopoverContent({
   className,
   align = "center",
   sideOffset = 8,
+  anchor,
   ...props
 }: React.ComponentProps<typeof PopoverPrimitive.Popup> &
-  Pick<React.ComponentProps<typeof PopoverPrimitive.Positioner>, "align" | "sideOffset">) {
+  Pick<
+    React.ComponentProps<typeof PopoverPrimitive.Positioner>,
+    "align" | "sideOffset" | "anchor"
+  >) {
   return (
     <PopoverPrimitive.Portal data-slot="popover-portal">
-      <PopoverPrimitive.Positioner align={align} sideOffset={sideOffset} collisionPadding={12}>
+      <PopoverPrimitive.Positioner
+        align={align}
+        sideOffset={sideOffset}
+        anchor={anchor}
+        collisionPadding={12}
+      >
         <PopoverPrimitive.Popup
           data-slot="popover-content"
           className={cn(

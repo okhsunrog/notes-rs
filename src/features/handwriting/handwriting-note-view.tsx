@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Menu } from "@base-ui/react/menu";
 import {
   ArrowLeft,
   Copy,
@@ -7,7 +8,9 @@ import {
   Grid2X2,
   Lasso,
   Minus,
+  MoreHorizontal,
   PenLine,
+  Pencil,
   Plus,
   Redo2,
   Square,
@@ -17,6 +20,9 @@ import {
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Popover, PopoverContent } from "@/components/ui/popover";
+import { refreshPanelAfterClose } from "@/app/eink-refresh";
+import { useOverlayInkSuppression } from "@/app/ink-suppression";
 import { usePageNavigationStore } from "@/features/pages/page-navigation-store";
 import { RenamePageDialog } from "@/features/pages/rename-page-dialog";
 import { usePageTitleEditor } from "@/features/pages/use-page-title-editor";
@@ -83,6 +89,79 @@ function completeInBackground(pageUuid: string) {
   });
 }
 
+const TOOLS = [
+  { id: "pen", label: "Pen", Icon: PenLine },
+  { id: "eraser", label: "Eraser", Icon: Eraser },
+  { id: "lasso", label: "Lasso", Icon: Lasso },
+] as const satisfies readonly { id: InkTool; label: string; Icon: typeof PenLine }[];
+
+/**
+ * Favourite, rename and delete, off the single toolbar row.
+ *
+ * A menu is an overlay, so opening it holds the firmware pen down: the items take their taps
+ * instead of the sheet taking a stroke through them.
+ */
+function NoteMenu({
+  favorite,
+  busy,
+  onToggleFavorite,
+  onRename,
+  onDelete,
+}: {
+  favorite: boolean;
+  busy: boolean;
+  onToggleFavorite: () => void;
+  onRename: () => void;
+  onDelete: () => void;
+}) {
+  const overlay = useOverlayInkSuppression();
+  return (
+    <Menu.Root onOpenChange={refreshPanelAfterClose(overlay)}>
+      <Menu.Trigger
+        render={
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Note options"
+            className="shrink-0 rounded-lg text-muted-foreground"
+          />
+        }
+      >
+        <MoreHorizontal className="size-4" />
+      </Menu.Trigger>
+      <Menu.Portal>
+        <Menu.Positioner sideOffset={6} align="end">
+          <Menu.Popup className="z-50 min-w-44 rounded-xl border bg-popover p-1 text-popover-foreground shadow-panel outline-none">
+            <Menu.Item
+              className="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2.5 text-sm outline-none data-[highlighted]:bg-accent"
+              onClick={onToggleFavorite}
+            >
+              <Star className={cn("size-4", favorite && "fill-current text-primary")} />
+              {favorite ? "Remove from favorites" : "Add to favorites"}
+            </Menu.Item>
+            <Menu.Item
+              className="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2.5 text-sm outline-none data-[highlighted]:bg-accent"
+              onClick={onRename}
+            >
+              <Pencil className="size-4" />
+              Rename
+            </Menu.Item>
+            <Menu.Item
+              disabled={busy}
+              className="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2.5 text-sm text-destructive outline-none data-[disabled]:opacity-50 data-[highlighted]:bg-accent"
+              onClick={onDelete}
+            >
+              <Trash2 className="size-4" />
+              Delete note
+            </Menu.Item>
+          </Menu.Popup>
+        </Menu.Positioner>
+      </Menu.Portal>
+    </Menu.Root>
+  );
+}
+
 type Props = {
   paneId: PaneId;
   page: Page;
@@ -131,6 +210,9 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
   const [recovering, setRecovering] = useState(false);
   const [comparing, setComparing] = useState(false);
   const [renaming, setRenaming] = useState(false);
+  // Anchored to the tool button that was tapped, so the options sit under their own tool.
+  const [optionsOpen, setOptionsOpen] = useState(false);
+  const [optionsAnchor, setOptionsAnchor] = useState<HTMLElement | null>(null);
 
   const latestDraft = useRef<InkDraft | null>(null);
   const historyBusyRef = useRef(false);
@@ -405,6 +487,12 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
       setHistoryBusy(false);
     }
   };
+  // Nothing may hold the pen down once the sheet is gone or the tool moved on.
+  useEffect(() => {
+    if (!editing) setOptionsOpen(false);
+  }, [editing]);
+  useEffect(() => setOptionsOpen(false), [tool]);
+
   const undoStroke = () => void navigateHistory(false);
   const redoStroke = () => void navigateHistory(true);
 
@@ -424,7 +512,12 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
         }
       }}
     >
-      <header className="flex shrink-0 items-center gap-2 border-b px-2 py-1.5">
+      {/* One row over the sheet: every extra strip of chrome is sheet the pen cannot use. */}
+      <div
+        role="toolbar"
+        aria-label="Handwriting tools"
+        className="flex shrink-0 items-center gap-1 border-b px-2 py-1.5"
+      >
         <Button
           type="button"
           variant="ghost"
@@ -441,159 +534,105 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
           type="button"
           onClick={() => setRenaming(true)}
           aria-label="Rename note"
-          className="min-w-0 flex-1 truncate rounded-lg px-1 py-1 text-left text-base leading-tight font-semibold text-foreground"
+          className="min-w-0 flex-1 truncate rounded-lg px-1 py-1 text-left text-sm leading-tight font-semibold text-foreground"
         >
           {title.title || <span className="text-muted-foreground/40">Untitled note</span>}
         </button>
         {unsentChanges(status) && (
-          <span className="shrink-0 text-[11px] text-muted-foreground">Unsent changes</span>
+          <span className="shrink-0 text-[11px] eink:text-xs text-muted-foreground">Unsent</span>
         )}
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          aria-label={favorite ? "Remove note from favorites" : "Add note to favorites"}
-          onClick={() => toggleFavoritePage(uuid)}
-          className={cn("shrink-0 rounded-lg text-muted-foreground", favorite && "text-primary")}
-        >
-          <Star className={cn("size-4", favorite && "fill-current")} />
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          aria-label="Delete page"
-          disabled={busy}
-          onClick={() => void deleteNote()}
-          className="shrink-0 rounded-lg text-muted-foreground hover:text-destructive"
-        >
-          <Trash2 className="size-4" />
-        </Button>
-      </header>
-      {title.conflict && (
-        <div
-          role="alert"
-          className="flex flex-wrap items-center gap-2 border-b bg-amber-500/10 px-3 py-2 text-xs"
-        >
-          <span className="mr-auto">
-            This title changed on another replica. Choose which version to keep.
-          </span>
-          <Button type="button" variant="outline" size="xs" onClick={title.useRemote}>
-            Use remote
-          </Button>
-          <Button type="button" size="xs" onClick={title.keepLocal}>
-            Keep mine
-          </Button>
-        </div>
-      )}
-      {hasConflict(status) && (
-        <div className="flex flex-wrap items-center gap-2 border-b bg-amber-500/10 px-3 py-2 text-xs">
-          <span className="mr-auto">
-            This note has {status?.heads.length} versions from other devices
-          </span>
-          <Button
-            type="button"
-            variant="outline"
-            size="xs"
-            disabled={busy || comparing}
-            onClick={() => void compareVersions()}
-          >
-            Compare
-          </Button>
-        </div>
-      )}
-      {editing ? (
-        <>
-          <div
-            role="toolbar"
-            aria-label="Handwriting tools"
-            className="flex shrink-0 flex-wrap items-center gap-2 border-b px-3 py-2"
-          >
+        {editing && (
+          <>
+            {TOOLS.map(({ id, label, Icon }) => (
+              <Button
+                key={id}
+                type="button"
+                size="icon-sm"
+                variant={tool === id ? "secondary" : "ghost"}
+                aria-label={tool === id ? `${label} options` : label}
+                aria-pressed={tool === id}
+                disabled={!draft || editingBusy}
+                onClick={(event) => {
+                  // The second tap on the active tool is what opens its options; the first
+                  // one has to stay a plain tool switch, or every switch costs a dismissal.
+                  if (tool === id) {
+                    setOptionsAnchor(event.currentTarget);
+                    setOptionsOpen(true);
+                    return;
+                  }
+                  setTool(id);
+                  if (id !== "lasso") setSelected([]);
+                }}
+                className="shrink-0 rounded-lg"
+              >
+                <Icon className="size-4" />
+              </Button>
+            ))}
             <Button
               type="button"
-              variant={tool === "pen" ? "secondary" : "ghost"}
-              aria-pressed={tool === "pen"}
+              size="icon-sm"
+              variant={draft?.background === "grid" ? "secondary" : "ghost"}
+              aria-label="Grid paper"
+              aria-pressed={draft?.background === "grid"}
               disabled={!draft || editingBusy}
               onClick={() => {
-                setTool("pen");
-                setSelected([]);
+                if (draft)
+                  change({
+                    ...draft,
+                    background: draft.background === "grid" ? "plain" : "grid",
+                  });
               }}
+              className="shrink-0 rounded-lg"
             >
-              <PenLine className="size-4" />
-              Pen
+              {draft?.background === "grid" ? (
+                <Grid2X2 className="size-4" />
+              ) : (
+                <Square className="size-4" />
+              )}
             </Button>
             <Button
               type="button"
-              variant={tool === "eraser" ? "secondary" : "ghost"}
-              aria-pressed={tool === "eraser"}
-              disabled={!draft || editingBusy}
-              onClick={() => {
-                setTool("eraser");
-                setSelected([]);
-              }}
+              size="icon-sm"
+              variant="ghost"
+              aria-label="Undo stroke"
+              disabled={editingBusy || !canUndo}
+              onClick={undoStroke}
+              className="shrink-0 rounded-lg"
             >
-              <Eraser className="size-4" />
-              Eraser
+              <Undo2 className="size-4" />
             </Button>
             <Button
               type="button"
-              variant={tool === "lasso" ? "secondary" : "ghost"}
-              aria-pressed={tool === "lasso"}
-              disabled={!draft || editingBusy}
-              onClick={() => setTool("lasso")}
+              size="icon-sm"
+              variant="ghost"
+              aria-label="Redo stroke"
+              disabled={editingBusy || !canRedo}
+              onClick={redoStroke}
+              className="shrink-0 rounded-lg"
             >
-              <Lasso className="size-4" /> Lasso
+              <Redo2 className="size-4" />
             </Button>
-            <div className="mx-1 h-6 border-l" />
-            <div className="flex gap-1" role="group" aria-label="Paper background">
-              {(["plain", "grid"] as const).map((background) => (
-                <Button
-                  key={background}
-                  variant={draft?.background === background ? "secondary" : "ghost"}
-                  aria-label={background === "grid" ? "Grid paper" : "Plain paper"}
-                  aria-pressed={draft?.background === background}
-                  disabled={!draft || editingBusy}
-                  onClick={() => {
-                    if (draft && draft.background !== background) change({ ...draft, background });
-                  }}
-                >
-                  {background === "grid" ? (
-                    <Grid2X2 className="size-4" />
-                  ) : (
-                    <Square className="size-4" />
-                  )}
-                </Button>
-              ))}
-            </div>
-            <div className="ml-auto flex gap-1">
-              <Button
-                type="button"
-                variant="ghost"
-                aria-label="Undo stroke"
-                disabled={editingBusy || !canUndo}
-                onClick={undoStroke}
-              >
-                <Undo2 className="size-4" />
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                aria-label="Redo stroke"
-                disabled={editingBusy || !canRedo}
-                onClick={redoStroke}
-              >
-                <Redo2 className="size-4" />
-              </Button>
-            </div>
-          </div>
-          <div
-            role="toolbar"
-            aria-label="Tool options"
-            className="flex min-h-12 shrink-0 flex-wrap items-center gap-1 border-b px-3 py-1"
+          </>
+        )}
+        <NoteMenu
+          favorite={favorite}
+          busy={busy}
+          onToggleFavorite={() => toggleFavoritePage(uuid)}
+          onRename={() => setRenaming(true)}
+          onDelete={() => void deleteNote()}
+        />
+      </div>
+      {editing && (
+        <Popover open={optionsOpen} onOpenChange={setOptionsOpen}>
+          <PopoverContent
+            anchor={optionsAnchor}
+            align="center"
+            data-ink-tool-options
+            className="w-auto max-w-[min(22rem,calc(100vw-1.5rem))] p-2"
           >
             {tool === "pen" && (
-              <>
-                <span className="mr-2 text-xs text-muted-foreground">Pen width</span>
+              <div className="flex items-center gap-1" role="group" aria-label="Pen width">
+                <span className="px-1 text-xs text-muted-foreground">Width</span>
                 {[2, 3, 5].map((value) => (
                   <Button
                     key={value}
@@ -601,7 +640,10 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
                     aria-label={`Pen width ${value}`}
                     aria-pressed={width === value}
                     disabled={editingBusy}
-                    onClick={() => setWidth(value)}
+                    onClick={() => {
+                      setWidth(value);
+                      setOptionsOpen(false);
+                    }}
                     className="w-10 px-0"
                   >
                     <span
@@ -610,10 +652,10 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
                     />
                   </Button>
                 ))}
-              </>
+              </div>
             )}
             {tool === "eraser" && (
-              <>
+              <div className="flex flex-wrap items-center gap-1">
                 {(
                   [
                     ["stroke", "Stroke"],
@@ -627,7 +669,10 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
                     aria-pressed={eraserMode === value}
                     aria-label={`${label} eraser`}
                     disabled={editingBusy}
-                    onClick={() => setEraserMode(value)}
+                    onClick={() => {
+                      setEraserMode(value);
+                      setOptionsOpen(false);
+                    }}
                   >
                     {label}
                   </Button>
@@ -651,7 +696,10 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
                         aria-label={`${label} eraser size`}
                         aria-pressed={eraserRadius === value}
                         disabled={editingBusy}
-                        onClick={() => setEraserRadius(value)}
+                        onClick={() => {
+                          setEraserRadius(value);
+                          setOptionsOpen(false);
+                        }}
                         className="w-9 px-0"
                       >
                         <span
@@ -663,7 +711,6 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
                   </div>
                 )}
                 <Button
-                  className="ml-auto"
                   variant="ghost"
                   disabled={editingBusy || !draft?.strokes.length}
                   onClick={() => {
@@ -672,14 +719,15 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
                       setSelected([]);
                       setLimit(false);
                     }
+                    setOptionsOpen(false);
                   }}
                 >
                   <Trash2 className="size-4" /> Clear sheet
                 </Button>
-              </>
+              </div>
             )}
             {tool === "lasso" && (
-              <>
+              <div className="flex flex-wrap items-center gap-1">
                 {(
                   [
                     ["free", "Freehand"],
@@ -694,6 +742,7 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
                     onClick={() => {
                       setLassoMode(value);
                       setSelected([]);
+                      setOptionsOpen(false);
                     }}
                   >
                     {label}
@@ -730,6 +779,7 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
                           strokes: [...draft.strokes, ...moveSelection(copies, ids, 25, 25)],
                         });
                         setSelected(ids);
+                        setOptionsOpen(false);
                       }}
                     >
                       <Copy className="size-4" />
@@ -745,6 +795,7 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
                         variant="ghost"
                         aria-label={label}
                         disabled={editingBusy}
+                        // Scaling is repeated until it looks right, so this one stays open.
                         onClick={() => {
                           if (draft) {
                             const strokes = scaleSelection(draft.strokes, selected, factor);
@@ -768,6 +819,7 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
                             ),
                           });
                         setSelected([]);
+                        setOptionsOpen(false);
                       }}
                     >
                       <Trash2 className="size-4" />
@@ -776,7 +828,10 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
                       variant="ghost"
                       aria-label="Deselect"
                       disabled={editingBusy}
-                      onClick={() => setSelected([])}
+                      onClick={() => {
+                        setSelected([]);
+                        setOptionsOpen(false);
+                      }}
                     >
                       <X className="size-4" />
                     </Button>
@@ -786,11 +841,44 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
                     Draw around handwriting to select it
                   </span>
                 )}
-              </>
+              </div>
             )}
-          </div>
-        </>
-      ) : (
+          </PopoverContent>
+        </Popover>
+      )}
+      {title.conflict && (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center gap-2 border-b bg-amber-500/10 px-3 py-2 text-xs"
+        >
+          <span className="mr-auto">
+            This title changed on another replica. Choose which version to keep.
+          </span>
+          <Button type="button" variant="outline" size="xs" onClick={title.useRemote}>
+            Use remote
+          </Button>
+          <Button type="button" size="xs" onClick={title.keepLocal}>
+            Keep mine
+          </Button>
+        </div>
+      )}
+      {hasConflict(status) && (
+        <div className="flex flex-wrap items-center gap-2 border-b bg-amber-500/10 px-3 py-2 text-xs">
+          <span className="mr-auto">
+            This note has {status?.heads.length} versions from other devices
+          </span>
+          <Button
+            type="button"
+            variant="outline"
+            size="xs"
+            disabled={busy || comparing}
+            onClick={() => void compareVersions()}
+          >
+            Compare
+          </Button>
+        </div>
+      )}
+      {!editing && (
         <p role="status" className="shrink-0 border-b px-3 py-2 text-xs text-muted-foreground">
           {access === "other_pane"
             ? "This note is open for writing in another pane. Close it there to edit here."

@@ -133,6 +133,24 @@ async function mount(onDelete: (page: Page) => void = () => {}) {
   );
 }
 
+/** Menus and popovers are portalled out of the pane, so they are looked up in the document. */
+function menuItem(label: string) {
+  const found = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+    (element) => element.textContent?.trim() === label,
+  );
+  if (!found) throw new Error(`no menu item labelled ${label}`);
+  return found;
+}
+
+function options(label: string) {
+  const found = [...document.querySelectorAll<HTMLElement>("[data-ink-tool-options] button")].find(
+    (element) =>
+      element.textContent?.trim() === label || element.getAttribute("aria-label") === label,
+  );
+  if (!found) throw new Error(`no tool option labelled ${label}`);
+  return found;
+}
+
 /** The rename dialog is portalled out of the pane, so it is looked up in the document. */
 function renameField(): HTMLInputElement;
 function renameField(required: false): HTMLInputElement | null;
@@ -245,7 +263,8 @@ it("opens read-only without a pen and without the mouse preference", async () =>
   await mount();
 
   expect(api.loadHandwritingNote).toHaveBeenCalledWith(page.uuid, false);
-  expect(container.querySelector('[role="toolbar"]')).toBeNull();
+  // The row stays — Back and the note menu still work — but it offers no tools.
+  expect(container.querySelectorAll('[role="toolbar"] button[aria-pressed]')).toHaveLength(0);
   expect(container.textContent).toContain("Connect a pen or enable mouse drawing in Settings");
   expect(container.querySelector("canvas")).not.toBeNull();
 });
@@ -297,7 +316,10 @@ it("stores queued gestures before deleting and never asks to retry sync", async 
     button("Grid paper").click();
   });
   await act(async () => {
-    button("Delete page").click();
+    button("Note options").click();
+  });
+  await act(async () => {
+    menuItem("Delete note").click();
   });
 
   expect(api.saveHandwritingPatch).toHaveBeenCalledTimes(1);
@@ -314,7 +336,7 @@ it("re-reads the note for editing once a pen or the mouse preference appears", a
   await mount();
 
   expect(api.loadHandwritingNote).toHaveBeenCalledWith(page.uuid, false);
-  expect(container.querySelector('[role="toolbar"]')).toBeNull();
+  expect(container.querySelectorAll('[role="toolbar"] button[aria-pressed]')).toHaveLength(0);
 
   api.saveHandwritingPatch.mockResolvedValue("revision-2");
   await act(async () => {
@@ -413,4 +435,28 @@ it("leaves undo to the rename field while the caret is in it", async () => {
     button("Undo stroke").click();
   });
   expect(api.handwritingHistory).toHaveBeenCalledWith(page.uuid, false, "revision-2");
+});
+
+it("keeps one toolbar row and moves the tool options into a popover", async () => {
+  await mount();
+
+  // Every strip of chrome is sheet the pen cannot use; there is exactly one.
+  expect(container.querySelectorAll('[role="toolbar"]')).toHaveLength(1);
+  expect(document.querySelector("[data-ink-tool-options]")).toBeNull();
+
+  // The first tap on a tool switches to it; only the second opens its options.
+  await act(async () => {
+    button("Eraser").click();
+  });
+  expect(document.querySelector("[data-ink-tool-options]")).toBeNull();
+  await act(async () => {
+    button("Eraser options").click();
+  });
+  expect(document.querySelector("[data-ink-tool-options]")).not.toBeNull();
+
+  await act(async () => {
+    options("Pixel eraser").click();
+  });
+  expect(options.bind(null, "Pixel eraser")).toThrow();
+  expect(container.querySelectorAll('[role="toolbar"]')).toHaveLength(1);
 });

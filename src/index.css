@@ -1227,17 +1227,21 @@ html::before {
   border: 1px solid oklch(0 0 0);
 }
 
-/* E-ink needs a luminance difference, not a subtle tinted selection. */
-[data-ink-editor] [role="toolbar"] button {
+/* E-ink needs a luminance difference, not a subtle tinted selection. The tool options are
+   portalled out of the editor, so they carry their own marker and the same treatment. */
+[data-ink-editor] [role="toolbar"] button,
+[data-ink-tool-options] button {
   transition: none;
 }
-[data-ink-editor] [role="toolbar"] button[aria-pressed="true"] {
+[data-ink-editor] [role="toolbar"] button[aria-pressed="true"],
+[data-ink-tool-options] button[aria-pressed="true"] {
   background: #111;
   color: #fff;
   box-shadow: inset 0 0 0 2px #111;
   opacity: 1;
 }
-[data-ink-editor] [role="toolbar"] button[aria-pressed="false"] {
+[data-ink-editor] [role="toolbar"] button[aria-pressed="false"],
+[data-ink-tool-options] button[aria-pressed="false"] {
   background: transparent;
   color: inherit;
 }
