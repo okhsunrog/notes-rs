@@ -70,7 +70,7 @@ class OnyxInk(
     private var sheet = RectF()
     private var limit = Rect()
     private var resumed = true
-    private var drawing = false
+    private val gesture = InkGesturePairing()
     private var sequence = 0L
     private var generation = 0L
     private val frames = InkFrameFence()
@@ -119,7 +119,7 @@ class OnyxInk(
         },
     )
     private val settleDisplay = Runnable {
-        if (!drawing && displayPolicy.settle(SystemClock.uptimeMillis())) {
+        if (!gesture.drawing && displayPolicy.settle(SystemClock.uptimeMillis())) {
             val dirty = qualityDamage.take()
             // Repaint even if the last content revision was already presented in fast mode.
             config?.let { args -> commit(OnyxFrameArgs().apply {
@@ -145,6 +145,10 @@ class OnyxInk(
                 "BOOX firmware drawing APIs are unavailable"
             }
         }
+        // A session killed mid-gesture leaves the panel in transient mode, and
+        // nothing else ever clears it. Start from a known state.
+        runCatching { Device.currentDevice().clearTransientUpdate(false) }
+            .onFailure { Log.d("OnyxInk", "no transient mode to clear: ${it.message}") }
         webView.viewTreeObserver.addOnWindowFocusChangeListener(this)
     }
 
@@ -160,7 +164,10 @@ class OnyxInk(
             args.selectionRight, args.selectionBottom).all { it.isFinite() })
         require(args.width > 0 && args.height > 0 && args.viewportWidth > 0)
         require(args.strokeWidth in 0.1..20.0)
-        check(failed == null) { failed ?: "Pen SDK unavailable" }
+        // A transient SDK failure — a hidden-API hiccup, a digitizer that was
+        // not ready yet — used to disable fast ink for the rest of the process.
+        // The message survives for status(); the gate does not.
+        failed = null
         check(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && webView.isHardwareAccelerated) {
             "BOOX ink requires Android 10 or later with hardware rendering"
         }
@@ -261,7 +268,7 @@ class OnyxInk(
                 pendingFrame = null
                 pendingObserver = null
                 try {
-                    if (!canPresent() || !frames.present(submission, sequence, drawing)) return@post
+                    if (!canPresent() || !frames.present(submission, sequence, gesture.drawing)) return@post
                     // Submit the canonical buffer before releasing the eraser's pen-render pause.
                     val dirty = damage.take() ?: return@post
                     val region = Rect(
@@ -290,7 +297,7 @@ class OnyxInk(
     }
 
     private fun canPresent(): Boolean =
-        helper != null && frames.canSubmit(sequence, drawing) &&
+        helper != null && frames.canSubmit(sequence, gesture.drawing) &&
             resumed && webView.hasWindowFocus() && !limit.isEmpty
 
     private fun cancelFrameSubmission() {
@@ -329,17 +336,14 @@ class OnyxInk(
     }
 
     private fun pause(releaseDisplay: Boolean = true) {
-        if (releaseDisplay || drawing) releaseDisplayMode()
+        if (releaseDisplay || gesture.drawing) releaseDisplayMode()
         webView.removeCallbacks(refresh)
         frames.request() // Invalidate visual/frame callbacks from the old geometry or lifecycle.
         cancelFrameSubmission()
         helper?.setRawDrawingEnabled(false)
         eraserRenderGate.reset()
         resetPalm()
-        if (drawing) {
-            drawing = false
-            send("cancel")
-        }
+        if (gesture.ended()) send("cancel")
     }
 
     private fun restoreToolRendering() {
@@ -415,6 +419,9 @@ class OnyxInk(
     private fun begin(point: TouchPoint, erasing: Boolean) {
         if (config == null || helper?.isRawDrawingInputEnabled != true) return
         if (!point.x.isFinite() || !point.y.isFinite() || !point.pressure.isFinite()) return
+        // The firmware can skip an end callback; without this the palm region
+        // and the transient display mode stay claimed until the next paired end.
+        if (gesture.beginNeedsEnd()) end()
         val args = config ?: return
         val x = (point.x - sheet.left) / sheet.width() * 1000
         val y = (point.y - sheet.top) / sheet.height() * 1400
@@ -425,7 +432,7 @@ class OnyxInk(
         // Keep raw input enabled so the software eraser continues receiving points.
         eraserRenderGate.begin(erasing || args.eraser)
         if (args.interaction) helper?.setRawDrawingRenderEnabled(fastPreview)
-        drawing = true
+        gesture.begun()
         webView.removeCallbacks(settleDisplay)
         displayPolicy.begin((args.interaction || args.eraser || erasing) && !fastPreview)
         markNativePoint(point)
@@ -440,8 +447,7 @@ class OnyxInk(
     }
 
     private fun end() {
-        if (!drawing) return
-        drawing = false
+        if (!gesture.ended()) return
         resetPalm()
         displayPolicy.end(SystemClock.uptimeMillis())
         if (displayPolicy.fastRequested) {
@@ -449,11 +455,14 @@ class OnyxInk(
             webView.postDelayed(settleDisplay, InkRefreshPolicy.QUIET_MS)
         }
         send("end")
+        // The submission in flight belongs to the frame this gesture superseded,
+        // exactly as at pen-down.
+        cancelFrameSubmission()
         webView.postDelayed(refresh, 120)
     }
 
     private fun stroke(list: TouchPointList, erasing: Boolean) {
-        if (!drawing || config == null || list.isEmpty) return
+        if (!gesture.drawing || config == null || list.isEmpty) return
         val points = JSONArray()
         var pressure = 0.5
         // Same point budget as the portable draft. Never silently retain an unbounded native list.
@@ -479,8 +488,8 @@ class OnyxInk(
     }
 
     private fun preview(point: TouchPoint, erasing: Boolean) {
-        if (drawing) markNativePoint(point)
-        if (!drawing || fastPreview || (config?.interaction != true && config?.eraser != true && !erasing)) return
+        if (gesture.drawing) markNativePoint(point)
+        if (!gesture.drawing || fastPreview || (config?.interaction != true && config?.eraser != true && !erasing)) return
         val now = android.os.SystemClock.uptimeMillis()
         if (now - previewAt < 32) return
         if (!point.x.isFinite() || !point.y.isFinite() || !point.pressure.isFinite()) return

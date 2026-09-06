@@ -28,6 +28,11 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
     private val inputManager = activity.getSystemService(InputManager::class.java)
     private var inkWebView: WebView? = null
     private var onyxInk: OnyxInk? = null
+    /**
+     * The view the ink session was built on. Weak: a replaced WebView must stay
+     * collectable, and the reference is only ever used for an identity check.
+     */
+    private var onyxInkWebView: java.lang.ref.WeakReference<WebView>? = null
 
     override fun load(webView: WebView) {
         inkWebView = webView
@@ -37,6 +42,8 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
     @Suppress("OVERRIDE_DEPRECATION") // This plugin does not depend on AppCompat types.
     override fun onDestroy() {
         onyxInk?.destroy()
+        onyxInk = null
+        onyxInkWebView = null
         inputManager.unregisterInputDeviceListener(this)
     }
 
@@ -60,8 +67,19 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
                 return@runOnUiThread
             }
             try {
+                val current = inkWebView
+                // wry re-creates the WebView on some configuration changes. The
+                // old session still holds listeners, a palm region and a display
+                // mode claim on a view that is never drawn again.
+                if (onyxInk != null && current != null && onyxInkWebView?.get() !== current) {
+                    onyxInk?.destroy()
+                    onyxInk = null
+                    onyxInkWebView = null
+                }
                 if (onyxInk == null && args.enabled) {
-                    onyxInk = OnyxInk(activity, checkNotNull(inkWebView)) { trigger("onyxInk", it) }
+                    val webView = checkNotNull(current)
+                    onyxInk = OnyxInk(activity, webView) { trigger("onyxInk", it) }
+                    onyxInkWebView = java.lang.ref.WeakReference(webView)
                 }
                 invoke.resolve(onyxInk?.configure(args) ?: JSObject().put("available", true).put("active", false))
             } catch (error: Throwable) {
@@ -74,8 +92,14 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
     fun commitOnyxFrame(invoke: Invoke) {
         val args = invoke.parseArgs(OnyxFrameArgs::class.java)
         activity.runOnUiThread {
-            onyxInk?.commit(args)
-            invoke.resolve()
+            // Without this a firmware failure here leaves the caller waiting on
+            // a promise that is never settled.
+            try {
+                onyxInk?.commit(args)
+                invoke.resolve()
+            } catch (error: Throwable) {
+                invoke.reject("Could not present the BOOX ink frame: ${error.message}")
+            }
         }
     }
 
@@ -107,6 +131,14 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
     fun getSafeAreaInsets(invoke: Invoke) {
         activity.runOnUiThread {
             val decorView = activity.window.decorView
+            // A detached decor view never runs its posted work, so the caller
+            // would wait forever instead of laying out with no insets.
+            if (!decorView.isAttachedToWindow) {
+                val zero = JSObject()
+                for (edge in listOf("top", "right", "bottom", "left")) zero.put(edge, 0.0)
+                invoke.resolve(zero)
+                return@runOnUiThread
+            }
             ViewCompat.requestApplyInsets(decorView)
             decorView.post {
                 val density = activity.resources.displayMetrics.density
