@@ -29,6 +29,8 @@ use tokio_util::io::ReaderStream;
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
+mod ink;
+
 const JSON_BODY_LIMIT: usize = 2 * 1024 * 1024;
 /// Bootstrap uploads a full workspace snapshot in one authenticated request;
 /// a real corpus (thousands of pages) far exceeds the ordinary JSON limit.
@@ -198,6 +200,8 @@ impl IntoResponse for ApiError {
 pub fn router(state: AppState) -> Router {
     let json_routes = Router::new()
         .route("/v1/ops", get(get_ops).post(push_ops))
+        .route("/v1/ink/missing", post(ink::missing))
+        .route("/v1/ink/download", post(ink::download))
         .route("/v1/snapshot", get(get_snapshot))
         .route("/v1/info", get(info))
         .route("/v1/ai/status", get(ai_status).put(update_ai_settings))
@@ -212,6 +216,7 @@ pub fn router(state: AppState) -> Router {
         .layer(DefaultBodyLimit::max(BOOTSTRAP_BODY_LIMIT));
     let stream_routes = Router::new()
         .route("/v1/sync", get(sync_socket))
+        .route("/v1/ink/upload", post(ink::upload))
         .route(
             "/v1/blobs/{hash}",
             put(put_blob).get(get_blob).head(head_blob),
@@ -461,6 +466,7 @@ async fn push_ops(
         ));
     }
     validate_operation_blobs(&state, &request.ops).await?;
+    ink::validate(&state, &user.0, ink_roots(&request.ops)).await?;
     let ops = user
         .0
         .ingest(request.ops)
@@ -485,6 +491,17 @@ async fn bootstrap(
     Json(request): Json<BootstrapRequest>,
 ) -> Result<Json<notes_sync::SyncSnapshot>, ApiError> {
     validate_snapshot_blobs(&state, &request.snapshot).await?;
+    ink::validate(
+        &state,
+        &user.0,
+        request
+            .snapshot
+            .ink_versions
+            .iter()
+            .map(|v| v.publication.root_hash)
+            .collect(),
+    )
+    .await?;
     user.0
         .bootstrap(request.snapshot)
         .await
@@ -493,16 +510,17 @@ async fn bootstrap(
 }
 
 async fn sync_socket(
+    State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Query(query): Query<SyncQuery>,
     socket: WebSocketUpgrade,
 ) -> Response {
     socket
         .max_message_size(JSON_BODY_LIMIT)
-        .on_upgrade(move |socket| websocket_session(user.0, query.since, socket))
+        .on_upgrade(move |socket| websocket_session(state, user.0, query.since, socket))
 }
 
-async fn websocket_session(user: Arc<UserState>, since: u64, socket: WebSocket) {
+async fn websocket_session(state: AppState, user: Arc<UserState>, since: u64, socket: WebSocket) {
     let mut operations = user.subscribe();
     let (mut sender, mut receiver) = socket.split();
     match user.oplog.ops_since(since, MAX_OPS_PAGE).await {
@@ -548,7 +566,7 @@ async fn websocket_session(user: Arc<UserState>, since: u64, socket: WebSocket) 
                     }
                 };
                 match message {
-                    Ok(ClientMessage::Push { ops }) if ops.len() <= 256 => match user.ingest(ops).await {
+                    Ok(ClientMessage::Push { ops }) if ops.len() <= 256 => match ingest_ink_checked(&state,&user,ops).await {
                         Ok(ops) => {
                             if send_server_message(&mut sender, &ServerMessage::Ack { ops }).await.is_err() { return; }
                         }
@@ -2110,4 +2128,26 @@ mod tests {
             .expect("bootstrap response");
         assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
+}
+
+fn ink_roots(ops: &[notes_core::Op]) -> Vec<BlobHash> {
+    ops.iter()
+        .filter_map(|op| {
+            if let notes_core::OpKind::InkPublish(p) = &op.kind {
+                Some(p.root_hash)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+async fn ingest_ink_checked(
+    state: &AppState,
+    user: &UserState,
+    ops: Vec<notes_core::Op>,
+) -> anyhow::Result<Vec<notes_protocol::SequencedOp>> {
+    ink::validate(state, user, ink_roots(&ops))
+        .await
+        .map_err(|e| notes_core::CoreError::invalid(e.message))?;
+    user.ingest(ops).await
 }

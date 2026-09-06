@@ -1,4 +1,6 @@
 use crate::{SyncSnapshot, SyncTransport};
+mod ink;
+
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;

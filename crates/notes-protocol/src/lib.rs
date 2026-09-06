@@ -1,5 +1,7 @@
 //! Transport-only request, response, and event types shared by every host.
 
+pub mod ink;
+
 use notes_core::{Op, SyncSnapshot};
 use serde::{Deserialize, Serialize};
 

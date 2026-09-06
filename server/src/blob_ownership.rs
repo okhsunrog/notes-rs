@@ -107,6 +107,33 @@ impl BlobOwnership {
             .await
     }
 
+    pub async fn owned(
+        &self,
+        user_id: &str,
+        hashes: Vec<BlobHash>,
+    ) -> Result<std::collections::BTreeMap<BlobHash, u64>> {
+        let user_id = user_id.to_owned();
+        self.connection
+            .call(move |db| {
+                let mut query = db
+                    .prepare("SELECT size FROM blob_ownership WHERE user_id=?1 AND blob_hash=?2")?;
+                let mut owned = std::collections::BTreeMap::new();
+                for hash in hashes {
+                    if let Some(size) = query
+                        .query_row(
+                            rusqlite::params![user_id, hash.as_bytes().as_slice()],
+                            |r| r.get::<_, i64>(0),
+                        )
+                        .optional()?
+                    {
+                        owned.insert(hash, size as u64);
+                    }
+                }
+                Ok(owned)
+            })
+            .await
+    }
+
     pub async fn release(&self, user_id: &str, hash: BlobHash) -> Result<()> {
         let user_id = user_id.to_owned();
         self.connection
