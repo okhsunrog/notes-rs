@@ -14,6 +14,9 @@ configuration, or workspace dependency inheritance is required.
   by the caller rather than tied to a particular UUID generator.
 - Deterministic CBOR metadata envelopes, strong dependency/resource references,
   object/version references and explicit required-feature checks.
+- Typed document, page, stroke, geometry, brush, source-profile and session bodies.
+- Complete core-ink snapshot validation: reference closure, identities, hashes,
+  profile/column agreement, segment mapping, timeline and resource checks.
 - Checksums, bounds, counts, duplicate IDs, malformed streams and fixed fixtures.
 
 ```rust
@@ -53,8 +56,11 @@ brush, or graph. Checking required features is necessary but not sufficient to
 render/edit: the consumer must also understand the record kind and body contract.
 Unknown CBOR body/extension values and unknown numeric column semantics can be
 preserved without interpreting them. Structural parsing is not semantic support.
-The full page/geometry/source-profile schema is still a draft in the repository;
-strongly typed bodies and cross-record graph validation are subsequent work.
+`model` supplies typed core bodies; `snapshot::Snapshot::validate` checks a whole
+core-ink graph. Recognition, corrections, images and text objects remain future
+work and the snapshot validator rejects them. Unknown high-numbered body fields
+are preserved by extensible typed bodies; nested structures without an extension
+map reject unsupported fields rather than silently discarding them.
 
 This crate does not own documents, assign timestamps, acquire stylus input,
 render strokes, choose an OCR provider, implement recognition selection policy,

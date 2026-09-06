@@ -16,3 +16,7 @@ fn ensure(condition: bool, message: &'static str) -> Result<()> {
         Err(Error::InvalidData(message))
     }
 }
+
+pub mod model;
+
+pub mod snapshot;
