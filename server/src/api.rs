@@ -793,12 +793,25 @@ async fn get_blob(
     Ok(response)
 }
 
+/// Two independent conditions gate a download: the caller's own oplog must
+/// reference the hash, and the caller must own the stored blob. A reference
+/// alone is forgeable — anyone can declare another user's hash in their own
+/// operations — so ownership is what actually authorizes the bytes. Both
+/// failures answer 404 so the response never reveals that the blob exists.
 async fn open_authorized_blob(
     state: &AppState,
     user: &UserState,
     hash: BlobHash,
 ) -> Result<VerifiedBlob, ApiError> {
     if !user_references_blob(user, &hash).await? {
+        return Err(ApiError::not_found("blob not found"));
+    }
+    let owned = state
+        .blob_ownership
+        .owned(&user.id, vec![hash])
+        .await
+        .map_err(ApiError::internal)?;
+    if !owned.contains_key(&hash) {
         return Err(ApiError::not_found("blob not found"));
     }
     let store = BlobStore::new(state.data_dir.clone());
@@ -1005,6 +1018,12 @@ async fn ingest_ink_checked(
     user: &UserState,
     ops: Vec<notes_core::Op>,
 ) -> anyhow::Result<Vec<notes_protocol::SequencedOp>> {
+    // The socket carries the same operations as POST /v1/ops and therefore runs
+    // the same declared-blob validation; skipping it here let a socket push
+    // register attachment metadata the HTTP path would have rejected.
+    validate_operation_blobs(state, &ops)
+        .await
+        .map_err(|e| notes_core::CoreError::invalid(e.message))?;
     ink::validate(state, user, ink_roots(&ops))
         .await
         .map_err(|e| notes_core::CoreError::invalid(e.message))?;
@@ -1879,10 +1898,7 @@ mod tests {
         let (directory, app) = test_app().await;
         let contents = b"expected attachment bytes";
         let corrupt = vec![b'x'; contents.len()];
-        let hash = BlobHash::digest(contents);
-        BlobStore::new(directory.path())
-            .install_reader(contents.as_slice(), hash, 1_024)
-            .expect("install referenced blob");
+        let hash = upload_test_blob(&app, contents.as_slice()).await;
         reference_blob(
             &app,
             uuid::Uuid::from_u128(0xB10B),
@@ -1946,10 +1962,7 @@ mod tests {
         let (directory, app) = test_app().await;
         let original = b"small referenced blob";
         let contents = vec![0x5a; 1_025];
-        let hash = BlobHash::digest(original);
-        BlobStore::new(directory.path())
-            .install_reader(original.as_slice(), hash, 1_024)
-            .expect("install referenced blob");
+        let hash = upload_test_blob(&app, original.as_slice()).await;
         reference_blob(
             &app,
             uuid::Uuid::from_u128(0xB10C),
