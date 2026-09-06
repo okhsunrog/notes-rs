@@ -26,7 +26,7 @@ it("sends no points for deletion, retains order, and resends ink restored by Und
   );
 });
 
-it("uses the last successful snapshot after failure and coalesces queued changes", async () => {
+it("uses the last successful snapshot after failure and preserves each queued gesture", async () => {
   let resolve!: (revision: string) => void;
   const save = vi
     .fn()
@@ -47,9 +47,14 @@ it("uses the last successful snapshot after failure and coalesces queued changes
   expect(save.mock.calls[0]![0]).toEqual(save.mock.calls[1]![0]);
   resolve("second");
   await retry;
-  expect(save).toHaveBeenCalledTimes(3);
-  expect(save).toHaveBeenLastCalledWith(
-    { order: ["b"], upserts: [b], background: "plain" },
+  expect(save).toHaveBeenCalledTimes(4);
+  expect(save).toHaveBeenNthCalledWith(
+    3,
+    { order: ["a", "b"], upserts: [b], background: "plain" },
     "second",
+  );
+  expect(save).toHaveBeenLastCalledWith(
+    { order: ["b"], upserts: [], background: "plain" },
+    "third",
   );
 });

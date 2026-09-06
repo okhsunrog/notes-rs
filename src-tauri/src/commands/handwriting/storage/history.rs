@@ -1,0 +1,124 @@
+//! History roots pin complete immutable snapshots, including redo states.
+use super::*;
+pub(super) fn cursor(conn: &Connection) -> CommandResult<i64> {
+    conn.query_row("SELECT seq FROM ink_cursor WHERE singleton=1", [], |r| {
+        r.get(0)
+    })
+    .map_err(err)
+}
+pub(super) fn persist(conn: &Connection, snapshot: &Snapshot) -> CommandResult<()> {
+    for (id, bytes) in &snapshot.chunks {
+        put(conn, "ink_chunks", *id, bytes)?;
+    }
+    for (id, r) in &snapshot.records {
+        put(conn, "ink_records", *id, &r.encode().map_err(err)?)?;
+    }
+    put(
+        conn,
+        "ink_records",
+        snapshot.root.id,
+        &snapshot.root.encode().map_err(err)?,
+    )
+}
+pub(super) fn set_head(conn: &Connection, seq: i64, root: Id) -> CommandResult<String> {
+    // A unique transition token prevents ABA after Undo/Redo. Compaction leaves it alone.
+    let revision = uuid::Uuid::now_v7().to_string();
+    conn.execute("INSERT INTO ink_head VALUES(1,?1,?2) ON CONFLICT(singleton) DO UPDATE SET root_id=excluded.root_id,revision=excluded.revision",params![root.as_slice(),revision]).map_err(err)?;
+    conn.execute("UPDATE ink_cursor SET seq=?1 WHERE singleton=1", [seq])
+        .map_err(err)?;
+    Ok(revision)
+}
+pub(super) fn roots(conn: &Connection) -> CommandResult<Vec<(i64, Id)>> {
+    let mut stmt = conn
+        .prepare("SELECT seq,root_id FROM ink_history ORDER BY seq")
+        .map_err(err)?;
+    stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))
+        .map_err(err)?
+        .map(|row| {
+            let (seq, id) = row.map_err(err)?;
+            Ok((
+                seq,
+                id.try_into()
+                    .map_err(|_| CommandError::invalid("Invalid history root"))?,
+            ))
+        })
+        .collect()
+}
+pub(super) fn collect(conn: &Connection) -> CommandResult<()> {
+    conn.execute_batch("CREATE TEMP TABLE IF NOT EXISTS keep_records(id BLOB PRIMARY KEY) WITHOUT ROWID; CREATE TEMP TABLE IF NOT EXISTS keep_chunks(id BLOB PRIMARY KEY) WITHOUT ROWID; DELETE FROM keep_records; DELETE FROM keep_chunks;").map_err(err)?;
+    for (_, id) in roots(conn)? {
+        let doc = model::Document::read(&get_record(conn, id, None)?).map_err(err)?;
+        for id in doc.records.keys().chain(std::iter::once(&id)) {
+            conn.execute(
+                "INSERT OR IGNORE INTO keep_records VALUES(?1)",
+                [id.as_slice()],
+            )
+            .map_err(err)?;
+        }
+        for id in doc.chunks.keys() {
+            conn.execute(
+                "INSERT OR IGNORE INTO keep_chunks VALUES(?1)",
+                [id.as_slice()],
+            )
+            .map_err(err)?;
+        }
+    }
+    conn.execute_batch("DELETE FROM ink_records WHERE id NOT IN (SELECT id FROM keep_records); DELETE FROM ink_chunks WHERE id NOT IN (SELECT id FROM keep_chunks);").map_err(err)?;
+    Ok(())
+}
+fn result(conn: &Connection) -> CommandResult<InkHistorySnapshot> {
+    let snapshot = match load(conn)? {
+        Some((s, revision)) => InkDraftSnapshot {
+            draft: to_draft(&s)?,
+            revision: Some(revision),
+        },
+        None => InkDraftSnapshot {
+            draft: InkDraft::default(),
+            revision: None,
+        },
+    };
+    let seq = cursor(conn)?;
+    let (can_undo,can_redo)=conn.query_row("SELECT EXISTS(SELECT 1 FROM ink_history WHERE seq<?1),EXISTS(SELECT 1 FROM ink_history WHERE seq>?1)",[seq],|r| Ok((r.get(0)?,r.get(1)?))).map_err(err)?;
+    Ok(InkHistorySnapshot {
+        snapshot,
+        can_undo,
+        can_redo,
+    })
+}
+pub(in super::super) fn navigate(
+    path: &Path,
+    redo: Option<bool>,
+    expected: Option<String>,
+) -> CommandResult<InkHistorySnapshot> {
+    let mut conn = open(path)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(err)?;
+    if let Some(redo) = redo {
+        let current = load(&tx)?;
+        if current.as_ref().map(|(_, r)| r) != expected.as_ref() {
+            return Err(CommandError::conflict(
+                "The handwriting draft changed. Reopen it before changing history.",
+            ));
+        }
+        let target = cursor(&tx)? + if redo { 1 } else { -1 };
+        let id: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT root_id FROM ink_history WHERE seq=?1",
+                [target],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(err)?;
+        let id = id.ok_or_else(|| CommandError::invalid("No further handwriting history"))?;
+        set_head(
+            &tx,
+            target,
+            id.try_into()
+                .map_err(|_| CommandError::invalid("Invalid history root"))?,
+        )?;
+    }
+    let result = result(&tx)?; // Validate before committing a navigation.
+    tx.commit().map_err(err)?;
+    Ok(result)
+}

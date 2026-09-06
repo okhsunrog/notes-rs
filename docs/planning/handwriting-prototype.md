@@ -443,3 +443,20 @@ Validation at `3c2b0e1`:
 Physical pen/eraser/lasso acceptance on this storage build is pending. Rendering and
 BOOX refresh code were not changed in this step. Durable Undo/Redo, compaction and
 integration into regular notes remain subsequent work.
+
+## Persistent handwriting history
+
+SQLite schema 2 adds `ink_history` and `ink_cursor`; an existing SQLite page becomes
+its initial history state, without importing any JSON. Each acknowledged gesture
+creates one state. Fifty transitions are retained, including background changes.
+Undo/Redo moves the persistent cursor, and a new edit after Undo discards the redo
+branch. GC pins all retained roots. The revision is now a unique transition token,
+not a physical root hash; returning to an earlier page cannot revive a stale CAS.
+Record IDs are verified against their content-derived identity during reads.
+
+The frontend queues every completed gesture, including during a slow/failed save.
+It flushes that queue before navigating history and briefly blocks input during the
+navigation. History navigation does not serialize old strokes back through IPC.
+Atomic snapshot publication, fifty-action retention, SQLite schema upgrade and
+ABA/conflict behavior are covered by storage tests. Compaction must preserve these
+roots and the current revision token.

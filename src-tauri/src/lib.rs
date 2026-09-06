@@ -18,6 +18,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::mobile_system_info,
             commands::input_capabilities,
             commands::load_handwriting_draft,
+            commands::handwriting_history,
             commands::save_handwriting_draft,
             commands::save_handwriting_patch,
             commands::set_system_bars_style,

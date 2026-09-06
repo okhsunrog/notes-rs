@@ -2,9 +2,9 @@ import type { InkDraft } from "@/lib/bindings";
 
 export type DraftSaveState = "saving" | "saved" | Error;
 
-/** Serialize writes and retain the newest complete sheet when storage fails. */
+/** Serialize writes and retain every gesture when storage fails. */
 export class DraftWriter {
-  private pending: InkDraft | undefined;
+  private pending: InkDraft[] = [];
   private running: Promise<boolean> | null = null;
 
   constructor(
@@ -14,8 +14,12 @@ export class DraftWriter {
   ) {}
 
   write(draft: InkDraft) {
-    this.pending = draft;
+    this.pending.push(draft);
     return this.flush();
+  }
+
+  getRevision() {
+    return this.revision;
   }
 
   flush(): Promise<boolean> {
@@ -27,14 +31,13 @@ export class DraftWriter {
   }
 
   private async drain() {
-    while (this.pending) {
-      const draft = this.pending;
-      this.pending = undefined;
+    while (this.pending.length) {
+      const draft = this.pending[0]!;
       this.onState("saving");
       try {
         this.revision = await this.save(draft, this.revision);
+        this.pending.shift();
       } catch (error) {
-        this.pending ??= draft;
         this.onState(error instanceof Error ? error : new Error(String(error)));
         return false;
       }

@@ -16,6 +16,7 @@ export const commands = {
 } | null, CommandError>(__TAURI_INVOKE("mobile_system_info")),
 	inputCapabilities: () => typedError<InputCapabilities, CommandError>(__TAURI_INVOKE("input_capabilities")),
 	loadHandwritingDraft: () => typedError<InkDraftSnapshot, CommandError>(__TAURI_INVOKE("load_handwriting_draft")),
+	handwritingHistory: (redo: boolean | null, expectedRevision: string | null) => typedError<InkHistorySnapshot, CommandError>(__TAURI_INVOKE("handwriting_history", { redo, expectedRevision })),
 	saveHandwritingDraft: (draft: InkDraft, expectedRevision: string | null) => typedError<string, CommandError>(__TAURI_INVOKE("save_handwriting_draft", { draft, expectedRevision })),
 	saveHandwritingPatch: (patch: InkDraftPatch, expectedRevision: string | null) => typedError<string, CommandError>(__TAURI_INVOKE("save_handwriting_patch", { patch, expectedRevision })),
 	setSystemBarsStyle: (darkBackground: boolean) => typedError<null, CommandError>(__TAURI_INVOKE("set_system_bars_style", { darkBackground })),
@@ -442,7 +443,7 @@ export type InkDraft = {
 	background?: InkBackground,
 };
 
-/**  An IPC update against an acknowledged snapshot. Disk storage remains a complete draft. */
+/**  An IPC update against an acknowledged immutable document root. */
 export type InkDraftPatch = {
 	order: string[],
 	upserts: InkStroke[],
@@ -452,6 +453,12 @@ export type InkDraftPatch = {
 export type InkDraftSnapshot = {
 	draft: InkDraft,
 	revision: string | null,
+};
+
+export type InkHistorySnapshot = {
+	snapshot: InkDraftSnapshot,
+	canUndo: boolean,
+	canRedo: boolean,
 };
 
 export type InkPoint = {

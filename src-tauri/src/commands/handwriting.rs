@@ -85,6 +85,38 @@ pub struct InkDraftSnapshot {
     pub revision: Option<String>,
 }
 
+#[derive(Debug, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct InkHistorySnapshot {
+    pub snapshot: InkDraftSnapshot,
+    pub can_undo: bool,
+    pub can_redo: bool,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn handwriting_history(
+    app: AppHandle,
+    store: State<'_, HandwritingStore>,
+    redo: Option<bool>,
+    expected_revision: Option<String>,
+) -> CommandResult<InkHistorySnapshot> {
+    let path = app
+        .path()
+        .app_data_dir()
+        .map_err(err)?
+        .join("handwriting/ink-v1.sqlite3");
+    let lock = store.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock
+            .lock()
+            .map_err(|e| err(anyhow::anyhow!(e.to_string())))?;
+        storage::navigate(&path, redo, expected_revision)
+    })
+    .await
+    .map_err(err)?
+}
+
 fn validate(draft: &InkDraft) -> CommandResult<()> {
     if draft.version != 1 || draft.width != 1000 || draft.height != 1400 {
         return Err(CommandError::invalid(
@@ -456,5 +488,62 @@ mod tests {
         assert_eq!(read_draft(&path).unwrap().revision, Some(revision));
         assert_eq!(stored_rows(&path, "ink_records"), records);
         assert_eq!(stored_rows(&path, "ink_chunks"), chunks);
+    }
+    #[test]
+    fn history_survives_reopen_and_branches_without_aba() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ink.sqlite3");
+        let original = sample();
+        let original_id = original.strokes[0].id;
+        let first = write_draft(&path, original, None).unwrap();
+        let second = write_draft(&path, InkDraft::default(), Some(first.clone())).unwrap();
+        let undo = storage::navigate(&path, Some(false), Some(second)).unwrap();
+        assert_eq!(undo.snapshot.draft.strokes[0].id, original_id);
+        assert!(undo.can_undo && undo.can_redo);
+        assert_ne!(undo.snapshot.revision, Some(first.clone()));
+        assert!(storage::navigate(&path, Some(false), Some(first)).is_err());
+        let reopened = storage::navigate(&path, None, None).unwrap();
+        assert!(reopened.can_redo);
+        let redo = storage::navigate(&path, Some(true), reopened.snapshot.revision).unwrap();
+        assert!(redo.snapshot.draft.strokes.is_empty());
+        let undo = storage::navigate(&path, Some(false), redo.snapshot.revision).unwrap();
+        write_draft(&path, sample(), undo.snapshot.revision).unwrap();
+        let branched = storage::navigate(&path, None, None).unwrap();
+        assert!(!branched.can_redo);
+        let prior = storage::navigate(&path, Some(false), branched.snapshot.revision).unwrap();
+        assert_eq!(prior.snapshot.draft.strokes[0].id, original_id);
+        let empty = storage::navigate(&path, Some(false), prior.snapshot.revision).unwrap();
+        assert!(empty.snapshot.draft.strokes.is_empty());
+        assert!(!empty.can_undo && empty.can_redo);
+    }
+
+    #[test]
+    fn history_retains_fifty_actions_and_upgrades_existing_sqlite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ink.sqlite3");
+        let mut revision = Some(write_draft(&path, sample(), None).unwrap());
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "DROP TABLE ink_history; DROP TABLE ink_cursor; PRAGMA user_version=1;",
+            )
+            .unwrap();
+        }
+        let initial = storage::navigate(&path, None, None).unwrap();
+        assert!(!initial.can_undo && !initial.can_redo);
+        for _ in 0..52 {
+            revision = Some(write_draft(&path, sample(), revision).unwrap());
+        }
+        let mut count = 0;
+        loop {
+            let state = storage::navigate(&path, None, None).unwrap();
+            if !state.can_undo {
+                break;
+            }
+            storage::navigate(&path, Some(false), state.snapshot.revision).unwrap();
+            count += 1;
+        }
+        assert_eq!(count, 50);
+        assert_eq!(read_draft(&path).unwrap().draft.strokes.len(), 1);
     }
 }

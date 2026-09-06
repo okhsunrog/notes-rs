@@ -9,6 +9,8 @@ use ink_format::{
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, BTreeSet};
+mod history;
+pub(super) use history::navigate;
 const APP_ID: i64 = 0x494e4b31;
 const MAX_SNAPSHOT_BYTES: i64 = 64 * 1024 * 1024;
 fn open(path: &Path) -> CommandResult<Connection> {
@@ -24,14 +26,18 @@ fn open(path: &Path) -> CommandResult<Connection> {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .map_err(err)?;
-    if app != 0 && app != APP_ID || version > 1 {
+    if app != 0 && app != APP_ID || version > 2 {
         return Err(CommandError::invalid("Unsupported handwriting database"));
     }
     conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
         CREATE TABLE IF NOT EXISTS ink_records(id BLOB PRIMARY KEY CHECK(length(id)=16), data BLOB NOT NULL) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS ink_chunks(id BLOB PRIMARY KEY CHECK(length(id)=16), data BLOB NOT NULL) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS ink_head(singleton INTEGER PRIMARY KEY CHECK(singleton=1), root_id BLOB NOT NULL REFERENCES ink_records(id), revision TEXT NOT NULL);
-        PRAGMA application_id=1229867825; PRAGMA user_version=1;").map_err(err)?;
+        CREATE TABLE IF NOT EXISTS ink_history(seq INTEGER PRIMARY KEY, root_id BLOB NOT NULL REFERENCES ink_records(id));
+        CREATE TABLE IF NOT EXISTS ink_cursor(singleton INTEGER PRIMARY KEY CHECK(singleton=1), seq INTEGER NOT NULL);
+        INSERT OR IGNORE INTO ink_cursor VALUES(1,0);
+        INSERT INTO ink_history SELECT 0,root_id FROM ink_head WHERE NOT EXISTS(SELECT 1 FROM ink_history);
+        PRAGMA application_id=1229867825; PRAGMA user_version=2;").map_err(err)?;
     Ok(conn)
 }
 fn get_record(conn: &Connection, id: Id, expected_length: Option<u64>) -> CommandResult<Record> {
@@ -43,7 +49,7 @@ fn get_record(conn: &Connection, id: Id, expected_length: Option<u64>) -> Comman
         )
         .map_err(err)?;
     let r = Record::decode(&bytes).map_err(err)?;
-    if r.id != id {
+    if r.id != id || identity(r.kind, &r.body)? != id {
         return Err(CommandError::invalid("Ink record identity mismatch"));
     }
     Ok(r)
@@ -66,9 +72,9 @@ fn load(conn: &Connection) -> CommandResult<Option<(Snapshot, String)>> {
             .map_err(|_| CommandError::invalid("Invalid root ID"))?,
         None,
     )?;
-    if format!("{:x}", Sha256::digest(root.encode().map_err(err)?)) != revision {
-        return Err(CommandError::invalid("Ink root checksum mismatch"));
-    }
+    Ok(Some((load_root(conn, root)?, revision)))
+}
+fn load_root(conn: &Connection, root: Record) -> CommandResult<Snapshot> {
     let doc = model::Document::read(&root).map_err(err)?;
     let total = doc
         .records
@@ -97,26 +103,27 @@ fn load(conn: &Connection) -> CommandResult<Option<(Snapshot, String)>> {
             .map_err(err)?;
         chunks.insert(*id, bytes);
     }
-    Ok(Some((
-        Snapshot {
-            root,
-            records,
-            chunks,
-            resources: BTreeMap::new(),
-        },
-        revision,
-    )))
+    Ok(Snapshot {
+        root,
+        records,
+        chunks,
+        resources: BTreeMap::new(),
+    })
 }
-fn seal<T: Body>(value: &T) -> CommandResult<Record> {
+fn identity(kind: u64, body: &cbor::Value) -> CommandResult<Id> {
     let mut hash = Sha256::new();
-    hash.update(T::KIND.to_le_bytes());
-    hash.update(cbor::encode(&value.to_value().map_err(err)?).map_err(err)?);
+    hash.update(kind.to_le_bytes());
+    hash.update(cbor::encode(body).map_err(err)?);
     let digest = hash.finalize();
     let mut id = [0; 16];
     id.copy_from_slice(&digest[..16]);
     if id == [0; 16] {
         id[0] = 1;
     }
+    Ok(id)
+}
+fn seal<T: Body>(value: &T) -> CommandResult<Record> {
+    let id = identity(T::KIND, &value.to_value().map_err(err)?)?;
     let mut record = value.record(id).map_err(err)?;
     record.required_features = vec![1, 2, 3, 4];
     Ok(record)
@@ -593,32 +600,35 @@ pub(super) fn patch(
         validate_adapter(s)?;
     }
     let snapshot = build(current.as_ref().map(|(s, _)| s), patch)?;
-    for (id, bytes) in &snapshot.chunks {
-        put(&tx, "ink_chunks", *id, bytes)?;
+    if current.is_none() {
+        let initial = build(
+            Some(&snapshot),
+            InkDraftPatch {
+                order: vec![],
+                upserts: vec![],
+                background: InkBackground::Plain,
+            },
+        )?;
+        history::persist(&tx, &initial)?;
+        tx.execute(
+            "INSERT INTO ink_history VALUES(0,?1)",
+            [initial.root.id.as_slice()],
+        )
+        .map_err(err)?;
     }
-    for (id, r) in &snapshot.records {
-        put(&tx, "ink_records", *id, &r.encode().map_err(err)?)?;
-    }
-    let bytes = snapshot.root.encode().map_err(err)?;
-    put(&tx, "ink_records", snapshot.root.id, &bytes)?;
-    let revision = format!("{:x}", Sha256::digest(&bytes));
-    tx.execute("INSERT INTO ink_head VALUES(1,?1,?2) ON CONFLICT(singleton) DO UPDATE SET root_id=excluded.root_id,revision=excluded.revision",params![snapshot.root.id.as_slice(),revision]).map_err(err)?;
-    // No durable history yet: keep current content only. Frontend Undo resubmits old strokes.
-    // Future history/export pins must extend these keep sets before enabling those features.
-    tx.execute_batch("CREATE TEMP TABLE keep_records(id BLOB PRIMARY KEY) WITHOUT ROWID; CREATE TEMP TABLE keep_chunks(id BLOB PRIMARY KEY) WITHOUT ROWID;").map_err(err)?;
-    for id in snapshot
-        .records
-        .keys()
-        .chain(std::iter::once(&snapshot.root.id))
-    {
-        tx.execute("INSERT INTO keep_records VALUES(?1)", [id.as_slice()])
-            .map_err(err)?;
-    }
-    for id in snapshot.chunks.keys() {
-        tx.execute("INSERT INTO keep_chunks VALUES(?1)", [id.as_slice()])
-            .map_err(err)?;
-    }
-    tx.execute_batch("DELETE FROM ink_records WHERE id NOT IN (SELECT id FROM keep_records); DELETE FROM ink_chunks WHERE id NOT IN (SELECT id FROM keep_chunks);").map_err(err)?;
+    history::persist(&tx, &snapshot)?;
+    let cursor = history::cursor(&tx)?;
+    tx.execute("DELETE FROM ink_history WHERE seq>?1", [cursor])
+        .map_err(err)?;
+    tx.execute(
+        "INSERT INTO ink_history VALUES(?1,?2)",
+        params![cursor + 1, snapshot.root.id.as_slice()],
+    )
+    .map_err(err)?;
+    let revision = history::set_head(&tx, cursor + 1, snapshot.root.id)?;
+    tx.execute("DELETE FROM ink_history WHERE seq<?1", [cursor + 1 - 50])
+        .map_err(err)?;
+    history::collect(&tx)?;
     tx.commit().map_err(err)?;
     #[cfg(unix)]
     if let Some(parent) = path.parent() {

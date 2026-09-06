@@ -47,6 +47,7 @@ const NO_SELECTION: string[] = [];
 
 export function InkCanvas({
   draft,
+  disabled = false,
   tool,
   width,
   mouseEnabled,
@@ -63,6 +64,7 @@ export function InkCanvas({
   onSelectionChange,
 }: {
   draft: InkDraft;
+  disabled?: boolean;
   tool: InkTool;
   width: number;
   mouseEnabled: boolean;
@@ -349,7 +351,7 @@ export function InkCanvas({
   };
   const onyx = useOnyxInk({
     canvasRef,
-    enabled: nativeInk,
+    enabled: nativeInk && !disabled,
     draft,
     tool,
     width,
@@ -422,6 +424,7 @@ export function InkCanvas({
   };
   const start = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     if (
+      disabled ||
       active.current ||
       (onyx && event.pointerType === "pen") ||
       (event.pointerType !== "pen" && !(mouseEnabled && event.pointerType === "mouse"))

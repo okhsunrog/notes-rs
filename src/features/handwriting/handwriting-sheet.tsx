@@ -16,8 +16,8 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import { loadHandwritingDraft, saveHandwritingPatch } from "@/lib/api";
-import type { InkDraft } from "@/lib/bindings";
+import { handwritingHistory, saveHandwritingPatch } from "@/lib/api";
+import type { InkDraft, InkHistorySnapshot } from "@/lib/bindings";
 import { registerBackOverlay } from "@/lib/back-overlays";
 import { incrementalDraftSaver } from "./ink-patch";
 import { DraftWriter, type DraftSaveState } from "./draft-writer";
@@ -47,24 +47,31 @@ export function HandwritingSheet() {
   const [metrics, setMetrics] = useState<InkMetrics | null>(null);
   const [nativeStatus, setNativeStatus] = useState<OnyxInkStatus | null>(null);
   const [limit, setLimit] = useState(false);
-  const [undo, setUndo] = useState<InkDraft[]>([]);
-  const [redo, setRedo] = useState<InkDraft[]>([]);
+  const [canUndo, setCanUndo] = useState(false);
+  const [historyBusy, setHistoryBusy] = useState(false);
+  const historyBusyRef = useRef(false);
+  const [canRedo, setCanRedo] = useState(false);
   const writer = useRef<DraftWriter | null>(null);
+
+  const adopt = useCallback((history: InkHistorySnapshot) => {
+    const { snapshot } = history;
+    writer.current = new DraftWriter(
+      snapshot.revision,
+      incrementalDraftSaver(snapshot.draft, saveHandwritingPatch),
+      setSaveState,
+    );
+    latestDraft.current = snapshot.draft;
+    setDraft(snapshot.draft);
+    setCanUndo(history.canUndo);
+    setCanRedo(history.canRedo);
+    setSaveState("saved");
+  }, []);
 
   useEffect(() => {
     let disposed = false;
-    void loadHandwritingDraft()
-      .then((snapshot) => {
-        if (disposed) return;
-        writer.current = new DraftWriter(
-          snapshot.revision,
-          incrementalDraftSaver(snapshot.draft, saveHandwritingPatch),
-          (state) => {
-            if (!disposed) setSaveState(state);
-          },
-        );
-        latestDraft.current = snapshot.draft;
-        setDraft(snapshot.draft);
+    void handwritingHistory(null, null)
+      .then((history) => {
+        if (!disposed) adopt(history);
       })
       .catch((error: unknown) => {
         if (!disposed) setLoadError(String(error));
@@ -72,10 +79,10 @@ export function HandwritingSheet() {
     return () => {
       disposed = true;
     };
-  }, []);
+  }, [adopt]);
 
   const close = useCallback(async () => {
-    if (active || closing) return;
+    if (active || closing || historyBusyRef.current) return;
     setClosing(true);
     const saved = writer.current ? await writer.current.flush() : true;
     if (saved) setOpen(false);
@@ -92,36 +99,35 @@ export function HandwritingSheet() {
 
   const change = (next: InkDraft) => {
     const previous = latestDraft.current;
-    if (!previous || !writer.current || next === previous) return;
+    if (!previous || !writer.current || next === previous || historyBusyRef.current || closing)
+      return;
     latestDraft.current = next;
-    setUndo((history) => [...history.slice(-49), previous]);
-    setRedo([]);
+    setCanUndo(true);
+    setCanRedo(false);
     setDraft(next);
     void writer.current.write(next);
   };
 
-  const undoStroke = () => {
-    const previous = undo[undo.length - 1];
-    if (!draft || !previous || active) return;
-    setUndo(undo.slice(0, -1));
-    setRedo([...redo, draft]);
-    latestDraft.current = previous;
-    setSelected([]);
-    setDraft(previous);
-    setLimit(false);
-    void writer.current?.write(previous);
+  const navigateHistory = async (redo: boolean) => {
+    if (active || closing || historyBusyRef.current || !(redo ? canRedo : canUndo)) return;
+    historyBusyRef.current = true;
+    setHistoryBusy(true);
+    try {
+      const current = writer.current;
+      if (!current || !(await current.flush())) return;
+      const history = await handwritingHistory(redo, current.getRevision());
+      adopt(history);
+      setSelected([]);
+      setLimit(false);
+    } catch (error) {
+      setSaveState(error instanceof Error ? error : new Error(String(error)));
+    } finally {
+      historyBusyRef.current = false;
+      setHistoryBusy(false);
+    }
   };
-
-  const redoStroke = () => {
-    const next = redo[redo.length - 1];
-    if (!draft || !next || active) return;
-    setRedo(redo.slice(0, -1));
-    setUndo([...undo, draft]);
-    latestDraft.current = next;
-    setSelected([]);
-    setDraft(next);
-    void writer.current?.write(next);
-  };
+  const undoStroke = () => void navigateHistory(false);
+  const redoStroke = () => void navigateHistory(true);
 
   return (
     <Dialog
@@ -154,7 +160,7 @@ export function HandwritingSheet() {
             type="button"
             variant="outline"
             onClick={() => void close()}
-            disabled={active || closing}
+            disabled={active || closing || historyBusy}
           >
             {loadError ? <X className="size-4" /> : <Check className="size-4" />}
             {loadError ? "Close" : closing ? "Saving…" : "Done"}
@@ -169,7 +175,7 @@ export function HandwritingSheet() {
             type="button"
             variant={tool === "pen" ? "secondary" : "ghost"}
             aria-pressed={tool === "pen"}
-            disabled={!draft || active}
+            disabled={!draft || active || historyBusy || closing}
             onClick={() => {
               setTool("pen");
               setSelected([]);
@@ -182,7 +188,7 @@ export function HandwritingSheet() {
             type="button"
             variant={tool === "eraser" ? "secondary" : "ghost"}
             aria-pressed={tool === "eraser"}
-            disabled={!draft || active}
+            disabled={!draft || active || historyBusy || closing}
             onClick={() => {
               setTool("eraser");
               setSelected([]);
@@ -195,7 +201,7 @@ export function HandwritingSheet() {
             type="button"
             variant={tool === "lasso" ? "secondary" : "ghost"}
             aria-pressed={tool === "lasso"}
-            disabled={!draft || active}
+            disabled={!draft || active || historyBusy || closing}
             onClick={() => setTool("lasso")}
           >
             <Lasso className="size-4" /> Lasso
@@ -208,7 +214,7 @@ export function HandwritingSheet() {
                 variant={draft?.background === background ? "secondary" : "ghost"}
                 aria-label={background === "grid" ? "Grid paper" : "Plain paper"}
                 aria-pressed={draft?.background === background}
-                disabled={!draft || active}
+                disabled={!draft || active || historyBusy || closing}
                 onClick={() => {
                   if (draft && draft.background !== background) change({ ...draft, background });
                 }}
@@ -226,7 +232,7 @@ export function HandwritingSheet() {
               type="button"
               variant="ghost"
               aria-label="Undo stroke"
-              disabled={active || undo.length === 0}
+              disabled={active || historyBusy || closing || !canUndo}
               onClick={undoStroke}
             >
               <Undo2 className="size-4" />
@@ -235,7 +241,7 @@ export function HandwritingSheet() {
               type="button"
               variant="ghost"
               aria-label="Redo stroke"
-              disabled={active || redo.length === 0}
+              disabled={active || historyBusy || closing || !canRedo}
               onClick={redoStroke}
             >
               <Redo2 className="size-4" />
@@ -256,7 +262,7 @@ export function HandwritingSheet() {
                   variant={width === value ? "secondary" : "ghost"}
                   aria-label={`Pen width ${value}`}
                   aria-pressed={width === value}
-                  disabled={active}
+                  disabled={active || historyBusy || closing}
                   onClick={() => setWidth(value)}
                   className="w-10 px-0"
                 >
@@ -282,7 +288,7 @@ export function HandwritingSheet() {
                   variant={eraserMode === value ? "secondary" : "ghost"}
                   aria-pressed={eraserMode === value}
                   aria-label={`${label} eraser`}
-                  disabled={active}
+                  disabled={active || historyBusy || closing}
                   onClick={() => setEraserMode(value)}
                 >
                   {label}
@@ -306,7 +312,7 @@ export function HandwritingSheet() {
                       variant={eraserRadius === value ? "secondary" : "ghost"}
                       aria-label={`${label} eraser size`}
                       aria-pressed={eraserRadius === value}
-                      disabled={active}
+                      disabled={active || historyBusy || closing}
                       onClick={() => setEraserRadius(value)}
                       className="w-9 px-0"
                     >
@@ -321,7 +327,7 @@ export function HandwritingSheet() {
               <Button
                 className="ml-auto"
                 variant="ghost"
-                disabled={active || !draft?.strokes.length}
+                disabled={active || historyBusy || closing || !draft?.strokes.length}
                 onClick={() => {
                   if (draft) {
                     change({ ...draft, strokes: [] });
@@ -346,7 +352,7 @@ export function HandwritingSheet() {
                   key={value}
                   variant={lassoMode === value ? "secondary" : "ghost"}
                   aria-pressed={lassoMode === value}
-                  disabled={active}
+                  disabled={active || historyBusy || closing}
                   onClick={() => {
                     setLassoMode(value);
                     setSelected([]);
@@ -361,7 +367,7 @@ export function HandwritingSheet() {
                   <Button
                     variant="ghost"
                     aria-label="Copy selection"
-                    disabled={active}
+                    disabled={active || historyBusy || closing}
                     onClick={() => {
                       if (!draft) return;
                       const source = draft.strokes.filter((stroke) => selected.includes(stroke.id));
@@ -398,7 +404,7 @@ export function HandwritingSheet() {
                       key={label}
                       variant="ghost"
                       aria-label={label}
-                      disabled={active}
+                      disabled={active || historyBusy || closing}
                       onClick={() => {
                         if (draft) {
                           const strokes = scaleSelection(draft.strokes, selected, factor);
@@ -412,7 +418,7 @@ export function HandwritingSheet() {
                   <Button
                     variant="ghost"
                     aria-label="Delete selection"
-                    disabled={active}
+                    disabled={active || historyBusy || closing}
                     onClick={() => {
                       if (draft)
                         change({
@@ -427,7 +433,7 @@ export function HandwritingSheet() {
                   <Button
                     variant="ghost"
                     aria-label="Deselect"
-                    disabled={active}
+                    disabled={active || historyBusy || closing}
                     onClick={() => setSelected([])}
                   >
                     <X className="size-4" />
@@ -453,6 +459,7 @@ export function HandwritingSheet() {
             <div className="mx-auto w-full max-w-[900px] border border-neutral-300 bg-white">
               <InkCanvas
                 draft={draft}
+                disabled={historyBusy || closing}
                 tool={tool}
                 eraserMode={eraserMode}
                 eraserRadius={eraserRadius}
@@ -524,7 +531,7 @@ export function HandwritingSheet() {
                 <input
                   type="checkbox"
                   checked={mouseEnabled}
-                  disabled={active}
+                  disabled={active || historyBusy || closing}
                   onChange={(event) => setMouseEnabled(event.target.checked)}
                 />
                 Allow mouse drawing

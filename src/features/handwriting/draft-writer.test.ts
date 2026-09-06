@@ -27,3 +27,33 @@ it("keeps a failed draft for explicit retry", async () => {
   expect(await writer.flush()).toBe(true);
   expect(save).toHaveBeenNthCalledWith(2, draft, "previous");
 });
+
+it("keeps every queued gesture and retries a failure before later edits", async () => {
+  let reject!: (error: Error) => void;
+  const first = new Promise<string>((_, fail) => {
+    reject = fail;
+  });
+  const save = vi
+    .fn()
+    .mockReturnValueOnce(first)
+    .mockResolvedValueOnce("a")
+    .mockResolvedValueOnce("b")
+    .mockResolvedValueOnce("c");
+  const writer = new DraftWriter(null, save, vi.fn());
+  const a = emptyDraft(),
+    b = emptyDraft(),
+    c = emptyDraft();
+  const saving = writer.write(a);
+  void writer.write(b);
+  void writer.write(c);
+  reject(new Error("disk full"));
+  expect(await saving).toBe(false);
+  expect(await writer.flush()).toBe(true);
+  expect(save.mock.calls).toEqual([
+    [a, null],
+    [a, null],
+    [b, "a"],
+    [c, "b"],
+  ]);
+  expect(writer.getRevision()).toBe("c");
+});
