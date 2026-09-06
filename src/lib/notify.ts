@@ -19,6 +19,14 @@ export function notifyError(context: string, error: unknown) {
   toast.error(`${context} error: ${formatError(error)}`, { duration: ERROR_TOAST_DURATION_MS });
 }
 
+/** A failure the user can act on again without repeating the work that failed. */
+export function notifyRetryableError(context: string, error: unknown, retry: () => void) {
+  toast.error(`${context}: ${formatError(error)}`, {
+    duration: ERROR_TOAST_DURATION_MS,
+    action: { label: "Retry", onClick: retry },
+  });
+}
+
 export function notifySuccess(message: string) {
   toast.success(message);
 }

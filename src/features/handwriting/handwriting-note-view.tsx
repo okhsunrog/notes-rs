@@ -21,22 +21,54 @@ import { usePageTitleEditor } from "@/features/pages/use-page-title-editor";
 import { currentDisposition, homeTarget, type PaneId } from "@/features/workspace/workspace-model";
 import { useWorkspaceStore } from "@/features/workspace/workspace-store";
 import {
+  completeAllHandwriting,
   completeHandwritingNote,
   handwritingHistory,
   loadHandwritingNote,
+  setHandwritingBackground,
   unknownErrorMessage,
   type Page,
 } from "@/lib/api";
 import type { InkDraft, InkHistorySnapshot } from "@/lib/bindings";
+import { notifyRetryableError } from "@/lib/notify";
 import { cn } from "@/lib/utils";
 import type { DraftSaveState } from "./draft-writer";
-import { beginSession, endSession, getWriter, requestCompletion } from "./handwriting-session";
+import {
+  acquireEditor,
+  awaitCompletion,
+  beginSession,
+  endSession,
+  flushAllSessions,
+  getWriter,
+  releaseEditor,
+  requestCompletion,
+} from "./handwriting-session";
 import { InkCanvas, type InkTool } from "./ink-canvas";
 import { moveSelection, scaleSelection, type EraserMode, type LassoMode } from "./ink-editing";
 import { MAX_INK_POINTS } from "./ink-model";
 import { applyHistoryUpdate } from "./ink-patch";
 import { useHandwritingAvailability, useHandwritingPreference } from "./input-capabilities";
 import type { OnyxInkStatus } from "./onyx-ink";
+
+/**
+ * Completion outlives the editor: it is requested detached, retried from a
+ * toast, and never treated as server confirmation of the publication.
+ */
+function completeInBackground(pageUuid: string) {
+  requestCompletion(pageUuid, () => completeHandwritingNote(pageUuid)).catch((error: unknown) => {
+    notifyRetryableError("Could not prepare sync", error, () => completeInBackground(pageUuid));
+  });
+}
+
+/** The window is going away: drain every note's queue, then let the core pack. */
+async function completeEveryNote() {
+  try {
+    await flushAllSessions();
+    await completeAllHandwriting();
+  } catch {
+    // Recovery on the next launch finishes sessions this call could not.
+  }
+}
 
 type Props = {
   paneId: PaneId;
@@ -74,20 +106,33 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
   const [historyBusy, setHistoryBusy] = useState(false);
+  const [ownership, setOwnership] = useState<"pending" | "owned" | "taken">("pending");
+  // Input stays closed between a background transition and the re-read that
+  // adopts whatever completion published while the window was hidden.
+  const [suspended, setSuspended] = useState(false);
 
   const latestDraft = useRef<InkDraft | null>(null);
   const historyBusyRef = useRef(false);
   const leavingRef = useRef(false);
+  const ownerRef = useRef({});
+  const generationRef = useRef(0);
+  const suspendedRef = useRef(false);
+  suspendedRef.current = suspended;
+
+  const editing = ownership === "owned";
+  const editingRef = useRef(editing);
+  editingRef.current = editing;
 
   const title = usePageTitleEditor(page, true, onSaved);
   const titleFlush = useRef(title.flush);
   titleFlush.current = title.flush;
   const busy = active || historyBusy || leaving;
+  const editingBusy = busy || suspended;
 
   const adopt = useCallback(
     (history: InkHistorySnapshot) => {
       const { snapshot } = history;
-      beginSession(uuid, snapshot, setSaveState);
+      if (editingRef.current) beginSession(uuid, snapshot, setSaveState);
       latestDraft.current = snapshot.draft;
       setDraft(snapshot.draft);
       setCanUndo(history.canUndo);
@@ -95,23 +140,84 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
       setSaveState("saved");
       setSelected([]);
       setLimit(false);
+      setSuspended(false);
     },
     [uuid],
   );
 
-  useEffect(() => {
-    let disposed = false;
-    loadHandwritingNote(uuid, true)
-      .then((history) => {
-        if (!disposed) adopt(history);
-      })
-      .catch((error: unknown) => {
-        if (!disposed) setLoadError(unknownErrorMessage(error));
-      });
-    return () => {
-      disposed = true;
-    };
+  /**
+   * Read the note only after any completion this UUID still owes has settled,
+   * so a session started here never continues from a superseded revision.
+   */
+  const openNote = useCallback(async () => {
+    const generation = ++generationRef.current;
+    setLoadError(null);
+    try {
+      await awaitCompletion(uuid);
+      const history = await loadHandwritingNote(uuid, editingRef.current);
+      if (generation !== generationRef.current) return;
+      adopt(history);
+    } catch (error) {
+      if (generation !== generationRef.current) return;
+      setLoadError(unknownErrorMessage(error));
+    }
   }, [adopt, uuid]);
+
+  // Two editors of one note are not a shared session; the second view reads.
+  useEffect(() => {
+    const owner = ownerRef.current;
+    setOwnership(acquireEditor(uuid, owner) ? "owned" : "taken");
+    return () => {
+      releaseEditor(uuid, owner);
+      setOwnership("pending");
+    };
+  }, [uuid]);
+
+  useEffect(() => {
+    if (ownership === "pending") return;
+    void openNote();
+    return () => {
+      generationRef.current += 1;
+    };
+  }, [openNote, ownership]);
+
+  const suspend = useCallback(() => {
+    if (!editingRef.current) return;
+    setSuspended(true);
+    void setHandwritingBackground(true);
+    const writer = getWriter(uuid);
+    if (!writer) return;
+    void (async () => {
+      if (await writer.flush()) completeInBackground(uuid);
+    })();
+  }, [uuid]);
+
+  const resume = useCallback(() => {
+    if (!editingRef.current) {
+      setSuspended(false);
+      return;
+    }
+    void setHandwritingBackground(false);
+    void openNote();
+  }, [openNote]);
+
+  useEffect(() => {
+    const visibility = () => {
+      if (document.visibilityState === "hidden") suspend();
+      else resume();
+    };
+    const leaveApp = () => {
+      setSuspended(true);
+      void setHandwritingBackground(true);
+      void completeEveryNote();
+    };
+    document.addEventListener("visibilitychange", visibility);
+    window.addEventListener("pagehide", leaveApp);
+    return () => {
+      document.removeEventListener("visibilitychange", visibility);
+      window.removeEventListener("pagehide", leaveApp);
+    };
+  }, [resume, suspend]);
 
   useEffect(() => {
     return () => {
@@ -121,9 +227,7 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
         // An unacknowledged gesture keeps the session alive so a later mount can
         // retry it; only a clean queue may be handed to completion and dropped.
         if (!(await writer.flush())) return;
-        if (!leavingRef.current) {
-          requestCompletion(uuid, () => completeHandwritingNote(uuid)).catch(() => {});
-        }
+        if (!leavingRef.current) completeInBackground(uuid);
         endSession(uuid);
       })();
     };
@@ -146,13 +250,20 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
     }
     await titleFlush.current();
     navigateAway();
-    if (writer) requestCompletion(uuid, () => completeHandwritingNote(uuid)).catch(() => {});
+    if (writer) completeInBackground(uuid);
   }, [busy, navigateAway, uuid]);
 
   const change = (next: InkDraft) => {
     const previous = latestDraft.current;
     const writer = getWriter(uuid);
-    if (!previous || !writer || next === previous || historyBusyRef.current || leavingRef.current) {
+    if (
+      !previous ||
+      !writer ||
+      next === previous ||
+      historyBusyRef.current ||
+      leavingRef.current ||
+      suspendedRef.current
+    ) {
       return;
     }
     latestDraft.current = next;
@@ -163,7 +274,7 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
   };
 
   const navigateHistory = async (redo: boolean) => {
-    if (busy || historyBusyRef.current || !(redo ? canRedo : canUndo)) return;
+    if (editingBusy || historyBusyRef.current || !(redo ? canRedo : canUndo)) return;
     historyBusyRef.current = true;
     setHistoryBusy(true);
     try {
@@ -259,287 +370,299 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
           </Button>
         </div>
       )}
-      <div
-        role="toolbar"
-        aria-label="Handwriting tools"
-        className="flex shrink-0 flex-wrap items-center gap-2 border-b px-3 py-2"
-      >
-        <Button
-          type="button"
-          variant={tool === "pen" ? "secondary" : "ghost"}
-          aria-pressed={tool === "pen"}
-          disabled={!draft || busy}
-          onClick={() => {
-            setTool("pen");
-            setSelected([]);
-          }}
-        >
-          <PenLine className="size-4" />
-          Pen
-        </Button>
-        <Button
-          type="button"
-          variant={tool === "eraser" ? "secondary" : "ghost"}
-          aria-pressed={tool === "eraser"}
-          disabled={!draft || busy}
-          onClick={() => {
-            setTool("eraser");
-            setSelected([]);
-          }}
-        >
-          <Eraser className="size-4" />
-          Eraser
-        </Button>
-        <Button
-          type="button"
-          variant={tool === "lasso" ? "secondary" : "ghost"}
-          aria-pressed={tool === "lasso"}
-          disabled={!draft || busy}
-          onClick={() => setTool("lasso")}
-        >
-          <Lasso className="size-4" /> Lasso
-        </Button>
-        <div className="mx-1 h-6 border-l" />
-        <div className="flex gap-1" role="group" aria-label="Paper background">
-          {(["plain", "grid"] as const).map((background) => (
+      {editing ? (
+        <>
+          <div
+            role="toolbar"
+            aria-label="Handwriting tools"
+            className="flex shrink-0 flex-wrap items-center gap-2 border-b px-3 py-2"
+          >
             <Button
-              key={background}
-              variant={draft?.background === background ? "secondary" : "ghost"}
-              aria-label={background === "grid" ? "Grid paper" : "Plain paper"}
-              aria-pressed={draft?.background === background}
-              disabled={!draft || busy}
+              type="button"
+              variant={tool === "pen" ? "secondary" : "ghost"}
+              aria-pressed={tool === "pen"}
+              disabled={!draft || editingBusy}
               onClick={() => {
-                if (draft && draft.background !== background) change({ ...draft, background });
+                setTool("pen");
+                setSelected([]);
               }}
             >
-              {background === "grid" ? (
-                <Grid2X2 className="size-4" />
-              ) : (
-                <Square className="size-4" />
-              )}
+              <PenLine className="size-4" />
+              Pen
             </Button>
-          ))}
-        </div>
-        <div className="ml-auto flex gap-1">
-          <Button
-            type="button"
-            variant="ghost"
-            aria-label="Undo stroke"
-            disabled={busy || !canUndo}
-            onClick={undoStroke}
-          >
-            <Undo2 className="size-4" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            aria-label="Redo stroke"
-            disabled={busy || !canRedo}
-            onClick={redoStroke}
-          >
-            <Redo2 className="size-4" />
-          </Button>
-        </div>
-      </div>
-      <div
-        role="toolbar"
-        aria-label="Tool options"
-        className="flex min-h-12 shrink-0 flex-wrap items-center gap-1 border-b px-3 py-1"
-      >
-        {tool === "pen" && (
-          <>
-            <span className="mr-2 text-xs text-muted-foreground">Pen width</span>
-            {[2, 3, 5].map((value) => (
+            <Button
+              type="button"
+              variant={tool === "eraser" ? "secondary" : "ghost"}
+              aria-pressed={tool === "eraser"}
+              disabled={!draft || editingBusy}
+              onClick={() => {
+                setTool("eraser");
+                setSelected([]);
+              }}
+            >
+              <Eraser className="size-4" />
+              Eraser
+            </Button>
+            <Button
+              type="button"
+              variant={tool === "lasso" ? "secondary" : "ghost"}
+              aria-pressed={tool === "lasso"}
+              disabled={!draft || editingBusy}
+              onClick={() => setTool("lasso")}
+            >
+              <Lasso className="size-4" /> Lasso
+            </Button>
+            <div className="mx-1 h-6 border-l" />
+            <div className="flex gap-1" role="group" aria-label="Paper background">
+              {(["plain", "grid"] as const).map((background) => (
+                <Button
+                  key={background}
+                  variant={draft?.background === background ? "secondary" : "ghost"}
+                  aria-label={background === "grid" ? "Grid paper" : "Plain paper"}
+                  aria-pressed={draft?.background === background}
+                  disabled={!draft || editingBusy}
+                  onClick={() => {
+                    if (draft && draft.background !== background) change({ ...draft, background });
+                  }}
+                >
+                  {background === "grid" ? (
+                    <Grid2X2 className="size-4" />
+                  ) : (
+                    <Square className="size-4" />
+                  )}
+                </Button>
+              ))}
+            </div>
+            <div className="ml-auto flex gap-1">
               <Button
-                key={value}
-                variant={width === value ? "secondary" : "ghost"}
-                aria-label={`Pen width ${value}`}
-                aria-pressed={width === value}
-                disabled={busy}
-                onClick={() => setWidth(value)}
-                className="w-10 px-0"
+                type="button"
+                variant="ghost"
+                aria-label="Undo stroke"
+                disabled={editingBusy || !canUndo}
+                onClick={undoStroke}
               >
-                <span
-                  className="block rounded-full bg-current"
-                  style={{ width: value * 2, height: value * 2 }}
-                />
+                <Undo2 className="size-4" />
               </Button>
-            ))}
-          </>
-        )}
-        {tool === "eraser" && (
-          <>
-            {(
-              [
-                ["stroke", "Stroke"],
-                ["pixel", "Pixel"],
-                ["lasso", "Lasso"],
-              ] as const
-            ).map(([value, label]) => (
               <Button
-                key={value}
-                variant={eraserMode === value ? "secondary" : "ghost"}
-                aria-pressed={eraserMode === value}
-                aria-label={`${label} eraser`}
-                disabled={busy}
-                onClick={() => setEraserMode(value)}
+                type="button"
+                variant="ghost"
+                aria-label="Redo stroke"
+                disabled={editingBusy || !canRedo}
+                onClick={redoStroke}
               >
-                {label}
+                <Redo2 className="size-4" />
               </Button>
-            ))}
-            {eraserMode !== "lasso" && (
-              <div
-                className="flex items-center gap-1 border-l pl-2"
-                role="group"
-                aria-label="Eraser size"
-              >
+            </div>
+          </div>
+          <div
+            role="toolbar"
+            aria-label="Tool options"
+            className="flex min-h-12 shrink-0 flex-wrap items-center gap-1 border-b px-3 py-1"
+          >
+            {tool === "pen" && (
+              <>
+                <span className="mr-2 text-xs text-muted-foreground">Pen width</span>
+                {[2, 3, 5].map((value) => (
+                  <Button
+                    key={value}
+                    variant={width === value ? "secondary" : "ghost"}
+                    aria-label={`Pen width ${value}`}
+                    aria-pressed={width === value}
+                    disabled={editingBusy}
+                    onClick={() => setWidth(value)}
+                    className="w-10 px-0"
+                  >
+                    <span
+                      className="block rounded-full bg-current"
+                      style={{ width: value * 2, height: value * 2 }}
+                    />
+                  </Button>
+                ))}
+              </>
+            )}
+            {tool === "eraser" && (
+              <>
                 {(
                   [
-                    [6, "Small"],
-                    [12, "Medium"],
-                    [24, "Large"],
+                    ["stroke", "Stroke"],
+                    ["pixel", "Pixel"],
+                    ["lasso", "Lasso"],
                   ] as const
                 ).map(([value, label]) => (
                   <Button
                     key={value}
-                    variant={eraserRadius === value ? "secondary" : "ghost"}
-                    aria-label={`${label} eraser size`}
-                    aria-pressed={eraserRadius === value}
-                    disabled={busy}
-                    onClick={() => setEraserRadius(value)}
-                    className="w-9 px-0"
+                    variant={eraserMode === value ? "secondary" : "ghost"}
+                    aria-pressed={eraserMode === value}
+                    aria-label={`${label} eraser`}
+                    disabled={editingBusy}
+                    onClick={() => setEraserMode(value)}
                   >
-                    <span
-                      className="rounded-full border border-current"
-                      style={{ width: value, height: value }}
-                    />
+                    {label}
                   </Button>
                 ))}
-              </div>
-            )}
-            <Button
-              className="ml-auto"
-              variant="ghost"
-              disabled={busy || !draft?.strokes.length}
-              onClick={() => {
-                if (draft) {
-                  change({ ...draft, strokes: [] });
-                  setSelected([]);
-                  setLimit(false);
-                }
-              }}
-            >
-              <Trash2 className="size-4" /> Clear sheet
-            </Button>
-          </>
-        )}
-        {tool === "lasso" && (
-          <>
-            {(
-              [
-                ["free", "Freehand"],
-                ["rectangle", "Rectangle"],
-              ] as const
-            ).map(([value, label]) => (
-              <Button
-                key={value}
-                variant={lassoMode === value ? "secondary" : "ghost"}
-                aria-pressed={lassoMode === value}
-                disabled={busy}
-                onClick={() => {
-                  setLassoMode(value);
-                  setSelected([]);
-                }}
-              >
-                {label}
-              </Button>
-            ))}
-            {selected.length > 0 ? (
-              <div className="flex flex-wrap items-center gap-1 border-l pl-2">
-                <span className="px-2 text-xs">{selected.length} selected · drag to move</span>
+                {eraserMode !== "lasso" && (
+                  <div
+                    className="flex items-center gap-1 border-l pl-2"
+                    role="group"
+                    aria-label="Eraser size"
+                  >
+                    {(
+                      [
+                        [6, "Small"],
+                        [12, "Medium"],
+                        [24, "Large"],
+                      ] as const
+                    ).map(([value, label]) => (
+                      <Button
+                        key={value}
+                        variant={eraserRadius === value ? "secondary" : "ghost"}
+                        aria-label={`${label} eraser size`}
+                        aria-pressed={eraserRadius === value}
+                        disabled={editingBusy}
+                        onClick={() => setEraserRadius(value)}
+                        className="w-9 px-0"
+                      >
+                        <span
+                          className="rounded-full border border-current"
+                          style={{ width: value, height: value }}
+                        />
+                      </Button>
+                    ))}
+                  </div>
+                )}
                 <Button
+                  className="ml-auto"
                   variant="ghost"
-                  aria-label="Copy selection"
-                  disabled={busy}
+                  disabled={editingBusy || !draft?.strokes.length}
                   onClick={() => {
-                    if (!draft) return;
-                    const source = draft.strokes.filter((stroke) => selected.includes(stroke.id));
-                    if (
-                      [...draft.strokes, ...source].reduce(
-                        (n, stroke) => n + stroke.points.length,
-                        0,
-                      ) > MAX_INK_POINTS
-                    ) {
-                      setLimit(true);
-                      return;
+                    if (draft) {
+                      change({ ...draft, strokes: [] });
+                      setSelected([]);
+                      setLimit(false);
                     }
-                    const copies = source.map((stroke) => ({
-                      ...stroke,
-                      id: crypto.randomUUID(),
-                    }));
-                    const ids = copies.map((stroke) => stroke.id);
-                    change({
-                      ...draft,
-                      strokes: [...draft.strokes, ...moveSelection(copies, ids, 25, 25)],
-                    });
-                    setSelected(ids);
                   }}
                 >
-                  <Copy className="size-4" />
+                  <Trash2 className="size-4" /> Clear sheet
                 </Button>
+              </>
+            )}
+            {tool === "lasso" && (
+              <>
                 {(
                   [
-                    [0.9, "Shrink selection", Minus],
-                    [1.1, "Enlarge selection", Plus],
+                    ["free", "Freehand"],
+                    ["rectangle", "Rectangle"],
                   ] as const
-                ).map(([factor, label, Icon]) => (
+                ).map(([value, label]) => (
                   <Button
-                    key={label}
-                    variant="ghost"
-                    aria-label={label}
-                    disabled={busy}
+                    key={value}
+                    variant={lassoMode === value ? "secondary" : "ghost"}
+                    aria-pressed={lassoMode === value}
+                    disabled={editingBusy}
                     onClick={() => {
-                      if (draft) {
-                        const strokes = scaleSelection(draft.strokes, selected, factor);
-                        if (strokes !== draft.strokes) change({ ...draft, strokes });
-                      }
+                      setLassoMode(value);
+                      setSelected([]);
                     }}
                   >
-                    <Icon className="size-4" />
+                    {label}
                   </Button>
                 ))}
-                <Button
-                  variant="ghost"
-                  aria-label="Delete selection"
-                  disabled={busy}
-                  onClick={() => {
-                    if (draft)
-                      change({
-                        ...draft,
-                        strokes: draft.strokes.filter((stroke) => !selected.includes(stroke.id)),
-                      });
-                    setSelected([]);
-                  }}
-                >
-                  <Trash2 className="size-4" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  aria-label="Deselect"
-                  disabled={busy}
-                  onClick={() => setSelected([])}
-                >
-                  <X className="size-4" />
-                </Button>
-              </div>
-            ) : (
-              <span className="px-2 text-xs text-muted-foreground">
-                Draw around handwriting to select it
-              </span>
+                {selected.length > 0 ? (
+                  <div className="flex flex-wrap items-center gap-1 border-l pl-2">
+                    <span className="px-2 text-xs">{selected.length} selected · drag to move</span>
+                    <Button
+                      variant="ghost"
+                      aria-label="Copy selection"
+                      disabled={editingBusy}
+                      onClick={() => {
+                        if (!draft) return;
+                        const source = draft.strokes.filter((stroke) =>
+                          selected.includes(stroke.id),
+                        );
+                        if (
+                          [...draft.strokes, ...source].reduce(
+                            (n, stroke) => n + stroke.points.length,
+                            0,
+                          ) > MAX_INK_POINTS
+                        ) {
+                          setLimit(true);
+                          return;
+                        }
+                        const copies = source.map((stroke) => ({
+                          ...stroke,
+                          id: crypto.randomUUID(),
+                        }));
+                        const ids = copies.map((stroke) => stroke.id);
+                        change({
+                          ...draft,
+                          strokes: [...draft.strokes, ...moveSelection(copies, ids, 25, 25)],
+                        });
+                        setSelected(ids);
+                      }}
+                    >
+                      <Copy className="size-4" />
+                    </Button>
+                    {(
+                      [
+                        [0.9, "Shrink selection", Minus],
+                        [1.1, "Enlarge selection", Plus],
+                      ] as const
+                    ).map(([factor, label, Icon]) => (
+                      <Button
+                        key={label}
+                        variant="ghost"
+                        aria-label={label}
+                        disabled={editingBusy}
+                        onClick={() => {
+                          if (draft) {
+                            const strokes = scaleSelection(draft.strokes, selected, factor);
+                            if (strokes !== draft.strokes) change({ ...draft, strokes });
+                          }
+                        }}
+                      >
+                        <Icon className="size-4" />
+                      </Button>
+                    ))}
+                    <Button
+                      variant="ghost"
+                      aria-label="Delete selection"
+                      disabled={editingBusy}
+                      onClick={() => {
+                        if (draft)
+                          change({
+                            ...draft,
+                            strokes: draft.strokes.filter(
+                              (stroke) => !selected.includes(stroke.id),
+                            ),
+                          });
+                        setSelected([]);
+                      }}
+                    >
+                      <Trash2 className="size-4" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      aria-label="Deselect"
+                      disabled={editingBusy}
+                      onClick={() => setSelected([])}
+                    >
+                      <X className="size-4" />
+                    </Button>
+                  </div>
+                ) : (
+                  <span className="px-2 text-xs text-muted-foreground">
+                    Draw around handwriting to select it
+                  </span>
+                )}
+              </>
             )}
-          </>
-        )}
-      </div>
+          </div>
+        </>
+      ) : (
+        <p role="status" className="shrink-0 border-b px-3 py-2 text-xs text-muted-foreground">
+          This note is open for writing in another pane. Close it there to edit here.
+        </p>
+      )}
       <div
         data-ink-viewport
         className="min-h-0 flex-1 overflow-auto overscroll-contain bg-neutral-100 px-2 py-3 sm:px-6"
@@ -552,7 +675,7 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
           <div className="mx-auto w-full max-w-[900px] border border-neutral-300 bg-white">
             <InkCanvas
               draft={draft}
-              disabled={historyBusy || leaving}
+              disabled={!editing || suspended || historyBusy || leaving}
               tool={tool}
               eraserMode={eraserMode}
               eraserRadius={eraserRadius}
