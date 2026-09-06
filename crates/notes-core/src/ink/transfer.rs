@@ -45,7 +45,7 @@ pub fn required_blobs(root_hash: BlobHash, root: &[u8]) -> CommandResult<BTreeMa
     }
     Ok(blobs)
 }
-fn snapshot(root_hash: BlobHash, blobs: &Blobs) -> CommandResult<Snapshot> {
+pub(super) fn snapshot(root_hash: BlobHash, blobs: &Blobs) -> CommandResult<Snapshot> {
     let root = blobs
         .get(&root_hash)
         .ok_or_else(|| CommandError::invalid("Missing handwriting root"))?;
@@ -100,7 +100,11 @@ fn snapshot(root_hash: BlobHash, blobs: &Blobs) -> CommandResult<Snapshot> {
 pub fn validate_graph(root_hash: BlobHash, blobs: &Blobs) -> CommandResult<()> {
     snapshot(root_hash, blobs).map(|_| ())
 }
-fn stage(conn: &Connection, root_hash: BlobHash, snapshot: &Snapshot) -> CommandResult<()> {
+pub(super) fn stage(
+    conn: &Connection,
+    root_hash: BlobHash,
+    snapshot: &Snapshot,
+) -> CommandResult<()> {
     storage::history::persist(conn, &snapshot)?;
     conn.execute(
         "INSERT OR IGNORE INTO ink_staged_roots VALUES(?1,?2)",

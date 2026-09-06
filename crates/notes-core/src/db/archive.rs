@@ -10,7 +10,7 @@ use crate::{
 use std::collections::{HashMap, HashSet};
 
 pub const ARCHIVE_FORMAT: &str = "tangleaf";
-pub const ARCHIVE_VERSION: u32 = 7;
+pub const ARCHIVE_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArchiveImportStats {
@@ -20,7 +20,9 @@ pub struct ArchiveImportStats {
 }
 
 pub async fn export_archive(conn: &Connection) -> Result<DataArchive> {
-    conn.call(|database| {
+    conn.call_domain(|database| -> Result<DataArchive> {
+        let transaction = database.transaction()?;
+        let database = &transaction;
         let workspace_uuid = database.query_row(
             "SELECT uuid FROM workspace WHERE singleton = 1",
             [],
@@ -143,7 +145,8 @@ pub async fn export_archive(conn: &Connection) -> Result<DataArchive> {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(DataArchive {
+        let (ink, ink_blobs) = crate::ink::archive::capture(database)?;
+        let archive = DataArchive {
             format: ARCHIVE_FORMAT.into(),
             version: ARCHIVE_VERSION,
             workspace_uuid,
@@ -154,7 +157,11 @@ pub async fn export_archive(conn: &Connection) -> Result<DataArchive> {
             blocks,
             attachments,
             external_import_receipts,
-        })
+            ink,
+            ink_blobs,
+        };
+        transaction.commit()?;
+        Ok(archive)
     })
     .await
 }
@@ -179,7 +186,7 @@ pub async fn import_archive_with_precommit<F>(
 where
     F: FnOnce() -> Result<()> + Send + 'static,
 {
-    if archive.format != ARCHIVE_FORMAT || archive.version != ARCHIVE_VERSION {
+    if archive.format != ARCHIVE_FORMAT || !matches!(archive.version, 7 | ARCHIVE_VERSION) {
         return Err(crate::CoreError::invalid(format!(
             "unsupported archive format {} version {}",
             archive.format, archive.version
@@ -254,6 +261,11 @@ where
             .into());
         }
     }
+    let (archive, ink_manifest, ink_graphs) = tokio::task::spawn_blocking(move || {
+        let (manifest, graphs) = crate::ink::archive::prepare(&archive)?;
+        Ok::<_, crate::CoreError>((archive, manifest, graphs))
+    })
+    .await??;
     conn.call_domain(move |database| -> Result<ArchiveImportStats> {
         let transaction = database.transaction()?;
         let current_workspace_uuid = transaction_workspace_uuid(&transaction)?;
@@ -386,8 +398,9 @@ where
             &transaction,
             restore_kinds,
         )?;
+        let ink_operations = crate::ink::archive::restore(&transaction, ink_manifest, ink_graphs)?;
         let stats = ArchiveImportStats {
-            applied_operations: applied.operations.len(),
+            applied_operations: applied.operations.len() + ink_operations,
             structure_reconciliations: applied.stats.structure_reconciliations,
             reference_projections: applied.stats.reference_projections,
         };

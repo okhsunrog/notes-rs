@@ -8,6 +8,26 @@ const MAX_FRESH_BYTES: u64 = 8 * 1024 * 1024;
 // Bounded, job-local reuse of validated typed metadata (not decoded points).
 const MAX_CACHED_ROOT_ENTRIES: usize = 65_536;
 type Packed = (BTreeMap<Id, Vec<u8>>, BTreeMap<Id, model::SegmentRef>);
+/// Archive restoration is also a publication boundary. Pack the validated
+/// detached graph before opening the restore transaction.
+pub(in crate::ink) fn compact_snapshot(mut snapshot: Snapshot) -> CommandResult<Snapshot> {
+    if snapshot.chunks.len() < 2 {
+        return Ok(snapshot);
+    }
+    let mut doc = model::Document::read(&snapshot.root).map_err(err)?;
+    let plan = Plan {
+        roots: BTreeMap::new(),
+        chunks: std::mem::take(&mut snapshot.chunks),
+        locations: doc.segments.clone(),
+    };
+    let (chunks, locations) = repack(&plan)?
+        .ok_or_else(|| CommandError::invalid("Archive ink graph exceeds compaction budget"))?;
+    doc.chunks = chunks.iter().map(|(id, b)| (*id, blob_ref(b))).collect();
+    doc.segments = locations;
+    snapshot.root = seal(&doc)?;
+    snapshot.chunks = chunks;
+    Ok(snapshot)
+}
 struct Plan {
     roots: BTreeMap<Id, model::Document>,
     chunks: BTreeMap<Id, Vec<u8>>,

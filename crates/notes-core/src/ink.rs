@@ -2,6 +2,7 @@
 use crate::{CoreError as CommandError, CoreResult as CommandResult};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+pub mod archive;
 mod input;
 mod status;
 pub use status::{InkNoteStatus, InkVersionInfo, recoverable_notes};

@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 mod compaction;
 #[path = "storage/history.rs"]
 pub(super) mod history;
+pub(super) use compaction::compact_snapshot;
 pub(super) use compaction::compact_with_limits;
 pub(super) use history::navigate_update;
 const MAX_SNAPSHOT_BYTES: i64 = 64 * 1024 * 1024;
@@ -442,7 +443,7 @@ pub(super) fn to_draft(snapshot: &Snapshot) -> CommandResult<InkDraft> {
     validate(&draft)?;
     Ok(draft)
 }
-fn build(current: Option<&Snapshot>, patch: InkDraftPatch) -> CommandResult<Snapshot> {
+pub(super) fn build(current: Option<&Snapshot>, patch: InkDraftPatch) -> CommandResult<Snapshot> {
     let (document_id, page_id, mut records, mut chunks, mut segments, previous) =
         if let Some(s) = current {
             let doc = model::Document::read(&s.root).map_err(err)?;

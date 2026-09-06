@@ -291,7 +291,7 @@ fn write_portable_archive(
     blob_store: &BlobStore,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
-        archive.format == "tangleaf" && archive.version == db::ARCHIVE_VERSION,
+        archive.format == "tangleaf" && matches!(archive.version, 7 | db::ARCHIVE_VERSION),
         "cannot export an unsupported tangleaf archive manifest"
     );
     validate_archive_shape(&archive)?;
@@ -311,6 +311,18 @@ fn write_portable_archive(
     for (blob_hash, expected_size) in expected {
         writer.write_all(blob_hash.as_bytes())?;
         write_u64(writer, expected_size)?;
+        if let Some(bytes) = archive.ink_blobs.get(&blob_hash) {
+            anyhow::ensure!(
+                bytes.len() as u64 == expected_size && BlobHash::digest(bytes) == blob_hash,
+                "Corrupt archive handwriting blob"
+            );
+            writer.write_all(bytes)?;
+            continue;
+        }
+        anyhow::ensure!(
+            !archive.ink.blobs.contains_key(&blob_hash),
+            "Missing archive handwriting blob"
+        );
         let verified =
             blob_store.open_verified(blob_hash, super::attachments::MAX_ATTACHMENT_SIZE)?;
         anyhow::ensure!(
@@ -351,9 +363,9 @@ fn read_portable_archive(
         .context("reserving archive manifest memory")?;
     manifest.resize(manifest_size, 0);
     reader.read_exact(&mut manifest)?;
-    let archive: db::DataArchive = serde_json::from_slice(&manifest)?;
+    let mut archive: db::DataArchive = serde_json::from_slice(&manifest)?;
     anyhow::ensure!(
-        archive.format == "tangleaf" && archive.version == db::ARCHIVE_VERSION,
+        archive.format == "tangleaf" && matches!(archive.version, 7 | db::ARCHIVE_VERSION),
         "unsupported archive format {} version {}",
         archive.format,
         archive.version
@@ -396,6 +408,19 @@ fn read_portable_archive(
         reader.read(&mut trailing)? == 0,
         "archive contains trailing data"
     );
+    for hash in archive.ink.blobs.keys() {
+        archive.ink_blobs.insert(
+            *hash,
+            staging_blob_store.read_verified(*hash, super::attachments::MAX_ATTACHMENT_SIZE)?,
+        );
+    }
+    // Ink is installed transactionally in SQLite, attachments in the existing file store.
+    let attachment_hashes: std::collections::BTreeSet<_> =
+        archive.attachments.iter().map(|a| a.blob_hash).collect();
+    let expected = expected
+        .into_iter()
+        .filter(|(h, _)| attachment_hashes.contains(h))
+        .collect();
     Ok(StagedPortableArchive {
         archive,
         blob_store: staging_blob_store,
@@ -430,7 +455,21 @@ fn validate_archive_shape(archive: &db::DataArchive) -> anyhow::Result<()> {
 }
 
 fn archive_blob_sizes(archive: &db::DataArchive) -> anyhow::Result<BTreeMap<BlobHash, u64>> {
-    let mut expected = BTreeMap::new();
+    let mut expected = archive.ink.blobs.clone();
+    let ink_size = expected
+        .values()
+        .try_fold(0u64, |n, size| n.checked_add(*size))
+        .context("Handwriting archive size overflow")?;
+    anyhow::ensure!(
+        ink_size <= notes_core::ink::archive::MAX_ARCHIVE_INK_BYTES,
+        "Handwriting archive exceeds the supported size limit"
+    );
+    for size in expected.values() {
+        anyhow::ensure!(
+            *size <= notes_core::ink::transfer::MAX_ROOT_BYTES,
+            "Oversized handwriting archive blob"
+        );
+    }
     for attachment in &archive.attachments {
         anyhow::ensure!(
             attachment.size <= super::attachments::MAX_ATTACHMENT_SIZE,
@@ -600,6 +639,8 @@ mod tests {
             blocks: Vec::new(),
             attachments: vec![attachment("one.bin"), attachment("two.bin")],
             external_import_receipts: Vec::new(),
+            ink: Default::default(),
+            ink_blobs: Default::default(),
         }
     }
 
@@ -629,6 +670,47 @@ mod tests {
             .open_verified(hash, payload.len() as u64)
             .unwrap();
         assert_eq!(verified.blob.size, payload.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn portable_archive_roundtrips_ink_as_binary_and_restores_it_to_sqlite() {
+        let source = tempfile::tempdir().unwrap();
+        let conn = db::open(source.path().join("notes.db")).await.unwrap();
+        let page = db::create_handwritten_note_with_ops(&conn, None)
+            .await
+            .unwrap()
+            .value;
+        let ink = notes_core::ink::Store::new(source.path().join("notes.db"), page.uuid);
+        ink.patch(
+            notes_core::ink::InkDraftPatch {
+                order: vec![],
+                upserts: vec![],
+                background: notes_core::ink::InkBackground::Grid,
+            },
+            None,
+        )
+        .unwrap();
+        let archive = db::export_archive(&conn).await.unwrap();
+        let blobs = archive.ink_blobs.clone();
+        let mut encoded = Vec::new();
+        write_portable_archive(&mut encoded, archive, &BlobStore::new(source.path())).unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let decoded = read_portable_archive(encoded.as_slice(), destination.path()).unwrap();
+        assert_eq!(decoded.archive.ink_blobs, blobs);
+        assert!(
+            decoded.expected_blobs.is_empty(),
+            "ink must not become permanent attachment files"
+        );
+        let target_path = destination.path().join("notes.db");
+        let target = db::open(&target_path).await.unwrap();
+        db::import_archive(&target, decoded.archive).await.unwrap();
+        let restored = notes_core::ink::Store::new(target_path, page.uuid)
+            .read()
+            .unwrap();
+        assert!(matches!(
+            restored.draft.background,
+            notes_core::ink::InkBackground::Grid
+        ));
     }
 
     #[test]

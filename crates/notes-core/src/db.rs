@@ -328,4 +328,9 @@ pub struct DataArchive {
     pub blocks: Vec<Block>,
     pub attachments: Vec<Attachment>,
     pub external_import_receipts: Vec<crate::ExternalImportReceipt>,
+    #[serde(default)]
+    pub ink: crate::ink::archive::Manifest,
+    /// Host container stores these as binary records, never JSON point arrays.
+    #[serde(skip)]
+    pub ink_blobs: crate::ink::transfer::Blobs,
 }

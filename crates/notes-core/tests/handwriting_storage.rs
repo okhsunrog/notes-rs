@@ -54,6 +54,84 @@ fn bytes(store: &Store) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn workspace_archive_restores_unpublished_ink_and_rolls_back_all_binary_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("source.db");
+    let conn = db::open(&path).await.unwrap();
+    let id = note(&conn).await;
+    let empty = note(&conn).await;
+    let store = Store::new(&path, id);
+    let a = stroke(1);
+    let b = stroke(2);
+    let revision = store.patch(patch(vec![a.clone()]), None).unwrap();
+    store.publish("Book".into()).unwrap();
+    store.patch(patch(vec![a, b]), Some(revision)).unwrap();
+    let expected = serde_json::to_value(store.read().unwrap().draft).unwrap();
+    let archive = db::export_archive(&conn).await.unwrap();
+    assert_eq!(
+        archive
+            .ink
+            .documents
+            .iter()
+            .find(|d| d.page_uuid == id)
+            .unwrap()
+            .variants
+            .len(),
+        1,
+        "the published base is not a conflict with its local successor"
+    );
+    let json = serde_json::to_value(&archive).unwrap();
+    assert!(
+        json.get("ink_blobs").is_none(),
+        "binary data must not enter the JSON manifest"
+    );
+    let missing_binary: db::DataArchive = serde_json::from_value(json).unwrap();
+    let target_path = dir.path().join("target.db");
+    let target = db::open(&target_path).await.unwrap();
+    assert!(db::import_archive(&target, missing_binary).await.is_err());
+    let failure = db::import_archive_with_precommit(&target, archive.clone(), || {
+        Err(anyhow::anyhow!("injected"))
+    })
+    .await;
+    assert!(failure.is_err());
+    assert!(db::list_pages(&target, 10).await.unwrap().is_empty());
+    let sql = rusqlite::Connection::open(&target_path).unwrap();
+    let count: i64 = sql
+        .query_row("SELECT count(*) FROM ink_records", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+    db::import_archive(&target, archive.clone()).await.unwrap();
+    let restored = Store::new(&target_path, id);
+    assert_eq!(
+        serde_json::to_value(restored.read().unwrap().draft).unwrap(),
+        expected
+    );
+    assert_eq!(restored.versions().unwrap().len(), 1);
+    assert!(
+        Store::new(&target_path, empty)
+            .read()
+            .unwrap()
+            .draft
+            .strokes
+            .is_empty()
+    );
+    assert!(
+        !restored.compact().unwrap(),
+        "restored publication is already packed"
+    );
+    let first = restored.versions().unwrap()[0].publication.version_uuid;
+    db::import_archive(&target, archive).await.unwrap();
+    assert_eq!(restored.versions().unwrap().len(), 1);
+    assert_eq!(
+        restored.versions().unwrap()[0].publication.parents,
+        vec![first]
+    );
+    sql.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+        .map(|v| assert_eq!(v, "ok"))
+        .unwrap();
+}
+
+#[tokio::test]
 async fn common_database_isolates_notes_history_and_compaction() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("notes.db");
@@ -199,6 +277,21 @@ async fn published_graphs_sync_causally_and_conflicts_keep_both_notes() {
     let rv = right.publish("Desktop".into()).unwrap().unwrap();
     assert_eq!(rv.parents, vec![first.version_uuid]);
     assert_eq!(right.versions().unwrap().len(), 2);
+    let archive_path = dir.path().join("archive.db");
+    let archive_conn = db::open(&archive_path).await.unwrap();
+    db::import_archive(&archive_conn, db::export_archive(&r).await.unwrap())
+        .await
+        .unwrap();
+    let archived = Store::new(&archive_path, id);
+    assert_eq!(
+        archived.versions().unwrap().len(),
+        2,
+        "backups retain every conflicting variant"
+    );
+    assert_eq!(
+        serde_json::to_value(archived.read().unwrap().draft).unwrap(),
+        serde_json::to_value(right.read().unwrap().draft).unwrap()
+    );
     // Missing/corrupt content never installs a partial graph.
     let mut corrupt = first_graph.clone();
     corrupt.get_mut(&first.root_hash).unwrap()[0] ^= 1;
