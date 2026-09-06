@@ -246,6 +246,28 @@ The server assigns a gapless per-user `seq` in its oplog and materializes the sa
 its own notes-core replica. Server replay resumes from the materialized replica cursor rather than
 reapplying the log from zero.
 
+### Server-authored writes
+
+The server writes to the graph itself: the chat agent creates pages, and further server-side writers
+will follow. On the server the notes replica is a materialization of the oplog and nothing else, so
+such a write is complete only once every operation behind it carries a `seq`. Until then it is not
+durable, not visible to any device, and absent from the log that a snapshot taken meanwhile claims
+to represent — and it cannot be repaired afterwards, because only the operation envelope carries the
+HLC and it was never persisted.
+
+Two rules keep that from being possible to forget:
+
+- every code path that mutates `UserState::notes` goes through `UserState::write`, which publishes
+  the authored operations through `ingest` before returning. Server-side tools are handed a writer
+  handle, never the connection: a bare connection looks like a plain local database, and writing to
+  one is only half of a write.
+- `applied_ops` rows with a null `seq` and no matching `sync_outbox` row are a bug. The server counts
+  them when it opens a replica and logs them as an error.
+
+Whether a replica publishes what it authors is recorded as its role (`sync_meta.replica_role`), not
+inferred from having an upstream URL. Clients publish because they push to a server; the server
+publishes because it owns the log. Both answers are yes, for different reasons.
+
 ## 6. Local-first client behavior
 
 Desktop and Android always keep local source state and FTS. Without a configured or reachable

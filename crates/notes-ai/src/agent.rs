@@ -3,7 +3,7 @@ use anyhow::Context;
 use futures::StreamExt;
 use llm_relay::RigClient;
 use notes_core::db::{self, Content, Page, SearchHit};
-use notes_core::{BlockStyle, Connection, PageListFilter};
+use notes_core::{Connection, PageListFilter};
 use notes_protocol::{ChatEvent, ChatTurn};
 use rig::agent::MultiTurnStreamItem;
 use rig::client::CompletionClient;
@@ -633,9 +633,24 @@ impl Tool for GetContent {
 
 // ───────────────────────── create_page ─────────────────────────
 
+/// The one way a tool is allowed to change the graph.
+///
+/// Tools are handed this rather than a [`Connection`] on purpose. A connection
+/// looks like a plain local database, and writing to one is only half of a
+/// write: on the server the notes database is a materialization of an operation
+/// log, and a change that never reaches that log is invisible to every device
+/// and absent from the snapshots taken afterwards. The host implements this
+/// trait so that publishing cannot be forgotten at the call site.
+#[async_trait::async_trait]
+pub trait GraphWriter: Send + Sync {
+    /// Creates a page, optionally with a first paragraph, and returns only once
+    /// the operations behind it are durable.
+    async fn create_page(&self, title: String, markdown: String) -> anyhow::Result<Page>;
+}
+
 #[derive(Clone)]
 pub struct CreatePage {
-    pub conn: Connection,
+    pub writer: Arc<dyn GraphWriter>,
 }
 
 #[derive(Deserialize)]
@@ -672,22 +687,10 @@ impl Tool for CreatePage {
                 "page title or content exceeds the allowed size".into(),
             ));
         }
-        let page = db::create_page(&self.conn, args.title)
+        self.writer
+            .create_page(args.title, args.markdown)
             .await
-            .map_err(into_tool_err)?;
-        if !args.markdown.trim().is_empty() {
-            db::create_block(
-                &self.conn,
-                page.uuid,
-                None,
-                None,
-                BlockStyle::Paragraph,
-                args.markdown,
-            )
-            .await
-            .map_err(into_tool_err)?;
-        }
-        Ok(page)
+            .map_err(into_tool_err)
     }
 }
 
@@ -697,7 +700,7 @@ fn build_agent<M: CompletionModel + 'static>(
     model: M,
     retrieval: RetrievalPipeline,
     rewriter: QueryRewriter,
-    allow_writes: bool,
+    writer: Option<Arc<dyn GraphWriter>>,
     active_content_uuid: Option<uuid::Uuid>,
 ) -> Result<rig::agent::Agent<M>, AgentError> {
     let conn = retrieval.notes().clone();
@@ -727,8 +730,8 @@ fn build_agent<M: CompletionModel + 'static>(
         .tool(ReadAncestors { conn: conn.clone() })
         .tool(ReadSubtree { conn: conn.clone() })
         .tool(GetContent { conn: conn.clone() });
-    if allow_writes {
-        builder = builder.tool(CreatePage { conn });
+    if let Some(writer) = writer {
+        builder = builder.tool(CreatePage { writer });
     }
     Ok(builder.build())
 }
@@ -745,7 +748,7 @@ pub async fn run_chat_stream_with_config(
     retrieval: RetrievalPipeline,
     history: Vec<ChatTurn>,
     message: String,
-    allow_writes: bool,
+    writer: Option<Arc<dyn GraphWriter>>,
     active_content_uuid: Option<uuid::Uuid>,
     cancelled: CancellationToken,
     emit: impl Fn(ChatEvent) + Send + Sync + 'static,
@@ -780,7 +783,7 @@ pub async fn run_chat_stream_with_config(
                 retrieval,
                 history,
                 message,
-                allow_writes,
+                writer.clone(),
                 active_content_uuid,
                 cancelled,
                 emit,
@@ -795,7 +798,7 @@ pub async fn run_chat_stream_with_config(
                 retrieval,
                 history,
                 message,
-                allow_writes,
+                writer.clone(),
                 active_content_uuid,
                 cancelled,
                 emit,
@@ -813,7 +816,7 @@ async fn run_chat_stream_with_model<M: CompletionModel + 'static>(
     retrieval: RetrievalPipeline,
     history: Vec<ChatTurn>,
     message: String,
-    allow_writes: bool,
+    writer: Option<Arc<dyn GraphWriter>>,
     active_content_uuid: Option<uuid::Uuid>,
     cancelled: CancellationToken,
     emit: Arc<dyn Fn(ChatEvent) + Send + Sync>,
@@ -821,13 +824,7 @@ async fn run_chat_stream_with_model<M: CompletionModel + 'static>(
     query_rewriting_enabled: bool,
 ) -> Result<String, AgentError> {
     let rewriter = QueryRewriter::new(&history, query_rewriting_enabled, query_rewriter_config);
-    let agent = build_agent(
-        model,
-        retrieval,
-        rewriter,
-        allow_writes,
-        active_content_uuid,
-    )?;
+    let agent = build_agent(model, retrieval, rewriter, writer, active_content_uuid)?;
     let history: Vec<Message> = history.into_iter().map(chat_turn_message).collect();
 
     let mut stream = agent

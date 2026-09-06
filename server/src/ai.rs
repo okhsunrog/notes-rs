@@ -252,11 +252,15 @@ impl AiRuntime {
         if cancelled.is_cancelled() {
             bail!("chat request was cancelled");
         }
+        let writer = allow_writes.then(|| {
+            let writer: Arc<dyn agent::GraphWriter> = user.source.clone();
+            writer
+        });
         agent::run_chat_stream_with_config(
             user.retrieval.clone(),
             history,
             message,
-            allow_writes,
+            writer,
             active_content_uuid,
             cancelled,
             emit,
