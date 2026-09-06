@@ -200,3 +200,8 @@ pub async fn cached_blobs(
         Ok(result)
     }).await
 }
+
+/// A root is marked available only after full validation and atomic installation.
+pub async fn has_graph(conn: &crate::Connection, root_hash: BlobHash) -> anyhow::Result<bool> {
+    conn.call(move |database| database.query_row("SELECT EXISTS(SELECT 1 FROM ink_versions WHERE root_hash=?1 AND root_id IS NOT NULL UNION ALL SELECT 1 FROM ink_staged_roots WHERE root_hash=?1)",[root_hash.as_bytes().as_slice()],|r|r.get(0))).await
+}

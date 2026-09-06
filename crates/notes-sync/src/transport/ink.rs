@@ -93,6 +93,9 @@ impl HttpTransport {
         connection: &notes_core::Connection,
         root_hash: BlobHash,
     ) -> Result<usize> {
+        if transfer::has_graph(connection, root_hash).await? {
+            return Ok(0);
+        }
         let mut blobs = transfer::cached_blobs(connection, vec![root_hash]).await?;
         let mut downloaded = 0;
         if !blobs.contains_key(&root_hash) {

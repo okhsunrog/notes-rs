@@ -66,6 +66,7 @@ fn is_permanent_failure(error: &anyhow::Error) -> bool {
 }
 
 struct DesktopTransport<'a> {
+    connection: &'a Connection,
     http: &'a HttpTransport,
     blob_store: &'a BlobStore,
 }
@@ -81,12 +82,18 @@ impl SyncTransport for DesktopTransport<'_> {
     }
 
     async fn prepare_push(&mut self, operations: &[notes_core::Op]) -> Result<()> {
-        upload_operation_blobs(self.http, self.blob_store, operations).await
+        upload_operation_blobs(self.connection, self.http, self.blob_store, operations).await
     }
 
     async fn prepare_pull(&mut self, operations: &[SequencedOp]) -> Result<()> {
         for operation in operations {
-            download_operation_blob(self.http, self.blob_store, &operation.envelope).await?;
+            download_operation_blob(
+                self.connection,
+                self.http,
+                self.blob_store,
+                &operation.envelope,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -465,7 +472,7 @@ async fn synchronize_session(
                         )
                         .await;
                     }
-                    upload_operation_blobs(transport, blob_store, &pending).await?;
+                    upload_operation_blobs(connection,transport, blob_store, &pending).await?;
                     let message = serde_json::to_string(&ClientMessage::Push { ops: pending })?;
                     socket.send(Message::Text(message.into())).await?;
                 }
@@ -498,11 +505,11 @@ async fn initialize_replica(
     let local_empty = snapshot_is_empty(&local);
     match (server_empty, local_empty) {
         (true, false) => {
-            upload_snapshot_blobs(transport, blob_store, &local).await?;
+            upload_snapshot_blobs(connection, transport, blob_store, &local).await?;
             transport.bootstrap(local.clone()).await?;
         }
         (false, true) => {
-            download_snapshot_blobs(transport, blob_store, &server).await?;
+            download_snapshot_blobs(connection, transport, blob_store, &server).await?;
             notes_core::import_sync_snapshot(connection, server.clone()).await?;
             emit_workspace_changed(app);
         }
@@ -513,7 +520,7 @@ async fn initialize_replica(
             {
                 return Err(SyncSessionError::WorkspaceConflict.into());
             }
-            download_snapshot_blobs(transport, blob_store, &server).await?;
+            download_snapshot_blobs(connection, transport, blob_store, &server).await?;
         }
         (true, true) => {
             // The server's durable empty workspace is canonical. This prevents
@@ -580,6 +587,7 @@ async fn synchronize_http(
     blob_store: &BlobStore,
 ) -> Result<()> {
     let mut transport = DesktopTransport {
+        connection,
         http: transport,
         blob_store,
     };
@@ -643,7 +651,7 @@ async fn apply_server_operations(
     operations: Vec<SequencedOp>,
 ) -> Result<()> {
     for operation in &operations {
-        download_operation_blob(transport, blob_store, &operation.envelope).await?;
+        download_operation_blob(connection, transport, blob_store, &operation.envelope).await?;
     }
     let sequenced = operations
         .iter()
@@ -668,11 +676,15 @@ async fn apply_server_operations(
 }
 
 async fn upload_operation_blobs(
+    connection: &Connection,
     transport: &HttpTransport,
     blob_store: &BlobStore,
     operations: &[notes_core::Op],
 ) -> Result<()> {
     for operation in operations {
+        if let notes_core::OpKind::InkPublish(p) = &operation.kind {
+            transport.upload_ink_graph(connection, p.root_hash).await?;
+        }
         if let notes_core::OpKind::AttachmentAdd(attachment) = &operation.kind {
             upload_blob(transport, blob_store, attachment.blob_hash, attachment.size).await?;
         }
@@ -681,10 +693,16 @@ async fn upload_operation_blobs(
 }
 
 async fn download_operation_blob(
+    connection: &Connection,
     transport: &HttpTransport,
     blob_store: &BlobStore,
     operation: &notes_core::Op,
 ) -> Result<()> {
+    if let notes_core::OpKind::InkPublish(p) = &operation.kind {
+        transport
+            .download_ink_graph(connection, p.root_hash)
+            .await?;
+    }
     if let notes_core::OpKind::AttachmentAdd(attachment) = &operation.kind {
         download_blob(transport, blob_store, attachment.blob_hash, attachment.size).await?;
     }
@@ -692,10 +710,16 @@ async fn download_operation_blob(
 }
 
 async fn upload_snapshot_blobs(
+    connection: &Connection,
     transport: &HttpTransport,
     blob_store: &BlobStore,
     snapshot: &SyncSnapshot,
 ) -> Result<()> {
+    for version in &snapshot.ink_versions {
+        transport
+            .upload_ink_graph(connection, version.publication.root_hash)
+            .await?;
+    }
     for attachment in snapshot
         .attachments
         .iter()
@@ -710,10 +734,16 @@ async fn upload_snapshot_blobs(
 }
 
 async fn download_snapshot_blobs(
+    connection: &Connection,
     transport: &HttpTransport,
     blob_store: &BlobStore,
     snapshot: &SyncSnapshot,
 ) -> Result<()> {
+    for version in &snapshot.ink_versions {
+        transport
+            .download_ink_graph(connection, version.publication.root_hash)
+            .await?;
+    }
     for attachment in snapshot
         .attachments
         .iter()
