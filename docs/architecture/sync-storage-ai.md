@@ -291,10 +291,13 @@ asks for a server token, the credential that already authorizes everything else 
 second password to manage. Issued material lives in `oauth.db` as digests and is short-lived:
 codes for a minute, access tokens for an hour, refresh tokens for thirty days from last use.
 
-Two details are load-bearing. Every published URL derives from `public_url` rather than from a
-request header, so a forged `Host` cannot redirect discovery. And an unauthorized request answers
-`401` with `WWW-Authenticate: Bearer resource_metadata=…`, which is the only way a client learns
-where to authorize.
+Two details are load-bearing. An unauthorized request answers `401` with
+`WWW-Authenticate: Bearer resource_metadata=…`, which is the only way a client learns where to
+authorize. And a workspace reachable under several names describes each of them: a client checks
+that the resource it was told about matches the URL its user typed, so the protected resource
+metadata reports the name the request arrived on. That is decided by the configured list, never by
+the header alone — an unknown `Host` falls back to `public_url`, which also stays the issuer, since
+the spec expects a resource to be able to point at an authorization server elsewhere.
 
 ## 6. Local-first client behavior
 

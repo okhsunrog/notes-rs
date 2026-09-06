@@ -432,12 +432,20 @@ async fn health() -> Json<HealthResponse> {
 /// where to authorize; the spec requires it on a 401 specifically, and a client
 /// that does not see it cannot start the flow at all.
 async fn require_auth(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
+    // The pointer names the origin this request arrived on, so a workspace
+    // reachable under more than one name sends each client to the document that
+    // describes the URL it actually used.
+    let host = request
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     let unauthorized = || {
         let mut response = ApiError::unauthorized().into_response();
         if let Some(origin) = &state.public_origin
             && let Ok(value) = HeaderValue::from_str(&format!(
                 "Bearer realm=\"tangleaf\", resource_metadata=\"{}\"",
-                origin.resource_metadata()
+                origin.resource_metadata(host.as_deref(), &state.mcp_allowed_hosts)
             ))
         {
             response.headers_mut().insert(WWW_AUTHENTICATE, value);

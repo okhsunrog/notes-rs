@@ -31,12 +31,27 @@ pub type McpService = StreamableHttpService<Tangleaf, LocalSessionManager>;
 /// account from the request, so one service serves every account exactly as the
 /// JSON routes do.
 pub fn service(allowed_hosts: Vec<String>, ai: Option<Arc<AiRuntime>>) -> McpService {
-    let config = StreamableHttpServerConfig::default().with_allowed_hosts(allowed_hosts);
     StreamableHttpService::new(
         move || Ok(Tangleaf { ai: ai.clone() }),
         Arc::new(LocalSessionManager::default()),
-        config,
+        transport_config(allowed_hosts),
     )
+}
+
+/// Configures `Host` validation, which is what stands between a public
+/// deployment and DNS rebinding.
+///
+/// An empty list is not "no opinion" to the transport — it turns validation off
+/// and accepts any `Host`. A deployment that has not named its hostnames wants
+/// the opposite, so an empty list keeps the transport's own loopback-only
+/// default instead of being passed through.
+fn transport_config(allowed_hosts: Vec<String>) -> StreamableHttpServerConfig {
+    let config = StreamableHttpServerConfig::default();
+    if allowed_hosts.is_empty() {
+        config
+    } else {
+        config.with_allowed_hosts(allowed_hosts)
+    }
 }
 
 #[derive(Clone)]
@@ -656,5 +671,25 @@ impl Tangleaf {
             .await
             .map(|found| Json(found.into_iter().map(Node::from).collect()))
             .map_err(failed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::transport_config;
+
+    #[test]
+    fn an_unconfigured_deployment_keeps_host_validation_on() {
+        // The transport reads an empty list as "accept any Host", so passing
+        // the configuration straight through would disable the check for every
+        // deployment that had not thought about it.
+        let unconfigured = transport_config(Vec::new());
+        assert!(
+            !unconfigured.allowed_hosts.is_empty(),
+            "an empty configuration must not disable Host validation"
+        );
+
+        let configured = transport_config(vec!["notes.example.com".into()]);
+        assert_eq!(configured.allowed_hosts, vec!["notes.example.com"]);
     }
 }

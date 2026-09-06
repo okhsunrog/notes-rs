@@ -360,3 +360,60 @@ async fn plain_pkce_is_refused() {
         .expect("a downgraded authorization request");
     assert_eq!(downgraded.status(), 400);
 }
+
+/// A workspace can answer under more than one name. A client checks that the
+/// resource it was told about matches the URL its user typed, so each name has
+/// to describe itself — otherwise the second domain is reachable by token but
+/// not connectable by OAuth.
+#[tokio::test]
+async fn each_configured_name_describes_itself() {
+    let harness =
+        common::start_public_server_for(vec!["127.0.0.1".into(), "notes.example.dev".into()]).await;
+    let http = client();
+    let canonical = harness.url("");
+
+    let described = |host: &'static str| {
+        let request = http
+            .get(harness.url("/.well-known/oauth-protected-resource"))
+            .header("host", host);
+        async move {
+            json(request.send().await.expect("resource metadata")).await["resource"]
+                .as_str()
+                .expect("a resource")
+                .to_owned()
+        }
+    };
+
+    assert_eq!(
+        described("notes.example.dev").await,
+        "http://notes.example.dev/mcp",
+        "a configured name must describe itself"
+    );
+
+    // A name nobody configured decides nothing.
+    assert_eq!(
+        described("attacker.example").await,
+        format!("{canonical}/mcp"),
+        "an unknown Host must fall back to the canonical origin"
+    );
+
+    // And the pointer on a refusal follows the same rule, so the client is sent
+    // to the document that describes the URL it used.
+    let refused = http
+        .post(harness.url("/mcp"))
+        .header("host", "notes.example.dev")
+        .send()
+        .await
+        .expect("unauthenticated call");
+    assert_eq!(refused.status(), 401);
+    assert!(
+        refused
+            .headers()
+            .get("www-authenticate")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|challenge| challenge.contains(
+                "resource_metadata=\"http://notes.example.dev/.well-known/oauth-protected-resource\""
+            )),
+        "the challenge must point at the metadata for the name that was used"
+    );
+}

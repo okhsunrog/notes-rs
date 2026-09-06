@@ -64,17 +64,47 @@ pub fn routes() -> Router<AppState> {
 pub struct PublicOrigin(pub url::Url);
 
 impl PublicOrigin {
+    /// The canonical origin: the issuer, and the answer for anything that did
+    /// not arrive on a name this deployment knows.
     fn issuer(&self) -> String {
         self.0.as_str().trim_end_matches('/').to_owned()
     }
 
-    pub fn resource(&self) -> String {
-        format!("{}/mcp", self.issuer())
+    /// The origin a request arrived on, when the deployment answers for that
+    /// name; the canonical origin otherwise.
+    ///
+    /// A workspace can be reachable under more than one name, and a client
+    /// checks that the resource it was told about matches the URL its user
+    /// typed — so a second name has to describe itself, not the first one. The
+    /// `Host` header is not trusted for this: it only decides between names the
+    /// configuration already lists, and anything else falls back to canonical.
+    /// The authorization server stays at the canonical origin regardless; the
+    /// spec expects a resource to be able to point at one elsewhere.
+    fn issuer_for(&self, host: Option<&str>, known: &[String]) -> String {
+        let Some(host) = host.map(str::trim).filter(|host| !host.is_empty()) else {
+            return self.issuer();
+        };
+        let canonical = self.0.authority();
+        let matches = |name: &str| name == host || name == host_without_port(host);
+        if canonical == host || matches(canonical) || known.iter().any(|name| matches(name)) {
+            format!("{}://{host}", self.0.scheme())
+        } else {
+            self.issuer()
+        }
     }
 
-    pub fn resource_metadata(&self) -> String {
-        format!("{}/.well-known/oauth-protected-resource", self.issuer())
+    pub fn resource_metadata(&self, host: Option<&str>, known: &[String]) -> String {
+        format!(
+            "{}/.well-known/oauth-protected-resource",
+            self.issuer_for(host, known)
+        )
     }
+}
+
+fn host_without_port(host: &str) -> &str {
+    host.rsplit_once(':')
+        .filter(|(name, port)| !name.is_empty() && port.chars().all(|c| c.is_ascii_digit()))
+        .map_or(host, |(name, _)| name)
 }
 
 fn origin(state: &AppState) -> Result<&PublicOrigin, OAuthError> {
@@ -95,10 +125,14 @@ struct ProtectedResourceMetadata {
 
 async fn protected_resource_metadata(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Response, OAuthError> {
     let origin = origin(&state)?;
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok());
     Ok(axum::Json(ProtectedResourceMetadata {
-        resource: origin.resource(),
+        resource: format!("{}/mcp", origin.issuer_for(host, &state.mcp_allowed_hosts)),
         authorization_servers: vec![origin.issuer()],
         scopes_supported: vec![SCOPE.into(), OFFLINE_SCOPE.into()],
         bearer_methods_supported: vec!["header".into()],
@@ -686,7 +720,70 @@ impl IntoResponse for OAuthError {
 
 #[cfg(test)]
 mod tests {
-    use super::redirect_matches;
+    use super::{PublicOrigin, redirect_matches};
+
+    fn origin() -> PublicOrigin {
+        PublicOrigin(url::Url::parse("https://notes.example.com").expect("a canonical origin"))
+    }
+
+    #[test]
+    fn a_resource_describes_the_name_it_was_reached_by() {
+        let origin = origin();
+        let known = vec!["notes.example.dev".to_owned()];
+
+        // The canonical name, and a second name the deployment answers for.
+        assert_eq!(
+            origin.resource_metadata(Some("notes.example.com"), &known),
+            "https://notes.example.com/.well-known/oauth-protected-resource"
+        );
+        assert_eq!(
+            origin.resource_metadata(Some("notes.example.dev"), &known),
+            "https://notes.example.dev/.well-known/oauth-protected-resource"
+        );
+
+        // A `Host` nobody configured decides nothing: it falls back to the
+        // canonical origin rather than describing itself.
+        assert_eq!(
+            origin.resource_metadata(Some("attacker.example"), &known),
+            "https://notes.example.com/.well-known/oauth-protected-resource"
+        );
+        assert_eq!(
+            origin.resource_metadata(Some("notes.example.dev.attacker.example"), &known),
+            "https://notes.example.com/.well-known/oauth-protected-resource"
+        );
+        assert_eq!(
+            origin.resource_metadata(None, &known),
+            "https://notes.example.com/.well-known/oauth-protected-resource"
+        );
+        assert_eq!(
+            origin.resource_metadata(Some(""), &known),
+            "https://notes.example.com/.well-known/oauth-protected-resource"
+        );
+    }
+
+    #[test]
+    fn a_configured_name_covers_the_port_it_is_served_on() {
+        // Names are configured bare; a request can carry an explicit port, and
+        // that is the same deployment answering.
+        let origin = origin();
+        let known = vec!["notes.example.dev".to_owned()];
+        assert_eq!(
+            origin.resource_metadata(Some("notes.example.dev:8443"), &known),
+            "https://notes.example.dev:8443/.well-known/oauth-protected-resource"
+        );
+
+        // A different port on the canonical name is a different origin, so it
+        // describes the canonical one rather than itself.
+        let local = PublicOrigin(url::Url::parse("http://127.0.0.1:8787").expect("an origin"));
+        assert_eq!(
+            local.resource_metadata(Some("127.0.0.1:8787"), &[]),
+            "http://127.0.0.1:8787/.well-known/oauth-protected-resource"
+        );
+        assert_eq!(
+            local.resource_metadata(Some("127.0.0.1"), &[]),
+            "http://127.0.0.1:8787/.well-known/oauth-protected-resource"
+        );
+    }
 
     #[test]
     fn loopback_redirects_ignore_the_port_and_nothing_else() {

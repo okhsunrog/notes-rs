@@ -33,17 +33,24 @@ impl Harness {
 
 #[allow(dead_code)]
 pub async fn start_server() -> Harness {
-    start(false).await
+    start(false, Vec::new()).await
 }
 
 /// A server that knows the origin it is reached at, which is what turns the
 /// OAuth endpoints on.
 #[allow(dead_code)]
 pub async fn start_public_server() -> Harness {
-    start(true).await
+    start(true, Vec::new()).await
 }
 
-async fn start(public: bool) -> Harness {
+/// A public server that answers for more than one name, as a deployment with
+/// two domains does.
+#[allow(dead_code)]
+pub async fn start_public_server_for(hosts: Vec<String>) -> Harness {
+    start(true, hosts).await
+}
+
+async fn start(public: bool, mcp_allowed_hosts: Vec<String>) -> Harness {
     let directory = tempfile::tempdir().expect("server directory");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -57,7 +64,7 @@ async fn start(public: bool) -> Harness {
         max_blob_bytes: 1024,
         max_user_blob_bytes: 1024,
         ai: None,
-        mcp_allowed_hosts: Vec::new(),
+        mcp_allowed_hosts,
         public_url: public
             .then(|| url::Url::parse(&format!("http://{address}")).expect("public URL")),
         users: vec![UserConfig {
