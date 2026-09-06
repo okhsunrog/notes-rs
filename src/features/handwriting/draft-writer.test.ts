@@ -57,3 +57,22 @@ it("keeps every queued gesture and retries a failure before later edits", async 
   ]);
   expect(writer.getRevision()).toBe("c");
 });
+
+it("bounds a stalled queue while preserving every state in the retained history window", async () => {
+  let resolve!: (revision: string) => void;
+  const save = vi
+    .fn()
+    .mockImplementationOnce(
+      () =>
+        new Promise<string>((done) => {
+          resolve = done;
+        }),
+    )
+    .mockResolvedValue("next");
+  const writer = new DraftWriter(null, save, vi.fn());
+  const drafts = Array.from({ length: 100 }, () => emptyDraft());
+  for (const draft of drafts) void writer.write(draft);
+  resolve("first");
+  expect(await writer.flush()).toBe(true);
+  expect(save.mock.calls.map(([draft]) => draft)).toEqual([drafts[0], ...drafts.slice(-51)]);
+});

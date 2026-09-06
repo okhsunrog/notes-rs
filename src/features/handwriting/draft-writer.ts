@@ -15,6 +15,9 @@ export class DraftWriter {
 
   write(draft: InkDraft) {
     this.pending.push(draft);
+    // Keep the in-flight/retry head plus all states needed for the last 50 Undo steps.
+    // Older queued intermediates may expire just like already-persisted history.
+    if (this.pending.length > 52) this.pending.splice(1, this.pending.length - 52);
     return this.flush();
   }
 
