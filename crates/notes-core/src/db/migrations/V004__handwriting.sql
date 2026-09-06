@@ -17,6 +17,7 @@ CREATE TABLE ink_documents (
   revision TEXT,
   cursor INTEGER NOT NULL DEFAULT 0,
   dirty INTEGER NOT NULL DEFAULT 0 CHECK(dirty IN (0,1)),
+  publication_requested INTEGER NOT NULL DEFAULT 0 CHECK(publication_requested IN (0,1)),
   base_version BLOB CHECK(base_version IS NULL OR length(base_version)=16),
   CHECK ((root_id IS NULL) = (revision IS NULL))
 ) WITHOUT ROWID;

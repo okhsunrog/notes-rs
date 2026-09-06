@@ -173,6 +173,11 @@ impl Store {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         if !dirty {
+            tx.execute(
+                "UPDATE ink_documents SET publication_requested=0 WHERE page_uuid=?1",
+                [self.document],
+            )?;
+            tx.commit()?;
             return Ok(None);
         }
         let Some((snapshot, _)) = storage::load(&tx, self.document)? else {
@@ -194,7 +199,7 @@ impl Store {
             params![publication.version_uuid, snapshot.root.id.as_slice()],
         )?;
         tx.execute(
-            "UPDATE ink_documents SET dirty=0,base_version=?2 WHERE page_uuid=?1",
+            "UPDATE ink_documents SET dirty=0,publication_requested=0,base_version=?2 WHERE page_uuid=?1",
             params![self.document, publication.version_uuid],
         )?;
         for id in snapshot.chunks.keys() {

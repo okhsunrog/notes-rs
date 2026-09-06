@@ -30,4 +30,4 @@ ink-format = { version = "0.1.0", path = "../ink-format" }
 [dev-dependencies]
 proptest.workspace = true
 tempfile.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

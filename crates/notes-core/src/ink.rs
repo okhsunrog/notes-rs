@@ -3,6 +3,9 @@ use crate::{CoreError as CommandError, CoreResult as CommandResult};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 mod input;
+mod status;
+pub use status::{InkNoteStatus, InkVersionInfo, recoverable_notes};
+pub mod runtime;
 mod storage;
 pub mod transfer;
 pub(crate) mod versions;
@@ -44,3 +47,6 @@ impl Store {
         storage::compact_with_limits(self, 512, 16 * 1024 * 1024)
     }
 }
+
+#[cfg(test)]
+mod adapter_tests;

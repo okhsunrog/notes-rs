@@ -42,7 +42,11 @@ pub(super) fn ensure_document(conn: &Connection, document: uuid::Uuid) -> Comman
         )),
     }
 }
-fn get_record(conn: &Connection, id: Id, expected_length: Option<u64>) -> CommandResult<Record> {
+pub(super) fn get_record(
+    conn: &Connection,
+    id: Id,
+    expected_length: Option<u64>,
+) -> CommandResult<Record> {
     let bytes: Vec<u8> = conn
         .query_row(
             "SELECT data FROM ink_records WHERE id=?1 AND length(data)<=16777216 AND (?2 IS NULL OR length(data)=?2)",
@@ -352,7 +356,7 @@ pub(super) fn validate_adapter(snapshot: &Snapshot) -> CommandResult<()> {
     }
     Ok(())
 }
-fn to_draft(snapshot: &Snapshot) -> CommandResult<InkDraft> {
+pub(super) fn to_draft(snapshot: &Snapshot) -> CommandResult<InkDraft> {
     snapshot.validate(&[1, 2, 3, 4]).map_err(err)?;
     validate_adapter(snapshot)?;
     let doc = model::Document::read(&snapshot.root).map_err(err)?;
