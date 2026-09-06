@@ -1,7 +1,7 @@
-# Ink format v1 — уточнённый проект, revision 3
+# Ink format v1 — уточнённый проект, revision 4
 
 Дата: 2026-09-06. Статус: проект для реализации и проверки, не опубликованный
-стандарт и не уже работающий storage. Revision 3 документа не означает wire major 3:
+стандарт и не уже работающий storage. Revision 4 документа не означает wire major 4:
 wire v1 ещё не фиксировался. Числовые реестры ниже — согласованная исходная точка
 реализации; замораживать их можно после реализации reader/writer и fixtures.
 
@@ -9,13 +9,19 @@ wire v1 ещё не фиксировался. Числовые реестры н
 Основа сохранена: CBOR metadata, immutable column chunks, независимый выбор codec.
 Изменения: точная миграция ширины/времени, контракт кисти, общий порядок объектов,
 версии metadata, стабильные segments при compaction, portable reader, OCR metadata.
-JSON перестаёт быть рабочим форматом рукописного документа после миграции.
+JSON перестаёт быть рабочим форматом после переключения приложения на новое хранилище.
+Тестовые черновики пользователь разрешил удалить; импорт и fallback для них не реализуются.
 
 Решение пользователя от 2026-09-06: основной compressor — crate `pco`,
 `compression_level=8` (далее PCO-8). Это уровень encoder, не 8-битная точность
 и не версия wire format. RAW остаётся несжатым контрольным/export профилем.
 Решение о codec не меняет типы, точность samples, историю или размещение в SQLite/blobs.
-Эта revision фиксирует выбор; интеграция PCO в приложение ещё не выполнена.
+Независимый крейт `crates/ink-format` реализует RAW/PCO blocks и CBOR envelopes.
+Его публичный API не зависит от Tangleaf, SQLite, Tauri или BOOX. Реализованный wire
+contract находится в `crates/ink-format/FORMAT.md` (копия для обмена —
+`INKCHNK-WIRE-V1.md`). Этот документ дополнительно описывает проект полной модели
+и её применение в Tangleaf; не все описанные части уже реализованы.
+Интеграция нового хранилища в приложение ещё не выполнена.
 
 ## 1. Область и термины
 
@@ -269,34 +275,22 @@ SOURCE_TIME сохраняет исходное число и шкалу, опи
 Ось не объявляет часы монотонными и может сосуществовать с нормализованной DT timeline.
 Одинаковый chunk объединяет только совместимые profile, tick_ns и наличие DT.
 
-### 3.2. Однократный импорт текущего JSON
+### 3.2. Исторический F64-профиль бенчмарка — без импорта в приложение
 
-В текущем Tangleaf InkPoint и width — f64. Web pointer сохраняет event.timeStamp;
-BOOX adapter нормализует координаты/давление, заменяет некоторые нулевые давления
-предыдущим ненулевым и передаёт timestamp SDK. JSON не хранит происхождение каждой
-точки; повторный импорт не может восстановить уже потерянные аппаратные значения.
+Решение пользователя от 2026-09-06: тестовые JSON-черновики не мигрировать.
+При переключении рабочего storage приложение начинает новый документ; старый
+JSON не является источником загрузки/fallback. Отдельный экспортированный образец
+для бенчмарков сохраняется независимо от черновиков приложения.
 
-Импорт обязан:
+Для воспроизводимости уже выполненных экспериментов профиль §3.2 сохраняет смысл:
+X/Y/pressure/tilt и SOURCE_TIME представлены как F64 без округления; ширина Float
+сохраняет f64 bits, transform identity. SOURCE_TIME unit=ms, clock_kind=unknown,
+origin="legacy-unspecified", timing=null, DT отсутствует. SAMPLE_KIND=imported-unknown.
+Случайная представимость конкретного значения как F32 не сужает dtype всей колонки.
 
-1. Валидировать прежнюю схему её валидатором; сохранить UUID, порядок, размеры и фон.
-2. Перенести X/Y/pressure/tilt как F64 без rounding/quantization/recentering.
-   base_width переносится как Float с точным f64 roundtrip, transform identity.
-3. Записать time в SOURCE_TIME F64, unit=ms, clock_kind=unknown,
-   origin="legacy-unspecified"; timing=null, DT отсутствует. Не угадывать epoch
-   по величине числа и не объединять разные часы в одну искусственную Session.
-4. SAMPLE_KIND=imported-unknown. Нулевой tilt остаётся нулём: отличить реальное
-   измерение от прежнего fallback уже нельзя. Provenance это прямо отмечает.
-5. Кисть — tangleaf-segment-v1 (§4), rgba=#111111ff. Сравнить восстановленные
-   значения по f64 bits, ID/order/background, затем отрисовку одним renderer.
-6. Надёжно опубликовать новый snapshot. При повторном запуске миграция узнаёт
-   исходный SHA-256 и уже завершённый import; не создаёт дубликаты.
-7. Только после проверки пометить старый JSON как backup. Обычная загрузка читает
-   новый root. Повреждение нового root даёт ошибку восстановления, не молчаливое
-   возвращение к устаревшему JSON и не пустую страницу.
-
-Lossless здесь — относительно типизированных значений старого приложения после
-его JSON parsing. Это не обещание восстановить исходные пробелы/десятичную запись JSON.
-F64 values остаются F64 в columns, даже если случайно представимы как F32.
+Это точность относительно значений после прежнего JSON parsing, не исходных байтов
+JSON и не исходного SDK: старый adapter нормализовал координаты/давление и применял
+fallback давления. Новый код импорта ради этого корпуса не требуется.
 
 ### 3.3. Новый ввод и геометрическое редактирование
 
@@ -380,11 +374,15 @@ PCO=2 выбран основным codec, encoder compression_level=8, outer=no
 accuracy=lossless. Уровень задаётся явно, а не через неявный default crate.
 QUOIN=1 остаётся reserved и не включается в обязательный decoder.
 Outer LZ4=2 reserved optional; raw block не является frame.
-Пара codec_id/codec_wire_version определяет совместимость decoder, отдельно от
-уровня encoder и версии crate. PCO wire mapping (standalone/wrapped, params,
-поддерживаемые dtype, ограничения декодирования) должен быть опубликован вместе
-с fixtures до записи PCO chunks в рабочие документы; в этой revision он ещё не задан.
-Наличие codec ID не означает поддержку любой версии crate.
+Пара codec_id/codec_wire_version определяет совместимость decoder отдельно от
+уровня encoder и версии crate. Реализованный mapping: PCO codec_id=2, wire=1,
+outer=0, params={} (CBOR a0), ровно один complete standalone PCO stream на колонку.
+Все десять dtype поддерживаются напрямую, logical_dtype=storage_dtype; 8-bit numeric
+support включён. Encoder: pco 1.0.3, level 8, mode/delta Auto, equal pages up to 2^18.
+Decoder ограничивает суммарное число значений declared valid_count до выделения
+output, проверяет dtype/count, конец stream и отсутствие trailing bytes. Fixtures
+лежат в `crates/ink-format/tests/fixtures`. Наличие codec ID не означает поддержку
+любой будущей версии PCO stream; неизвестная версия даёт ошибку.
 
 RAW export декодирует PCO без изменения logical dtype/bits/Segment IDs и записывает
 полные колонки, без outer/shuffle/constant. Unsupported required column/codec — явная ошибка.
@@ -547,7 +545,7 @@ catalog. Настоящая конкурирующая правка страни
 ### 6.3. Сборка мусора и снимки
 
 GC учитывает активные documents/drafts, before/after Undo/Redo, экспортные/read leases,
-sync/outbox pins при появлении sync, незавершённую миграцию и explicit recovery pins.
+sync/outbox pins при появлении sync, explicit recovery pins и любые будущие import sessions.
 Последовательность: serialize reference check с writers -> mark unreachable -> delete
 только проверенные blobs/records. Нельзя проверять только таблицу attachments:
 существующий attachment GC не знает о будущих ink references и требует интеграции.
@@ -574,12 +572,15 @@ Framing cost = 80 + 32*S + 64*C + params + validity + padding.
 - Незавершённый штрих находится в памяти; UI не говорит «сохранено» до ack. При
   приостановке приложения сохраняются все завершённые операции. Durable streaming
   незавершённого штриха — отдельное расширение, не скрытое обещание v1.
-- Начальный target 32 KiB decoded samples, кандидаты для bench 16/32/64 KiB.
+- Размер chunk выбирает storage adapter, крейт не задаёт target. Бенчмарк страницы
+  113877 points показал для PCO-8: whole-page 339345 bytes, 64 KiB target 500415,
+  16 KiB target 864231. Поэтому прежние 32 KiB не считаются default: для compaction
+  проверить whole-page и >=256 KiB, отдельно измеряя задержку foreground saves.
   Совместимые мелкие segments пакуются вместе; длинный stroke делится без потери
   граничного интервала и соединяющего отрезка. Новые маленькие chunks допустимы.
 - Контрольный writer/export — RAW без outer/shuffle/constant. Даже очевидные
   константы хранятся целиком для независимых codec benchmarks.
-  Основной encoder после реализации и проверки wire mapping — PCO level 8.
+  Основной encoder — PCO level 8; wire mapping и начальные fixtures реализованы.
   Сжатие выполняется worker, не callback пера; размещение и размер chunks
   проверяются отдельно на устройстве. Внешнее дополнительное сжатие не включается.
 - Compaction выполняется в фоне после опустошения foreground очереди; рекомендуемый
@@ -702,21 +703,26 @@ revision_conflict, io_error. Ошибка не заменяет документ
 
 Обязательные fixtures/integration tests перед включением нового storage:
 
-| Группа           | Что должно быть доказано                                                                                               |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| Legacy precision | f64 bits всех полей, ширины после scale, +0/-0, дробное время, порядок/UUID/grid                                       |
-| Brush            | dot, repeated XY, zero/missing pressure, mixed integer/float profiles, alpha overlaps, nonuniform transform, part seam |
-| Columns          | RAW и PCO-8 bit-exact roundtrip; mixed/all-null; malformed flags/ranges/counts/CRC/hash; unsupported wire refusal      |
-| Metadata         | deterministic CBOR, duplicate keys, unknown optional roundtrip, unknown required refusal, u64 beyond JS safe integer   |
-| Editing          | move/copy без новых chunks; pixel cut без соединения через разрыв; synthetic provenance; Undo с matrix/style/order     |
-| Catalog          | compaction меняет размещение, не Geometry/Page/appearance fingerprint; lease удерживает старый chunk                   |
-| Durability       | fault injection до/после установки blobs, до/после commit/ack, retry idempotence, no missing referenced blob           |
-| OCR              | stale late response, layout/background invalidation, compaction stability, correction preservation, UTF-8 offsets      |
-| Device           | свежие слова/переворот пера/ластики/лассо/Undo/перезапуск, latency и память на BOOX                                    |
+| Группа     | Что должно быть доказано                                                                                               |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Precision  | f64 bits всех полей, ширины после scale, +0/-0, дробное время, порядок/UUID/grid                                       |
+| Brush      | dot, repeated XY, zero/missing pressure, mixed integer/float profiles, alpha overlaps, nonuniform transform, part seam |
+| Columns    | RAW и PCO-8 bit-exact roundtrip; mixed/all-null; malformed flags/ranges/counts/CRC/hash; unsupported wire refusal      |
+| Metadata   | deterministic CBOR, duplicate keys, unknown optional roundtrip, unknown required refusal, u64 beyond JS safe integer   |
+| Editing    | move/copy без новых chunks; pixel cut без соединения через разрыв; synthetic provenance; Undo с matrix/style/order     |
+| Catalog    | compaction меняет размещение, не Geometry/Page/appearance fingerprint; lease удерживает старый chunk                   |
+| Durability | fault injection до/после установки blobs, до/после commit/ack, retry idempotence, no missing referenced blob           |
+| OCR        | stale late response, layout/background invalidation, compaction stability, correction preservation, UTF-8 offsets      |
+| Device     | свежие слова/переворот пера/ластики/лассо/Undo/перезапуск, latency и память на BOOX                                    |
 
 Проверка fault injection должна различать crash процесса и power-loss гарантию.
-Реальные codec timings и интеграционные тесты пока не выполнены: спецификация их
-задаёт, а не заменяет. Перенос формата в приложение — следующая отдельная реализация.
+В независимом крейте прошли 13 integration tests и пример из документации:
+RAW/PCO roundtrip всех scalar types, mixed/all-null, фиксированные fixtures,
+malformed input, CBOR precision/canonicalization и envelope references. Проверены
+Clippy и сборка/тесты/package из отдельной директории без workspace приложения.
+Полная модель body/graph, редактор, durability, OCR и аппаратная интеграция нового
+хранилища ещё требуют реализации и проверок. Бенчмарки другого агента измеряют
+кодеки/обрамление; они не доказывают задержку нового storage на BOOX.
 
 ## 10. Проверенные источники и следующий порядок работ
 
@@ -744,9 +750,10 @@ revision_conflict, io_error. Ошибка не заменяет документ
   относятся к указанным там представлениям. Эксперименты results/inkchunk используют
   revision 2 framing и pco 1.0.3; они не заменяют fixtures и device tests реализации Tangleaf.
 
-Порядок реализации: reader/writer+fixtures -> legacy import -> новый immutable edit
-model и incremental IPC -> транзакционный backend/history/GC -> device bench ->
-подключение ink к обычным заметкам/sync -> Recognition/поиск. Выбранный PCO-8
-подключается после проверки RAW основы и его wire mapping/fixtures, без смены
-модели страницы. Несжатый экспорт с полными колонками сохраняется для исследования.
-Quantization не включается выбором PCO-8 и остаётся отдельным будущим решением.
+Порядок реализации: независимый reader/writer+fixtures (первый слой готов) ->
+полная модель metadata/body и graph validation -> adapter нового хранилища Tangleaf
+с чистым документом без legacy import -> immutable edit model и incremental IPC ->
+транзакционный backend/history/GC -> device bench -> подключение ink к обычным
+заметкам/sync -> Recognition/поиск. XOPP import/export — отдельный будущий adapter.
+Несжатый экспорт с полными колонками сохраняется для исследования. Quantization
+не включается выбором PCO-8 и остаётся отдельным будущим решением.
