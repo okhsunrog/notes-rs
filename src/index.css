@@ -1198,15 +1198,22 @@ html::before {
 
 /* A tinted "selected" state is a few levels of gray on this hardware, which reads as noise
    rather than as state. Pressed, selected, highlighted and active items invert instead. */
-[data-display="eink"] [aria-pressed="true"],
-[data-display="eink"] [aria-selected="true"],
-[data-display="eink"] [aria-current="page"],
-[data-display="eink"] [data-selected],
-[data-display="eink"] [data-highlighted],
-[data-display="eink"] [data-active] {
+[data-display="eink"] button[aria-pressed="true"],
+[data-display="eink"] [role="option"][aria-selected="true"],
+[data-display="eink"] [role="tab"][aria-selected="true"],
+[data-display="eink"] [role="option"][data-highlighted],
+[data-display="eink"] [role="menuitem"][data-highlighted],
+[data-display="eink"] button[aria-current="page"],
+[data-display="eink"] a[aria-current="page"] {
   border-color: oklch(0 0 0);
   background: oklch(0 0 0);
   color: oklch(1 0 0);
+}
+
+/* Containers that merely mark state (the focused pane, a chosen version card) keep their
+   surface; a solid edge is enough to show the choice. */
+[data-display="eink"] section[data-selected] {
+  border: 2px solid oklch(0 0 0);
 }
 
 /* A 50% black backdrop dithers; an opaque one separates the dialog cleanly, and the content
