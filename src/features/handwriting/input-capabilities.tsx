@@ -21,10 +21,20 @@ export function handwritingAvailable(
 export const useHandwritingPreference = create(
   persist<{
     mode: HandwritingPreference;
+    mouseEnabled: boolean;
+    setMouseEnabled: (mouseEnabled: boolean) => void;
     setMode: (mode: HandwritingPreference) => void;
-  }>((set) => ({ mode: "auto", setMode: (mode) => set({ mode }) }), {
-    name: "tangleaf.handwriting-preference.v1",
-  }),
+  }>(
+    (set) => ({
+      mode: "auto",
+      mouseEnabled: false,
+      setMouseEnabled: (mouseEnabled) => set({ mouseEnabled }),
+      setMode: (mode) => set({ mode }),
+    }),
+    {
+      name: "tangleaf.handwriting-preference.v1",
+    },
+  ),
 );
 
 const unknown: InputCapabilities = {

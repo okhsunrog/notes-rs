@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  Check,
+  ArrowLeft,
   Copy,
   Eraser,
   Grid2X2,
@@ -21,9 +21,9 @@ import type { InkDraft, InkHistorySnapshot } from "@/lib/bindings";
 import { registerBackOverlay } from "@/lib/back-overlays";
 import { applyHistoryUpdate, incrementalDraftSaver } from "./ink-patch";
 import { DraftWriter, type DraftSaveState } from "./draft-writer";
-import { InkCanvas, type InkMetrics, type InkTool } from "./ink-canvas";
+import { InkCanvas, type InkTool } from "./ink-canvas";
 import { useHandwritingSession } from "./handwriting-session";
-import { useHandwritingAvailability } from "./input-capabilities";
+import { useHandwritingPreference, useHandwritingAvailability } from "./input-capabilities";
 import { MAX_INK_POINTS } from "./ink-model";
 import { moveSelection, scaleSelection, type EraserMode, type LassoMode } from "./ink-editing";
 import type { OnyxInkStatus } from "./onyx-ink";
@@ -43,8 +43,7 @@ export function HandwritingSheet() {
   const latestDraft = useRef<InkDraft | null>(null);
   const [active, setActive] = useState(false);
   const [closing, setClosing] = useState(false);
-  const [mouseEnabled, setMouseEnabled] = useState(false);
-  const [metrics, setMetrics] = useState<InkMetrics | null>(null);
+  const mouseEnabled = useHandwritingPreference((state) => state.mouseEnabled);
   const [nativeStatus, setNativeStatus] = useState<OnyxInkStatus | null>(null);
   const [limit, setLimit] = useState(false);
   const [canUndo, setCanUndo] = useState(false);
@@ -139,7 +138,7 @@ export function HandwritingSheet() {
       <DialogContent
         data-fullscreen="true"
         showCloseButton={false}
-        className="ink-dialog fixed inset-0 flex h-dvh w-screen max-w-none translate-x-0 translate-y-0 flex-col gap-0 rounded-none border-0 p-0 sm:max-w-none"
+        className="ink-dialog fixed inset-0 flex h-dvh w-screen max-w-none translate-x-0 translate-y-0 flex-col gap-0 rounded-none border-0 p-0 sm:max-w-none pb-[var(--safe-area-inset-bottom)]"
         onKeyDown={(event) => {
           if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
             event.preventDefault();
@@ -149,22 +148,23 @@ export function HandwritingSheet() {
           }
         }}
       >
-        <header className="flex shrink-0 items-center justify-between gap-3 border-b px-4 pt-[calc(0.75rem+var(--safe-area-inset-top))] pb-3">
+        <header className="flex shrink-0 items-center gap-3 border-b px-3 pt-[calc(0.5rem+var(--safe-area-inset-top))] pb-2">
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => void close()}
+            disabled={active || closing || historyBusy}
+            aria-busy={closing}
+          >
+            <ArrowLeft className="size-4" />
+            Back
+          </Button>
           <div className="min-w-0">
             <DialogTitle>Handwriting</DialogTitle>
             <DialogDescription className="mt-1 text-xs">
               Local draft · not yet added to your notes
             </DialogDescription>
           </div>
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => void close()}
-            disabled={active || closing || historyBusy}
-          >
-            {loadError ? <X className="size-4" /> : <Check className="size-4" />}
-            {loadError ? "Close" : closing ? "Saving…" : "Done"}
-          </Button>
         </header>
         <div
           role="toolbar"
@@ -472,7 +472,6 @@ export function HandwritingSheet() {
                 onNativeStatus={setNativeStatus}
                 onChange={change}
                 onActiveChange={setActive}
-                onMetrics={setMetrics}
                 onLimit={() => setLimit(true)}
               />
             </div>
@@ -482,63 +481,33 @@ export function HandwritingSheet() {
             </p>
           )}
         </div>
-        <footer className="shrink-0 space-y-1 border-t px-4 pt-2 pb-[calc(0.5rem+var(--safe-area-inset-bottom))] text-xs">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <span role="status">
-              {!draft
-                ? "Opening draft…"
-                : saveState instanceof Error
-                  ? "Draft not saved"
-                  : saveState === "saving"
-                    ? "Saving on this device…"
-                    : "Saved on this device"}
-            </span>
-            <span>{draft?.strokes.length ?? 0} strokes</span>
-          </div>
-          {saveState instanceof Error && (
-            <div role="alert" className="text-destructive">
-              {saveState.message}
-              <button
-                type="button"
-                className="ml-2 underline"
-                onClick={() => {
-                  void writer.current?.flush();
-                }}
-              >
-                Retry saving
-              </button>
-            </div>
-          )}
-          {limit && (
-            <p role="status">
-              This test sheet has reached its point limit. Your completed strokes are kept; use the
-              eraser or undo to make room.
-            </p>
-          )}
-          <details>
-            <summary className="cursor-pointer py-1 text-muted-foreground">Input details</summary>
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 py-1 text-muted-foreground">
-              <span>Pen: {capabilities.stylus.replace(/_/g, " ")}</span>
-              <span>Ink: {nativeStatus?.available ? "BOOX Pen SDK" : "Web canvas"}</span>
-              {nativeStatus?.error && (
-                <span role="alert">BOOX ink unavailable: {nativeStatus.error}</span>
-              )}
-              <span>Pressure: {metrics ? `${Math.round(metrics.pressure * 100)}%` : "—"}</span>
-              <span>Tilt: {metrics ? `${metrics.tiltX}°, ${metrics.tiltY}°` : "—"}</span>
-              <span>Input: {metrics?.tool ?? "—"}</span>
-              <span>Stroke samples: {metrics?.samples ?? 0}</span>
-              <label className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={mouseEnabled}
-                  disabled={active || historyBusy || closing}
-                  onChange={(event) => setMouseEnabled(event.target.checked)}
-                />
-                Allow mouse drawing
-              </label>
-            </div>
-          </details>
-        </footer>
+        {(saveState instanceof Error || limit || nativeStatus?.error) && (
+          <footer className="shrink-0 space-y-1 border-t px-4 py-2 text-xs">
+            {saveState instanceof Error && (
+              <div role="alert" className="text-destructive">
+                Could not save your changes. {saveState.message}
+                <button
+                  type="button"
+                  className="ml-2 underline"
+                  onClick={() => {
+                    void writer.current?.flush();
+                  }}
+                >
+                  Retry saving
+                </button>
+              </div>
+            )}
+            {limit && (
+              <p role="status">
+                This sheet is full. Your completed strokes are kept; erase handwriting or undo to
+                make room.
+              </p>
+            )}
+            {nativeStatus?.error && (
+              <p role="alert">Fast pen input is unavailable: {nativeStatus.error}</p>
+            )}
+          </footer>
+        )}
       </DialogContent>
     </Dialog>
   );

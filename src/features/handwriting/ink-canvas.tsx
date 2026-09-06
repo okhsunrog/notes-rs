@@ -70,7 +70,7 @@ export function InkCanvas({
   mouseEnabled: boolean;
   onChange: (draft: InkDraft) => void;
   onActiveChange: (active: boolean) => void;
-  onMetrics: (metrics: InkMetrics) => void;
+  onMetrics?: (metrics: InkMetrics) => void;
   onLimit: () => void;
   nativeInk?: boolean;
   onNativeStatus?: (status: OnyxInkStatus) => void;
@@ -413,7 +413,7 @@ export function InkCanvas({
     sampleGesture(p, end);
     if (event.timeStamp - current.lastMetrics > 120 || end) {
       current.lastMetrics = event.timeStamp;
-      onMetrics({
+      onMetrics?.({
         tool: event.pointerType,
         pressure: p.pressure,
         tiltX: p.tiltX,

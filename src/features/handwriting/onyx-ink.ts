@@ -61,7 +61,7 @@ export function useOnyxInk({
   width: number;
   onChange: (draft: InkDraft) => void;
   onActiveChange: (active: boolean) => void;
-  onMetrics: (metrics: InkMetrics) => void;
+  onMetrics?: (metrics: InkMetrics) => void;
   onLimit: () => void;
   onStatus?: (status: OnyxInkStatus) => void;
   decoration?: string;
@@ -223,7 +223,7 @@ export function useOnyxInk({
         }
         const last = event.points?.[event.points.length - 1];
         if (last)
-          current.onMetrics({
+          current.onMetrics?.({
             tool: "BOOX Pen SDK",
             pressure: last.pressure,
             tiltX: last.tiltX,

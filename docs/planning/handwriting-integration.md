@@ -40,3 +40,26 @@ Check independent documents, deletion/GC with retained histories, save/outbox
 atomicity, process interruption, offline queue recovery, and two-client sync.
 Initial full snapshot loading remains supported; history navigation uses deltas.
 The prototype's format crate remains independent of application database/sync code.
+
+## Proposed user experience
+
+Handwritten notes should live alongside text notes in All notes and share titles,
+favorites, navigation, deletion, and synchronization. A pen icon and a small ink
+preview distinguish their contents. Recognition will later provide searchable
+text for the whole sheet or note without replacing the original handwriting.
+
+Keep the existing capability-aware Write by hand creation option. Opening and
+viewing an existing handwritten note must work without a detected pen. Device
+preferences may explicitly enable creation and mouse drawing.
+
+The integrated editor should use the common note identity/navigation with a
+compact Back/title header, drawing tools, contextual tool options, and a large
+sheet. Back flushes pending local writes before leaving. Normal saving and input
+diagnostics do not need a permanent footer; save failures remain visible and
+retryable. Mouse drawing belongs in device settings. Until integration is real,
+the scratch editor retains its local-draft description.
+
+For the first integrated version, prefer explicit sheets with vertical navigation
+and an Add page action at the end. This preserves predictable page boundaries for
+recognition, previews and export. Infinite paper and mixed text/ink content remain
+separate design decisions; the UI cleanup does not settle their storage model.

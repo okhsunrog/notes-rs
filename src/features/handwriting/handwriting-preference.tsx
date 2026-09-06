@@ -8,7 +8,7 @@ const modes = [
 ] as const;
 
 export function HandwritingPreferenceField() {
-  const { mode, setMode } = useHandwritingPreference();
+  const { mode, setMode, mouseEnabled, setMouseEnabled } = useHandwritingPreference();
   return (
     <section className="space-y-3">
       <div>
@@ -34,6 +34,14 @@ export function HandwritingPreferenceField() {
           ))}
         </SelectContent>
       </Select>
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={mouseEnabled}
+          onChange={(event) => setMouseEnabled(event.target.checked)}
+        />
+        Allow mouse drawing
+      </label>
     </section>
   );
 }
