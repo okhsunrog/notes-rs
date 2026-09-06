@@ -2,6 +2,8 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import {
   refreshPanelAfterClose,
   requestFullRefreshSoon,
+  noteNavigation,
+  NAVIGATIONS_PER_REFRESH,
   resetEinkRefresh,
   setEinkRefreshEnabled,
 } from "./eink-refresh";
@@ -104,4 +106,22 @@ it("a failed refresh is not worth bothering the user with", async () => {
   requestFullRefreshSoon();
   vi.advanceTimersByTime(300);
   await vi.waitFor(() => expect(api.requestFullRefresh).toHaveBeenCalledTimes(1));
+});
+
+it("refreshes only after enough navigations have piled up", () => {
+  setEinkRefreshEnabled(true);
+  for (let i = 0; i < NAVIGATIONS_PER_REFRESH - 1; i++) noteNavigation();
+  vi.advanceTimersByTime(1000);
+  expect(api.requestFullRefresh).not.toHaveBeenCalled();
+  noteNavigation();
+  vi.advanceTimersByTime(1000);
+  expect(api.requestFullRefresh).toHaveBeenCalledTimes(1);
+  // An overlay closing resets the count: the panel was just cleaned.
+  noteNavigation();
+  refreshPanelAfterClose()(false);
+  vi.advanceTimersByTime(1000);
+  expect(api.requestFullRefresh).toHaveBeenCalledTimes(2);
+  for (let i = 0; i < NAVIGATIONS_PER_REFRESH - 1; i++) noteNavigation();
+  vi.advanceTimersByTime(1000);
+  expect(api.requestFullRefresh).toHaveBeenCalledTimes(2);
 });

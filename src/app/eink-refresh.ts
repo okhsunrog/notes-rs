@@ -15,8 +15,16 @@ import { requestFullRefresh } from "@/lib/api";
  */
 const SETTLE_MS = 300;
 
+/**
+ * A full flash on every page change is more distracting than the ghosting it removes, so
+ * navigations are counted and the panel is cleaned once enough of them have accumulated.
+ * Overlays still refresh on close: their rectangle leaves the sharpest ghost of all.
+ */
+export const NAVIGATIONS_PER_REFRESH = 6;
+
 let eink = false;
 let pending: ReturnType<typeof setTimeout> | null = null;
+let navigationsSinceRefresh = 0;
 
 /** Called by the appearance provider whenever the resolved display changes. */
 export function setEinkRefreshEnabled(enabled: boolean): void {
@@ -31,10 +39,18 @@ export function setEinkRefreshEnabled(enabled: boolean): void {
 export function requestFullRefreshSoon(): void {
   if (!eink) return;
   cancel();
+  navigationsSinceRefresh = 0;
   pending = setTimeout(() => {
     pending = null;
     void requestFullRefresh().catch(() => undefined);
   }, SETTLE_MS);
+}
+
+/** A page change happened; refreshes only every `NAVIGATIONS_PER_REFRESH`-th one. */
+export function noteNavigation(): void {
+  if (!eink) return;
+  navigationsSinceRefresh += 1;
+  if (navigationsSinceRefresh >= NAVIGATIONS_PER_REFRESH) requestFullRefreshSoon();
 }
 
 /**
@@ -62,5 +78,6 @@ function cancel(): void {
 /** Test seam: drops the gate and any refresh still waiting. */
 export function resetEinkRefresh(): void {
   eink = false;
+  navigationsSinceRefresh = 0;
   cancel();
 }
