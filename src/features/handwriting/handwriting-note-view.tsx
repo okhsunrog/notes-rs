@@ -50,6 +50,7 @@ import {
   releaseEditor,
   requestCompletion,
 } from "./handwriting-session";
+import { useResolvedInkColor } from "@/app/appearance";
 import { InkCanvas, type InkTool } from "./ink-canvas";
 import { moveSelection, scaleSelection, type EraserMode, type LassoMode } from "./ink-editing";
 import { MAX_INK_POINTS } from "./ink-model";
@@ -91,6 +92,7 @@ type Props = {
  * long as it is mounted; the text editor is never mounted for this page kind.
  */
 export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) {
+  const monoInk = useResolvedInkColor() === "mono";
   const uuid = page.uuid;
   const { available, capabilities } = useHandwritingAvailability();
   const mouseEnabled = useHandwritingPreference((state) => state.mouseEnabled);
@@ -786,6 +788,7 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
           <div className="mx-auto w-full max-w-[900px] border border-neutral-300 bg-white">
             <InkCanvas
               draft={draft}
+              mono={monoInk}
               disabled={!editing || suspended || historyBusy || leaving}
               tool={tool}
               eraserMode={eraserMode}

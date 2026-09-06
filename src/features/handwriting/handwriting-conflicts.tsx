@@ -19,6 +19,7 @@ import {
   keepAll,
   keepOne,
 } from "./handwriting-conflict-model";
+import { useResolvedInkColor } from "@/app/appearance";
 import { InkCanvas } from "./ink-canvas";
 
 type Props = {
@@ -131,6 +132,7 @@ function VersionCard({
   onSelect: () => void;
   onKeep: () => void;
 }) {
+  const monoInk = useResolvedInkColor() === "mono";
   const preview = useQuery({
     queryKey: queryKeys.handwritingVersion(pageUuid, head.versionUuid),
     queryFn: () => previewHandwritingVersion(pageUuid, head.versionUuid),
@@ -164,6 +166,7 @@ function VersionCard({
         ) : preview.data ? (
           <InkCanvas
             draft={preview.data}
+            mono={monoInk}
             disabled
             tool="pen"
             width={3}

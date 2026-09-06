@@ -62,6 +62,7 @@ export function InkCanvas({
   lassoMode = "free",
   selected = NO_SELECTION,
   onSelectionChange,
+  mono = false,
 }: {
   draft: InkDraft;
   disabled?: boolean;
@@ -79,6 +80,8 @@ export function InkCanvas({
   lassoMode?: LassoMode;
   selected?: string[];
   onSelectionChange?: (ids: string[]) => void;
+  /** Grayscale panel: strokes are mapped onto the gray axis instead of drawn in their color. */
+  mono?: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const bufferRef = useRef<HTMLCanvasElement | null>(null);
@@ -130,8 +133,15 @@ export function InkCanvas({
       if (reusable) {
         const dirty = changedInkBounds(cached.strokes, sceneStrokes);
         if (dirty)
-          drawInkRegion(sceneContext, sceneStrokes, draft.background ?? "plain", dirty, staging);
-      } else drawSheet(sceneContext, sceneStrokes, draft.background);
+          drawInkRegion(
+            sceneContext,
+            sceneStrokes,
+            draft.background ?? "plain",
+            dirty,
+            staging,
+            mono,
+          );
+      } else drawSheet(sceneContext, sceneStrokes, draft.background, mono);
       sceneRef.current = { canvas: scene, strokes: sceneStrokes, background: draft.background };
     }
     staging.setTransform(1, 0, 0, 1, 0, 0);
@@ -164,6 +174,7 @@ export function InkCanvas({
               stroke.points[Math.max(0, i - 1)]!,
               stroke.points[i]!,
               stroke.width,
+              mono,
             );
         }
         gesture.movingBitmap = layer;
@@ -285,7 +296,7 @@ export function InkCanvas({
     if (current.nativeFast) return;
     if (current.action === "pen") {
       const ctx = canvasRef.current?.getContext("2d");
-      if (ctx) drawSegment(ctx, last ?? point, point, width);
+      if (ctx) drawSegment(ctx, last ?? point, point, width, mono);
     } else if (current.action === "move") {
       const start = current.points[0]!;
       current.preview = moveSelection(

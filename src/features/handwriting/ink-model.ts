@@ -48,14 +48,42 @@ export function eraseAt(strokes: InkStroke[], point: InkPoint, radius = 12): Ink
   );
 }
 
+/** The single ink color strokes are drawn with today. Stroke data carries no color yet. */
+export const INK_COLOR = "#111111";
+
+/**
+ * Maps an ink color onto the gray axis by relative luminance, for panels that cannot render
+ * hue. Anything that is not a six-digit hex color is returned unchanged.
+ */
+export function inkStrokeColor(color: string, mono?: boolean): string {
+  if (!mono) return color;
+  const match = /^#([0-9a-f]{6})$/i.exec(color.trim());
+  if (!match) return color;
+  const value = Number.parseInt(match[1]!, 16);
+  const channel = (shift: number) => ((value >> shift) & 0xff) / 255;
+  // WCAG relative luminance: linearize each channel, then weight it by eye sensitivity.
+  const linear = (raw: number) => (raw <= 0.04045 ? raw / 12.92 : ((raw + 0.055) / 1.055) ** 2.4);
+  const luminance =
+    0.2126 * linear(channel(16)) + 0.7152 * linear(channel(8)) + 0.0722 * linear(channel(0));
+  // Back to sRGB so the gray reads as the same brightness the color had.
+  const encoded =
+    luminance <= 0.0031308 ? luminance * 12.92 : 1.055 * luminance ** (1 / 2.4) - 0.055;
+  const level = Math.max(0, Math.min(255, Math.round(encoded * 255)))
+    .toString(16)
+    .padStart(2, "0");
+  return `#${level}${level}${level}`;
+}
+
 export function drawSegment(
   ctx: CanvasRenderingContext2D,
   a: InkPoint,
   b: InkPoint,
   width: number,
+  mono?: boolean,
 ) {
-  ctx.strokeStyle = "#111111";
-  ctx.fillStyle = "#111111";
+  const color = inkStrokeColor(INK_COLOR, mono);
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
   ctx.lineWidth = width * (0.25 + 1.5 * ((a.pressure + b.pressure) / 2));
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
@@ -74,6 +102,7 @@ export function drawSheet(
   ctx: CanvasRenderingContext2D,
   strokes: InkStroke[],
   background: InkBackground = "plain",
+  mono?: boolean,
 ) {
   ctx.clearRect(0, 0, 1000, 1400);
   ctx.fillStyle = "#ffffff";
@@ -95,7 +124,7 @@ export function drawSheet(
   }
   for (const stroke of strokes) {
     for (let i = 0; i < stroke.points.length; i++) {
-      drawSegment(ctx, stroke.points[Math.max(0, i - 1)]!, stroke.points[i]!, stroke.width);
+      drawSegment(ctx, stroke.points[Math.max(0, i - 1)]!, stroke.points[i]!, stroke.width, mono);
     }
   }
 }

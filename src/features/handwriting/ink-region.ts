@@ -58,6 +58,7 @@ export function drawInkRegion(
   background: InkBackground,
   bounds: Bounds,
   scratch: CanvasRenderingContext2D,
+  mono?: boolean,
 ) {
   const { a: sx, d: sy } = ctx.getTransform();
   // Pixel-aligned clipping prevents seams from repeatedly blending a fractional clip edge.
@@ -80,7 +81,7 @@ export function drawInkRegion(
   // A clip can change Skia's edge rasterization for crossing strokes. Render uncut
   // vectors into the existing staging canvas, then copy only whole damaged pixels.
   scratch.setTransform(sx, 0, 0, sy, 0, 0);
-  drawSheet(scratch, visible, background);
+  drawSheet(scratch, visible, background, mono);
   const x = Math.max(0, Math.floor(bounds.left * sx));
   const y = Math.max(0, Math.floor(bounds.top * sy));
   const right = Math.min(ctx.canvas.width, Math.ceil(bounds.right * sx));
