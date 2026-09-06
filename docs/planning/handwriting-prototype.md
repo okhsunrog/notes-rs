@@ -403,6 +403,11 @@ for software geometry. It stays paused until an accepted canvas frame is submitt
 new pen-down supersedes the pending erase frame. Tool settings determine the restored render
 mode; lifecycle shutdown clears the gate without enabling rendering. Normal pen strokes do
 not acquire this pause. Tests cover repeated erasing, frame completion, an immediate return
-to writing and lifecycle cancellation. Physical acceptance of this automatic transition is
-pending the updated APK retest. Validation: twelve Android unit tests, vp check and the
-arm64 debug APK build pass.
+to writing and lifecycle cancellation. Validation: twelve Android unit tests, vp check and
+the arm64 debug APK build pass.
+
+The updated APK passed the physical retest: the user confirmed that fresh words now erase
+quickly and correctly with the back of the stylus while Pen remains selected. The recording
+captured nine writing strokes and eight hardware eraser strokes; afterward Pen SDK remained
+active and the eraser render gate was released. Diagnostic listeners were stopped after
+the retest. This supersedes the failed fresh-word erasing retests above.
