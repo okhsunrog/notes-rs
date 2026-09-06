@@ -74,3 +74,18 @@ executes none/5s/30s/60s/exit policies twice in opposite orders. Stage the relea
 Android binary as `bench` and the private fixture as `page.json` first. It writes
 progress and appends each verified run immediately. The runner performs no app
 installation or data mutations outside its dedicated test directory.
+
+### Exit-phase profiling
+
+Build the same binary's test harness in release mode for Android:
+`cargo test -p ink-storage-bench --bin compaction --release --target aarch64-linux-android --no-run`
+(using the same NDK compiler/linker environment as the normal executable).
+Run only the ignored `profile_recorded_exit` test with `--ignored --nocapture`.
+`INK_PROFILE_SOURCE` must name a closed disposable benchmark DB without WAL/SHM;
+`INK_PROFILE_DEST` must be a new path. Both paths must be absolute and their parent
+basename must start with `ink-compaction-`. The test copies the source, restores
+its latest retained history state, then times `prepare`, `repack`, and `publish`
+separately. Setup/redo and final bitwise/revision checks are excluded. Output has
+an `INK_PROFILE` JSON line. Repack includes decode, merge and PCO encode; publish
+includes history remapping, persistence, GC, commit and connection teardown.
+This profiling code exists only under cfg(test), not in the installed app.

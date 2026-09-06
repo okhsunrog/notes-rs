@@ -320,6 +320,84 @@ mod tests {
             .map(Result::unwrap)
             .collect()
     }
+    /// Run only against a closed, disposable benchmark DB. Production paths are
+    /// not accepted. The source is copied and never mutated.
+    #[test]
+    #[ignore = "requires INK_PROFILE_SOURCE and INK_PROFILE_DEST in a benchmark directory"]
+    fn profile_recorded_exit() {
+        use std::time::Instant;
+        let source = std::path::PathBuf::from(std::env::var("INK_PROFILE_SOURCE").unwrap());
+        let path = std::path::PathBuf::from(std::env::var("INK_PROFILE_DEST").unwrap());
+        for p in [&source, &path] {
+            assert!(p.is_absolute());
+            assert!(
+                !p.components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            );
+            assert!(
+                p.parent()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with("ink-compaction-")
+            );
+        }
+        for p in [&source, &path] {
+            for suffix in ["-wal", "-shm"] {
+                assert!(!std::path::PathBuf::from(format!("{}{suffix}", p.display())).exists());
+            }
+        }
+        let mut input = std::fs::File::open(&source).unwrap();
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        std::io::copy(&mut input, &mut output).unwrap();
+        output.sync_all().unwrap();
+        drop(output);
+        // Suite verification left the cursor at the oldest retained state.
+        loop {
+            let state = history::navigate(&path, None, None).unwrap();
+            if !state.can_redo {
+                break;
+            }
+            history::navigate(&path, Some(true), state.snapshot.revision).unwrap();
+        }
+        let before = read(&path).unwrap();
+        let mut prepare_ms = 0.;
+        let mut repack_ms = 0.;
+        let mut publish_ms = 0.;
+        let mut batches = 0;
+        loop {
+            let t = Instant::now();
+            let plan = prepare(&path).unwrap();
+            prepare_ms += t.elapsed().as_secs_f64() * 1000.;
+            let Some(plan) = plan else {
+                break;
+            };
+            let t = Instant::now();
+            let packed = repack(&plan).unwrap();
+            repack_ms += t.elapsed().as_secs_f64() * 1000.;
+            let Some((chunks, locations)) = packed else {
+                break;
+            };
+            let t = Instant::now();
+            assert!(publish(&path, plan, chunks, locations).unwrap());
+            publish_ms += t.elapsed().as_secs_f64() * 1000.;
+            batches += 1;
+        }
+        let after = read(&path).unwrap();
+        assert_eq!(before.revision, after.revision);
+        equal(&before.draft, &after.draft);
+        println!(
+            "INK_PROFILE {}",
+            serde_json::json!({"batches":batches,"strokes":after.draft.strokes.len(),"prepare_ms":prepare_ms,"decode_merge_encode_ms":repack_ms,"publish_ms":publish_ms,"verified":true})
+        );
+    }
+
     #[test]
     fn compaction_preserves_undo_redo_bits_geometry_and_revision() {
         let dir = tempfile::tempdir().unwrap();
