@@ -13,6 +13,9 @@ use std::collections::{BTreeMap, BTreeSet};
 mod compaction;
 #[path = "storage/history.rs"]
 mod history;
+#[cfg(test)]
+#[path = "storage/profile.rs"]
+mod profile;
 pub(super) use compaction::compact;
 #[cfg(test)]
 pub(super) use history::navigate;

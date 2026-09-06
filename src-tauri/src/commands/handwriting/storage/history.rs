@@ -47,7 +47,13 @@ pub(super) fn roots(conn: &Connection) -> CommandResult<Vec<(i64, Id)>> {
 pub(super) fn collect(conn: &Connection) -> CommandResult<()> {
     conn.execute_batch("CREATE TEMP TABLE IF NOT EXISTS keep_records(id BLOB PRIMARY KEY) WITHOUT ROWID; CREATE TEMP TABLE IF NOT EXISTS keep_chunks(id BLOB PRIMARY KEY) WITHOUT ROWID; DELETE FROM keep_records; DELETE FROM keep_chunks;").map_err(err)?;
     for (_, id) in roots(conn)? {
-        let doc = model::Document::read(&get_record(conn, id, None)?).map_err(err)?;
+        let doc = {
+            #[cfg(test)]
+            let _span = profile::span("gc.read_root");
+            model::Document::read(&get_record(conn, id, None)?).map_err(err)?
+        };
+        #[cfg(test)]
+        let _span = profile::span("gc.mark_sql");
         for id in doc.records.keys().chain(std::iter::once(&id)) {
             conn.execute(
                 "INSERT OR IGNORE INTO keep_records VALUES(?1)",
@@ -63,6 +69,8 @@ pub(super) fn collect(conn: &Connection) -> CommandResult<()> {
             .map_err(err)?;
         }
     }
+    #[cfg(test)]
+    let _span = profile::span("gc.delete_sql");
     conn.execute_batch("DELETE FROM ink_records WHERE id NOT IN (SELECT id FROM keep_records); DELETE FROM ink_chunks WHERE id NOT IN (SELECT id FROM keep_chunks);").map_err(err)?;
     Ok(())
 }

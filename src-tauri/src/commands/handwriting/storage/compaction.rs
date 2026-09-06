@@ -17,6 +17,8 @@ fn prepare(path: &Path) -> CommandResult<Option<Plan>> {
     let roots = history::roots(&tx)?;
     let mut catalog = BTreeMap::new();
     let mut locations = BTreeMap::new();
+    #[cfg(test)]
+    let roots_span = profile::span("prepare.roots");
     for (_, id) in &roots {
         let root = get_record(&tx, *id, None)?;
         if root.extensions != cbor::map([]) || !root.resources.is_empty() {
@@ -38,6 +40,8 @@ fn prepare(path: &Path) -> CommandResult<Option<Plan>> {
             }
         }
     }
+    #[cfg(test)]
+    drop(roots_span);
     let sealed: BTreeSet<Vec<u8>> = tx
         .prepare("SELECT id FROM ink_sealed_chunks")
         .map_err(err)?
@@ -191,7 +195,13 @@ fn publish(
         .map_err(err)?;
     let mut replacements = Vec::new();
     for (seq, root_id) in history::roots(&tx)? {
-        let mut doc = model::Document::read(&get_record(&tx, root_id, None)?).map_err(err)?;
+        let mut doc = {
+            #[cfg(test)]
+            let _span = profile::span("publish.read_root");
+            model::Document::read(&get_record(&tx, root_id, None)?).map_err(err)?
+        };
+        #[cfg(test)]
+        let remap_span = profile::span("publish.remap");
         let mut changed = false;
         for (id, location) in &mut doc.segments {
             if let Some(replacement) = locations.get(id) {
@@ -228,11 +238,17 @@ fn publish(
         if size > MAX_SNAPSHOT_BYTES as u64 {
             return Ok(false);
         }
+        #[cfg(test)]
+        drop(remap_span);
+        #[cfg(test)]
+        let _span = profile::span("publish.seal");
         replacements.push((seq, seal(&doc)?));
     }
     if replacements.is_empty() {
         return Ok(false);
     }
+    #[cfg(test)]
+    let persist_span = profile::span("publish.persist");
     for (id, bytes) in &chunks {
         put(&tx, "ink_chunks", *id, bytes)?;
         tx.execute("INSERT INTO ink_sealed_chunks VALUES(?1)", [id.as_slice()])
@@ -254,8 +270,17 @@ fn publish(
             .map_err(err)?;
         }
     }
-    history::collect(&tx)?;
+    #[cfg(test)]
+    drop(persist_span);
+    {
+        #[cfg(test)]
+        let _span = profile::span("publish.gc");
+        history::collect(&tx)?;
+    }
+    #[cfg(test)]
+    let _span = profile::span("publish.commit_close");
     tx.commit().map_err(err)?;
+    drop(conn);
     Ok(true)
 }
 pub(in super::super) fn compact(path: &Path) -> CommandResult<bool> {
@@ -367,6 +392,7 @@ mod tests {
             history::navigate(&path, Some(true), state.snapshot.revision).unwrap();
         }
         let before = read(&path).unwrap();
+        profile::start();
         let mut prepare_ms = 0.;
         let mut repack_ms = 0.;
         let mut publish_ms = 0.;
@@ -389,12 +415,13 @@ mod tests {
             publish_ms += t.elapsed().as_secs_f64() * 1000.;
             batches += 1;
         }
+        let phases = profile::finish();
         let after = read(&path).unwrap();
         assert_eq!(before.revision, after.revision);
         equal(&before.draft, &after.draft);
         println!(
             "INK_PROFILE {}",
-            serde_json::json!({"batches":batches,"strokes":after.draft.strokes.len(),"prepare_ms":prepare_ms,"decode_merge_encode_ms":repack_ms,"publish_ms":publish_ms,"verified":true})
+            serde_json::json!({"batches":batches,"strokes":after.draft.strokes.len(),"prepare_ms":prepare_ms,"decode_merge_encode_ms":repack_ms,"publish_ms":publish_ms,"phases":phases,"verified":true})
         );
     }
 
