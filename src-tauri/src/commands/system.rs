@@ -47,11 +47,26 @@ pub fn input_capabilities(app: AppHandle) -> CommandResult<InputCapabilities> {
     }
 }
 
+/// Panel technology reported by the platform. There is no CSS media feature for it: `(update: slow)`
+/// is not reported by the e-ink WebView, so the frontend display profile depends on this value.
+#[derive(Debug, Clone, Copy, Default, Serialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)] // Native detection is currently implemented on Android only.
+pub enum DisplayKind {
+    Eink,
+    Lcd,
+    #[default]
+    Unknown,
+}
+
 #[derive(Debug, Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct MobileSystemInfo {
     pub device_name: String,
     pub safe_area: SafeAreaInsets,
+    pub display_kind: DisplayKind,
+    /// `None` while no platform publishes a documented color-panel query.
+    pub color_panel: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, specta::Type)]
@@ -70,6 +85,7 @@ pub fn mobile_system_info(app: AppHandle) -> CommandResult<Option<MobileSystemIn
     {
         let integration = app.mobile_system();
         let native = integration.safe_area_insets().map_err(err)?;
+        let display = integration.display_info().map_err(err)?;
         Ok(Some(MobileSystemInfo {
             device_name: integration.device_name().map_err(err)?,
             safe_area: SafeAreaInsets {
@@ -78,6 +94,12 @@ pub fn mobile_system_info(app: AppHandle) -> CommandResult<Option<MobileSystemIn
                 bottom: native.bottom,
                 left: native.left,
             },
+            display_kind: match display.kind {
+                tauri_plugin_mobile_system::DisplayKind::Eink => DisplayKind::Eink,
+                tauri_plugin_mobile_system::DisplayKind::Lcd => DisplayKind::Lcd,
+                tauri_plugin_mobile_system::DisplayKind::Unknown => DisplayKind::Unknown,
+            },
+            color_panel: display.color_panel,
         }))
     }
 

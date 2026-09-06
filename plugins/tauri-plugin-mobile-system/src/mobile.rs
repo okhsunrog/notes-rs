@@ -6,7 +6,9 @@ use tauri::{
 
 use crate::{
     Result,
-    models::{DeviceNameResponse, SafeAreaInsets, SystemBarsStyleArgs},
+    models::{
+        DeviceNameResponse, DisplayInfo, DisplayInfoResponse, SafeAreaInsets, SystemBarsStyleArgs,
+    },
 };
 
 #[cfg(target_os = "android")]
@@ -31,6 +33,13 @@ impl<R: Runtime> MobileSystem<R> {
         self.0
             .run_mobile_plugin::<DeviceNameResponse>("getDeviceName", ())
             .map(|response| response.name)
+            .map_err(Into::into)
+    }
+
+    pub fn display_info(&self) -> Result<DisplayInfo> {
+        self.0
+            .run_mobile_plugin::<DisplayInfoResponse>("getDisplayInfo", ())
+            .map(DisplayInfo::from)
             .map_err(Into::into)
     }
 

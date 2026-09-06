@@ -151,6 +151,15 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
     }
 
     @Command
+    fun getDisplayInfo(invoke: Invoke) {
+        val result = JSObject()
+        result.put("kind", DisplayKind.of(Build.MANUFACTURER))
+        // Absent rather than JSON null: the Rust side defaults the field to "unknown".
+        DisplayKind.colorPanel()?.let { result.put("colorPanel", it) }
+        invoke.resolve(result)
+    }
+
+    @Command
     fun getDeviceName(invoke: Invoke) {
         val manufacturer = Build.MANUFACTURER.replaceFirstChar { it.uppercase() }
         val model = Build.MODEL

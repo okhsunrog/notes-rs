@@ -13,6 +13,9 @@ export const commands = {
 	mobileSystemInfo: () => typedError<{
 	deviceName: string,
 	safeArea: SafeAreaInsets,
+	displayKind: DisplayKind,
+	/**  `None` while no platform publishes a documented color-panel query. */
+	colorPanel: boolean | null,
 } | null, CommandError>(__TAURI_INVOKE("mobile_system_info")),
 	inputCapabilities: () => typedError<InputCapabilities, CommandError>(__TAURI_INVOKE("input_capabilities")),
 	createHandwrittenNote: (title: string | null) => typedError<Page, CommandError>(__TAURI_INVOKE("create_handwritten_note", { title })),
@@ -371,6 +374,12 @@ export type DiagnosticCode = "config_not_found" | "source_directory_not_found" |
 export type DiagnosticSeverity = "info" | "warning" | "error";
 
 /**
+ *  Panel technology reported by the platform. There is no CSS media feature for it: `(update: slow)`
+ *  is not reported by the e-ink WebView, so the frontend display profile depends on this value.
+ */
+export type DisplayKind = "eink" | "lcd" | "unknown";
+
+/**
  *  Opaque revision of a complete page document projection.
  *  The value is always the canonical lowercase hexadecimal representation of
  *  one SHA-256 digest. Callers may compare and round-trip it, but the digest
@@ -590,6 +599,9 @@ export type LogseqImportUnavailableReason = "mobile_platform";
 export type MobileSystemInfo = {
 	deviceName: string,
 	safeArea: SafeAreaInsets,
+	displayKind: DisplayKind,
+	/**  `None` while no platform publishes a documented color-panel query. */
+	colorPanel: boolean | null,
 };
 
 export type ObjectKind = "page" | "block";
