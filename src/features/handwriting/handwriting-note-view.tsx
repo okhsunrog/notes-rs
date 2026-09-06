@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { usePageNavigationStore } from "@/features/pages/page-navigation-store";
+import { RenamePageDialog } from "@/features/pages/rename-page-dialog";
 import { usePageTitleEditor } from "@/features/pages/use-page-title-editor";
 import { currentDisposition, homeTarget, type PaneId } from "@/features/workspace/workspace-model";
 import { useWorkspaceStore } from "@/features/workspace/workspace-store";
@@ -129,6 +130,7 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
   // snapshot from storage is allowed to replace them.
   const [recovering, setRecovering] = useState(false);
   const [comparing, setComparing] = useState(false);
+  const [renaming, setRenaming] = useState(false);
 
   const latestDraft = useRef<InkDraft | null>(null);
   const historyBusyRef = useRef(false);
@@ -411,8 +413,8 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
       data-ink-editor
       className="flex h-full min-h-0 flex-col pb-[var(--safe-area-inset-bottom)]"
       onKeyDown={(event) => {
-        // The title textarea is inside this container; its own undo stack must
-        // keep working while the caret is in it.
+        // Nothing on this screen is editable any more, but the rename dialog is
+        // rendered from here and its input must keep its own undo stack.
         if (isEditableTarget(event.target)) return;
         if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
           event.preventDefault();
@@ -435,21 +437,14 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
           <ArrowLeft className="size-3.5" />
           Back
         </Button>
-        <textarea
-          rows={1}
-          value={title.title}
-          onBlur={() => void title.flush()}
-          onChange={(event) => title.edit(event.currentTarget.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.nativeEvent.isComposing) {
-              event.preventDefault();
-              event.currentTarget.blur();
-            }
-          }}
-          placeholder="Untitled note"
-          aria-label="Note title"
-          className="min-w-0 flex-1 resize-none appearance-none overflow-hidden border-0 bg-transparent px-1 py-1 text-base leading-tight font-semibold text-foreground outline-none placeholder:text-muted-foreground/40"
-        />
+        <button
+          type="button"
+          onClick={() => setRenaming(true)}
+          aria-label="Rename note"
+          className="min-w-0 flex-1 truncate rounded-lg px-1 py-1 text-left text-base leading-tight font-semibold text-foreground"
+        >
+          {title.title || <span className="text-muted-foreground/40">Untitled note</span>}
+        </button>
         {unsentChanges(status) && (
           <span className="shrink-0 text-[11px] text-muted-foreground">Unsent changes</span>
         )}
@@ -863,6 +858,14 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
             <p role="alert">Fast pen input is unavailable: {nativeStatus.error}</p>
           )}
         </footer>
+      )}
+      {renaming && (
+        <RenamePageDialog
+          page={page}
+          open
+          onOpenChange={(open) => setRenaming(open)}
+          onSaved={onSaved}
+        />
       )}
       {conflictsOpen && status && (
         <HandwritingConflictDialog

@@ -1,7 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowRight, Clock3, FilePlus2, FileText, ListFilter, Search, Star, X } from "lucide-react";
+import { Menu } from "@base-ui/react/menu";
+import {
+  ArrowRight,
+  Clock3,
+  FilePlus2,
+  FileText,
+  ListFilter,
+  MoreHorizontal,
+  Pencil,
+  Search,
+  Star,
+  X,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { refreshPanelAfterClose } from "@/app/eink-refresh";
+import { useOverlayInkSuppression } from "@/app/ink-suppression";
 import { NewNoteButton } from "@/features/handwriting/new-note-button";
 import { PageIcon } from "./page-icon";
 import { Input } from "@/components/ui/input";
@@ -14,6 +28,7 @@ import { notifyError } from "@/lib/notify";
 import { queryKeys } from "@/lib/query";
 import { cn } from "@/lib/utils";
 import { usePageNavigationStore } from "./page-navigation-store";
+import { RenamePageDialog } from "./rename-page-dialog";
 import {
   presentAllNotes,
   type AllNotesLayout,
@@ -236,6 +251,8 @@ function AllNotesRow({
   onOpen: (shiftKey: boolean) => void;
   onToggleFavorite: () => void;
 }) {
+  const [renaming, setRenaming] = useState(false);
+  const [renamed, setRenamed] = useState<Page | null>(null);
   return (
     <li className="group flex min-w-0 items-center transition-colors hover:bg-accent/45">
       <button
@@ -270,7 +287,53 @@ function AllNotesRow({
       >
         <Star className={cn("size-3.5", favorite && "fill-current")} />
       </Button>
+      {/* A handwritten note has no editable title on its own screen, so renaming lives here. */}
+      {page.kind.kind === "handwriting" && (
+        <RenameMenu title={pageDisplayTitle(page)} onRename={() => setRenaming(true)} />
+      )}
+      {renaming && (
+        <RenamePageDialog
+          page={renamed ?? page}
+          open
+          onOpenChange={setRenaming}
+          onSaved={setRenamed}
+        />
+      )}
     </li>
+  );
+}
+
+function RenameMenu({ title, onRename }: { title: string; onRename: () => void }) {
+  const overlay = useOverlayInkSuppression();
+  return (
+    <Menu.Root onOpenChange={refreshPanelAfterClose(overlay)}>
+      <Menu.Trigger
+        render={
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label={`More options for ${title}`}
+            className="mr-3 -ml-1 rounded-lg text-muted-foreground"
+          />
+        }
+      >
+        <MoreHorizontal className="size-4" />
+      </Menu.Trigger>
+      <Menu.Portal>
+        <Menu.Positioner sideOffset={6} align="end">
+          <Menu.Popup className="z-50 min-w-40 rounded-xl border bg-popover p-1 text-popover-foreground shadow-panel outline-none">
+            <Menu.Item
+              className="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2.5 text-sm outline-none data-[highlighted]:bg-accent"
+              onClick={onRename}
+            >
+              <Pencil className="size-4" />
+              Rename
+            </Menu.Item>
+          </Menu.Popup>
+        </Menu.Positioner>
+      </Menu.Portal>
+    </Menu.Root>
   );
 }
 

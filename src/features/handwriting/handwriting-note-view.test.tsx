@@ -133,6 +133,15 @@ async function mount(onDelete: (page: Page) => void = () => {}) {
   );
 }
 
+/** The rename dialog is portalled out of the pane, so it is looked up in the document. */
+function renameField(): HTMLInputElement;
+function renameField(required: false): HTMLInputElement | null;
+function renameField(required = true) {
+  const field = document.querySelector<HTMLInputElement>('input[aria-label="Note name"]');
+  if (!field && required) throw new Error("no rename field");
+  return field;
+}
+
 function button(label: string) {
   const found = [...container.querySelectorAll("button")].find(
     (element) =>
@@ -346,7 +355,35 @@ it("closes the session of a note that was deleted while gestures were queued", a
   expect(api.completeHandwritingNote).not.toHaveBeenCalled();
 });
 
-it("leaves undo to the title field while the caret is in it", async () => {
+it("renames from a dialog instead of a field on the sheet", async () => {
+  api.renamePage.mockResolvedValue({ ...page, title: "Meeting", titleRevision: "title-2" });
+  await mount();
+
+  // Nothing on the drawing screen takes the caret; the keyboard cannot meet an armed pen.
+  expect(container.querySelector("textarea")).toBeNull();
+  expect(container.querySelector("input")).toBeNull();
+
+  await act(async () => {
+    button("Rename note").click();
+  });
+  const field = renameField();
+  await act(async () => {
+    // React tracks the last value it wrote; the native setter is what a real keystroke reaches.
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+      field,
+      "Meeting",
+    );
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => {
+    field.form!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  });
+
+  expect(api.renamePage).toHaveBeenCalledWith(page.uuid, "Meeting", "title-revision");
+  expect(renameField(false)).toBeNull();
+});
+
+it("leaves undo to the rename field while the caret is in it", async () => {
   api.saveHandwritingPatch.mockResolvedValue("revision-2");
   api.handwritingHistory.mockResolvedValue({
     baseRevision: "revision-2",
@@ -361,8 +398,10 @@ it("leaves undo to the title field while the caret is in it", async () => {
     button("Grid paper").click();
   });
 
-  const title = container.querySelector("textarea");
-  if (!title) throw new Error("no title field");
+  await act(async () => {
+    button("Rename note").click();
+  });
+  const title = renameField();
   await act(async () => {
     title.dispatchEvent(
       new KeyboardEvent("keydown", { key: "z", ctrlKey: true, bubbles: true, cancelable: true }),

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { MarkdownOpenRequest } from "@/features/markdown";
+import { defaultHandwritingTitle } from "@/features/handwriting/default-title";
 import {
   pageDisplayTitle,
   parseJournalDate,
@@ -166,7 +167,8 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
       creatingNoteRef.current = true;
       setCreatingNote(true);
       try {
-        const page = await createHandwrittenNoteCommand(null);
+        // A sheet has nowhere to type a name, so it arrives with one.
+        const page = await createHandwrittenNoteCommand(defaultHandwritingTitle());
         queryClient.setQueryData(queryKeys.page(page.uuid), page);
         await queryClient.invalidateQueries({ queryKey: queryKeys.pages });
         if (navigationEpoch !== navigationEpochRef.current) return;
