@@ -8,9 +8,6 @@ const MAX_FRESH_CHUNKS: usize = 16;
 const MAX_FRESH_BYTES: u64 = 8 * 1024 * 1024;
 type Packed = (BTreeMap<Id, Vec<u8>>, BTreeMap<Id, model::SegmentRef>);
 struct Plan {
-    roots: Vec<(i64, Id)>,
-    revision: Option<String>,
-    documents: Vec<(i64, model::Document)>,
     chunks: BTreeMap<Id, Vec<u8>>,
     locations: BTreeMap<Id, model::SegmentRef>,
 }
@@ -18,16 +15,9 @@ fn prepare(path: &Path) -> CommandResult<Option<Plan>> {
     let mut conn = open(path)?;
     let tx = conn.transaction().map_err(err)?;
     let roots = history::roots(&tx)?;
-    let revision = tx
-        .query_row("SELECT revision FROM ink_head WHERE singleton=1", [], |r| {
-            r.get(0)
-        })
-        .optional()
-        .map_err(err)?;
-    let mut documents = Vec::new();
     let mut catalog = BTreeMap::new();
     let mut locations = BTreeMap::new();
-    for (seq, id) in &roots {
+    for (_, id) in &roots {
         let root = get_record(&tx, *id, None)?;
         if root.extensions != cbor::map([]) || !root.resources.is_empty() {
             return Err(CommandError::invalid("Unsupported compaction root"));
@@ -47,7 +37,6 @@ fn prepare(path: &Path) -> CommandResult<Option<Plan>> {
                 }
             }
         }
-        documents.push((*seq, doc));
     }
     let sealed: BTreeSet<Vec<u8>> = tx
         .prepare("SELECT id FROM ink_sealed_chunks")
@@ -90,13 +79,7 @@ fn prepare(path: &Path) -> CommandResult<Option<Plan>> {
         chunks.insert(id, bytes);
     }
     tx.commit().map_err(err)?;
-    Ok(Some(Plan {
-        roots,
-        revision,
-        documents,
-        chunks,
-        locations,
-    }))
+    Ok(Some(Plan { chunks, locations }))
 }
 fn finish(
     builder: &mut Option<Chunk>,
@@ -202,12 +185,26 @@ fn publish(
     chunks: BTreeMap<Id, Vec<u8>>,
     locations: BTreeMap<Id, model::SegmentRef>,
 ) -> CommandResult<bool> {
+    let mut conn = open(path)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(err)?;
     let mut replacements = Vec::new();
-    for (seq, mut doc) in plan.documents {
+    for (seq, root_id) in history::roots(&tx)? {
+        let mut doc = model::Document::read(&get_record(&tx, root_id, None)?).map_err(err)?;
+        let mut changed = false;
         for (id, location) in &mut doc.segments {
             if let Some(replacement) = locations.get(id) {
+                let source = &plan.locations[id];
+                if source.chunk != location.chunk || source.index != location.index {
+                    return Ok(false);
+                }
+                changed = true;
                 *location = replacement.clone();
             }
+        }
+        if !changed {
+            continue;
         }
         doc.chunks = doc
             .segments
@@ -233,17 +230,7 @@ fn publish(
         }
         replacements.push((seq, seal(&doc)?));
     }
-    let mut conn = open(path)?;
-    let tx = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(err)?;
-    let revision: Option<String> = tx
-        .query_row("SELECT revision FROM ink_head WHERE singleton=1", [], |r| {
-            r.get(0)
-        })
-        .optional()
-        .map_err(err)?;
-    if history::roots(&tx)? != plan.roots || revision != plan.revision {
+    if replacements.is_empty() {
         return Ok(false);
     }
     for (id, bytes) in &chunks {
@@ -399,20 +386,38 @@ mod tests {
         assert!(!compact(&path).unwrap());
     }
     #[test]
-    fn stale_preparation_and_failed_publication_never_replace_history() {
+    fn new_edits_survive_prepared_packs_and_publication_failure_rolls_back() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ink.sqlite3");
-        let rev = write_draft(&path, sheet(), None).unwrap();
+        let mut draft = sheet();
+        let rev = write_draft(&path, draft.clone(), None).unwrap();
         let plan = prepare(&path).unwrap().unwrap();
         let (chunks, locations) = repack(&plan).unwrap().unwrap();
-        let new = write_draft(&path, sheet(), Some(rev)).unwrap();
+        let fresh = sheet().strokes;
+        draft.strokes.extend(fresh.clone());
+        let new = write_patch(
+            &path,
+            InkDraftPatch {
+                order: draft.strokes.iter().map(|s| s.id).collect(),
+                upserts: fresh,
+                background: InkBackground::Plain,
+            },
+            Some(rev),
+        )
+        .unwrap();
         let conn = open(&path).unwrap();
         let roots = history::roots(&conn).unwrap();
         drop(conn);
-        assert!(!publish(&path, plan, chunks, locations).unwrap());
+        assert!(publish(&path, plan, chunks, locations).unwrap());
         assert_eq!(read(&path).unwrap().revision, Some(new.clone()));
+        equal(&read(&path).unwrap().draft, &draft);
         let conn = open(&path).unwrap();
-        assert_eq!(history::roots(&conn).unwrap(), roots);
+        let updated_roots = history::roots(&conn).unwrap();
+        assert_eq!(
+            updated_roots.iter().map(|r| r.0).collect::<Vec<_>>(),
+            roots.iter().map(|r| r.0).collect::<Vec<_>>()
+        );
+        let roots = updated_roots;
         let records = rows(&conn, "ink_records");
         let chunks = rows(&conn, "ink_chunks");
         conn.execute_batch("CREATE TRIGGER fail_compaction BEFORE UPDATE ON ink_head BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
@@ -424,6 +429,19 @@ mod tests {
         assert_eq!(rows(&conn, "ink_chunks"), chunks);
         assert_eq!(read(&path).unwrap().revision, Some(new));
     }
+    #[test]
+    fn a_second_prepared_pack_cannot_replace_already_sealed_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ink.sqlite3");
+        write_draft(&path, sheet(), None).unwrap();
+        let stale = prepare(&path).unwrap().unwrap();
+        let (chunks, locations) = repack(&stale).unwrap().unwrap();
+        assert!(compact(&path).unwrap());
+        let before = rows(&open(&path).unwrap(), "ink_chunks");
+        assert!(!publish(&path, stale, chunks, locations).unwrap());
+        assert_eq!(rows(&open(&path).unwrap(), "ink_chunks"), before);
+    }
+
     #[test]
     fn subsequent_packs_leave_sealed_blocks_unchanged() {
         let dir = tempfile::tempdir().unwrap();

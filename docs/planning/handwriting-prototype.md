@@ -509,3 +509,13 @@ outputs of compaction are permanently sealed. Each preparation selects at most
 Untouched block references are preserved across every retained history root.
 Tests verify that later compactions retain the exact bytes of earlier packs.
 This is a local storage-policy change, not a portable format version change.
+
+Fresh chunk publication now reads current history roots inside its transaction
+and remaps only matching immutable segments. Edits arriving while compression
+runs survive publication; the current revision and history cursor are preserved.
+A mismatched physical source (e.g. another completed pack) rejects stale work.
+The scheduler is now one worker on a fixed five-second interval, triggered only
+by added/changed geometry. Opening, navigation, deletion-only patches and paper
+changes do not arm it. Requests during work are coalesced; bounded batches drain
+without restarting a timer on each gesture. This is maintenance scheduling only;
+versioned note autosave and synchronization integration are still pending.

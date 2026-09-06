@@ -9,33 +9,53 @@ mod storage;
 const MAX_POINTS: usize = 150_000;
 
 #[derive(Default)]
+struct MaintenanceState {
+    running: bool,
+    dirty: bool,
+}
+#[derive(Default)]
 pub struct HandwritingStore {
     lock: Arc<Mutex<()>>,
-    generation: Arc<std::sync::atomic::AtomicU64>,
-    compaction_lock: Arc<tokio::sync::Mutex<()>>,
+    maintenance: Arc<Mutex<MaintenanceState>>,
 }
 impl HandwritingStore {
     fn schedule_compaction(&self, path: std::path::PathBuf) {
-        use std::sync::atomic::Ordering;
-        let generation = self.generation.clone();
-        let expected = generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let serial = self.compaction_lock.clone();
+        {
+            let mut state = self.maintenance.lock().expect("maintenance mutex poisoned");
+            state.dirty = true;
+            if state.running {
+                return;
+            }
+            state.running = true;
+        }
+        let maintenance = self.maintenance.clone();
         tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            if generation.load(Ordering::SeqCst) != expected {
-                return;
-            }
-            let _guard = serial.lock().await;
-            if generation.load(Ordering::SeqCst) != expected {
-                return;
-            }
-            match tauri::async_runtime::spawn_blocking(move || storage::compact(&path)).await {
-                Ok(Ok(true)) => tracing::info!("Handwriting chunks compacted"),
-                Ok(Ok(false)) => {}
-                result => tracing::warn!(
-                    ?result,
-                    "Handwriting compaction deferred; saved history is unchanged"
-                ),
+            loop {
+                // A fixed interval: continued writing never postpones the next batch.
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                maintenance
+                    .lock()
+                    .expect("maintenance mutex poisoned")
+                    .dirty = false;
+                let job_path = path.clone();
+                let packed =
+                    match tauri::async_runtime::spawn_blocking(move || storage::compact(&job_path))
+                        .await
+                    {
+                        Ok(Ok(packed)) => packed,
+                        result => {
+                            tracing::warn!(
+                                ?result,
+                                "Handwriting compaction deferred; saved history is unchanged"
+                            );
+                            false
+                        }
+                    };
+                let mut state = maintenance.lock().expect("maintenance mutex poisoned");
+                if !state.dirty && !packed {
+                    state.running = false;
+                    break;
+                }
             }
         });
     }
@@ -156,7 +176,6 @@ pub async fn handwriting_history(
         .map_err(err)?
         .join("handwriting/ink-v1.sqlite3");
     let lock = store.lock.clone();
-    let maintenance_path = path.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let _guard = lock
             .lock()
@@ -165,7 +184,6 @@ pub async fn handwriting_history(
     })
     .await
     .map_err(err)??;
-    store.schedule_compaction(maintenance_path);
     Ok(result)
 }
 
@@ -259,6 +277,7 @@ pub async fn save_handwriting_patch(
         .join("handwriting/ink-v1.sqlite3");
     let lock = store.lock.clone();
     let maintenance_path = path.clone();
+    let geometry_changed = !patch.upserts.is_empty();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let _guard = lock
             .lock()
@@ -267,7 +286,9 @@ pub async fn save_handwriting_patch(
     })
     .await
     .map_err(err)??;
-    store.schedule_compaction(maintenance_path);
+    if geometry_changed {
+        store.schedule_compaction(maintenance_path);
+    }
     Ok(result)
 }
 
@@ -283,7 +304,6 @@ pub async fn load_handwriting_draft(
         .map_err(err)?
         .join("handwriting/ink-v1.sqlite3");
     let lock = store.lock.clone();
-    let maintenance_path = path.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let _guard = lock
             .lock()
@@ -292,7 +312,6 @@ pub async fn load_handwriting_draft(
     })
     .await
     .map_err(err)??;
-    store.schedule_compaction(maintenance_path);
     Ok(result)
 }
 
@@ -311,6 +330,7 @@ pub async fn save_handwriting_draft(
         .join("handwriting/ink-v1.sqlite3");
     let lock = store.lock.clone();
     let maintenance_path = path.clone();
+    let geometry_changed = !draft.strokes.is_empty();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let _guard = lock
             .lock()
@@ -319,7 +339,9 @@ pub async fn save_handwriting_draft(
     })
     .await
     .map_err(err)??;
-    store.schedule_compaction(maintenance_path);
+    if geometry_changed {
+        store.schedule_compaction(maintenance_path);
+    }
     Ok(result)
 }
 
