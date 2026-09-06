@@ -13,6 +13,10 @@ libc = "0.2.189"
 rusqlite = { workspace = true, features = ["bundled"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+sha2.workspace = true
+specta.workspace = true
+specta-typescript.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
