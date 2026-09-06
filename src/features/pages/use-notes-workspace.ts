@@ -456,7 +456,13 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
     (page: Page, disposition: OpenDisposition = currentDisposition) => {
       navigationEpochRef.current += 1;
       setNewNote(null);
-      queryClient.setQueryData(queryKeys.page(page.uuid), page);
+      // A list record can be older than what the cache already holds — a rename
+      // that has not reached the list yet, for instance — so seeding blindly
+      // would show the stale title until the next fetch.
+      if (isNewerPageRecord(page, queryClient.getQueryData<Page>(queryKeys.page(page.uuid)))) {
+        queryClient.setQueryData(queryKeys.page(page.uuid), page);
+      }
+      void queryClient.invalidateQueries({ queryKey: queryKeys.page(page.uuid) });
       openTarget(pageTarget(page.uuid), disposition);
       showEditor();
     },
@@ -534,6 +540,18 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
     selectPage,
     quickCapture,
   };
+}
+
+/**
+ * Whether a page record may replace a cached one. Nothing cached is always
+ * replaceable; otherwise only a newer title revision or a later update wins.
+ */
+export function isNewerPageRecord(incoming: Page, cached: Page | undefined): boolean {
+  if (!cached) return true;
+  if (cached.uuid !== incoming.uuid) return true;
+  if (cached.titleRevision !== incoming.titleRevision)
+    return incoming.updatedAt >= cached.updatedAt;
+  return incoming.updatedAt > cached.updatedAt;
 }
 
 function decodeFragment(fragment: string): string {

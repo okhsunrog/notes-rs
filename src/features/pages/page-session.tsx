@@ -98,7 +98,29 @@ const EMPTY_SESSION: PageSessionSnapshot = Object.freeze({
 export class PageSessionRegistry {
   readonly #sessions = new Map<string, SessionRecord>();
   readonly #listeners = new Map<string, Set<() => void>>();
+  readonly #flushes = new Set<() => Promise<unknown>>();
   #nextAttemptId = 1;
+
+  /**
+   * Registered by whatever owns a draft's save path — a title field, a block,
+   * a document. The registry holds the unsaved text but not the commands that
+   * persist it, so a process-wide drain has to go back through the owners.
+   */
+  registerFlush(flush: () => Promise<unknown>): () => void {
+    this.#flushes.add(flush);
+    return () => {
+      this.#flushes.delete(flush);
+    };
+  }
+
+  /**
+   * Persist every pending draft at once. Used when the window is going away:
+   * debounced autosave has no chance to fire, and one failing draft must not
+   * stop the others from being stored.
+   */
+  async flushAll(): Promise<void> {
+    await Promise.allSettled([...this.#flushes].map((flush) => flush()));
+  }
 
   createWriterLeaseToken(): WriterLeaseToken {
     return Object.freeze({ id: Symbol("page-writer-lease") });

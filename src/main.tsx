@@ -8,7 +8,7 @@ import { ConfirmationProvider } from "@/app/confirmation";
 import { ErrorBoundary } from "@/app/error-boundary";
 import { registerLifecycleFlush } from "@/app/lifecycle-flush";
 import { disableViewportZoom } from "@/app/viewport-zoom";
-import { PageSessionProvider } from "@/features/pages/page-session";
+import { PageSessionProvider, PageSessionRegistry } from "@/features/pages/page-session";
 import { InputCapabilitiesProvider } from "@/features/handwriting/input-capabilities";
 import { Toaster } from "@/components/ui/sonner";
 import "./index.css";
@@ -20,7 +20,10 @@ const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement)
 const queryClient = createAppQueryClient();
 void listenForDomainEvents(queryClient);
 disableViewportZoom();
-registerLifecycleFlush();
+// Owned here rather than by the provider so the process-level drain can reach
+// unsaved drafts without a React tree.
+const pageSessions = new PageSessionRegistry();
+registerLifecycleFlush(pageSessions);
 
 root.render(
   <React.StrictMode>
@@ -29,7 +32,7 @@ root.render(
         <AppearanceProvider>
           <ConfirmationProvider>
             <ErrorBoundary>
-              <PageSessionProvider>
+              <PageSessionProvider registry={pageSessions}>
                 <InputCapabilitiesProvider>
                   <App />
                 </InputCapabilitiesProvider>

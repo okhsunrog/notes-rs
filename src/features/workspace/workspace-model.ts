@@ -428,20 +428,46 @@ function setPagePresentation(
   };
 }
 
+function referencesPage(content: OpenTarget | undefined, pageUuid: string): boolean {
+  return (
+    (content?.kind === PaneContentKind.Page && content.pageUuid === pageUuid) ||
+    (content?.kind === PaneContentKind.Graph && content.focusPageUuid === pageUuid)
+  );
+}
+
+/**
+ * A deleted page leaves no trace in navigation. Replacing the pane's content
+ * through `navigatePane` would push the dead page onto the history, putting it
+ * one Back press away; leaving it in `back`/`forward` would make Back land on a
+ * page that no longer exists instead of on whatever the user visited before it.
+ */
 function forgetPage(state: WorkspaceState, pageUuid: string): WorkspaceState {
   let next = state;
   for (const paneId of leafPaneIds(state.tree)) {
-    const content = next.panes[paneId]?.content;
-    const referencesPage =
-      (content?.kind === PaneContentKind.Page && content.pageUuid === pageUuid) ||
-      (content?.kind === PaneContentKind.Graph && content.focusPageUuid === pageUuid);
-    if (!referencesPage) continue;
-    next =
-      paneId === next.primaryPaneId
-        ? navigatePane(next, paneId, homeTarget)
-        : closePane(next, paneId);
+    if (!referencesPage(next.panes[paneId]?.content, pageUuid)) continue;
+    if (paneId !== next.primaryPaneId) {
+      next = closePane(next, paneId);
+      continue;
+    }
+    const pane = getPane(next, paneId);
+    next = {
+      ...next,
+      panes: { ...next.panes, [paneId]: { ...pane, content: homeTarget } },
+    };
   }
-  return next;
+
+  const panes = { ...next.panes };
+  let pruned = false;
+  for (const paneId of Object.keys(panes) as PaneId[]) {
+    const pane = panes[paneId];
+    if (!pane) continue;
+    const back = pane.back.filter((entry) => !referencesPage(entry, pageUuid));
+    const forward = pane.forward.filter((entry) => !referencesPage(entry, pageUuid));
+    if (back.length === pane.back.length && forward.length === pane.forward.length) continue;
+    panes[paneId] = { ...pane, back, forward };
+    pruned = true;
+  }
+  return pruned ? { ...next, panes } : next;
 }
 
 function moveHistory(

@@ -283,6 +283,59 @@ describe("window-local workspace model", () => {
     expect(state.tree).toBe(tree);
   });
 
+  it("leaves no trace of a deleted page in any pane's history", () => {
+    let state = createInitialWorkspaceState();
+    for (const uuid of ["page-a", "page-b"]) {
+      state = workspaceReducer(state, {
+        type: "open_target",
+        target: pageTarget(uuid),
+        disposition: { kind: OpenDispositionKind.Current },
+      });
+    }
+
+    state = workspaceReducer(state, { type: "forget_page", pageUuid: "page-b" });
+
+    const pane = getActivePane(state);
+    expect(pane.content).toEqual({ kind: PaneContentKind.Home });
+    // Going back must reach the page the user actually came from, not the home
+    // view that replaced the deleted one.
+    const back = workspaceReducer(state, { type: "go_back", paneId: pane.id });
+    expect(getActivePane(back).content).toMatchObject({
+      kind: PaneContentKind.Page,
+      pageUuid: "page-a",
+    });
+
+    const entries = Object.values(state.panes).flatMap((record) => [
+      ...record.back,
+      ...record.forward,
+      record.content,
+    ]);
+    expect(
+      entries.some((entry) => entry.kind === PaneContentKind.Page && entry.pageUuid === "page-b"),
+    ).toBe(false);
+    expect(validateWorkspaceState(state)).toEqual([]);
+  });
+
+  it("prunes a deleted page from panes that are not showing it", () => {
+    let state = createInitialWorkspaceState();
+    state = workspaceReducer(state, {
+      type: "open_target",
+      target: pageTarget("page-b"),
+      disposition: { kind: OpenDispositionKind.Current },
+    });
+    state = workspaceReducer(state, {
+      type: "open_target",
+      target: pageTarget("page-c"),
+      disposition: { kind: OpenDispositionKind.Current },
+    });
+
+    state = workspaceReducer(state, { type: "forget_page", pageUuid: "page-b" });
+
+    const pane = getActivePane(state);
+    expect(pane.content).toMatchObject({ kind: PaneContentKind.Page, pageUuid: "page-c" });
+    expect(pane.back).toEqual([{ kind: PaneContentKind.Home }]);
+  });
+
   it("projects every dock visibility without rewriting dock state", () => {
     expect(projectDock(DockVisibility.Hidden, false)).toBe(DockProjection.Hidden);
     expect(projectDock(DockVisibility.Rail, false)).toBe(DockProjection.Rail);

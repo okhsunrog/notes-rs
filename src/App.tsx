@@ -78,7 +78,8 @@ function App() {
     workspace.activePage?.kind.kind === "handwriting";
 
   useAppShortcuts({
-    enabled: ready && !handwritingActive,
+    enabled: ready,
+    historyEnabled: !handwritingActive,
     createNote: () => void workspace.createNewNote(),
     openSearch: () => setSearchOpen(true),
     undo: () => void workspace.moveHistory("undo"),

@@ -174,6 +174,12 @@ export function PageView({
     }
   }, [autosave, sessions]);
 
+  // The window can be destroyed without unmounting anything, and debounced
+  // autosave never fires then. A process-level drain reaches this draft here.
+  const flushRef = useRef(flush);
+  flushRef.current = flush;
+  useEffect(() => sessions.registerFlush(() => flushRef.current()), [sessions]);
+
   const scheduleSave = useCallback(() => {
     if (!canEdit) return;
     setSaveState("dirty");

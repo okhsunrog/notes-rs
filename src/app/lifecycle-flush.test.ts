@@ -6,6 +6,7 @@ import {
   type SavePatch,
 } from "@/features/handwriting/handwriting-session";
 import { emptyDraft } from "@/features/handwriting/ink-model";
+import { PageSessionRegistry } from "@/features/pages/page-session";
 import { registerLifecycleFlush } from "./lifecycle-flush";
 
 const api = vi.hoisted(() => ({ completeAllHandwriting: vi.fn() }));
@@ -22,7 +23,7 @@ afterEach(() => {
 
 it("drains a retained session when the window goes away with no view mounted", async () => {
   api.completeAllHandwriting.mockResolvedValue(undefined);
-  registerLifecycleFlush();
+  registerLifecycleFlush(new PageSessionRegistry());
   const save = vi
     .fn<SavePatch>()
     .mockRejectedValueOnce(new Error("database is locked"))
@@ -45,4 +46,19 @@ it("drains a retained session when the window goes away with no view mounted", a
     expect(save).toHaveBeenCalledTimes(2);
     expect(api.completeAllHandwriting).toHaveBeenCalledTimes(1);
   });
+});
+
+it("stores a dirty text draft when the window is hidden", async () => {
+  api.completeAllHandwriting.mockResolvedValue(undefined);
+  const sessions = new PageSessionRegistry();
+  registerLifecycleFlush(sessions);
+  const save = vi.fn().mockResolvedValue(undefined);
+  sessions.registerFlush(save);
+
+  Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
+  document.dispatchEvent(new Event("visibilitychange"));
+
+  // Autosave is debounced, so without this the last keystrokes before the app
+  // is backgrounded are never written.
+  await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(1));
 });

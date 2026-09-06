@@ -294,6 +294,12 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
     }
   }, [applyBlockSnapshot, sessions]);
 
+  // The window can be destroyed without unmounting anything, and debounced
+  // autosave never fires then. A process-level drain reaches this draft here.
+  const flushRef = useRef(flush);
+  flushRef.current = flush;
+  useEffect(() => sessions.registerFlush(() => flushRef.current()), [sessions]);
+
   const changeBlockStyle = async (value: string) => {
     if (!isBlockStyleKind(value) || styleBusyRef.current || readOnly) return;
     const nextStyle = blockStyleForKind(value, blockRef.current.style);
