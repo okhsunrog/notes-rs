@@ -1,9 +1,20 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 
-const [remote, output] = process.argv.slice(2);
+const [remote, output, maxChunks = "16", decodedMiB = "128"] = process.argv.slice(2);
+if (
+  !/^\d+$/.test(maxChunks) ||
+  !/^\d+$/.test(decodedMiB) ||
+  +maxChunks < 2 ||
+  +maxChunks > 512 ||
+  +decodedMiB < 16 ||
+  +decodedMiB > 128
+)
+  throw new Error("invalid batch limits");
 if (!/^\/data\/local\/tmp\/ink-compaction-[a-zA-Z0-9-]+$/.test(remote ?? "") || !output)
-  throw new Error("usage: run-compaction.mjs /data/local/tmp/ink-compaction-UNIQUE NEW.jsonl");
+  throw new Error(
+    "usage: run-compaction.mjs /data/local/tmp/ink-compaction-UNIQUE NEW.jsonl [maxChunks=16] [decodedMiB=128]",
+  );
 const fd = fs.openSync(output, "wx");
 const adb = (args) => {
   const r = spawnSync("adb", args, { encoding: "utf8", timeout: 15 * 60 * 1000 });
@@ -16,6 +27,8 @@ const record = (r) => {
 };
 record({
   kind: "environment",
+  maxChunks: +maxChunks,
+  decodedMiB: +decodedMiB,
   time: new Date().toISOString(),
   device: adb(["devices", "-l"]),
   battery: adb(["shell", "dumpsys", "battery"]),
@@ -37,7 +50,16 @@ for (const [i, policy] of [
 ].entries()) {
   console.log(`Starting ${i}: ${policy}`);
   const r = JSON.parse(
-    adb(["shell", `${remote}/bench`, `${remote}/page.json`, `${remote}/run-${i}.db`, policy, "0"]),
+    adb([
+      "shell",
+      `${remote}/bench`,
+      `${remote}/page.json`,
+      `${remote}/run-${i}.db`,
+      policy,
+      "0",
+      maxChunks,
+      decodedMiB,
+    ]),
   );
   record({ kind: "run", index: i, ...r });
   console.log(

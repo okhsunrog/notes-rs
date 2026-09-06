@@ -42,13 +42,13 @@ adapter and handwritten visual acceptance remain separate integration tests.
 
 ## Production-adapter compaction scheduling
 
-`compaction page.json NEW.db none|exit|SECONDS [speed:0=unpaced,1=realtime]`
+`compaction page.json NEW.db none|exit|SECONDS [speed:0=unpaced,1=realtime] [max_chunks=16] [decoded_MiB=128]`
 
 This second executable directly compiles the application's model/validation,
 SQLite adapter, history and compaction modules. It does not copy their algorithms.
 A small error shim replaces the Tauri command boundary. Geometry is always PCO-8.
-Policies vary only when the same production compactor is invoked. Every call
-retains its current maximum of 16 fresh blocks and 8 MiB of compressed input;
+Policies vary when the same production compactor is invoked. Calls default to
+16 fresh blocks, 8 MiB of compressed input and 128 MiB of decoded column values;
 `exit` does not imply combining a whole page into a single chunk. Exit drains
 bounded jobs until no more packing succeeds. `none` is the no-packing baseline.
 Timed policies arm after a completed stroke and continue while a pack succeeds;
@@ -74,6 +74,28 @@ executes none/5s/30s/60s/exit policies twice in opposite orders. Stage the relea
 Android binary as `bench` and the private fixture as `page.json` first. It writes
 progress and appends each verified run immediately. The runner performs no app
 installation or data mutations outside its dedicated test directory.
+
+The runner also accepts optional `maxChunks decodedMiB` arguments (defaults
+`16 128`). Use `512 16` for the larger-batch experiment. These are explicit
+benchmark arguments, not environment settings honored by the installed app.
+The adapter now inspects decoded value sizes before selecting input blocks;
+highly compressible histories exceeding the budget are processed in partial jobs.
+This is a decoded-data/work budget, not an RSS ceiling: encoded buffers, metadata,
+output builders and codec scratch space need additional memory. Output chunks
+still target 250,000 points, keeping whole segments; a larger input batch can
+publish several output chunks in one transaction. Already sealed input is skipped.
+`peak_rss_before_exit_kib` and `peak_rss_kib` are process high-water marks before
+and after exit work; neither isolates allocation by the compactor.
+
+The ignored release test `large_compressible_history_respects_decoded_budget`
+requires `INK_STRESS_DEST` to be a new DB under an `ink-compaction-*` directory.
+It generates 40 versions of a 75,000-point stroke (147 MB decoded across history),
+packs them in 16 MiB jobs, checks continued progress, then verifies all history
+states bit-for-bit and SQLite integrity. `INK_STRESS` reports compaction time,
+maximum selected decoded bytes and peak RSS before verification. Generation and
+verification are excluded from the timer; generation is included in peak RSS.
+The input is artificial low-entropy data for budget testing, not a compression
+ratio prediction for natural handwriting. Never point this test at application data.
 
 ### Exit-phase profiling
 

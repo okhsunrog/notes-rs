@@ -17,6 +17,9 @@ mod history;
 #[path = "storage/profile.rs"]
 mod profile;
 pub(super) use compaction::compact;
+// The standalone benchmark varies policy while reusing the production algorithm.
+#[allow(unused_imports)]
+pub(super) use compaction::compact_with_limits;
 #[cfg(test)]
 pub(super) use history::navigate;
 pub(super) use history::navigate_update;

@@ -18,8 +18,20 @@ fn prepare(path: &Path) -> CommandResult<Option<Plan>> {
     prepare_with_limit(path, MAX_FRESH_CHUNKS)
 }
 fn prepare_with_limit(path: &Path, max_chunks: usize) -> CommandResult<Option<Plan>> {
+    prepare_with_limits(path, max_chunks, MAX_JOB_BYTES)
+}
+fn prepare_with_limits(
+    path: &Path,
+    max_chunks: usize,
+    max_decoded_bytes: u64,
+) -> CommandResult<Option<Plan>> {
     if !(2..=512).contains(&max_chunks) {
         return Err(CommandError::invalid("Unsupported compaction batch limit"));
+    }
+    if max_decoded_bytes == 0 || max_decoded_bytes > MAX_JOB_BYTES {
+        return Err(CommandError::invalid(
+            "Unsupported compaction decoded budget",
+        ));
     }
     let mut conn = open(path)?;
     let tx = conn.transaction().map_err(err)?;
@@ -78,25 +90,15 @@ fn prepare_with_limit(path: &Path, max_chunks: usize) -> CommandResult<Option<Pl
         .map_err(err)?;
     catalog.retain(|id, _| !sealed.contains(id.as_slice()));
     let mut selected_bytes = 0;
-    let mut selected_count = 0;
-    catalog.retain(|_, entry| {
-        if selected_count >= max_chunks || selected_bytes + entry.length > MAX_FRESH_BYTES {
-            return false;
-        }
-        selected_count += 1;
-        selected_bytes += entry.length;
-        true
-    });
-    locations.retain(|_, location| catalog.contains_key(&location.chunk));
-    let size = catalog
-        .values()
-        .try_fold(0u64, |n, b| n.checked_add(b.length))
-        .ok_or_else(|| CommandError::invalid("Compaction size overflow"))?;
-    if catalog.len() < 2 || size > MAX_JOB_BYTES {
-        return Ok(None);
-    }
+    let mut decoded_bytes = 0;
     let mut chunks = BTreeMap::new();
     for (id, entry) in catalog {
+        if chunks.len() >= max_chunks {
+            break;
+        }
+        if selected_bytes + entry.length > MAX_FRESH_BYTES {
+            continue;
+        }
         let bytes: Vec<u8> = tx
             .query_row(
                 "SELECT data FROM ink_chunks WHERE id=?1 AND length(data)=?2",
@@ -107,8 +109,20 @@ fn prepare_with_limit(path: &Path, max_chunks: usize) -> CommandResult<Option<Pl
         if blob_ref(&bytes) != entry {
             return Err(CommandError::invalid("Compaction chunk checksum"));
         }
+        // Inspect validated framing before decompression. Highly compressible
+        // history may otherwise fit the encoded budget but exceed the work budget.
+        let decoded = Chunk::decoded_value_bytes(&bytes).map_err(err)? as u64;
+        if decoded_bytes + decoded > max_decoded_bytes {
+            continue;
+        }
+        selected_bytes += entry.length;
+        decoded_bytes += decoded;
         chunks.insert(id, bytes);
     }
+    if chunks.len() < 2 {
+        return Ok(None);
+    }
+    locations.retain(|_, location| chunks.contains_key(&location.chunk));
     tx.commit().map_err(err)?;
     Ok(Some(Plan {
         roots: cached_roots,
@@ -332,7 +346,26 @@ fn publish(
     Ok(true)
 }
 pub(in super::super) fn compact(path: &Path) -> CommandResult<bool> {
-    let Some(plan) = prepare(path)? else {
+    compact_with_limits(path, MAX_FRESH_CHUNKS, MAX_JOB_BYTES)
+}
+/// Internal policy seam shared with the benchmark. The installed scheduler uses
+/// `compact` defaults. The minimum fits two maximum-sized normalized fresh strokes.
+pub(in super::super) fn compact_with_limits(
+    path: &Path,
+    max_chunks: usize,
+    max_decoded_bytes: u64,
+) -> CommandResult<bool> {
+    if max_decoded_bytes < (2 * MAX_POINTS * 49) as u64 {
+        return Err(CommandError::invalid(
+            "Compaction budget cannot fit two fresh strokes",
+        ));
+    }
+    let plan = if max_chunks == MAX_FRESH_CHUNKS && max_decoded_bytes == MAX_JOB_BYTES {
+        prepare(path)?
+    } else {
+        prepare_with_limits(path, max_chunks, max_decoded_bytes)?
+    };
+    let Some(plan) = plan else {
         return Ok(false);
     };
     let Some((chunks, locations)) = repack(&plan)? else {
@@ -344,6 +377,135 @@ pub(in super::super) fn compact(path: &Path) -> CommandResult<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn decoded_budget_selects_partial_jobs_and_keeps_making_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ink.sqlite3");
+        let mut original = sheet();
+        let mut fourth = original.strokes[0].clone();
+        fourth.id = uuid::Uuid::now_v7();
+        original.strokes.push(fourth);
+        let revision = write_draft(&path, original.clone(), None).unwrap();
+        // Each stroke is 20 points * 49 value bytes. Encoded size is deliberately
+        // irrelevant: two jobs must fit even though all four blocks compress well.
+        for _ in 0..2 {
+            let plan = prepare_with_limits(&path, 512, 1960).unwrap().unwrap();
+            assert_eq!(plan.chunks.len(), 2);
+            assert_eq!(
+                plan.chunks
+                    .values()
+                    .map(|b| Chunk::decoded_value_bytes(b).unwrap())
+                    .sum::<usize>(),
+                1960
+            );
+            let (chunks, locations) = repack(&plan).unwrap().unwrap();
+            assert!(publish(&path, plan, chunks, locations).unwrap());
+        }
+        assert!(prepare_with_limits(&path, 512, 1960).unwrap().is_none());
+        equal(&read(&path).unwrap().draft, &original);
+        assert_eq!(read(&path).unwrap().revision, Some(revision.clone()));
+        assert!(compact_with_limits(&path, 512, 1960).is_err());
+        let undo = history::navigate(&path, Some(false), Some(revision)).unwrap();
+        assert!(undo.snapshot.draft.strokes.is_empty());
+        equal(
+            &history::navigate(&path, Some(true), undo.snapshot.revision)
+                .unwrap()
+                .snapshot
+                .draft,
+            &original,
+        );
+    }
+
+    #[test]
+    #[ignore = "large isolated history stress; requires INK_STRESS_DEST"]
+    fn large_compressible_history_respects_decoded_budget() {
+        let path = std::path::PathBuf::from(std::env::var("INK_STRESS_DEST").unwrap());
+        assert!(path.is_absolute() && !path.exists());
+        assert!(
+            !path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        );
+        assert!(
+            path.parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("ink-compaction-")
+        );
+        for suffix in ["-wal", "-shm"] {
+            assert!(!std::path::PathBuf::from(format!("{}{suffix}", path.display())).exists());
+        }
+        let mut draft = sheet();
+        draft.strokes.truncate(1);
+        draft.strokes[0].points = (0..75_000)
+            .map(|i| InkPoint {
+                x: (i % 1000) as f64,
+                y: 20.,
+                pressure: 0.7,
+                tilt_x: -12.5,
+                tilt_y: 3.25,
+                time: 1788660500000.125 + i as f64,
+            })
+            .collect();
+        let mut revision = None;
+        for version in 0..40 {
+            for p in &mut draft.strokes[0].points {
+                p.y = version as f64;
+            }
+            revision = Some(write_draft(&path, draft.clone(), revision).unwrap());
+        }
+        let conn = open(&path).unwrap();
+        let before_roots = history::roots(&conn).unwrap();
+        let encoded_bytes: usize = rows(&conn, "ink_chunks").iter().map(|(_, b)| b.len()).sum();
+        drop(conn);
+        let budget = 16 * 1024 * 1024;
+        let timer = std::time::Instant::now();
+        let mut jobs = 0;
+        let mut max_decoded = 0;
+        while let Some(plan) = prepare_with_limits(&path, 512, budget).unwrap() {
+            let bytes: usize = plan
+                .chunks
+                .values()
+                .map(|b| Chunk::decoded_value_bytes(b).unwrap())
+                .sum();
+            assert!(bytes <= budget as usize);
+            max_decoded = max_decoded.max(bytes);
+            let (chunks, locations) = repack(&plan)
+                .unwrap()
+                .expect("compressible batch must make progress");
+            assert!(publish(&path, plan, chunks, locations).unwrap());
+            jobs += 1;
+            assert!(jobs <= 20);
+        }
+        let elapsed = timer.elapsed().as_secs_f64();
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        let peak = status.lines().find(|l| l.starts_with("VmHWM:")).unwrap();
+        assert_eq!(jobs, 10);
+        assert_eq!(read(&path).unwrap().revision, revision);
+        for version in (0..40).rev() {
+            for p in &mut draft.strokes[0].points {
+                p.y = version as f64;
+            }
+            let snapshot = read(&path).unwrap();
+            equal(&snapshot.draft, &draft);
+            history::navigate(&path, Some(false), snapshot.revision).unwrap();
+        }
+        assert!(read(&path).unwrap().draft.strokes.is_empty());
+        let conn = open(&path).unwrap();
+        assert_eq!(history::roots(&conn).unwrap().len(), before_roots.len());
+        assert_eq!(
+            conn.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+        println!(
+            "INK_STRESS {}",
+            serde_json::json!({"history_states":41,"points_across_history":3_000_000,"decoded_bytes_across_history":147_000_000,"encoded_bytes_before":encoded_bytes,"budget":budget,"max_job_decoded_bytes":max_decoded,"jobs":jobs,"compaction_seconds":elapsed,"peak_before_verification":peak,"verified":true})
+        );
+    }
     fn sheet() -> InkDraft {
         InkDraft {
             strokes: (0..3)

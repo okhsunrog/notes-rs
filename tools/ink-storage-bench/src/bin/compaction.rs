@@ -162,7 +162,7 @@ fn main() -> Result<()> {
     let a: Vec<_> = std::env::args().collect();
     ensure!(
         a.len() >= 4,
-        "compaction page.json NEW.db none|exit|SECONDS [speed:0=unpaced,1=realtime]"
+        "compaction page.json NEW.db none|exit|SECONDS [speed:0=unpaced,1=realtime] [max_chunks=16] [decoded_MiB=128]"
     );
     let path = Path::new(&a[2]);
     ensure!(
@@ -187,6 +187,18 @@ fn main() -> Result<()> {
         .transpose()?
         .unwrap_or(0.);
     ensure!(speed.is_finite() && speed >= 0.);
+    let max_chunks = a
+        .get(5)
+        .map(|s| s.parse::<usize>())
+        .transpose()?
+        .unwrap_or(16);
+    let decoded_mib = a
+        .get(6)
+        .map(|s| s.parse::<u64>())
+        .transpose()?
+        .unwrap_or(128);
+    ensure!((2..=512).contains(&max_chunks) && (16..=128).contains(&decoded_mib));
+    let compact = || storage::compact_with_limits(path, max_chunks, decoded_mib * 1024 * 1024);
     storage::read(path)?; // schema creation excluded
     let first = page.strokes[0].points[0].time;
     let mut strokes = vec![];
@@ -213,7 +225,7 @@ fn main() -> Result<()> {
         ensure!(when.is_finite() && when >= 0.);
         while let Some(t) = due.filter(|t| *t <= when) {
             wait(t);
-            let packed = measure(|| storage::compact(path), &mut packs)?;
+            let packed = measure(compact, &mut packs)?;
             packed_count += usize::from(packed);
             due = if packed {
                 interval.map(|n| t + n)
@@ -246,9 +258,10 @@ fn main() -> Result<()> {
     }
     let before_exit_cpu = cpu_ms() - cpu;
     let before_exit_io = proc_values("/proc/self/io");
+    let rss_before_exit = proc_values("/proc/self/status").get("VmHWM").copied();
     if a[3] != "none" {
         loop {
-            let packed = measure(|| storage::compact(path), &mut exit_packs)?;
+            let packed = measure(compact, &mut exit_packs)?;
             packed_count += usize::from(packed);
             if !packed {
                 break;
@@ -293,7 +306,7 @@ fn main() -> Result<()> {
     };
     println!(
         "{}",
-        serde_json::json!({"policy":a[3],"speed":speed,"strokes":page.strokes.len(),"points":page.strokes.iter().map(|s|s.points.len()).sum::<usize>(),"stroke":timing(&strokes),"periodic":timing(&packs),"exit":timing(&exit_packs),"successful_packs":packed_count,"cpu_ms":total_cpu,"writing_cpu_ms":before_exit_cpu,"wall_ms":wall,"write_bytes":delta(&after_io,"write_bytes"),"writing_write_bytes":delta(&before_exit_io,"write_bytes"),"wchar":delta(&after_io,"wchar"),"peak_rss_kib":rss,"max_serial_event_lag_ms":max_lag,"size":size,"verified_history_states":history_states,"bitwise_verified":true})
+        serde_json::json!({"policy":a[3],"speed":speed,"max_chunks":max_chunks,"decoded_budget_mib":decoded_mib,"peak_rss_before_exit_kib":rss_before_exit,"strokes":page.strokes.len(),"points":page.strokes.iter().map(|s|s.points.len()).sum::<usize>(),"stroke":timing(&strokes),"periodic":timing(&packs),"exit":timing(&exit_packs),"successful_packs":packed_count,"cpu_ms":total_cpu,"writing_cpu_ms":before_exit_cpu,"wall_ms":wall,"write_bytes":delta(&after_io,"write_bytes"),"writing_write_bytes":delta(&before_exit_io,"write_bytes"),"wchar":delta(&after_io,"wchar"),"peak_rss_kib":rss,"max_serial_event_lag_ms":max_lag,"size":size,"verified_history_states":history_states,"bitwise_verified":true})
     );
     Ok(())
 }
