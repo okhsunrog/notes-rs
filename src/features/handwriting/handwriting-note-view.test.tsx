@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vite-plus/test";
 import { PageSessionProvider } from "@/features/pages/page-session";
@@ -23,6 +24,7 @@ const api = vi.hoisted(() => ({
   completeAllHandwriting: vi.fn(),
   setHandwritingBackground: vi.fn(),
   handwritingHistory: vi.fn(),
+  handwritingNoteStatus: vi.fn(),
   renamePage: vi.fn(),
   getPage: vi.fn(),
   notifyRetryableError: vi.fn(),
@@ -57,6 +59,7 @@ const history = (revision: string | null): InkHistorySnapshot => ({
 
 let container: HTMLDivElement;
 let root: Root;
+let queryClient: QueryClient;
 
 beforeAll(() => {
   (
@@ -77,6 +80,15 @@ beforeEach(() => {
   api.loadHandwritingNote.mockResolvedValue(history("revision-1"));
   api.completeHandwritingNote.mockResolvedValue({});
   api.setHandwritingBackground.mockResolvedValue(undefined);
+  api.handwritingNoteStatus.mockResolvedValue({
+    pageUuid: page.uuid,
+    revision: "revision-1",
+    unpublishedChanges: false,
+    publicationRequested: false,
+    baseVersion: null,
+    heads: [],
+  });
+  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   useWorkspaceStore.getState().dispatch({ type: "reset" });
   // Drawing without a detected pen is the explicit device preference.
   useHandwritingPreference.setState({ mouseEnabled: true });
@@ -107,14 +119,16 @@ async function mount() {
   });
   await act(async () =>
     root.render(
-      <PageSessionProvider>
-        <HandwritingNoteView
-          paneId={paneId as PaneId}
-          page={page}
-          onSaved={() => {}}
-          onDelete={() => {}}
-        />
-      </PageSessionProvider>,
+      <QueryClientProvider client={queryClient}>
+        <PageSessionProvider>
+          <HandwritingNoteView
+            paneId={paneId as PaneId}
+            page={page}
+            onSaved={() => {}}
+            onDelete={() => {}}
+          />
+        </PageSessionProvider>
+      </QueryClientProvider>,
     ),
   );
 }

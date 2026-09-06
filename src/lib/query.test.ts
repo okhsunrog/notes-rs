@@ -10,6 +10,7 @@ describe("domain event query invalidation", () => {
     client.setQueryData(queryKeys.journal("2026-07-17"), { uuid: "page-a" });
     client.setQueryData(queryKeys.page("page-a"), { uuid: "page-a" });
     client.setQueryData(queryKeys.graph(null), { items: [], edges: [] });
+    client.setQueryData(queryKeys.handwritingStatus("page-a"), { heads: [] });
 
     await applyDomainEvent(client, {
       kind: "pages_changed",
@@ -21,6 +22,18 @@ describe("domain event query invalidation", () => {
     expect(client.getQueryState(queryKeys.journal("2026-07-17"))?.isInvalidated).toBe(true);
     expect(client.getQueryState(queryKeys.page("page-a"))?.isInvalidated).toBe(true);
     expect(client.getQueryState(queryKeys.graph(null))?.isInvalidated).toBe(true);
+    expect(client.getQueryState(queryKeys.handwritingStatus("page-a"))?.isInvalidated).toBe(true);
+  });
+
+  it("invalidates every handwriting status when publication progresses", async () => {
+    const client = new QueryClient();
+    client.setQueryData(queryKeys.handwritingStatus("page-a"), { heads: [] });
+    client.setQueryData(queryKeys.syncStatus, { state: "idle" });
+
+    await applyDomainEvent(client, { kind: "sync_status_changed" });
+
+    expect(client.getQueryState(queryKeys.syncStatus)?.isInvalidated).toBe(true);
+    expect(client.getQueryState(queryKeys.handwritingStatus("page-a"))?.isInvalidated).toBe(true);
   });
 
   it("invalidates a changed block and its containing child list", async () => {

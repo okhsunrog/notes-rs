@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
   Copy,
@@ -24,16 +25,20 @@ import {
   completeAllHandwriting,
   completeHandwritingNote,
   handwritingHistory,
+  handwritingNoteStatus,
   loadHandwritingNote,
   setHandwritingBackground,
   unknownErrorMessage,
   type Page,
 } from "@/lib/api";
 import type { InkDraft, InkHistorySnapshot } from "@/lib/bindings";
-import { notifyRetryableError } from "@/lib/notify";
+import { notifyError, notifyRetryableError } from "@/lib/notify";
+import { queryKeys } from "@/lib/query";
 import { cn } from "@/lib/utils";
 import type { DraftSaveState } from "./draft-writer";
 import { canDrawHandwriting, editorAccess, type EditorOwnership } from "./handwriting-access";
+import { hasConflict, unsentChanges } from "./handwriting-conflict-model";
+import { HandwritingConflictDialog } from "./handwriting-conflicts";
 import {
   acquireEditor,
   awaitCompletion,
@@ -86,6 +91,7 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
   const uuid = page.uuid;
   const { available, capabilities } = useHandwritingAvailability();
   const mouseEnabled = useHandwritingPreference((state) => state.mouseEnabled);
+  const queryClient = useQueryClient();
   const dispatch = useWorkspaceStore((state) => state.dispatch);
   const historyDepth = useWorkspaceStore((state) => state.panes[paneId]?.back.length ?? 0);
   const favorite = usePageNavigationStore((state) => state.favoritePageUuids.includes(uuid));
@@ -111,6 +117,8 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
   // Input stays closed between a background transition and the re-read that
   // adopts whatever completion published while the window was hidden.
   const [suspended, setSuspended] = useState(false);
+  const [conflictsOpen, setConflictsOpen] = useState(false);
+  const [comparing, setComparing] = useState(false);
 
   const latestDraft = useRef<InkDraft | null>(null);
   const historyBusyRef = useRef(false);
@@ -124,6 +132,12 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
   const editing = access === "editable";
   const editingRef = useRef(editing);
   editingRef.current = editing;
+
+  const statusQuery = useQuery({
+    queryKey: queryKeys.handwritingStatus(uuid),
+    queryFn: () => handwritingNoteStatus(uuid),
+  });
+  const status = statusQuery.data;
 
   const title = usePageTitleEditor(page, true, onSaved);
   const titleFlush = useRef(title.flush);
@@ -235,6 +249,36 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
     };
   }, [uuid]);
 
+  /** Settle local work before comparing: a resolve must see the real heads. */
+  const compareVersions = useCallback(async () => {
+    if (busy || comparing) return;
+    setComparing(true);
+    try {
+      const writer = getWriter(uuid);
+      if (writer) {
+        if (!(await writer.flush())) return;
+        await requestCompletion(uuid, () => completeHandwritingNote(uuid));
+      }
+      await queryClient.invalidateQueries({ queryKey: queryKeys.handwritingStatus(uuid) });
+      await statusQuery.refetch();
+      setConflictsOpen(true);
+    } catch (error) {
+      notifyError("handwriting", error);
+    } finally {
+      setComparing(false);
+    }
+  }, [busy, comparing, queryClient, statusQuery, uuid]);
+
+  const conflictResolved = useCallback(async () => {
+    setConflictsOpen(false);
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: queryKeys.page(uuid) }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.pages }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.handwritingStatus(uuid) }),
+    ]);
+    await openNote();
+  }, [openNote, queryClient, uuid]);
+
   const navigateAway = useCallback(() => {
     if (historyDepth > 0) dispatch({ type: "go_back", paneId });
     else dispatch({ type: "open_target", target: homeTarget, disposition: currentDisposition });
@@ -335,6 +379,9 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
           aria-label="Note title"
           className="min-w-0 flex-1 resize-none appearance-none overflow-hidden border-0 bg-transparent px-1 py-1 text-base leading-tight font-semibold text-foreground outline-none placeholder:text-muted-foreground/40"
         />
+        {unsentChanges(status) && (
+          <span className="shrink-0 text-[11px] text-muted-foreground">Unsent changes</span>
+        )}
         <Button
           type="button"
           variant="ghost"
@@ -369,6 +416,22 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
           </Button>
           <Button type="button" size="xs" onClick={title.keepLocal}>
             Keep mine
+          </Button>
+        </div>
+      )}
+      {hasConflict(status) && (
+        <div className="flex flex-wrap items-center gap-2 border-b bg-amber-500/10 px-3 py-2 text-xs">
+          <span className="mr-auto">
+            This note has {status?.heads.length} versions from other devices
+          </span>
+          <Button
+            type="button"
+            variant="outline"
+            size="xs"
+            disabled={busy || comparing}
+            onClick={() => void compareVersions()}
+          >
+            Compare
           </Button>
         </div>
       )}
@@ -727,6 +790,14 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
             <p role="alert">Fast pen input is unavailable: {nativeStatus.error}</p>
           )}
         </footer>
+      )}
+      {conflictsOpen && status && (
+        <HandwritingConflictDialog
+          pageUuid={uuid}
+          heads={status.heads}
+          onClose={() => setConflictsOpen(false)}
+          onResolved={conflictResolved}
+        />
       )}
     </div>
   );

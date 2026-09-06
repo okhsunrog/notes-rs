@@ -32,6 +32,10 @@ export const queryKeys = {
   history: [...root, "history"] as const,
   settings: [...root, "settings"] as const,
   inputCapabilities: [...root, "input-capabilities"] as const,
+  handwritingStatusRoot: [...root, "handwriting-status"] as const,
+  handwritingStatus: (uuid: string) => [...root, "handwriting-status", uuid] as const,
+  handwritingVersion: (pageUuid: string, versionUuid: string) =>
+    [...root, "handwriting-version", pageUuid, versionUuid] as const,
   syncStatus: [...root, "sync-status"] as const,
   serverAi: [...root, "server-ai"] as const,
 };
@@ -59,6 +63,7 @@ export async function applyDomainEvent(queryClient: QueryClient, event: DomainEv
         invalidate(queryKeys.graphRoot),
         invalidate(queryKeys.backlinksRoot),
         ...event.page_uuids.map((uuid) => invalidate(queryKeys.page(uuid))),
+        ...event.page_uuids.map((uuid) => invalidate(queryKeys.handwritingStatus(uuid))),
       ]);
       return;
     case "blocks_changed":
@@ -125,7 +130,11 @@ export async function applyDomainEvent(queryClient: QueryClient, event: DomainEv
       await invalidate(queryKeys.settings);
       return;
     case "sync_status_changed":
-      await invalidate(queryKeys.syncStatus);
+      // Publication progress changes the unsent/conflict state of every note.
+      await Promise.all([
+        invalidate(queryKeys.syncStatus),
+        invalidate(queryKeys.handwritingStatusRoot),
+      ]);
       return;
     case "server_ai_changed":
       await invalidate(queryKeys.serverAi);
