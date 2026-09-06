@@ -9,7 +9,9 @@ use ink_format::{
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, BTreeSet};
+#[path = "storage/compaction.rs"]
 mod compaction;
+#[path = "storage/history.rs"]
 mod history;
 pub(super) use compaction::compact;
 #[cfg(test)]
