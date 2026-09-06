@@ -1,7 +1,7 @@
-# Ink format v1 — уточнённый проект, revision 2
+# Ink format v1 — уточнённый проект, revision 3
 
 Дата: 2026-09-06. Статус: проект для реализации и проверки, не опубликованный
-стандарт и не уже работающий storage. Revision 2 документа не означает wire major 2:
+стандарт и не уже работающий storage. Revision 3 документа не означает wire major 3:
 wire v1 ещё не фиксировался. Числовые реестры ниже — согласованная исходная точка
 реализации; замораживать их можно после реализации reader/writer и fixtures.
 
@@ -10,6 +10,12 @@ wire v1 ещё не фиксировался. Числовые реестры н
 Изменения: точная миграция ширины/времени, контракт кисти, общий порядок объектов,
 версии metadata, стабильные segments при compaction, portable reader, OCR metadata.
 JSON перестаёт быть рабочим форматом рукописного документа после миграции.
+
+Решение пользователя от 2026-09-06: основной compressor — crate `pco`,
+`compression_level=8` (далее PCO-8). Это уровень encoder, не 8-битная точность
+и не версия wire format. RAW остаётся несжатым контрольным/export профилем.
+Решение о codec не меняет типы, точность samples, историю или размещение в SQLite/blobs.
+Эта revision фиксирует выбор; интеграция PCO в приложение ещё не выполнена.
 
 ## 1. Область и термины
 
@@ -362,18 +368,26 @@ SOURCE_TIME и SAMPLE_KIND с перечисленными dtype. Оси 7..10 �
 записи/ссылки сохраняются при редактировании. Нельзя объявлять feature required,
 если его неизвестность действительно не запрещает интерпретацию документа.
 
-Первая реализация и обязательный decoder используют RAW codec wire version 1,
-outer=none, byte_shuffle=false, constant=false: каждое valid значение представлено
-полностью обычными LE scalar bytes. Константные колонки тоже записываются целиком.
-Поддерживаются all-valid/mixed/all-null. Сжатие пока не выбрано. Описания shuffle,
-constant и outer ниже резервируют семантику будущих extensions, не включают их в writer
-и не требуют поддержки их decoder первым релизом.
-QUOIN=1 и PCO=2 зарезервированы как optional codecs; их комбинации
-wire versions публикуются с отдельными fixtures. Их наличие в таблице — не обещание
-поддержки любой версии crate. Outer LZ4=2 reserved optional; raw block не является frame.
-Первый writer использует только RAW wire=1, outer=0 и lossless accuracy=0.
-Portable export перекодирует дополнительные поддерживаемые codecs без изменения
-logical dtype/bits/Segment IDs. Unsupported required column/codec — явная ошибка.
+Обязательный decoder готовой реализации поддерживает RAW и выбранный PCO.
+Контрольный RAW profile: codec wire version 1, outer=none, byte_shuffle=false,
+constant=false; каждое valid значение представлено полностью обычными LE scalar
+bytes, включая константные колонки. Поддерживаются all-valid/mixed/all-null.
+RAW reader/writer остаётся первым проверяемым этапом и способом несжатого экспорта.
+Описания shuffle, constant и outer ниже резервируют будущие extensions и сами по себе
+не включают их в writer.
+
+PCO=2 выбран основным codec, encoder compression_level=8, outer=none,
+accuracy=lossless. Уровень задаётся явно, а не через неявный default crate.
+QUOIN=1 остаётся reserved и не включается в обязательный decoder.
+Outer LZ4=2 reserved optional; raw block не является frame.
+Пара codec_id/codec_wire_version определяет совместимость decoder, отдельно от
+уровня encoder и версии crate. PCO wire mapping (standalone/wrapped, params,
+поддерживаемые dtype, ограничения декодирования) должен быть опубликован вместе
+с fixtures до записи PCO chunks в рабочие документы; в этой revision он ещё не задан.
+Наличие codec ID не означает поддержку любой версии crate.
+
+RAW export декодирует PCO без изменения logical dtype/bits/Segment IDs и записывает
+полные колонки, без outer/shuffle/constant. Unsupported required column/codec — явная ошибка.
 
 Unknown required feature/major/flag/brush/visible object kind запрещает обычное
 редактирование/рендер документа. Можно показать отдельный verified preview как preview,
@@ -563,9 +577,11 @@ Framing cost = 80 + 32*S + 64*C + params + validity + padding.
 - Начальный target 32 KiB decoded samples, кандидаты для bench 16/32/64 KiB.
   Совместимые мелкие segments пакуются вместе; длинный stroke делится без потери
   граничного интервала и соединяющего отрезка. Новые маленькие chunks допустимы.
-- Первый writer всегда RAW без outer/shuffle/constant. Даже очевидные константы
-  хранятся целиком: несжатая страница нужна для независимых codec benchmarks.
-  Последующий выбор encoder выполняется после этих измерений; кодек не фиксируется.
+- Контрольный writer/export — RAW без outer/shuffle/constant. Даже очевидные
+  константы хранятся целиком для независимых codec benchmarks.
+  Основной encoder после реализации и проверки wire mapping — PCO level 8.
+  Сжатие выполняется worker, не callback пера; размещение и размер chunks
+  проверяются отдельно на устройстве. Внешнее дополнительное сжатие не включается.
 - Compaction выполняется в фоне после опустошения foreground очереди; рекомендуемый
   старт после 2 секунд без input, ограниченная работа с проверкой отмены между chunks.
   Она не блокирует новый жест. Никакой blanket-перезаписи целой страницы после каждого слова.
@@ -686,17 +702,17 @@ revision_conflict, io_error. Ошибка не заменяет документ
 
 Обязательные fixtures/integration tests перед включением нового storage:
 
-| Группа           | Что должно быть доказано                                                                                                 |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| Legacy precision | f64 bits всех полей, ширины после scale, +0/-0, дробное время, порядок/UUID/grid                                         |
-| Brush            | dot, repeated XY, zero/missing pressure, mixed integer/float profiles, alpha overlaps, nonuniform transform, part seam   |
-| Columns          | RAW/mixed/all-null, malformed flags/ranges/counts/CRC/hash; unsupported compression refusal; будущие fixtures для codecs |
-| Metadata         | deterministic CBOR, duplicate keys, unknown optional roundtrip, unknown required refusal, u64 beyond JS safe integer     |
-| Editing          | move/copy без новых chunks; pixel cut без соединения через разрыв; synthetic provenance; Undo с matrix/style/order       |
-| Catalog          | compaction меняет размещение, не Geometry/Page/appearance fingerprint; lease удерживает старый chunk                     |
-| Durability       | fault injection до/после установки blobs, до/после commit/ack, retry idempotence, no missing referenced blob             |
-| OCR              | stale late response, layout/background invalidation, compaction stability, correction preservation, UTF-8 offsets        |
-| Device           | свежие слова/переворот пера/ластики/лассо/Undo/перезапуск, latency и память на BOOX                                      |
+| Группа           | Что должно быть доказано                                                                                               |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Legacy precision | f64 bits всех полей, ширины после scale, +0/-0, дробное время, порядок/UUID/grid                                       |
+| Brush            | dot, repeated XY, zero/missing pressure, mixed integer/float profiles, alpha overlaps, nonuniform transform, part seam |
+| Columns          | RAW и PCO-8 bit-exact roundtrip; mixed/all-null; malformed flags/ranges/counts/CRC/hash; unsupported wire refusal      |
+| Metadata         | deterministic CBOR, duplicate keys, unknown optional roundtrip, unknown required refusal, u64 beyond JS safe integer   |
+| Editing          | move/copy без новых chunks; pixel cut без соединения через разрыв; synthetic provenance; Undo с matrix/style/order     |
+| Catalog          | compaction меняет размещение, не Geometry/Page/appearance fingerprint; lease удерживает старый chunk                   |
+| Durability       | fault injection до/после установки blobs, до/после commit/ack, retry idempotence, no missing referenced blob           |
+| OCR              | stale late response, layout/background invalidation, compaction stability, correction preservation, UTF-8 offsets      |
+| Device           | свежие слова/переворот пера/ластики/лассо/Undo/перезапуск, latency и память на BOOX                                    |
 
 Проверка fault injection должна различать crash процесса и power-loss гарантию.
 Реальные codec timings и интеграционные тесты пока не выполнены: спецификация их
@@ -720,12 +736,17 @@ revision_conflict, io_error. Ошибка не заменяет документ
 - [SQLite synchronous](https://www.sqlite.org/pragma.html#pragma_synchronous).
   WAL+NORMAL сохраняет консистентность, но не обещает durability после потери питания;
   выбран FULL для будущего durable ink ack.
+- [pco ChunkConfig](https://docs.rs/pco/1.0.3/pco/struct.ChunkConfig.html):
+  compression_level управляет encoder и сам по себе не записывается в stream;
+  его поведение может меняться между версиями crate. Для воспроизводимости benchmarks
+  фиксируются версия crate и полная конфигурация encoder.
 - Локальные REPORT.md и STORAGE-HANDOFF.md в ink-compression-benchmark: результаты
-  относятся к указанным там представлениям, не к измерениям этого revision 2 framing.
+  относятся к указанным там представлениям. Эксперименты results/inkchunk используют
+  revision 2 framing и pco 1.0.3; они не заменяют fixtures и device tests реализации Tangleaf.
 
 Порядок реализации: reader/writer+fixtures -> legacy import -> новый immutable edit
 model и incremental IPC -> транзакционный backend/history/GC -> device bench ->
-подключение ink к обычным заметкам/sync -> Recognition/поиск. Codec extensions и
-quantization подключаются после стабильной RAW основы и независимых бенчмарков, без
-смены модели страницы. Первая собранная страница экспортируется с полными несжатыми
-колонками для исследования. Никакой compressor пока не выбран и не обязателен.
+подключение ink к обычным заметкам/sync -> Recognition/поиск. Выбранный PCO-8
+подключается после проверки RAW основы и его wire mapping/fixtures, без смены
+модели страницы. Несжатый экспорт с полными колонками сохраняется для исследования.
+Quantization не включается выбором PCO-8 и остаётся отдельным будущим решением.
