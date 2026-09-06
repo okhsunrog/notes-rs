@@ -846,6 +846,12 @@ pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> 
                 ));
             }
         }
+        let incoming_pages: HashSet<_> = snapshot.pages.iter().map(|p|p.uuid).collect();
+        let active_ink = transaction.prepare("SELECT d.page_uuid FROM ink_documents d JOIN pages p ON p.uuid=d.page_uuid WHERE d.dirty=1 OR d.editing=1 OR d.publication_requested=1")?
+            .query_map([], |r|r.get::<_,uuid::Uuid>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        if active_ink.iter().any(|id| !incoming_pages.contains(id)) {
+            return Err(CoreError::conflict("Snapshot would remove an open or unpublished handwritten note"));
+        }
         transaction.execute_batch(
             "DELETE FROM page_links;
              DELETE FROM block_refs;
@@ -1093,6 +1099,11 @@ fn validate_snapshot(snapshot: &SyncSnapshot) -> CoreResult<()> {
                 block.uuid
             )));
         }
+        if identities.get(&block.page_uuid) == Some(&&PageKind::Handwriting) {
+            return Err(CoreError::invalid(
+                "Handwritten notes cannot contain text blocks",
+            ));
+        }
         if !pages.contains_key(&block.page_uuid) {
             return Err(CoreError::invalid(format!(
                 "snapshot block {} references missing page {}",
@@ -1160,6 +1171,11 @@ fn validate_snapshot(snapshot: &SyncSnapshot) -> CoreResult<()> {
     }
     let mut structures = HashMap::new();
     for structure in &snapshot.structures {
+        if identities.get(&structure.page_uuid) == Some(&&PageKind::Handwriting) {
+            return Err(CoreError::invalid(
+                "Cannot move text blocks into a handwritten note",
+            ));
+        }
         if structures.insert(structure.block_uuid, structure).is_some() {
             return Err(CoreError::invalid(format!(
                 "snapshot contains duplicate structure intent for {}",
@@ -1705,6 +1721,7 @@ fn apply_one_with_effects(
             Ok(vec![payload.uuid])
         }
         OpKind::PageSetLayout(payload) => {
+            ensure_text_note_target(transaction, payload.uuid)?;
             ensure_object_kind(transaction, payload.uuid, ObjectKind::Page)?;
             if !is_tombstoned(transaction, payload.uuid)? {
                 apply_page_layout(
@@ -1771,6 +1788,7 @@ fn apply_one_with_effects(
             Ok(affected)
         }
         OpKind::BlockCreate(payload) => {
+            ensure_text_note_target(transaction, payload.page_uuid)?;
             ensure_object_kind(transaction, payload.uuid, ObjectKind::Block)?;
             ensure_object_kind(transaction, payload.page_uuid, ObjectKind::Page)?;
             if let Some(parent_uuid) = payload.parent_uuid {
@@ -1904,6 +1922,7 @@ fn apply_one_with_effects(
             Ok(vec![payload.uuid])
         }
         OpKind::BlockMove(payload) => {
+            ensure_text_note_target(transaction, payload.page_uuid)?;
             ensure_object_kind(transaction, payload.uuid, ObjectKind::Block)?;
             ensure_object_kind(transaction, payload.page_uuid, ObjectKind::Page)?;
             if let Some(parent_uuid) = payload.parent_uuid {
@@ -3057,4 +3076,13 @@ mod tests {
             attachment_uuid(AttachmentOwner::Block(uuid), &hash)
         );
     }
+}
+
+fn ensure_text_note_target(conn: &rusqlite::Transaction<'_>, page: uuid::Uuid) -> CoreResult<()> {
+    if page_identity(conn, page)? == Some(PageKind::Handwriting) {
+        return Err(CoreError::invalid(
+            "Text blocks and text layouts are not supported for handwritten notes",
+        ));
+    }
+    Ok(())
 }

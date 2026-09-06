@@ -30,6 +30,34 @@ async fn handwriting_is_an_immutable_note_kind_in_lists_and_snapshots() {
     )
     .await
     .unwrap();
+    let block = notes_core::BlockCreate {
+        uuid: uuid::Uuid::now_v7(),
+        page_uuid,
+        parent_uuid: None,
+        order_key: notes_core::OrderKey::first(),
+        style: notes_core::BlockStyle::Paragraph,
+        markdown: "Must not become an ink body".into(),
+        created_at: 1,
+    };
+    for kind in [
+        OpKind::BlockCreate(block.clone()),
+        OpKind::BlockMove(notes_core::BlockMove {
+            uuid: block.uuid,
+            page_uuid,
+            parent_uuid: None,
+            order_key: notes_core::OrderKey::first(),
+        }),
+        OpKind::PageSetLayout(notes_core::PageSetLayout {
+            uuid: page_uuid,
+            layout: PageLayout::Outline,
+        }),
+    ] {
+        assert!(
+            notes_core::apply(&left, &make_op(2, kind), Origin::Remote)
+                .await
+                .is_err()
+        );
+    }
     db::create_page(&left, "Text".into()).await.unwrap();
     let notes = db::list_pages(&left, 10).await.unwrap();
     assert_eq!(notes.len(), 2);

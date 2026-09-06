@@ -301,7 +301,7 @@ fn page_of(snapshot: &Snapshot) -> CommandResult<model::Page> {
     )
     .map_err(err)
 }
-// This scratch-sheet editor cannot losslessly edit arbitrary portable documents yet.
+// This single-sheet editor cannot losslessly edit arbitrary portable documents yet.
 // Reject unsupported metadata instead of replacing it with our defaults on the next save.
 pub(super) fn validate_adapter(snapshot: &Snapshot) -> CommandResult<()> {
     let doc = model::Document::read(&snapshot.root).map_err(err)?;
@@ -325,7 +325,10 @@ pub(super) fn validate_adapter(snapshot: &Snapshot) -> CommandResult<()> {
         if identity(r.kind, &r.body)? != r.id {
             return Err(CommandError::invalid("Ink record identity mismatch"));
         }
-        if r.extensions != cbor::map([]) || !r.resources.is_empty() {
+        if r.required_features != [1, 2, 3, 4]
+            || r.extensions != cbor::map([])
+            || !r.resources.is_empty()
+        {
             return Err(CommandError::invalid("Unsupported ink extensions"));
         }
         match r.kind {

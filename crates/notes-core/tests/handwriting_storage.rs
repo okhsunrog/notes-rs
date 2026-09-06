@@ -54,6 +54,32 @@ fn bytes(store: &Store) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn replacement_snapshot_cannot_hide_unpublished_handwriting() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("notes.db");
+    let conn = db::open(&path).await.unwrap();
+    let empty = notes_core::export_sync_snapshot(&conn, 0).await.unwrap();
+    let id = note(&conn).await;
+    let store = Store::new(path, id);
+    store.open_editor(true).unwrap();
+    assert!(
+        notes_core::import_sync_snapshot(&conn, empty.clone())
+            .await
+            .is_err()
+    );
+    store.patch(patch(vec![stroke(1)]), None).unwrap();
+    store.close_editor().unwrap();
+    let before = bytes(&store);
+    assert!(
+        notes_core::import_sync_snapshot(&conn, empty)
+            .await
+            .is_err()
+    );
+    assert_eq!(bytes(&store), before);
+    assert!(db::get_page(&conn, id).await.unwrap().is_some());
+}
+
+#[tokio::test]
 async fn workspace_archive_restores_unpublished_ink_and_rolls_back_all_binary_data() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("source.db");
@@ -246,6 +272,17 @@ async fn published_graphs_sync_causally_and_conflicts_keep_both_notes() {
     while left.compact().unwrap() {}
     let first = left.publish("Book".into()).unwrap().unwrap();
     let first_graph = transfer::export_graph(&l, first.root_hash).await.unwrap();
+    let mut altered = first_graph.clone();
+    let mut record = ink_format::record::Record::decode(&altered[&first.root_hash]).unwrap();
+    record.required_features.clear();
+    let encoded = record.encode().unwrap();
+    let altered_hash = notes_blob::BlobHash::digest(&encoded);
+    altered.remove(&first.root_hash);
+    altered.insert(altered_hash, encoded);
+    assert!(
+        transfer::validate_graph(altered_hash, &altered).is_err(),
+        "different metadata envelopes must not alias the same record ID"
+    );
     transfer::stage_graph(&r, first.root_hash, first_graph.clone())
         .await
         .unwrap();
