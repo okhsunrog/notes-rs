@@ -144,6 +144,8 @@ internal class OnyxInk(
     }
 
     companion object {
+        /** Dash length and gap, and the line width, of the firmware selection trace. */
+        private const val LASSO_DASH = 5f
         fun supported(): Boolean = Build.MANUFACTURER.equals("ONYX", true)
 
         /** Stock Notes' `DELAY_ENABLE_RAW_DRAWING_MILLS` for a monochrome panel. */
@@ -251,10 +253,21 @@ internal class OnyxInk(
                 helper!!.setEraserRawDrawingEnabled(false, 0)
                 helper!!.enableSideBtnErase(true)
             }
-            helper!!.setLimitRect(limit, emptyList())
-                .setStrokeWidth(((if (args.fastLasso) 1.5 else args.strokeWidth) * sheet.width() / 1000).toFloat())
-                .setStrokeColor(Color.BLACK)
-                .setStrokeStyle(if (args.fastLasso) TouchHelper.STROKE_STYLE_PENCIL else TouchHelper.STROKE_STYLE_FOUNTAIN)
+            if (args.fastLasso) {
+                // The firmware draws the selection trace as a dashed line only when the dash
+                // pattern is configured on the device first: a single-element gap/length array,
+                // black, at the driver's standard width (Notate's verified recipe, onyx.md §2).
+                Device.currentDevice().setStrokeParameters(TouchHelper.STROKE_STYLE_DASH, floatArrayOf(LASSO_DASH))
+                helper!!.setLimitRect(limit, emptyList())
+                    .setStrokeWidth(LASSO_DASH)
+                    .setStrokeColor(Color.BLACK)
+                    .setStrokeStyle(TouchHelper.STROKE_STYLE_DASH)
+            } else {
+                helper!!.setLimitRect(limit, emptyList())
+                    .setStrokeWidth((args.strokeWidth * sheet.width() / 1000).toFloat())
+                    .setStrokeColor(Color.BLACK)
+                    .setStrokeStyle(TouchHelper.STROKE_STYLE_FOUNTAIN)
+            }
             resume()
             if (sheet != previousSheet || limit != previousLimit) commit(OnyxFrameArgs().apply {
                 session = args.session
