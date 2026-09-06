@@ -52,6 +52,17 @@ Findings from the 2026-07-19 multi-agent review that are **deliberately not in a
 - **Two Back buttons on a handwritten note in compact layout**: the pane frame's Back and the editor's own Back (flush-then-leave). The frame's Back bypasses the editor lifecycle and lands on the unmount path, which also flushes and completes. _Trigger: e-ink profile UI pass (Track C of `HANDWRITING_UI_PLAN.md`); hide the frame's Back for handwriting panes or route it through the editor's `leave`._
 - **`removePage` gives no cancellation signal** (`use-notes-workspace.ts`), so the editor cannot mark itself as leaving before delete; harmless today because a `not_found` completion is ignored. _Trigger: when another caller needs to know whether a delete happened; return `boolean`._
 
+## 2026-09-07 review, deferred
+
+Findings verified during the review that produced Track E of `HANDWRITING_UI_PLAN.md`,
+deliberately left out of it.
+
+- **Per-gesture ink I/O is O(document), and `ink_root_refs` grows with it** (`crates/notes-core/src/ink/storage.rs`, patch path): every completed gesture rewrites the whole root record and re-indexes every object it references, so the cost of one stroke scales with the note rather than with the stroke. _Trigger: the first busy-timeout save failure, or a sheet of roughly 50k points feeling slow on the tablet; fix = incremental root/ref maintenance, which needs its own design._
+- **Blob ownership is never released and there is no blob GC** (`server/src/blob_ownership.rs`): a user's quota only ever grows, and blobs no operation references any more stay on disk forever. _Trigger: the first quota warning, or a second user._
+- **No rate limiting on the hashing endpoints** (`PUT /v1/blobs/{hash}`, `POST /v1/ink/upload`): an authenticated caller can spend server CPU on SHA-256 without bound. _Trigger: a second user, or exposing the server publicly._
+- **OAuth client registration is unbounded** (`server/src/oauth`): anyone reaching the endpoint can register clients without limit. _Trigger: same as above._
+- **`pastey` appears twice in `Cargo.lock`** (two semver-incompatible versions pulled in transitively). Cosmetic: build time and binary size only. _Trigger: next dependency sweep._
+
 ## Recently resolved elsewhere (for context, keep list short)
 
 - 2026-07-19 frontend review findings → fixed in `f1c7dc3`.
