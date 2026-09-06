@@ -174,9 +174,23 @@ pub enum ServerErrorCode {
     InvalidMessage,
     ResyncRequired,
     Conflict,
+    /// The batch itself is malformed or references content the server refuses.
+    /// Terminal for the offending operation: resending it changes nothing.
+    InvalidOperation,
+    /// The batch exceeds a size or storage quota. Also terminal per operation.
+    QuotaExceeded,
 }
 
 impl ServerErrorCode {
+    /// Whether resending the same operation can only be refused again. The
+    /// client quarantines the offender instead of blocking the queue on it.
+    pub const fn is_terminal_rejection(self) -> bool {
+        matches!(
+            self,
+            Self::Conflict | Self::InvalidOperation | Self::QuotaExceeded
+        )
+    }
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::CatchUpFailed => "catch_up_failed",
@@ -186,6 +200,8 @@ impl ServerErrorCode {
             Self::InvalidMessage => "invalid_message",
             Self::ResyncRequired => "resync_required",
             Self::Conflict => "conflict",
+            Self::InvalidOperation => "invalid_operation",
+            Self::QuotaExceeded => "quota_exceeded",
         }
     }
 }

@@ -655,21 +655,11 @@ async fn websocket_session(state: AppState, user: Arc<UserState>, since: u64, so
                             if send_server_message(&mut sender, &ServerMessage::Ack { ops }).await.is_err() { return; }
                         }
                         Err(error) => {
-                            tracing::warn!(user = %user.id, error = ?error, "websocket ingest failed");
-                            let code = if error.chain().any(|cause| {
-                                matches!(
-                                    cause.downcast_ref::<notes_core::CoreError>(),
-                                    Some(
-                                        notes_core::CoreError::Conflict(_)
-                                            | notes_core::CoreError::SyncConflict(_)
-                                    )
-                                )
-                            }) {
-                                ServerErrorCode::Conflict
-                            } else {
-                                ServerErrorCode::IngestFailed
-                            };
-                            if send_server_error(&mut sender, code, "operation batch was rejected").await.is_err() { return; }
+                            tracing::warn!(user = %user.id, status = %error.status, message = %error.message, "websocket ingest failed");
+                            let code = socket_rejection(&error);
+                            // The client shows this text next to the change it
+                            // could not send, so send the server's own reason.
+                            if send_server_error(&mut sender, code, error.message).await.is_err() { return; }
                         }
                     },
                     Ok(ClientMessage::Push { .. }) => {
@@ -1048,21 +1038,29 @@ fn ink_roots(ops: &[notes_core::Op]) -> Vec<BlobHash> {
         })
         .collect()
 }
+/// The socket runs exactly the HTTP ingest, refusal included: flattening every
+/// rejection into one opaque failure left the client unable to tell a batch it
+/// must stop resending from a server that was merely unwell, so it retried the
+/// same head forever.
 async fn ingest_ink_checked(
     state: &AppState,
     user: &UserState,
     ops: Vec<notes_core::Op>,
-) -> anyhow::Result<Vec<notes_protocol::SequencedOp>> {
-    // The socket carries the same operations as POST /v1/ops and therefore runs
-    // the same declared-blob validation; skipping it here let a socket push
-    // register attachment metadata the HTTP path would have rejected.
-    validate_operation_blobs(state, &ops)
-        .await
-        .map_err(|e| notes_core::CoreError::invalid(e.message))?;
-    ink::validate(state, user, ink_roots(&ops))
-        .await
-        .map_err(|e| notes_core::CoreError::invalid(e.message))?;
-    user.ingest(ops).await
+) -> Result<Vec<notes_protocol::SequencedOp>, ApiError> {
+    validate_operation_blobs(state, &ops).await?;
+    ink::validate(state, user, ink_roots(&ops)).await?;
+    user.ingest(ops).await.map_err(ApiError::from_domain)
+}
+
+/// Carries the HTTP refusal's meaning onto the socket. Only the codes marked
+/// terminal make a client hold the operation back.
+fn socket_rejection(error: &ApiError) -> ServerErrorCode {
+    match error.status {
+        StatusCode::CONFLICT => ServerErrorCode::Conflict,
+        StatusCode::BAD_REQUEST => ServerErrorCode::InvalidOperation,
+        StatusCode::PAYLOAD_TOO_LARGE => ServerErrorCode::QuotaExceeded,
+        _ => ServerErrorCode::IngestFailed,
+    }
 }
 
 #[cfg(test)]

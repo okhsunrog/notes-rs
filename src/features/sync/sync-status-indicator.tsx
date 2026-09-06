@@ -2,10 +2,14 @@ import { useState } from "react";
 import { AlertTriangle, Check, Cloud, CloudOff, RefreshCw, Settings } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { retrySync, type SyncStatus } from "@/lib/api";
+import { retryRejectedChanges, retrySync, type SyncStatus } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { notifyError } from "@/lib/notify";
-import { presentSyncStatus, type SyncStatusTone } from "./sync-status-presentation";
+import {
+  presentSyncStatus,
+  rejectedChangesLabel,
+  type SyncStatusTone,
+} from "./sync-status-presentation";
 
 type Props = {
   status: SyncStatus;
@@ -22,6 +26,7 @@ const toneClasses: Record<SyncStatusTone, string> = {
 
 export function SyncStatusIndicator({ status, onOpenSettings }: Props) {
   const [retrying, setRetrying] = useState(false);
+  const [releasing, setReleasing] = useState(false);
   const presentation = presentSyncStatus(status);
   const Icon = statusIcon(status);
 
@@ -33,6 +38,17 @@ export function SyncStatusIndicator({ status, onOpenSettings }: Props) {
       notifyError("sync retry", error);
     } finally {
       setRetrying(false);
+    }
+  }
+
+  async function retryRejected() {
+    setReleasing(true);
+    try {
+      await retryRejectedChanges();
+    } catch (error) {
+      notifyError("retry rejected changes", error);
+    } finally {
+      setReleasing(false);
     }
   }
 
@@ -87,6 +103,31 @@ export function SyncStatusIndicator({ status, onOpenSettings }: Props) {
             <p className="mt-1 text-xs leading-relaxed break-words text-foreground/80">
               {status.message}
             </p>
+          </div>
+        )}
+
+        {status.quarantinedOperations > 0 && (
+          <div className="mx-4 mb-3 rounded-lg border border-amber-500/25 bg-amber-500/8 px-3 py-2">
+            <p className="text-[10px] eink:text-xs font-semibold tracking-wide uppercase">
+              {rejectedChangesLabel(status.quarantinedOperations)}
+            </p>
+            <p className="mt-1 text-xs leading-relaxed break-words text-foreground/80">
+              {status.quarantineReason ?? "The server rejected this change."} It is still stored on
+              this device.
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="mt-2"
+              disabled={releasing}
+              onClick={() => void retryRejected()}
+            >
+              <RefreshCw
+                className={cn("size-3.5", releasing && "animate-spin eink:animate-none")}
+              />
+              Send again
+            </Button>
           </div>
         )}
 

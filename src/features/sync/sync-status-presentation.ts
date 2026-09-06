@@ -94,6 +94,14 @@ export function presentSyncStatus(status: SyncStatus): SyncStatusPresentation {
   }
 }
 
+/**
+ * Shown alongside the connection state: these changes are stored and will be
+ * sent on retry, so the wording says "could not be sent", never "lost".
+ */
+export function rejectedChangesLabel(count: number): string {
+  return `${count} ${count === 1 ? "change" : "changes"} could not be sent`;
+}
+
 function pendingDescription(count: number): string {
   return `${count} local ${count === 1 ? "change" : "changes"} waiting to sync.`;
 }

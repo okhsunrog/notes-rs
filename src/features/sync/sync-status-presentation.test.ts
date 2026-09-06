@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import type { SyncStatus } from "@/lib/api";
-import { presentSyncStatus } from "./sync-status-presentation";
+import { presentSyncStatus, rejectedChangesLabel } from "./sync-status-presentation";
 
 function status(state: SyncStatus["state"], pendingOperations = 0): SyncStatus {
   return {
@@ -10,6 +10,8 @@ function status(state: SyncStatus["state"], pendingOperations = 0): SyncStatus {
     pendingOperations,
     message: null,
     serverFormatVersion: null,
+    quarantinedOperations: 0,
+    quarantineReason: null,
   };
 }
 
@@ -61,5 +63,10 @@ describe("presentSyncStatus", () => {
     expect(
       presentSyncStatus({ ...status("update_required"), serverFormatVersion: 9 }).description,
     ).toBe("The sync server uses data format 9. Update the app to keep syncing.");
+  });
+
+  it("counts rejected changes without claiming they were lost", () => {
+    expect(rejectedChangesLabel(1)).toBe("1 change could not be sent");
+    expect(rejectedChangesLabel(3)).toBe("3 changes could not be sent");
   });
 });

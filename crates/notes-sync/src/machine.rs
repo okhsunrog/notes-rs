@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 use async_trait::async_trait;
 use notes_core::{
     Connection, Op, acknowledge_server_ops, apply_sequenced_batch, configure_sync, pending_outbox,
-    sync_cursor,
+    quarantine_outbox_op, sync_cursor,
 };
 use notes_protocol::SequencedOp;
 use std::collections::HashMap;
@@ -116,6 +116,22 @@ impl SyncTransport for LoopbackServer {
     }
 }
 
+fn quarantine_reason(message: &str) -> String {
+    if message.trim().is_empty() {
+        "The server rejected this change.".into()
+    } else {
+        message.trim().to_owned()
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            elapsed.as_millis().try_into().unwrap_or(i64::MAX)
+        })
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SyncStats {
     pub pushed: usize,
@@ -165,7 +181,7 @@ impl SyncClient {
         stats.pushed = outbox.len();
         if !outbox.is_empty() {
             transport.prepare_push(&outbox).await?;
-            let accepted = transport.push(outbox).await?;
+            let accepted = self.push_batch(transport, outbox).await?;
             acknowledge_server_ops(
                 &self.conn,
                 accepted
@@ -196,6 +212,63 @@ impl SyncClient {
                 return Ok(total);
             }
         }
+    }
+
+    async fn push_batch<T: SyncTransport>(
+        &self,
+        transport: &mut T,
+        outbox: Vec<Op>,
+    ) -> Result<Vec<SequencedOp>> {
+        match transport.push(outbox.clone()).await {
+            Ok(accepted) => Ok(accepted),
+            Err(error) if crate::terminal_rejection(&error).is_some() => {
+                self.isolate_rejected_batch(transport, outbox).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Finds the one operation a refused batch is stuck on and holds only that
+    /// one back.
+    ///
+    /// The server judges a batch as a whole, so a single unacceptable
+    /// operation used to block every later change: the client reconnected,
+    /// resent the same head, and was refused again forever. Resending the
+    /// operations one at a time names the offender; it is quarantined with the
+    /// server's own reason — kept, never deleted — and everything after it
+    /// reaches the server on this same pass.
+    async fn isolate_rejected_batch<T: SyncTransport>(
+        &self,
+        transport: &mut T,
+        outbox: Vec<Op>,
+    ) -> Result<Vec<SequencedOp>> {
+        let mut accepted = Vec::new();
+        let mut progressed = false;
+        for operation in outbox {
+            match transport.push(vec![operation.clone()]).await {
+                Ok(mut ops) => {
+                    accepted.append(&mut ops);
+                    progressed = true;
+                }
+                Err(error) => match crate::terminal_rejection(&error) {
+                    Some(reason) => {
+                        quarantine_outbox_op(
+                            &self.conn,
+                            operation.op_id,
+                            quarantine_reason(&reason),
+                            now_ms(),
+                        )
+                        .await?;
+                        progressed = true;
+                    }
+                    // Transient: a dropped connection is not a rejection. The
+                    // rest of the batch stays queued for the next pass.
+                    None if progressed => break,
+                    None => return Err(error),
+                },
+            }
+        }
+        Ok(accepted)
     }
 
     async fn catch_up<T: SyncTransport>(
@@ -241,6 +314,183 @@ impl SyncClient {
 mod tests {
     use super::*;
     use notes_core::{BlockStyle, db, export_sync_snapshot, import_sync_snapshot};
+
+    /// A loopback server that refuses named operations the way the real one
+    /// refuses an incomplete handwriting publication: 409, batch and all.
+    struct RejectingServer {
+        inner: LoopbackServer,
+        rejected: std::collections::HashSet<uuid::Uuid>,
+        reason: String,
+    }
+
+    #[async_trait]
+    impl SyncTransport for RejectingServer {
+        async fn ops_since(&mut self, since: u64, limit: usize) -> Result<Vec<SequencedOp>> {
+            Ok(self.inner.ops_since(since, limit))
+        }
+
+        async fn push(&mut self, operations: Vec<Op>) -> Result<Vec<SequencedOp>> {
+            if operations
+                .iter()
+                .any(|operation| self.rejected.contains(&operation.op_id))
+            {
+                return Err(crate::TransportError::Conflict(self.reason.clone()).into());
+            }
+            self.inner.ingest(operations)
+        }
+    }
+
+    fn ink_patch() -> notes_core::ink::InkDraftPatch {
+        let stroke = notes_core::ink::InkStroke {
+            id: uuid::Uuid::now_v7(),
+            width: 2.,
+            points: (0..8)
+                .map(|n| notes_core::ink::InkPoint {
+                    x: f64::from(n),
+                    y: f64::from(n),
+                    pressure: 0.5,
+                    tilt_x: 0.,
+                    tilt_y: 0.,
+                    time: f64::from(n),
+                })
+                .collect(),
+        };
+        notes_core::ink::InkDraftPatch {
+            order: vec![stroke.id],
+            upserts: vec![stroke],
+            background: notes_core::ink::InkBackground::Plain,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_operation_is_quarantined_so_later_changes_still_reach_the_server() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("notes.db");
+        let connection = db::open(&path).await.expect("open database");
+        let client = SyncClient::enable(connection.clone(), "loopback://quarantine")
+            .await
+            .expect("enable sync");
+
+        let note = db::create_handwritten_note_with_ops(&connection, Some("Ink".into()))
+            .await
+            .expect("handwritten note")
+            .value
+            .uuid;
+        let store = notes_core::ink::Store::new(&path, note);
+        store.patch(ink_patch(), None).expect("write a stroke");
+        while store.compact().expect("compact") {}
+        store
+            .publish("Book".into())
+            .expect("publish")
+            .expect("head");
+
+        let publication = pending_outbox(&connection, 100)
+            .await
+            .expect("outbox")
+            .into_iter()
+            .find(|operation| matches!(operation.kind, notes_core::OpKind::InkPublish(_)))
+            .expect("a publication is queued");
+        let mut server = RejectingServer {
+            inner: LoopbackServer::new(),
+            rejected: std::collections::HashSet::from([publication.op_id]),
+            reason: "Upload handwriting root before publication".into(),
+        };
+
+        client
+            .sync_until_idle(&mut server)
+            .await
+            .expect("a refused batch is not a sync failure");
+
+        let held = notes_core::quarantined_outbox(&connection, 100)
+            .await
+            .expect("quarantine");
+        assert_eq!(held.len(), 1, "only the offending operation is held back");
+        assert_eq!(held[0].op.op_id, publication.op_id);
+        assert_eq!(held[0].reason, "Upload handwriting root before publication");
+        assert!(
+            pending_outbox(&connection, 100)
+                .await
+                .expect("outbox")
+                .is_empty(),
+            "everything else in the batch was accepted"
+        );
+
+        // A later, unrelated change is no longer stuck behind the rejection.
+        db::create_page(&connection, "Written after".into())
+            .await
+            .expect("text note");
+        client.sync_until_idle(&mut server).await.expect("sync");
+        assert!(
+            server.inner.log().iter().any(|item| matches!(
+                &item.envelope.kind,
+                notes_core::OpKind::PageCreate(page)
+                    if page.title.as_deref() == Some("Written after")
+            )),
+            "a text change after the rejection must still reach the server"
+        );
+
+        // Once the cause is gone the held operation is sent, not discarded.
+        server.rejected.clear();
+        assert_eq!(
+            notes_core::release_quarantined_outbox(&connection)
+                .await
+                .expect("release"),
+            1
+        );
+        client.sync_until_idle(&mut server).await.expect("resync");
+        assert!(
+            notes_core::quarantined_outbox(&connection, 100)
+                .await
+                .expect("quarantine")
+                .is_empty()
+        );
+        assert!(
+            server
+                .inner
+                .log()
+                .iter()
+                .any(|item| item.envelope.op_id == publication.op_id),
+            "the retried publication reaches the server unchanged"
+        );
+    }
+
+    /// A dropped connection is not a verdict on the batch.
+    #[tokio::test]
+    async fn a_transient_failure_never_quarantines_anything() {
+        struct Offline;
+
+        #[async_trait]
+        impl SyncTransport for Offline {
+            async fn ops_since(&mut self, _: u64, _: usize) -> Result<Vec<SequencedOp>> {
+                Ok(Vec::new())
+            }
+
+            async fn push(&mut self, _: Vec<Op>) -> Result<Vec<SequencedOp>> {
+                Err(crate::TransportError::Http {
+                    status: 503,
+                    code: None,
+                    message: "restarting".into(),
+                }
+                .into())
+            }
+        }
+
+        let (_directory, connection, client) = client("transient").await;
+        db::create_page(&connection, "Kept".into())
+            .await
+            .expect("edit");
+        assert!(client.sync_once(&mut Offline).await.is_err());
+        assert!(
+            notes_core::quarantined_outbox(&connection, 10)
+                .await
+                .expect("quarantine")
+                .is_empty()
+        );
+        assert_eq!(
+            pending_outbox(&connection, 10).await.expect("outbox").len(),
+            1
+        );
+    }
 
     async fn client(name: &str) -> (tempfile::TempDir, Connection, SyncClient) {
         let directory = tempfile::tempdir().expect("temporary directory");

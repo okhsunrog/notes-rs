@@ -42,6 +42,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::save_settings,
             commands::reset_settings,
             commands::retry_sync,
+            commands::retry_rejected_changes,
             commands::restart_app,
             commands::history_status,
             commands::undo,

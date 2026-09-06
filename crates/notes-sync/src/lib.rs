@@ -8,7 +8,8 @@ mod transport;
 
 pub use machine::{AppliedRemoteOperation, LoopbackServer, SyncClient, SyncStats, SyncTransport};
 pub use transport::{
-    HttpTransport, SyncSocket, TransportError, is_transport_failure, transport_error,
+    HttpTransport, SyncSocket, TransportError, is_transport_failure, terminal_rejection,
+    transport_error,
 };
 
 pub use notes_core::Hlc;
@@ -22,5 +23,6 @@ pub use notes_core::{
     OrderKey, Origin, PageAlias, PageKind, PageLayout, SnapshotAttachment, SnapshotBlock,
     SnapshotPage, SnapshotPageAlias, SnapshotPageIdentity, SnapshotTombstone, SyncSnapshot,
     TaskState, acknowledge_server_op, apply, apply_batch, apply_sequenced, configure_sync,
-    export_sync_snapshot, import_sync_snapshot, pending_outbox, sync_cursor,
+    export_sync_snapshot, import_sync_snapshot, pending_outbox, quarantined_outbox,
+    release_quarantined_outbox, sync_cursor,
 };

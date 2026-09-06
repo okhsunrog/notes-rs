@@ -55,6 +55,11 @@ export const commands = {
 	saveSettings: (update: SettingsUpdate) => typedError<SettingsSnapshot, CommandError>(__TAURI_INVOKE("save_settings", { update })),
 	resetSettings: () => typedError<SettingsSnapshot, CommandError>(__TAURI_INVOKE("reset_settings")),
 	retrySync: () => __TAURI_INVOKE<void>("retry_sync"),
+	/**
+	 *  Puts every change the server refused back in the send queue and reconnects.
+	 *  Nothing was deleted while it was held back, so this is a plain retry.
+	 */
+	retryRejectedChanges: () => typedError<number, CommandError>(__TAURI_INVOKE("retry_rejected_changes")),
 	restartApp: () => __TAURI_INVOKE<void>("restart_app"),
 	historyStatus: () => typedError<HistoryStatus, CommandError>(__TAURI_INVOKE("history_status")),
 	undo: () => typedError<HistoryMoveResult, CommandError>(__TAURI_INVOKE("undo")),
@@ -755,6 +760,13 @@ export type SyncStatus = {
 	 *  build. `None` at every other time, including a plain offline server.
 	 */
 	serverFormatVersion: number | null,
+	/**
+	 *  Changes the server refused outright. They are still stored and are sent
+	 *  as soon as the user retries them; they just no longer block the queue.
+	 */
+	quarantinedOperations: number,
+	/**  The server's reason for the first held-back change. */
+	quarantineReason: string | null,
 };
 
 /**  Durable workflow state carried only by a task block. */

@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use notes_blob::{BlobHash, BlobStore, BlobStoreError};
 use notes_core::{Connection, acknowledge_server_ops, apply_sequenced_batch, export_sync_snapshot};
-use notes_protocol::{ClientMessage, SequencedOp, ServerErrorCode, ServerMessage};
+use notes_protocol::{ClientMessage, SequencedOp, ServerMessage};
 use notes_sync::{HttpTransport, SyncClient, SyncSnapshot, SyncTransport, TransportError};
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
@@ -51,8 +51,6 @@ enum SyncSessionError {
         "local and server workspace contain different data; export one workspace and reset the other before enabling sync"
     )]
     WorkspaceConflict,
-    #[error("sync server rejected the session: {0}")]
-    ServerConflict(String),
     #[error(
         "the sync server writes format {server_version}; this app reads {}. Update the app to keep syncing",
         notes_sync::FORMAT_VERSION
@@ -156,6 +154,11 @@ pub struct SyncStatus {
     /// Sync format the server writes, known only once it has refused this
     /// build. `None` at every other time, including a plain offline server.
     pub server_format_version: Option<u32>,
+    /// Changes the server refused outright. They are still stored and are sent
+    /// as soon as the user retries them; they just no longer block the queue.
+    pub quarantined_operations: u32,
+    /// The server's reason for the first held-back change.
+    pub quarantine_reason: Option<String>,
 }
 
 pub struct SyncRuntime {
@@ -174,6 +177,8 @@ impl SyncRuntime {
                 pending_operations: 0,
                 message: None,
                 server_format_version: None,
+                quarantined_operations: 0,
+                quarantine_reason: None,
             })),
             retry,
         }
@@ -217,6 +222,8 @@ pub fn spawn_worker(
                         pending_operations: 0,
                         message: None,
                         server_format_version: None,
+                        quarantined_operations: 0,
+                        quarantine_reason: None,
                     },
                 );
                 return;
@@ -234,6 +241,8 @@ pub fn spawn_worker(
                             pending_operations: 0,
                             message: Some(error.to_string()),
                             server_format_version: None,
+                            quarantined_operations: 0,
+                            quarantine_reason: None,
                         },
                     );
                     return;
@@ -252,6 +261,8 @@ pub fn spawn_worker(
                         pending_operations: 0,
                         message: Some(error.to_string()),
                         server_format_version: None,
+                        quarantined_operations: 0,
+                        quarantine_reason: None,
                     },
                 );
                 return;
@@ -701,10 +712,13 @@ async fn handle_server_message(
             Ok(())
         }
         ServerMessage::Pong => Ok(()),
-        ServerMessage::Error {
-            code: ServerErrorCode::Conflict,
-            message,
-        } => Err(SyncSessionError::ServerConflict(message).into()),
+        // A batch the server refuses outright is not a reason to drop the
+        // connection: reconnecting only resends the same head. Isolate the
+        // offending change over HTTP and keep the queue moving on this session.
+        ServerMessage::Error { code, message } if code.is_terminal_rejection() => {
+            tracing::warn!(%code, %message, "sync server rejected a pushed batch");
+            synchronize_http(app, connection, transport, blob_store).await
+        }
         ServerMessage::Error { code, message } => bail!("sync server error {code}: {message}"),
     }
 }
@@ -919,6 +933,9 @@ async fn set_connection_detail(
         .await
         .map(|operations| operations.len().try_into().unwrap_or(u32::MAX))
         .unwrap_or_default();
+    let quarantined = notes_core::quarantined_outbox(connection, u32::MAX)
+        .await
+        .unwrap_or_default();
     replace_status(
         app,
         status,
@@ -929,6 +946,8 @@ async fn set_connection_detail(
             pending_operations: pending,
             message,
             server_format_version,
+            quarantined_operations: quarantined.len().try_into().unwrap_or(u32::MAX),
+            quarantine_reason: quarantined.first().map(|held| held.reason.clone()),
         },
     );
 }

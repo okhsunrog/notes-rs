@@ -81,6 +81,13 @@ requirements, verified boundaries and remaining limitations. In particular,
 full snapshots currently fetch historical published graphs as well as current heads,
 and historical published-body retention has no pruning policy yet.
 
+The handoff's remaining sync limitation no longer applies: a batch the server
+refuses outright no longer stalls the outbox behind it. The client resends the
+batch one operation at a time to find the offender, quarantines that operation
+with the server's own reason — it stays stored and is never deleted — and lets
+every later change through. Sync status reports how many changes could not be
+sent and offers to send them again, which releases the quarantine.
+
 ## Validation required before installation of integrated storage
 
 Migrate a copy of the current device DB first; retain the original until verified.

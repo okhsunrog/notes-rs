@@ -146,6 +146,21 @@ pub fn retry_sync(sync: State<'_, crate::sync::SyncRuntime>) {
     sync.request_retry();
 }
 
+/// Puts every change the server refused back in the send queue and reconnects.
+/// Nothing was deleted while it was held back, so this is a plain retry.
+#[tauri::command]
+#[specta::specta]
+pub async fn retry_rejected_changes(
+    state: State<'_, AppState>,
+    sync: State<'_, crate::sync::SyncRuntime>,
+) -> CommandResult<u32> {
+    let released = notes_core::release_quarantined_outbox(&state.conn)
+        .await
+        .map_err(err)?;
+    sync.request_retry();
+    Ok(released.try_into().unwrap_or(u32::MAX))
+}
+
 #[tauri::command]
 #[specta::specta]
 pub fn restart_app(app: AppHandle) {

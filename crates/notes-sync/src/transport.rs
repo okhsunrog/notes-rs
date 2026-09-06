@@ -50,6 +50,24 @@ impl TransportError {
     }
 }
 
+/// The server's own words for why it will never accept this operation, or
+/// `None` when the failure is transient and the queue should simply retry.
+///
+/// 401 and 426 refuse the session rather than a change, so they are
+/// deliberately absent: holding work back over an expired token or an
+/// out-of-date app would quarantine changes the server never even inspected.
+pub fn terminal_rejection(error: &anyhow::Error) -> Option<String> {
+    match transport_error(error)? {
+        TransportError::Conflict(message) => Some(message.clone()),
+        TransportError::Http {
+            status: 400 | 413 | 422,
+            message,
+            ..
+        } => Some(message.clone()),
+        TransportError::Http { .. } | TransportError::Unauthorized => None,
+    }
+}
+
 pub fn is_transport_failure(error: &anyhow::Error) -> bool {
     transport_error(error).is_some()
         || error

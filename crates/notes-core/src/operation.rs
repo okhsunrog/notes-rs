@@ -537,10 +537,23 @@ pub async fn sync_cursor(conn: &Connection) -> Result<u64> {
     })
 }
 
+/// One operation the server refused outright, kept out of the send queue.
+///
+/// Quarantine is never deletion: the change is still in the outbox and is sent
+/// as soon as it is released, so nothing a user wrote is lost to a rejection.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuarantinedOp {
+    pub op: Op,
+    pub reason: String,
+}
+
 pub async fn pending_outbox(conn: &Connection, limit: u32) -> Result<Vec<Op>> {
     conn.call(move |database| {
-        let mut statement =
-            database.prepare("SELECT envelope FROM sync_outbox ORDER BY rowid LIMIT ?1")?;
+        let mut statement = database.prepare(
+            "SELECT envelope FROM sync_outbox
+              WHERE quarantined_at IS NULL
+              ORDER BY rowid LIMIT ?1",
+        )?;
         statement
             .query_map([limit], |row| row.get::<_, String>(0))?
             .map(|envelope| {
@@ -553,6 +566,68 @@ pub async fn pending_outbox(conn: &Connection, limit: u32) -> Result<Vec<Op>> {
                 })
             })
             .collect()
+    })
+    .await
+}
+
+/// Holds one refused operation back so the rest of the queue keeps moving.
+///
+/// Returns whether the operation was still queued: a batch rejection racing an
+/// acknowledgement is normal, and nothing needs quarantining then.
+pub async fn quarantine_outbox_op(
+    conn: &Connection,
+    op_id: uuid::Uuid,
+    reason: String,
+    now_ms: i64,
+) -> Result<bool> {
+    conn.call(move |database| {
+        let changed = database.execute(
+            "UPDATE sync_outbox
+                SET quarantined_at = ?2, quarantine_reason = ?3
+              WHERE op_id = ?1 AND quarantined_at IS NULL",
+            rusqlite::params![op_id, now_ms, reason],
+        )?;
+        Ok(changed > 0)
+    })
+    .await
+}
+
+pub async fn quarantined_outbox(conn: &Connection, limit: u32) -> Result<Vec<QuarantinedOp>> {
+    conn.call(move |database| {
+        let mut statement = database.prepare(
+            "SELECT envelope, COALESCE(quarantine_reason, '') FROM sync_outbox
+              WHERE quarantined_at IS NOT NULL
+              ORDER BY rowid LIMIT ?1",
+        )?;
+        statement
+            .query_map([limit], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .map(|row| {
+                let (envelope, reason) = row?;
+                decode_persisted_envelope(&envelope)
+                    .map(|op| QuarantinedOp { op, reason })
+                    .map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })
+            })
+            .collect()
+    })
+    .await
+}
+
+/// Puts every held-back operation back in the queue, in its original order.
+pub async fn release_quarantined_outbox(conn: &Connection) -> Result<usize> {
+    conn.call(move |database| {
+        database.execute(
+            "UPDATE sync_outbox SET quarantined_at = NULL, quarantine_reason = NULL
+              WHERE quarantined_at IS NOT NULL",
+            [],
+        )
     })
     .await
 }
