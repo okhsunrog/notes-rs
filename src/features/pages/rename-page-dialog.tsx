@@ -35,20 +35,35 @@ export function RenamePageDialog({
 }) {
   const title = usePageTitleEditor(page, true, onSaved);
   const [saving, setSaving] = useState(false);
+  // The field edits a local draft. The shared title editor autosaves after a short pause and
+  // hands back the trimmed, persisted title, which on a slow keyboard replaces the text under
+  // the user's fingers and swallows a trailing space. Nothing leaves the dialog until Save.
+  const [draft, setDraft] = useState<string | null>(null);
+  const value = draft ?? title.title;
 
   const save = async () => {
     if (saving) return;
     setSaving(true);
     try {
+      if (draft !== null) title.edit(draft);
       // A refused rename keeps the dialog open with the draft and its error in place.
-      if (await title.flush()) onOpenChange(false);
+      if (await title.flush()) {
+        setDraft(null);
+        onOpenChange(false);
+      }
     } finally {
       setSaving(false);
     }
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) setDraft(null);
+        onOpenChange(next);
+      }}
+    >
       <DialogContent className="sm:max-w-sm">
         <DialogHeader>
           <DialogTitle>Rename note</DialogTitle>
@@ -63,8 +78,8 @@ export function RenamePageDialog({
         >
           <Input
             autoFocus
-            value={title.title}
-            onChange={(event) => title.edit(event.currentTarget.value)}
+            value={value}
+            onChange={(event) => setDraft(event.currentTarget.value)}
             placeholder="Untitled note"
             aria-label="Note name"
           />
@@ -82,7 +97,14 @@ export function RenamePageDialog({
             </div>
           )}
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setDraft(null);
+                onOpenChange(false);
+              }}
+            >
               Cancel
             </Button>
             <Button type="submit" disabled={saving}>
