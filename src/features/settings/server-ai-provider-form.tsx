@@ -81,7 +81,7 @@ export function ServerAiProviderForm({ provider, onError, onMessage }: Props) {
   };
 
   return (
-    <div className="grid gap-4 rounded-2xl border border-border/60 bg-background/55 p-4">
+    <div className="grid gap-4 rounded-2xl border border-border/60 surface-base p-4">
       <div>
         <h3 className="text-sm font-semibold">Provider configuration</h3>
         <p className="mt-1 text-xs leading-relaxed text-muted-foreground">

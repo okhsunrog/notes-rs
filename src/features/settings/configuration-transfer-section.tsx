@@ -145,7 +145,7 @@ export function ConfigurationTransferSection({
       </div>
       {preview && (
         <div
-          className="space-y-4 rounded-2xl border border-primary/30 bg-background/70 p-4"
+          className="space-y-4 rounded-2xl border border-primary/30 surface-base p-4"
           aria-label="Configuration import preview"
         >
           <h3 className="font-semibold">Import preview</h3>

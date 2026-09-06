@@ -47,7 +47,7 @@ export function NewNoteButton({
           </Menu.Trigger>
           <Menu.Portal>
             <Menu.Positioner sideOffset={6} align="end">
-              <Menu.Popup className="z-50 min-w-48 rounded-xl border bg-popover p-1 text-popover-foreground shadow-lg outline-none">
+              <Menu.Popup className="z-50 min-w-48 rounded-xl border bg-popover p-1 text-popover-foreground shadow-panel outline-none">
                 <Menu.Item
                   className="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2.5 text-sm outline-none data-[highlighted]:bg-accent"
                   onClick={() => void controller.createHandwrittenNote()}

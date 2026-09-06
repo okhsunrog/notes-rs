@@ -66,7 +66,7 @@ export function JournalNavigation({ activeDate, busy, onOpenDate }: Props) {
           variant={activeDate === today ? "secondary" : "outline"}
           disabled={busy}
           onClick={(event) => void onOpenDate(today, dispositionFromShiftKey(event.shiftKey))}
-          className="h-9 justify-start rounded-lg border-border/60 bg-card/45 px-2 shadow-none"
+          className="h-9 justify-start rounded-lg border-border/60 surface-card-soft px-2 shadow-none"
         >
           <span className="flex size-6 items-center justify-center rounded-lg bg-primary/10 text-primary">
             <CalendarDays className="size-3.5" />

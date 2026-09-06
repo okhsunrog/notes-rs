@@ -32,7 +32,7 @@ export function SettingsSelect<Value extends string | number>({
     >
       <SelectTrigger
         aria-label={label}
-        className="w-full rounded-xl border-border/70 bg-background/70 text-left shadow-none hover:bg-accent/40 dark:bg-background/70 dark:hover:bg-accent/40 data-[size=default]:h-10"
+        className="w-full rounded-xl border-border/70 surface-base text-left shadow-none hover:bg-accent/40 dark:surface-base dark:hover:bg-accent/40 data-[size=default]:h-10"
       >
         <SelectValue className="min-w-0 truncate" placeholder={placeholder} />
       </SelectTrigger>

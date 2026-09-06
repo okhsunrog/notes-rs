@@ -42,7 +42,7 @@ export function JournalQuickCapture({ busy, onCapture }: Props) {
               void submit();
             }
           }}
-          className="min-h-20 w-full resize-none rounded-lg border-border/60 bg-background/55 px-2.5 pt-2 pb-9 text-xs shadow-none focus-visible:ring-1"
+          className="min-h-20 w-full resize-none rounded-lg border-border/60 surface-base px-2.5 pt-2 pb-9 text-xs shadow-none focus-visible:ring-1"
         />
         <Button
           type="submit"

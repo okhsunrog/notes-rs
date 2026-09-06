@@ -17,7 +17,7 @@ const toneClasses: Record<SyncStatusTone, string> = {
   progress: "border-primary/25 bg-primary/10 text-primary",
   warning: "border-amber-500/25 bg-amber-500/10 text-amber-600 dark:text-amber-400",
   danger: "border-destructive/25 bg-destructive/8 text-destructive",
-  muted: "border-border/60 bg-card/55 text-muted-foreground",
+  muted: "border-border/60 surface-card text-muted-foreground",
 };
 
 export function SyncStatusIndicator({ status, onOpenSettings }: Props) {

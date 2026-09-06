@@ -74,7 +74,7 @@ export function MarkdownImageViewer({
           title={title}
           width={image.width}
         />
-        <span className="reveal-on-hover pointer-events-none absolute right-2 bottom-2 flex size-8 items-center justify-center rounded-lg bg-black/65 text-white shadow-sm backdrop-blur-sm transition">
+        <span className="reveal-on-hover pointer-events-none absolute right-2 bottom-2 flex size-8 items-center justify-center rounded-lg bg-black/65 text-white shadow-sm surface-blur transition">
           <Maximize2 className="size-4" />
         </span>
       </DialogTrigger>
@@ -89,7 +89,7 @@ export function MarkdownImageViewer({
           Full-resolution image. Use the controls to zoom, reset, or close.
         </DialogDescription>
         <div className="absolute top-[max(0.75rem,var(--safe-area-inset-top))] right-[max(0.75rem,var(--safe-area-inset-right))] left-[max(0.75rem,var(--safe-area-inset-left))] z-20 flex items-center gap-2">
-          <div className="flex items-center rounded-xl border border-white/15 bg-black/60 p-1 text-white shadow-lg backdrop-blur-md">
+          <div className="flex items-center rounded-xl border border-white/15 bg-black/60 p-1 text-white shadow-panel surface-blur">
             <ViewerButton
               label="Zoom out"
               onClick={() => zoom(1 / 1.25)}
@@ -119,7 +119,7 @@ export function MarkdownImageViewer({
           <button
             type="button"
             aria-label="Close image viewer"
-            className="ml-auto flex size-10 items-center justify-center rounded-xl border border-white/15 bg-black/60 text-xl text-white shadow-lg backdrop-blur-md hover:bg-white/15"
+            className="ml-auto flex size-10 items-center justify-center rounded-xl border border-white/15 bg-black/60 text-xl text-white shadow-panel surface-blur hover:bg-white/15"
             onClick={() => changeOpen(false)}
           >
             ×

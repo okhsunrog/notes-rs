@@ -203,7 +203,7 @@ export function AppLayout({
 
         <div
           className={cn(
-            "workspace-frame relative mx-2 mb-2 min-h-0 flex-1 overflow-hidden rounded-2xl border shadow-xl shadow-black/5",
+            "workspace-frame relative mx-2 mb-2 min-h-0 flex-1 overflow-hidden rounded-2xl border shadow-popover",
             compact && "mx-0 mb-0 rounded-none border-x-0 border-b-0 shadow-none",
           )}
         >

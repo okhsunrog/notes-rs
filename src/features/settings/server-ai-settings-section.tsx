@@ -62,7 +62,7 @@ export function ServerAiSettingsSection({ enabled, onError, onMessage }: Props) 
       description="Inspect and control the server-owned retrieval index. Provider credentials and vectors are never stored on this device."
     >
       {!enabled ? (
-        <p className="rounded-2xl border border-border/60 bg-background/55 p-4 text-sm text-muted-foreground">
+        <p className="rounded-2xl border border-border/60 surface-base p-4 text-sm text-muted-foreground">
           Configure the notes server and restart the app to manage its AI runtime.
         </p>
       ) : statusQuery.isPending ? (
@@ -75,7 +75,7 @@ export function ServerAiSettingsSection({ enabled, onError, onMessage }: Props) 
         </p>
       ) : status ? (
         <>
-          <div className="rounded-2xl border border-border/60 bg-background/55 p-4">
+          <div className="rounded-2xl border border-border/60 surface-base p-4">
             <div className="flex items-center justify-between gap-3">
               <span className="flex items-center gap-2 text-sm font-medium">
                 <BrainCircuit className="size-4 text-primary" /> Embedding index
@@ -141,7 +141,7 @@ export function ServerAiSettingsSection({ enabled, onError, onMessage }: Props) 
             onMessage={onMessage}
           />
 
-          <div className="grid gap-1 rounded-2xl border border-border/60 bg-background/55 p-4 text-xs text-muted-foreground sm:grid-cols-2">
+          <div className="grid gap-1 rounded-2xl border border-border/60 surface-base p-4 text-xs text-muted-foreground sm:grid-cols-2">
             <span>Embedding: {status.provider.embeddingModel}</span>
             <span>Dimensions: {status.provider.embeddingDimensions}</span>
             <span>Reranker: {status.provider.rerankModel}</span>

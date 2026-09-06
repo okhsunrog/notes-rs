@@ -54,7 +54,7 @@ export function Workbench(props: WorkbenchProps) {
         <div
           role="tablist"
           aria-label="Open workspace panes"
-          className="flex h-10 shrink-0 items-center justify-center gap-1 border-b border-border/60 bg-card/70 px-2"
+          className="flex h-10 shrink-0 items-center justify-center gap-1 border-b border-border/60 surface-card px-2"
         >
           {paneIds.map((paneId, index) => (
             <Button
@@ -213,7 +213,7 @@ function PaneFrame({
       }}
     >
       {(!compact || pane.content.kind !== PaneContentKind.Home) && (
-        <div className="flex h-9 shrink-0 items-center gap-1 border-b border-border/50 bg-card/55 px-2">
+        <div className="flex h-9 shrink-0 items-center gap-1 border-b border-border/50 surface-card px-2">
           {compact && backToHome ? (
             <Button
               type="button"

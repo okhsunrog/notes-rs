@@ -114,7 +114,7 @@ export function GraphWorkspace({
               }
             }}
           />
-          <div className="pointer-events-none absolute bottom-5 left-5 flex gap-3 rounded-xl border border-border/60 bg-card/80 px-3 py-2 text-[10px] text-muted-foreground shadow-sm backdrop-blur">
+          <div className="pointer-events-none absolute bottom-5 left-5 flex gap-3 rounded-xl border border-border/60 surface-glass px-3 py-2 text-[10px] text-muted-foreground shadow-sm">
             <span>
               <i className="mr-1 inline-block size-2 rounded-full bg-sky-500" /> Page
             </span>
@@ -144,7 +144,7 @@ export function GraphWorkspace({
                   onClick={(event) =>
                     void onOpenContent(backlink, dispositionFromShiftKey(event.shiftKey))
                   }
-                  className="w-full rounded-xl border border-border/60 bg-card/55 px-3 py-2.5 text-left text-xs transition hover:border-primary/25 hover:bg-primary/5"
+                  className="w-full rounded-xl border border-border/60 surface-card px-3 py-2.5 text-left text-xs transition hover:border-primary/25 hover:bg-primary/5"
                 >
                   <span className="font-medium">
                     {contentText(backlink).slice(0, 48) || "Untitled"}
@@ -198,7 +198,7 @@ function GraphView({
       preserveAspectRatio="xMidYMid meet"
       role="img"
       aria-label="Knowledge graph"
-      className="h-full w-full bg-card/20"
+      className="h-full w-full surface-card-soft"
     >
       {snapshot.edges.map((edge) => {
         const source = byUuid.get(edge.sourceUuid);

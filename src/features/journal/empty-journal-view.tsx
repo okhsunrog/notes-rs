@@ -48,7 +48,7 @@ export function EmptyJournalView({ date, busy, onCapture, onOpenAllNotes, onOpen
         <h1 className="text-[2.6rem] leading-tight font-semibold tracking-[-0.045em]">
           {formatJournalDate(date)}
         </h1>
-        <div className="flex shrink-0 items-center rounded-lg border border-border/60 bg-card/55 p-0.5">
+        <div className="flex shrink-0 items-center rounded-lg border border-border/60 surface-card p-0.5">
           <Button
             type="button"
             variant="ghost"
@@ -76,7 +76,7 @@ export function EmptyJournalView({ date, busy, onCapture, onOpenAllNotes, onOpen
         </div>
       </div>
 
-      <div className="mt-12 rounded-2xl border border-dashed border-primary/25 bg-card/40 p-5 shadow-sm">
+      <div className="mt-12 rounded-2xl border border-dashed border-primary/25 surface-card-soft p-5 shadow-sm">
         <p className="text-sm font-medium">Nothing captured for this day yet.</p>
         <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
           This date is only being previewed. It becomes a journal page when you save the first
@@ -95,7 +95,7 @@ export function EmptyJournalView({ date, busy, onCapture, onOpenAllNotes, onOpen
               void submit();
             }
           }}
-          className="mt-4 min-h-32 resize-y rounded-xl bg-background/65"
+          className="mt-4 min-h-32 resize-y rounded-xl surface-base"
         />
         <div className="mt-3 flex items-center justify-between gap-3">
           <span className="text-[10px] text-muted-foreground">Ctrl/⌘ + Enter to save</span>

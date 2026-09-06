@@ -212,7 +212,7 @@ export function SettingsPage({
     return (
       <div className="app-shell flex h-full items-center justify-center text-foreground">
         {error ? (
-          <div className="mx-5 max-w-lg rounded-2xl border border-destructive/30 bg-card/90 p-6 shadow-xl">
+          <div className="mx-5 max-w-lg rounded-2xl border border-destructive/30 surface-card-strong p-6 shadow-popover">
             <h1 className="font-semibold">Device settings could not be loaded</h1>
             <p className="mt-2 text-sm break-words text-destructive">{error}</p>
             <div className="mt-5 flex flex-wrap gap-2">
@@ -339,7 +339,7 @@ export function SettingsPage({
                     "group rounded-2xl border p-3 text-left transition hover:-translate-y-0.5 hover:shadow-md",
                     palette === item.id
                       ? "border-primary/50 bg-primary/8 ring-3 ring-primary/10"
-                      : "border-border/60 bg-background/55 hover:border-primary/25",
+                      : "border-border/60 surface-base hover:border-primary/25",
                   )}
                 >
                   <span className="mb-3 flex h-8 overflow-hidden rounded-xl ring-1 ring-black/5">
@@ -530,7 +530,7 @@ export function SettingsPage({
             description="Applies when AI search runs on Enter. When disabled, the server keeps its original RRF order."
             onChange={(checked) => update("aiSearchRerank", checked)}
           />
-          <details className="rounded-2xl border border-border/60 bg-background/40 p-4">
+          <details className="rounded-2xl border border-border/60 surface-base-soft p-4">
             <summary className="cursor-pointer text-sm font-medium">Advanced</summary>
             <div className="mt-3">
               <ToggleField
@@ -591,7 +591,7 @@ export function SettingsPage({
               )}
             </div>
           </Field>
-          <div className="rounded-xl border border-border/60 bg-background/60 p-3 text-xs">
+          <div className="rounded-xl border border-border/60 surface-base p-3 text-xs">
             <div className="flex items-center justify-between gap-3">
               <span className="font-medium">Current state</span>
               <span

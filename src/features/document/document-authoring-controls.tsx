@@ -47,7 +47,7 @@ export function DocumentAuthoringControls({
         role="group"
         aria-label="Document view"
         aria-describedby={unavailable ? explanationId : undefined}
-        className="flex items-center rounded-lg border border-border/60 bg-card/55 p-0.5"
+        className="flex items-center rounded-lg border border-border/60 surface-card p-0.5"
       >
         {ACTIONS.map(({ value, label, icon: Icon, authoringMode: actionMode }) => {
           const selected = active === value;

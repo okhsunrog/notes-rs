@@ -363,7 +363,7 @@ function DashboardQuickCapture({
 
   return (
     <form
-      className="flex min-h-11 items-center gap-2 rounded-xl border border-border/60 bg-background/45 px-3 py-1.5 transition-colors focus-within:border-primary/30 focus-within:bg-background/65"
+      className="flex min-h-11 items-center gap-2 rounded-xl border border-border/60 surface-base-soft px-3 py-1.5 transition-colors focus-within:border-primary/30 focus-within:surface-base"
       onSubmit={(event) => {
         event.preventDefault();
         void submit();
@@ -467,7 +467,9 @@ function DashboardSection({
 
 function DashboardCard({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
-    <section className={cn("rounded-2xl border border-border/60 bg-card/45 shadow-sm", className)}>
+    <section
+      className={cn("rounded-2xl border border-border/60 surface-card-soft shadow-sm", className)}
+    >
       {children}
     </section>
   );

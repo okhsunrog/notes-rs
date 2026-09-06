@@ -78,7 +78,7 @@ export function BlockChildren({
   if (blocks.length === 0) {
     if (depth === 0) {
       return (
-        <div className="rounded-md border border-dashed bg-card/30 p-6 text-center text-sm text-muted-foreground">
+        <div className="rounded-md border border-dashed surface-card-soft p-6 text-center text-sm text-muted-foreground">
           <p>{emptyTitle}</p>
           {!store.readOnly && (
             <button

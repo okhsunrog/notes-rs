@@ -251,7 +251,7 @@ function LoadedDocumentPage({
           </button>
         </div>
       )}
-      <div className="relative rounded-2xl border border-border/55 bg-card/30 px-5 py-4 shadow-sm">
+      <div className="relative rounded-2xl border border-border/55 surface-card-soft px-5 py-4 shadow-sm">
         {buffer.length === 0 && (
           <p className="pointer-events-none absolute top-5 left-5 text-sm text-muted-foreground/45">
             Start writing your document…

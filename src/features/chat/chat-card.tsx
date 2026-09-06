@@ -85,7 +85,7 @@ export function ChatCard({
                   key={prompt}
                   type="button"
                   onClick={() => controller.setInput(prompt)}
-                  className="rounded-xl border border-border/60 bg-card/55 px-3 py-2 text-left text-[11px] text-muted-foreground transition hover:border-primary/25 hover:bg-primary/5 hover:text-foreground"
+                  className="rounded-xl border border-border/60 surface-card px-3 py-2 text-left text-[11px] text-muted-foreground transition hover:border-primary/25 hover:bg-primary/5 hover:text-foreground"
                 >
                   {prompt}
                 </button>
@@ -156,7 +156,7 @@ export function ChatCard({
 
       <form
         onSubmit={sendChat}
-        className="mt-2 rounded-2xl border border-border/70 bg-card/85 p-2 shadow-sm focus-within:border-primary/30 focus-within:ring-3 focus-within:ring-primary/10"
+        className="mt-2 rounded-2xl border border-border/70 surface-card-strong p-2 shadow-sm focus-within:border-primary/30 focus-within:ring-3 focus-within:ring-primary/10"
       >
         <textarea
           ref={inputRef}

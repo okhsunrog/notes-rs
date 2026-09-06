@@ -82,7 +82,7 @@ export function AllNotesView() {
         </NewNoteButton>
       </header>
 
-      <div className="mt-6 rounded-2xl border border-border/60 bg-card/45 p-3 shadow-sm">
+      <div className="mt-6 rounded-2xl border border-border/60 surface-card-soft p-3 shadow-sm">
         <div className="flex flex-col gap-2.5 sm:flex-row">
           <div className="relative min-w-0 flex-1">
             <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
@@ -91,7 +91,7 @@ export function AllNotesView() {
               onChange={(event) => setQuery(event.currentTarget.value)}
               placeholder="Search note titles…"
               aria-label="Search note titles"
-              className="h-10 rounded-xl bg-background/70 pr-9 pl-9"
+              className="h-10 rounded-xl surface-base pr-9 pl-9"
             />
             {query && (
               <Button
@@ -115,7 +115,7 @@ export function AllNotesView() {
             <SelectTrigger
               size="sm"
               aria-label="Sort notes"
-              className="h-10 min-w-44 rounded-xl bg-background/70 px-3"
+              className="h-10 min-w-44 rounded-xl surface-base px-3"
             >
               <Clock3 className="size-3.5" />
               <span className="text-xs">
@@ -165,7 +165,7 @@ export function AllNotesView() {
 
       <section
         aria-label="Notes"
-        className="mt-4 overflow-hidden rounded-2xl border border-border/60 bg-card/35 shadow-sm"
+        className="mt-4 overflow-hidden rounded-2xl border border-border/60 surface-card-soft shadow-sm"
       >
         {pagesQuery.isPending ? (
           <p className="px-5 py-12 text-center text-sm text-muted-foreground">Loading notes…</p>

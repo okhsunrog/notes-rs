@@ -16,7 +16,7 @@
   --app-viewport-background:
     radial-gradient(
       circle at 15% -20%,
-      color-mix(in oklch, var(--primary) 13%, transparent),
+      color-mix(in oklch, var(--primary) calc(var(--surface-gradient-strength) * 13%), transparent),
       transparent 38%
     ),
     var(--background);
@@ -25,6 +25,23 @@
   --safe-area-inset-bottom: env(safe-area-inset-bottom, 0px);
   --safe-area-inset-left: env(safe-area-inset-left, 0px);
   --radius: 0.625rem;
+  /* Non-color design tokens. They exist so the e-ink profile can flatten depth, translucency,
+     motion and gradients in one place instead of per component. */
+  --panel-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+  --popover-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
+  --floating-shadow: 0 25px 50px -12px rgb(0 0 0 / 0.25);
+  /* Opacity of translucent surfaces, and the blur that turns one into glass. */
+  --surface-glass-soft: 0.4;
+  --surface-glass: 0.65;
+  --surface-glass-strong: 0.95;
+  --surface-blur: 12px;
+  /* Multiplier for durations that are not already covered by a utility. 0 disables motion. */
+  --motion: 1;
+  /* Strength of the decorative primary-tinted gradients. */
+  --surface-gradient-strength: 1;
+  /* Focus indicator drawn as an outline. Only the e-ink profile uses it: the default 3px
+     translucent ring the components carry dithers into noise on a bi-level panel. */
+  --focus-ring: 3px solid color-mix(in oklch, var(--ring) 50%, transparent);
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
@@ -308,7 +325,55 @@
   --inspector: oklch(0.165 0.026 145);
 }
 
+/* E-ink profile. Placed after every palette and dark block so it wins on document order, and
+   deliberately light-only: the panel is white paper, so a dark variant would fight the hardware.
+   The palette keeps --primary and --destructive; only the neutrals collapse to pure black/white. */
+:root[data-display="eink"] {
+  --panel-shadow: none;
+  --popover-shadow: none;
+  --floating-shadow: none;
+  --surface-glass-soft: 1;
+  --surface-glass: 1;
+  --surface-glass-strong: 1;
+  --surface-blur: 0px;
+  --motion: 0;
+  --surface-gradient-strength: 0;
+  --focus-ring: 2px solid oklch(0 0 0);
+  --radius: 0.25rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0 0 0);
+  --secondary: oklch(1 0 0);
+  --secondary-foreground: oklch(0 0 0);
+  --muted: oklch(1 0 0);
+  --muted-foreground: oklch(0.4 0 0);
+  --accent: oklch(1 0 0);
+  --accent-foreground: oklch(0 0 0);
+  --border: oklch(0.55 0 0);
+  --input: oklch(0.55 0 0);
+  --ring: oklch(0 0 0);
+  --sidebar: oklch(1 0 0);
+  --sidebar-accent: oklch(1 0 0);
+  --sidebar-accent-foreground: oklch(0 0 0);
+  --canvas: oklch(1 0 0);
+  --inspector: oklch(1 0 0);
+}
+
+/* Monochrome panel: the accent loses its hue but keeps its role as the darkest surface. */
+:root[data-display="eink"][data-ink-color="mono"] {
+  --primary: oklch(0 0 0);
+  --primary-foreground: oklch(1 0 0);
+  --destructive: oklch(0 0 0);
+  --destructive-foreground: oklch(1 0 0);
+}
+
 @theme inline {
+  --shadow-panel: var(--panel-shadow);
+  --shadow-popover: var(--popover-shadow);
+  --shadow-floating: var(--floating-shadow);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -337,6 +402,71 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-canvas: var(--canvas);
   --color-inspector: var(--inspector);
+}
+
+/* Translucent surfaces. The alpha is a token so the e-ink profile can make every one of them
+   opaque at once, and the blur is a separate utility so only the few real glass panels pay for a
+   backdrop filter. Declared with @utility, not @layer components, so variants like hover: work. */
+@utility surface-card-soft {
+  background-color: color-mix(
+    in oklch,
+    var(--card) calc(var(--surface-glass-soft) * 100%),
+    transparent
+  );
+}
+
+@utility surface-card {
+  background-color: color-mix(in oklch, var(--card) calc(var(--surface-glass) * 100%), transparent);
+}
+
+@utility surface-card-strong {
+  background-color: color-mix(
+    in oklch,
+    var(--card) calc(var(--surface-glass-strong) * 100%),
+    transparent
+  );
+}
+
+@utility surface-base-soft {
+  background-color: color-mix(
+    in oklch,
+    var(--background) calc(var(--surface-glass-soft) * 100%),
+    transparent
+  );
+}
+
+@utility surface-base {
+  background-color: color-mix(
+    in oklch,
+    var(--background) calc(var(--surface-glass) * 100%),
+    transparent
+  );
+}
+
+@utility surface-base-strong {
+  background-color: color-mix(
+    in oklch,
+    var(--background) calc(var(--surface-glass-strong) * 100%),
+    transparent
+  );
+}
+
+@utility surface-blur {
+  backdrop-filter: blur(var(--surface-blur));
+}
+
+@utility surface-glass {
+  background-color: color-mix(in oklch, var(--card) calc(var(--surface-glass) * 100%), transparent);
+  backdrop-filter: blur(var(--surface-blur));
+}
+
+@utility surface-glass-strong {
+  background-color: color-mix(
+    in oklch,
+    var(--background) calc(var(--surface-glass-strong) * 100%),
+    transparent
+  );
+  backdrop-filter: blur(var(--surface-blur));
 }
 
 @layer base {
@@ -447,7 +577,11 @@ html::before {
     background:
       radial-gradient(
         circle at 75% 0%,
-        color-mix(in oklch, var(--primary) 4%, transparent),
+        color-mix(
+          in oklch,
+          var(--primary) calc(var(--surface-gradient-strength) * 4%),
+          transparent
+        ),
         transparent 30%
       ),
       var(--canvas);
@@ -460,7 +594,11 @@ html::before {
   .brand-button {
     background: linear-gradient(
       135deg,
-      color-mix(in oklch, var(--primary) 82%, white),
+      color-mix(
+        in oklch,
+        var(--primary) calc(100% - var(--surface-gradient-strength) * 18%),
+        white
+      ),
       var(--primary)
     );
   }
@@ -1027,6 +1165,30 @@ html::before {
 }
 [data-workspace-scroll] > * {
   will-change: transform;
+}
+
+/* Every animation frame is a panel refresh, so the e-ink profile collapses motion to its end
+   state even where the WebView does not report prefers-reduced-motion (desktop preview, or a
+   user who picked the profile by hand). Unlayered so Tailwind duration utilities cannot win. */
+[data-display="eink"] *,
+[data-display="eink"] *::before,
+[data-display="eink"] *::after {
+  animation-duration: calc(var(--motion) * 200ms) !important;
+  transition-duration: calc(var(--motion) * 200ms) !important;
+}
+
+/* A backdrop filter costs a compositor layer and resolves to a flat surface here anyway. */
+[data-display="eink"] .surface-blur,
+[data-display="eink"] .surface-glass,
+[data-display="eink"] .surface-glass-strong {
+  backdrop-filter: none;
+}
+
+/* A soft translucent ring dithers into noise on a bi-level panel; use a hard outline. */
+[data-display="eink"] :focus-visible {
+  box-shadow: none;
+  outline: var(--focus-ring);
+  outline-offset: 2px;
 }
 
 /* E-ink needs a luminance difference, not a subtle tinted selection. */

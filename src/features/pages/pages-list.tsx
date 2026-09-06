@@ -246,7 +246,7 @@ function NoteRow({
             : `Add ${pageDisplayTitle(page)} to favorites`
         }
         className={cn(
-          "reveal-on-hover mr-1 flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-background/70 hover:text-primary",
+          "reveal-on-hover mr-1 flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:surface-base hover:text-primary",
           favorite && "text-primary opacity-100",
         )}
       >

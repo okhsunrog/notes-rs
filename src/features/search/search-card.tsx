@@ -553,7 +553,7 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
       <div>
         {input}
         {queryValue && (
-          <div className="mt-2 max-h-80 overflow-y-auto rounded-xl bg-background/35 p-1.5">
+          <div className="mt-2 max-h-80 overflow-y-auto rounded-xl surface-base-soft p-1.5">
             {resultList}
           </div>
         )}
@@ -566,7 +566,7 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
       <div className="min-h-0">
         {input}
         {queryValue && (
-          <div className="mt-2 max-h-[min(50dvh,28rem)] overflow-y-auto rounded-xl bg-background/35 p-1">
+          <div className="mt-2 max-h-[min(50dvh,28rem)] overflow-y-auto rounded-xl surface-base-soft p-1">
             {resultList}
           </div>
         )}
@@ -592,7 +592,7 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
   );
   if (variant === "inline") {
     return (
-      <Card className="gap-4 rounded-2xl border-border/60 bg-card/65 py-5 shadow-sm backdrop-blur [&_[data-slot=card-header]]:px-5 [&_[data-slot=card-content]]:px-5">
+      <Card className="gap-4 rounded-2xl border-border/60 surface-glass py-5 shadow-sm [&_[data-slot=card-header]]:px-5 [&_[data-slot=card-content]]:px-5">
         {content}
       </Card>
     );

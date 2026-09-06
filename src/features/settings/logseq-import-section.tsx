@@ -66,7 +66,7 @@ type Props = {
 
 function Metric({ label, value }: { label: string; value: number }) {
   return (
-    <div className="rounded-xl border border-border/55 bg-background/65 px-3 py-2.5">
+    <div className="rounded-xl border border-border/55 surface-base px-3 py-2.5">
       <div className="text-lg font-semibold tabular-nums">{value.toLocaleString()}</div>
       <div className="text-[11px] text-muted-foreground">{label}</div>
     </div>
@@ -107,7 +107,7 @@ function DiagnosticItem({ diagnostic }: { diagnostic: ImportDiagnostic }) {
     ? `${diagnostic.relativePath}${diagnostic.range ? `:${diagnostic.range.start.line}:${diagnostic.range.start.column}` : ""}`
     : null;
   return (
-    <li className="rounded-xl border border-border/50 bg-background/55 p-3 text-xs">
+    <li className="rounded-xl border border-border/50 surface-base p-3 text-xs">
       <div className="flex flex-wrap items-center gap-2">
         <Badge
           variant={diagnostic.severity === "error" ? "destructive" : "outline"}
@@ -160,7 +160,7 @@ function Preview({ state, hasMoreDiagnostics, onLoadMoreDiagnostics }: ViewProps
         <Metric label="Media refs" value={report.mediaReferenceCount} />
       </div>
 
-      <div className="grid gap-2 rounded-xl border border-border/55 bg-background/55 p-3 text-xs text-muted-foreground sm:grid-cols-2">
+      <div className="grid gap-2 rounded-xl border border-border/55 surface-base p-3 text-xs text-muted-foreground sm:grid-cols-2">
         <span>{report.journalCount.toLocaleString()} journals</span>
         <span>{report.taskCount.toLocaleString()} tasks</span>
         <span>
@@ -192,7 +192,7 @@ function Preview({ state, hasMoreDiagnostics, onLoadMoreDiagnostics }: ViewProps
             "flex items-start gap-3 rounded-xl border p-3 text-sm",
             report.drawingConversionState !== "prepared" || report.preservedExcalidrawCount > 0
               ? "border-amber-500/35 bg-amber-500/5"
-              : "border-border/55 bg-background/55",
+              : "border-border/55 surface-base",
           )}
         >
           <Image className="mt-0.5 size-4 shrink-0 text-amber-600" />

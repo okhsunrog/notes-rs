@@ -144,7 +144,7 @@ export function AttachmentsCard({
               {attachments.map((attachment) => (
                 <li
                   key={attachment.uuid}
-                  className="flex items-center gap-2 rounded-xl border border-border/60 bg-card/60 px-2.5 py-2 text-xs"
+                  className="flex items-center gap-2 rounded-xl border border-border/60 surface-card px-2.5 py-2 text-xs"
                 >
                   <File className="size-3.5 shrink-0 text-muted-foreground" />
                   <span className="min-w-0 flex-1 truncate">{attachment.filename}</span>

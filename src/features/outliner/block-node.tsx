@@ -862,7 +862,7 @@ function BlockStylePicker({
         aria-label={`Block style: ${current.label}`}
         title={`Block style: ${current.label}`}
         className={cn(
-          "mt-0.5 h-7 min-w-0 shrink-0 gap-1 rounded-lg border-transparent bg-transparent px-1.5 shadow-none hover:border-border/70 hover:bg-card/80 focus-visible:border-border focus-visible:ring-2 [&>svg:last-child]:size-3",
+          "mt-0.5 h-7 min-w-0 shrink-0 gap-1 rounded-lg border-transparent bg-transparent px-1.5 shadow-none hover:border-border/70 hover:surface-card focus-visible:border-border focus-visible:ring-2 [&>svg:last-child]:size-3",
           editing || open ? "opacity-100" : "reveal-on-hover transition-opacity",
         )}
       >
@@ -877,7 +877,7 @@ function BlockStylePicker({
         position="popper"
         align="end"
         sideOffset={4}
-        className="min-w-48 rounded-xl border-border/70 p-1 shadow-xl"
+        className="min-w-48 rounded-xl border-border/70 p-1 shadow-popover"
         onCloseAutoFocus={(event) => {
           if (!editing) return;
           event.preventDefault();
@@ -936,7 +936,7 @@ function TaskStatePicker({
         position="popper"
         align="end"
         sideOffset={4}
-        className="min-w-40 rounded-xl border-border/70 p-1 shadow-xl"
+        className="min-w-40 rounded-xl border-border/70 p-1 shadow-popover"
         onCloseAutoFocus={(event) => {
           if (!editing) return;
           event.preventDefault();

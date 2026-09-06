@@ -179,7 +179,7 @@ function VirtualOutline({
 
   if (blocks.length === 0) {
     return (
-      <div className="rounded-md border border-dashed bg-card/30 p-6 text-center text-sm text-muted-foreground">
+      <div className="rounded-md border border-dashed surface-card-soft p-6 text-center text-sm text-muted-foreground">
         <p>
           {page.kind.kind === "journal"
             ? "Nothing captured for this day yet."

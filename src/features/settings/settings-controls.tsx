@@ -36,7 +36,7 @@ export function SettingsSection({
       Search,
     }[title] ?? Palette;
   return (
-    <section className="space-y-5 rounded-3xl border border-border/60 bg-card/70 p-5 shadow-sm backdrop-blur sm:p-6">
+    <section className="space-y-5 rounded-3xl border border-border/60 surface-glass p-5 shadow-sm sm:p-6">
       <div className="flex gap-3">
         <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
           <Icon className="size-3.5" />
@@ -67,7 +67,7 @@ export function ToggleField({
   return (
     <label
       className={cn(
-        "flex items-start justify-between gap-4 rounded-2xl border border-border/60 bg-background/55 p-4",
+        "flex items-start justify-between gap-4 rounded-2xl border border-border/60 surface-base p-4",
         disabled && "opacity-55",
       )}
     >
@@ -126,7 +126,7 @@ export function FieldGroup({
 
 export function QueueMetric({ label, value }: { label: string; value: number }) {
   return (
-    <div className="rounded-xl border border-border/60 bg-background/70 p-3">
+    <div className="rounded-xl border border-border/60 surface-base p-3">
       <div className="text-lg font-semibold tabular-nums">{value}</div>
       <div className="text-xs text-muted-foreground">{label}</div>
     </div>

@@ -250,7 +250,7 @@ function App() {
                   variant="ghost"
                   size="sm"
                   onClick={() => setSearchOpen(true)}
-                  className="mr-2 h-8 rounded-xl border border-border/60 bg-card/55 px-3 text-muted-foreground shadow-sm hover:bg-card"
+                  className="mr-2 h-8 rounded-xl border border-border/60 surface-card px-3 text-muted-foreground shadow-sm hover:surface-card-strong"
                 >
                   <Search className="size-3.5" />
                   <span className="text-xs">Search</span>
@@ -332,8 +332,8 @@ function App() {
           showCloseButton={false}
           className={
             compact
-              ? "search-dialog search-dialog-compact top-[var(--safe-area-inset-top)] left-0 h-[calc(100dvh-var(--safe-area-inset-top))] max-w-none translate-x-0 translate-y-0 gap-0 overflow-hidden rounded-none border-0 bg-background/95 p-0 shadow-2xl backdrop-blur-xl sm:max-w-none"
-              : "search-dialog top-[18%] max-w-2xl translate-y-0 gap-0 overflow-hidden rounded-2xl border-border/60 bg-background/95 p-0 shadow-2xl backdrop-blur-xl"
+              ? "search-dialog search-dialog-compact top-[var(--safe-area-inset-top)] left-0 h-[calc(100dvh-var(--safe-area-inset-top))] max-w-none translate-x-0 translate-y-0 gap-0 overflow-hidden rounded-none border-0 surface-glass-strong p-0 shadow-floating sm:max-w-none"
+              : "search-dialog top-[18%] max-w-2xl translate-y-0 gap-0 overflow-hidden rounded-2xl border-border/60 surface-glass-strong p-0 shadow-floating"
           }
         >
           <div className="sr-only">

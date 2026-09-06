@@ -409,7 +409,7 @@ export function PageView({
           {page.layout.toUpperCase()}
         </span>
         {journalDate && (
-          <div className="flex items-center rounded-lg border border-border/60 bg-card/55 p-0.5">
+          <div className="flex items-center rounded-lg border border-border/60 surface-card p-0.5">
             <Button
               type="button"
               variant="ghost"
@@ -445,7 +445,7 @@ export function PageView({
         <div
           role="group"
           aria-label="Page layout"
-          className="ml-1 flex items-center rounded-lg border border-border/60 bg-card/55 p-0.5"
+          className="ml-1 flex items-center rounded-lg border border-border/60 surface-card p-0.5"
         >
           {PAGE_LAYOUTS.map(({ value, label, icon: Icon }) => (
             <Button
