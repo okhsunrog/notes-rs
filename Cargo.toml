@@ -11,6 +11,7 @@ members = [
   "plugins/tauri-plugin-mobile-system",
   "server",
   "src-tauri",
+  "crates/ink-format",
 ]
 
 [workspace.package]

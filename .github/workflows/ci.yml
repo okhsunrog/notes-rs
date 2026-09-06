@@ -45,3 +45,23 @@ jobs:
           git diff --exit-code -- src/lib/bindings.ts
       - run: cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --locked --all-features
+
+  ink-format-standalone:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Extract format crate without application workspace
+        run: cp -R crates/ink-format "$RUNNER_TEMP/ink-format"
+      - run: cargo fmt -- --check
+        working-directory: ${{ runner.temp }}/ink-format
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: ${{ runner.temp }}/ink-format
+      - run: cargo test --all-targets
+        working-directory: ${{ runner.temp }}/ink-format
+      - run: cargo test --doc
+        working-directory: ${{ runner.temp }}/ink-format
+      - run: cargo package --allow-dirty
+        working-directory: ${{ runner.temp }}/ink-format

@@ -1,0 +1,16 @@
+[package]
+name = "ink-format"
+edition = "2024"
+version = "0.1.0"
+authors = ["okhsunrog <me@okhsunrog.dev>"]
+repository = "https://github.com/okhsunrog/tangleaf"
+description = "Portable columnar digital ink format with lossless RAW and PCO encoding"
+readme = "README.md"
+publish = false
+
+[dependencies]
+ciborium = "0.2.2"
+crc32fast = "1.5.1"
+pco = "1.0.3"
+sha2 = "0.10.9"
+thiserror = "2.0.18"
