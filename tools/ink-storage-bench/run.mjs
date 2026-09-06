@@ -2,9 +2,13 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 // Run from the host. The binary and private corpus must already be on the device.
-const [remote, output, pacing = "0"] = process.argv.slice(2);
+const [remote, output, pacing = "0", order = "forward"] = process.argv.slice(2);
 if (!remote?.startsWith("/data/local/tmp/ink-policy-") || !output)
-  throw new Error("usage: node run.mjs /data/local/tmp/ink-policy-UNIQUE output.jsonl [0|1]");
+  throw new Error(
+    "usage: node run.mjs /data/local/tmp/ink-policy-UNIQUE output.jsonl [0|1] [forward|reverse]",
+  );
+if (!["0", "1"].includes(pacing) || !["forward", "reverse"].includes(order))
+  throw new Error("Invalid pacing or order");
 const fd = fs.openSync(output, "wx");
 const adb = (args) => spawnSync("adb", args, { encoding: "utf8", timeout: 20 * 60 * 1000 });
 const run = (mode, name, phase) => {
@@ -21,11 +25,13 @@ record({
   kind: "environment",
   time: new Date().toISOString(),
   pacing,
+  order,
   device: adb(["devices", "-l"]).stdout,
   battery: adb(["shell", "dumpsys", "battery"]).stdout,
   binary: adb(["shell", "sha256sum", remote + "/bench", remote + "/page.json"]).stdout,
 });
 const modes = pacing === "1" ? ["raw", "pco"] : ["pco", "raw", "raw", "pco", "pco", "raw"];
+if (order === "reverse") modes.reverse();
 for (const [i, mode] of modes.entries()) {
   const name = `run-${pacing}-${i}-${mode}`;
   console.log(`Starting ${name}`);

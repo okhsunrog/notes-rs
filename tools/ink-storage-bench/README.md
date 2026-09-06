@@ -31,6 +31,9 @@ checkpoint/remap. Results cannot establish application latency or battery saving
   process-crash recovery, not sudden physical power loss.
 
 Input corpus is private and must not be committed. Existing databases are rejected.
+The host runner accepts `run.mjs remote-directory output.jsonl [0|1] [forward|reverse]`.
+Use a new remote directory for each suite. Reverse the order for a second paced
+pair to help distinguish policy effects from execution order and device state.
 Use a dedicated directory under `/data/local/tmp` on Android. Never pass notes.db
 or the application's handwriting database. No networking is performed.
 
