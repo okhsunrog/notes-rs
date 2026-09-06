@@ -1,4 +1,4 @@
-import { saveHandwritingPatch } from "@/lib/api";
+import { completeAllHandwriting, saveHandwritingPatch } from "@/lib/api";
 import type { InkDraftPatch, InkDraftSnapshot } from "@/lib/bindings";
 import { DraftWriter, type DraftSaveState } from "./draft-writer";
 import { incrementalDraftSaver } from "./ink-patch";
@@ -112,6 +112,21 @@ export function openSessionUuids(): string[] {
 export async function flushAllSessions(): Promise<boolean> {
   const results = await Promise.all([...writers.values()].map((writer) => writer.flush()));
   return results.every(Boolean);
+}
+
+/**
+ * The window is going away: drain every open note's queue, then let the core
+ * pack and publish. Registered at process level, because a session outlives the
+ * view that started it and the last chance to store work must not depend on a
+ * React component still being mounted.
+ */
+export async function completeEveryNote(): Promise<void> {
+  try {
+    await flushAllSessions();
+    await completeAllHandwriting();
+  } catch {
+    // Recovery on the next launch finishes sessions this call could not.
+  }
 }
 
 /** The registry outlives React, so tests clear it between cases. */

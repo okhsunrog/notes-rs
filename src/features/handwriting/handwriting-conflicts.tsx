@@ -100,6 +100,13 @@ export function HandwritingConflictDialog({ pageUuid, heads, onClose, onResolved
           ))}
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
+          {/* Without this the button is simply dead: the reason it cannot be
+              used is on the cards, not next to the action. */}
+          {state.heads.some((head) => !head.available) && (
+            <p className="mr-auto text-xs text-muted-foreground">
+              Keeping all needs every version downloaded first.
+            </p>
+          )}
           <Button type="button" variant="ghost" disabled={state.busy} onClick={onClose}>
             Later
           </Button>

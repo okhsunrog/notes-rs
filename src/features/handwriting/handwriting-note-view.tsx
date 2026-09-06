@@ -23,7 +23,6 @@ import { currentDisposition, homeTarget, type PaneId } from "@/features/workspac
 import { useWorkspaceStore } from "@/features/workspace/workspace-store";
 import {
   CommandFailure,
-  completeAllHandwriting,
   completeHandwritingNote,
   handwritingHistory,
   handwritingNoteStatus,
@@ -45,7 +44,6 @@ import {
   awaitCompletion,
   beginSession,
   endSession,
-  flushAllSessions,
   getWriter,
   releaseEditor,
   requestCompletion,
@@ -58,6 +56,20 @@ import { applyHistoryUpdate } from "./ink-patch";
 import { useHandwritingAvailability, useHandwritingPreference } from "./input-capabilities";
 import type { OnyxInkStatus } from "./onyx-ink";
 
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return (
+    target.isContentEditable ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLInputElement
+  );
+}
+
+/** The note itself is gone, so nothing is left to store, pack or retry. */
+function noteIsGone(error: Error | null): boolean {
+  return error instanceof CommandFailure && error.code === "not_found";
+}
+
 /**
  * Completion outlives the editor: it is requested detached, retried from a
  * toast, and never treated as server confirmation of the publication.
@@ -68,16 +80,6 @@ function completeInBackground(pageUuid: string) {
     if (error instanceof CommandFailure && error.code === "not_found") return;
     notifyRetryableError("Could not prepare sync", error, () => completeInBackground(pageUuid));
   });
-}
-
-/** The window is going away: drain every note's queue, then let the core pack. */
-async function completeEveryNote() {
-  try {
-    await flushAllSessions();
-    await completeAllHandwriting();
-  } catch {
-    // Recovery on the next launch finishes sessions this call could not.
-  }
 }
 
 type Props = {
@@ -135,6 +137,9 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
   const generationRef = useRef(0);
   const suspendedRef = useRef(false);
   suspendedRef.current = suspended;
+  // Whether the last read asked for an editable session, so a later upgrade is
+  // distinguishable from an ordinary re-read.
+  const openedForEditing = useRef(false);
 
   const access = editorAccess(ownership, canDrawHandwriting(available, mouseEnabled));
   const editing = access === "editable";
@@ -176,6 +181,7 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
    */
   const openNote = useCallback(async () => {
     const generation = ++generationRef.current;
+    openedForEditing.current = editingRef.current;
     setLoadError(null);
     try {
       const carried = getWriter(uuid);
@@ -231,6 +237,14 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
     };
   }, [openNote, ownership]);
 
+  // A read-only open holds no session and stores nothing, so a pen observed
+  // after the note was opened — or mouse drawing switched on in Settings — has
+  // to re-read the note with `editing` set before the canvas accepts input.
+  useEffect(() => {
+    if (ownership === "pending" || !editing || openedForEditing.current) return;
+    void openNote();
+  }, [editing, openNote, ownership]);
+
   const suspend = useCallback(() => {
     if (!editingRef.current) return;
     setSuspended(true);
@@ -256,10 +270,11 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
       if (document.visibilityState === "hidden") suspend();
       else resume();
     };
+    // Draining every session is registered once at process level, because it
+    // has to run whether or not this view happens to be mounted.
     const leaveApp = () => {
       setSuspended(true);
       void setHandwritingBackground(true);
-      void completeEveryNote();
     };
     document.addEventListener("visibilitychange", visibility);
     window.addEventListener("pagehide", leaveApp);
@@ -276,8 +291,11 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
       void (async () => {
         // An unacknowledged gesture keeps the session alive so a later mount can
         // retry it; only a clean queue may be handed to completion and dropped.
-        if (!(await writer.flush())) return;
-        if (!leavingRef.current) completeInBackground(uuid);
+        // A deleted note is the exception: its gestures can never be stored, so
+        // holding the writer would strand it for the life of the process.
+        const stored = await writer.flush();
+        if (!stored && !noteIsGone(writer.lastError())) return;
+        if (stored && !leavingRef.current) completeInBackground(uuid);
         endSession(uuid, writer);
       })();
     };
@@ -340,7 +358,12 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
     // is not closed here for the same reason — onDelete cannot report a
     // declined confirmation — so the unmount path stays in charge, and a
     // completion for a note that is gone is ignored rather than retried.
-    await getWriter(uuid)?.flush();
+    const writer = getWriter(uuid);
+    if (writer && !(await writer.flush()) && !noteIsGone(writer.lastError())) {
+      // Storage refused the queue for a reason that is still on screen. Deleting
+      // now would make a declined confirmation cost those gestures.
+      return;
+    }
     await onDelete(page);
   }, [busy, onDelete, page, uuid]);
 
@@ -388,6 +411,9 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
       data-ink-editor
       className="flex h-full min-h-0 flex-col pb-[var(--safe-area-inset-bottom)]"
       onKeyDown={(event) => {
+        // The title textarea is inside this container; its own undo stack must
+        // keep working while the caret is in it.
+        if (isEditableTarget(event.target)) return;
         if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
           event.preventDefault();
           event.stopPropagation();

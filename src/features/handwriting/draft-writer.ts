@@ -6,6 +6,7 @@ export type DraftSaveState = "saving" | "saved" | Error;
 export class DraftWriter {
   private pending: InkDraft[] = [];
   private running: Promise<boolean> | null = null;
+  private failure: Error | null = null;
 
   constructor(
     private revision: string | null,
@@ -20,6 +21,15 @@ export class DraftWriter {
 
   hasPending() {
     return this.pending.length > 0;
+  }
+
+  /**
+   * Why the last flush stopped. Callers distinguish a note that has been
+   * deleted — nothing is left to store, so the session can be closed — from a
+   * storage failure whose gestures must be kept for a retry.
+   */
+  lastError(): Error | null {
+    return this.failure;
   }
 
   /** The newest queued state: never older than what storage would return. */
@@ -55,10 +65,12 @@ export class DraftWriter {
         this.revision = await this.save(draft, this.revision);
         this.pending.shift();
       } catch (error) {
-        this.onState(error instanceof Error ? error : new Error(String(error)));
+        this.failure = error instanceof Error ? error : new Error(String(error));
+        this.onState(this.failure);
         return false;
       }
     }
+    this.failure = null;
     this.onState("saved");
     return true;
   }

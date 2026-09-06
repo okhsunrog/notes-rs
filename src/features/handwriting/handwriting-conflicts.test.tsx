@@ -109,6 +109,8 @@ it("renders one card per head and refuses to keep a version that is not download
   expect(api.previewHandwritingVersion).toHaveBeenCalledTimes(2);
   expect(buttonIn(cards()[1]!, "Keep this one").disabled).toBe(true);
   expect(dialogButton("Keep all as separate notes").disabled).toBe(true);
+  // A dead button with no reason next to it reads as a bug, not as a state.
+  expect(document.body.textContent).toContain("Keeping all needs every version downloaded first.");
 });
 
 it("keeps one version and passes every current head as the expectation", async () => {
@@ -126,6 +128,8 @@ it("keeps one version and passes every current head as the expectation", async (
 it("keeps every version as separate notes in head order", async () => {
   api.resolveHandwritingConflict.mockResolvedValue(["page-a", "page-b"]);
   await render([head("a"), head("b")]);
+
+  expect(document.body.textContent).not.toContain("needs every version downloaded");
 
   await act(async () => {
     dialogButton("Keep all as separate notes").click();

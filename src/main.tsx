@@ -6,6 +6,7 @@ import App from "./App";
 import { AppearanceProvider } from "@/app/appearance";
 import { ConfirmationProvider } from "@/app/confirmation";
 import { ErrorBoundary } from "@/app/error-boundary";
+import { registerLifecycleFlush } from "@/app/lifecycle-flush";
 import { disableViewportZoom } from "@/app/viewport-zoom";
 import { PageSessionProvider } from "@/features/pages/page-session";
 import { InputCapabilitiesProvider } from "@/features/handwriting/input-capabilities";
@@ -19,6 +20,7 @@ const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement)
 const queryClient = createAppQueryClient();
 void listenForDomainEvents(queryClient);
 disableViewportZoom();
+registerLifecycleFlush();
 
 root.render(
   <React.StrictMode>

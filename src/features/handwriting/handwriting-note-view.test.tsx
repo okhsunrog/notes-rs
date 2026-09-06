@@ -13,7 +13,7 @@ import {
 import { useWorkspaceStore } from "@/features/workspace/workspace-store";
 import type { InkHistorySnapshot, Page } from "@/lib/bindings";
 import { HandwritingNoteView } from "./handwriting-note-view";
-import { resetHandwritingSessions } from "./handwriting-session";
+import { getWriter, resetHandwritingSessions } from "./handwriting-session";
 import { useHandwritingPreference } from "./input-capabilities";
 import { emptyDraft } from "./ink-model";
 
@@ -298,4 +298,80 @@ it("stores queued gestures before deleting and never asks to retry sync", async 
   root = createRoot(container);
 
   expect(api.notifyRetryableError).not.toHaveBeenCalled();
+});
+
+it("re-reads the note for editing once a pen or the mouse preference appears", async () => {
+  useHandwritingPreference.setState({ mouseEnabled: false });
+  await mount();
+
+  expect(api.loadHandwritingNote).toHaveBeenCalledWith(page.uuid, false);
+  expect(container.querySelector('[role="toolbar"]')).toBeNull();
+
+  api.saveHandwritingPatch.mockResolvedValue("revision-2");
+  await act(async () => {
+    useHandwritingPreference.setState({ mouseEnabled: true });
+  });
+
+  // A read-only open holds no session, so the note has to be read again before
+  // anything drawn on it can be stored.
+  expect(api.loadHandwritingNote).toHaveBeenLastCalledWith(page.uuid, true);
+  await act(async () => {
+    button("Grid paper").click();
+  });
+  expect(api.saveHandwritingPatch).toHaveBeenCalledWith(
+    page.uuid,
+    expect.objectContaining({ background: "grid" }),
+    "revision-1",
+  );
+});
+
+it("closes the session of a note that was deleted while gestures were queued", async () => {
+  const { CommandFailure } = await import("@/lib/api");
+  api.saveHandwritingPatch.mockRejectedValue(
+    new CommandFailure({ code: "not_found", message: "page is gone" }),
+  );
+  await mount();
+
+  await act(async () => {
+    button("Grid paper").click();
+  });
+  expect(getWriter(page.uuid)).not.toBeNull();
+
+  await act(async () => root.unmount());
+  root = createRoot(container);
+
+  // Keeping the writer would strand it for the life of the process: its
+  // gestures can never be stored against a note that no longer exists.
+  expect(getWriter(page.uuid)).toBeNull();
+  expect(api.completeHandwritingNote).not.toHaveBeenCalled();
+});
+
+it("leaves undo to the title field while the caret is in it", async () => {
+  api.saveHandwritingPatch.mockResolvedValue("revision-2");
+  api.handwritingHistory.mockResolvedValue({
+    baseRevision: "revision-2",
+    revision: "revision-3",
+    canUndo: false,
+    canRedo: true,
+    patch: { order: [], upserts: [], background: "plain" },
+  });
+  await mount();
+
+  await act(async () => {
+    button("Grid paper").click();
+  });
+
+  const title = container.querySelector("textarea");
+  if (!title) throw new Error("no title field");
+  await act(async () => {
+    title.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "z", ctrlKey: true, bubbles: true, cancelable: true }),
+    );
+  });
+  expect(api.handwritingHistory).not.toHaveBeenCalled();
+
+  await act(async () => {
+    button("Undo stroke").click();
+  });
+  expect(api.handwritingHistory).toHaveBeenCalledWith(page.uuid, false, "revision-2");
 });
