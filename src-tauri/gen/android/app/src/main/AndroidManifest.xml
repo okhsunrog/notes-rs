@@ -11,6 +11,8 @@
         android:networkSecurityConfig="@xml/network_security_config"
         android:theme="@style/Theme.tangleaf"
         android:usesCleartextTraffic="${usesCleartextTraffic}">
+        <!-- density|fontScale are handled in-process: per-app DPI and font-size changes on
+             BOOX tablets otherwise recreate the Activity and wry leaves a blank WebView. -->
         <activity
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|density|fontScale"
             android:launchMode="singleTask"
