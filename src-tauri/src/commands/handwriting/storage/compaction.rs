@@ -14,6 +14,12 @@ struct Plan {
 fn prepare(path: &Path) -> CommandResult<Option<Plan>> {
     let mut conn = open(path)?;
     let tx = conn.transaction().map_err(err)?;
+    // No roots need decoding if fewer than two fresh blocks remain. This also
+    // makes the worker's final idle check cheap; no corruption is hidden on reads.
+    let fresh: i64 = tx.query_row("SELECT count(*) FROM (SELECT 1 FROM ink_chunks c WHERE NOT EXISTS(SELECT 1 FROM ink_sealed_chunks s WHERE s.id=c.id) LIMIT 2)", [], |r| r.get(0)).map_err(err)?;
+    if fresh < 2 {
+        return Ok(None);
+    }
     let roots = history::roots(&tx)?;
     let mut catalog = BTreeMap::new();
     let mut locations = BTreeMap::new();
@@ -194,6 +200,12 @@ fn publish(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(err)?;
     let mut replacements = Vec::new();
+    let mut retained = history::Retained::default();
+    // Hash each output block once, rather than once per segment per history root.
+    let chunk_refs: BTreeMap<_, _> = chunks
+        .iter()
+        .map(|(id, bytes)| (*id, blob_ref(bytes)))
+        .collect();
     for (seq, root_id) in history::roots(&tx)? {
         let mut doc = {
             #[cfg(test)]
@@ -214,19 +226,18 @@ fn publish(
             }
         }
         if !changed {
+            retained.pin(root_id, &doc);
             continue;
         }
         doc.chunks = doc
             .segments
             .values()
-            .map(|r| {
-                (
-                    r.chunk,
-                    chunks
-                        .get(&r.chunk)
-                        .map(|bytes| blob_ref(bytes))
-                        .unwrap_or_else(|| doc.chunks[&r.chunk].clone()),
-                )
+            .map(|r| r.chunk)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|id| {
+                let entry = chunk_refs.get(&id).unwrap_or_else(|| &doc.chunks[&id]);
+                (id, entry.clone())
             })
             .collect();
         let size = doc
@@ -242,7 +253,9 @@ fn publish(
         drop(remap_span);
         #[cfg(test)]
         let _span = profile::span("publish.seal");
-        replacements.push((seq, seal(&doc)?));
+        let root = seal(&doc)?;
+        retained.pin(root.id, &doc);
+        replacements.push((seq, root));
     }
     if replacements.is_empty() {
         return Ok(false);
@@ -275,7 +288,7 @@ fn publish(
     {
         #[cfg(test)]
         let _span = profile::span("publish.gc");
-        history::collect(&tx)?;
+        retained.collect(&tx)?;
     }
     #[cfg(test)]
     let _span = profile::span("publish.commit_close");
@@ -575,6 +588,52 @@ mod tests {
         assert!(sealed.iter().all(|row| after.contains(row)));
         equal(&read(&path).unwrap().draft, &draft);
         assert!(prepare(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn history_only_strokes_survive_and_late_gc_failure_rolls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ink.sqlite3");
+        let original = sheet();
+        let first = write_draft(&path, original.clone(), None).unwrap();
+        let remaining = original.strokes.last().unwrap().clone();
+        let revision = write_patch(
+            &path,
+            InkDraftPatch {
+                order: vec![remaining.id],
+                upserts: vec![],
+                background: InkBackground::Grid,
+            },
+            Some(first),
+        )
+        .unwrap();
+        let before = read(&path).unwrap();
+        let conn = open(&path).unwrap();
+        let records = rows(&conn, "ink_records");
+        let chunks = rows(&conn, "ink_chunks");
+        let roots = history::roots(&conn).unwrap();
+        conn.execute_batch("CREATE TRIGGER fail_gc BEFORE DELETE ON ink_chunks BEGIN SELECT RAISE(ABORT,'injected late GC failure'); END;").unwrap();
+        drop(conn);
+        assert!(compact(&path).is_err());
+        let conn = open(&path).unwrap();
+        assert_eq!(rows(&conn, "ink_records"), records);
+        assert_eq!(rows(&conn, "ink_chunks"), chunks);
+        assert_eq!(history::roots(&conn).unwrap(), roots);
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM ink_sealed_chunks", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        conn.execute_batch("DROP TRIGGER fail_gc").unwrap();
+        drop(conn);
+        assert_eq!(read(&path).unwrap().revision, Some(revision.clone()));
+        assert!(compact(&path).unwrap());
+        equal(&read(&path).unwrap().draft, &before.draft);
+        let undo = history::navigate(&path, Some(false), Some(revision)).unwrap();
+        equal(&undo.snapshot.draft, &original);
+        let redo = history::navigate(&path, Some(true), undo.snapshot.revision).unwrap();
+        equal(&redo.snapshot.draft, &before.draft);
     }
 
     #[test]

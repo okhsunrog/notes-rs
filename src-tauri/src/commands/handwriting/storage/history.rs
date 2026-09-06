@@ -44,36 +44,54 @@ pub(super) fn roots(conn: &Connection) -> CommandResult<Vec<(i64, Id)>> {
         })
         .collect()
 }
-pub(super) fn collect(conn: &Connection) -> CommandResult<()> {
-    conn.execute_batch("CREATE TEMP TABLE IF NOT EXISTS keep_records(id BLOB PRIMARY KEY) WITHOUT ROWID; CREATE TEMP TABLE IF NOT EXISTS keep_chunks(id BLOB PRIMARY KEY) WITHOUT ROWID; DELETE FROM keep_records; DELETE FROM keep_chunks;").map_err(err)?;
-    for (_, id) in roots(conn)? {
-        let doc = {
-            #[cfg(test)]
-            let _span = profile::span("gc.read_root");
-            model::Document::read(&get_record(conn, id, None)?).map_err(err)?
-        };
-        #[cfg(test)]
-        let _span = profile::span("gc.mark_sql");
-        for id in doc.records.keys().chain(std::iter::once(&id)) {
-            conn.execute(
-                "INSERT OR IGNORE INTO keep_records VALUES(?1)",
-                [id.as_slice()],
-            )
-            .map_err(err)?;
-        }
-        for id in doc.chunks.keys() {
-            conn.execute(
-                "INSERT OR IGNORE INTO keep_chunks VALUES(?1)",
-                [id.as_slice()],
-            )
-            .map_err(err)?;
-        }
-    }
-    #[cfg(test)]
-    let _span = profile::span("gc.delete_sql");
-    conn.execute_batch("DELETE FROM ink_records WHERE id NOT IN (SELECT id FROM keep_records); DELETE FROM ink_chunks WHERE id NOT IN (SELECT id FROM keep_chunks);").map_err(err)?;
-    Ok(())
+/// A complete set of live references for the transaction's current history roots.
+/// Publication may reuse already validated documents instead of decoding them again.
+#[derive(Default)]
+pub(super) struct Retained {
+    records: BTreeSet<Id>,
+    chunks: BTreeSet<Id>,
 }
+impl Retained {
+    pub(super) fn pin(&mut self, root: Id, doc: &model::Document) {
+        self.records.insert(root);
+        self.records.extend(doc.records.keys().copied());
+        self.chunks.extend(doc.chunks.keys().copied());
+    }
+    pub(super) fn collect(self, conn: &Connection) -> CommandResult<()> {
+        conn.execute_batch("CREATE TEMP TABLE IF NOT EXISTS keep_records(id BLOB PRIMARY KEY) WITHOUT ROWID; CREATE TEMP TABLE IF NOT EXISTS keep_chunks(id BLOB PRIMARY KEY) WITHOUT ROWID; DELETE FROM keep_records; DELETE FROM keep_chunks;").map_err(err)?;
+        {
+            #[cfg(test)]
+            let _span = profile::span("gc.mark_sql");
+            let mut records = conn
+                .prepare("INSERT INTO keep_records VALUES(?1)")
+                .map_err(err)?;
+            for id in self.records {
+                records.execute([id.as_slice()]).map_err(err)?;
+            }
+            let mut chunks = conn
+                .prepare("INSERT INTO keep_chunks VALUES(?1)")
+                .map_err(err)?;
+            for id in self.chunks {
+                chunks.execute([id.as_slice()]).map_err(err)?;
+            }
+        }
+        #[cfg(test)]
+        let _span = profile::span("gc.delete_sql");
+        conn.execute_batch("DELETE FROM ink_records WHERE id NOT IN (SELECT id FROM keep_records); DELETE FROM ink_chunks WHERE id NOT IN (SELECT id FROM keep_chunks);").map_err(err)?;
+        Ok(())
+    }
+}
+pub(super) fn collect(conn: &Connection) -> CommandResult<()> {
+    let mut retained = Retained::default();
+    for (_, id) in roots(conn)? {
+        #[cfg(test)]
+        let _span = profile::span("gc.read_root");
+        let doc = model::Document::read(&get_record(conn, id, None)?).map_err(err)?;
+        retained.pin(id, &doc);
+    }
+    retained.collect(conn)
+}
+
 fn result(conn: &Connection) -> CommandResult<(InkHistorySnapshot, BTreeMap<Id, Id>)> {
     let mut objects = BTreeMap::new();
     let snapshot = match load(conn)? {
