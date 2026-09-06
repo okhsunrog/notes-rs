@@ -519,3 +519,10 @@ by added/changed geometry. Opening, navigation, deletion-only patches and paper
 changes do not arm it. Requests during work are coalesced; bounded batches drain
 without restarting a timer on each gesture. This is maintenance scheduling only;
 versioned note autosave and synchronization integration are still pending.
+
+Device validation (2026-09-06): installed arm64 debug build; opened the current
+71-stroke sheet successfully. Compared device database copies before/after schema
+2 -> 3: chunk bytes, record bytes and head revision unchanged, integrity_check OK,
+one existing chunk marked sealed. Fifteen handwriting storage/history tests pass;
+scoped Clippy passes with the existing collapsible_if/chunks_exact_to_as_chunks
+baseline lints excluded. Fresh handwriting/eraser/Undo visual acceptance is pending.
