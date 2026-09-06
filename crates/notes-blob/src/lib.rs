@@ -90,10 +90,11 @@ impl FromStr for BlobHash {
         }
 
         let mut decoded = [0_u8; SHA256_BYTES];
-        for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let (pairs, _) = value.as_bytes().as_chunks::<2>();
+        for (index, &[high, low]) in pairs.iter().enumerate() {
             let high =
-                decode_nibble(pair[0]).ok_or(ParseBlobHashError::NonHex { index: index * 2 })?;
-            let low = decode_nibble(pair[1]).ok_or(ParseBlobHashError::NonHex {
+                decode_nibble(high).ok_or(ParseBlobHashError::NonHex { index: index * 2 })?;
+            let low = decode_nibble(low).ok_or(ParseBlobHashError::NonHex {
                 index: index * 2 + 1,
             })?;
             decoded[index] = (high << 4) | low;

@@ -99,13 +99,12 @@ fn parse_configuration(reader: impl Read) -> Result<Configuration> {
     if let Some(url) = &config.server_url {
         validate_http_url(url)?;
     }
-    if let Some(token) = &config.sync_token {
-        if token.trim().is_empty()
+    if let Some(token) = &config.sync_token
+        && (token.trim().is_empty()
             || token.chars().any(char::is_control)
-            || config.server_url.is_none()
-        {
-            bail!("A non-empty token requires a server URL and cannot contain control characters.");
-        }
+            || config.server_url.is_none())
+    {
+        bail!("A non-empty token requires a server URL and cannot contain control characters.");
     }
     Ok(config)
 }
@@ -352,8 +351,10 @@ mod tests {
     use super::*;
 
     fn stored() -> StoredSettings {
-        let mut stored = StoredSettings::default();
-        stored.sync_server_url = Some("https://notes.example/".parse().unwrap());
+        let mut stored = StoredSettings {
+            sync_server_url: Some("https://notes.example/".parse().unwrap()),
+            ..StoredSettings::default()
+        };
         stored
             .secrets
             .insert(SecretKey::SyncToken, "private-token".into());

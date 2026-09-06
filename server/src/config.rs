@@ -170,8 +170,9 @@ fn parse_sha256(encoded: &str) -> Result<[u8; 32]> {
         bail!("invalid SHA-256 length");
     }
     let mut digest = [0_u8; 32];
-    for (index, pair) in encoded.as_bytes().chunks_exact(2).enumerate() {
-        digest[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
+    let (pairs, _) = encoded.as_bytes().as_chunks::<2>();
+    for (index, &[high, low]) in pairs.iter().enumerate() {
+        digest[index] = (hex_nibble(high)? << 4) | hex_nibble(low)?;
     }
     Ok(digest)
 }

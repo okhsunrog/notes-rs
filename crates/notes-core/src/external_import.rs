@@ -79,8 +79,9 @@ impl ExternalImportDigest {
             ));
         }
         let mut bytes = [0_u8; 32];
-        for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
-            bytes[index] = (hex_value(pair[0])? << 4) | hex_value(pair[1])?;
+        let (pairs, _) = value.as_bytes().as_chunks::<2>();
+        for (index, &[high, low]) in pairs.iter().enumerate() {
+            bytes[index] = (hex_value(high)? << 4) | hex_value(low)?;
         }
         Ok(Self(bytes))
     }
