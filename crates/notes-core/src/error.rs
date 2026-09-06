@@ -12,6 +12,8 @@ pub enum CoreError {
     SyncSequenceGap { expected: u64, received: u64 },
     #[error(transparent)]
     Database(#[from] rusqlite::Error),
+    #[error("ink storage: {0}")]
+    InkStorage(String),
 }
 
 impl CoreError {

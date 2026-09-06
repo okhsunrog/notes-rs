@@ -195,7 +195,9 @@ fn err<E: std::fmt::Display + 'static>(error: E) -> CommandError {
                 notes_core::CoreError::Conflict(_)
                 | notes_core::CoreError::SyncConflict(_)
                 | notes_core::CoreError::SyncSequenceGap { .. } => CommandErrorCode::Conflict,
-                notes_core::CoreError::Database(_) => CommandErrorCode::Internal,
+                notes_core::CoreError::Database(_) | notes_core::CoreError::InkStorage(_) => {
+                    CommandErrorCode::Internal
+                }
             };
             return CommandError::new(code, message);
         }
@@ -243,7 +245,9 @@ fn err<E: std::fmt::Display + 'static>(error: E) -> CommandError {
             notes_core::CoreError::Conflict(_)
             | notes_core::CoreError::SyncConflict(_)
             | notes_core::CoreError::SyncSequenceGap { .. } => CommandErrorCode::Conflict,
-            notes_core::CoreError::Database(_) => CommandErrorCode::Internal,
+            notes_core::CoreError::Database(_) | notes_core::CoreError::InkStorage(_) => {
+                CommandErrorCode::Internal
+            }
         };
         return CommandError::new(code, error.to_string());
     }

@@ -27,6 +27,15 @@ CREATE TABLE ink_history (
 CREATE TABLE ink_sealed_chunks (
   id BLOB PRIMARY KEY REFERENCES ink_chunks(id) ON DELETE CASCADE
 ) WITHOUT ROWID;
+-- Derived membership, written atomically with each immutable root. GC uses this
+-- index instead of parsing every note's CBOR on each gesture in another note.
+CREATE TABLE ink_root_refs (
+  root_id BLOB NOT NULL REFERENCES ink_records(id) ON DELETE CASCADE,
+  kind INTEGER NOT NULL CHECK(kind IN (0,1)),
+  object_id BLOB NOT NULL CHECK(length(object_id)=16),
+  PRIMARY KEY(root_id,kind,object_id)
+) WITHOUT ROWID;
+CREATE INDEX ink_root_refs_object ON ink_root_refs(kind,object_id);
 
 -- Version metadata can arrive before blob download. A materialized root pins
 -- its local graph; an absent root never makes a partially downloaded note editable.

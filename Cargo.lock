@@ -3546,6 +3546,7 @@ dependencies = [
  "anyhow",
  "async-channel",
  "chrono",
+ "ink-format",
  "notes-blob",
  "notes-markdown",
  "proptest",

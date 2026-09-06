@@ -25,6 +25,7 @@ thiserror.workspace = true
 tracing.workspace = true
 unicode-normalization.workspace = true
 uuid.workspace = true
+ink-format = { version = "0.1.0", path = "../ink-format" }
 
 [dev-dependencies]
 proptest.workspace = true

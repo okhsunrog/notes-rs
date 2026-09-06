@@ -4,6 +4,7 @@ pub mod db;
 mod error;
 pub mod external_import;
 pub mod hlc;
+pub mod ink;
 pub mod model;
 pub mod operation;
 pub mod sqlite;

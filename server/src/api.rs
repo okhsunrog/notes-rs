@@ -164,7 +164,9 @@ impl ApiError {
                 notes_core::CoreError::Conflict(message)
                 | notes_core::CoreError::SyncConflict(message) => Self::conflict(message.clone()),
                 notes_core::CoreError::SyncSequenceGap { .. } => Self::conflict(core.to_string()),
-                notes_core::CoreError::Database(_) => Self::internal(error),
+                notes_core::CoreError::Database(_) | notes_core::CoreError::InkStorage(_) => {
+                    Self::internal(error)
+                }
             };
         }
         Self::internal(error)
