@@ -110,6 +110,60 @@ pub fn mobile_system_info(app: AppHandle) -> CommandResult<Option<MobileSystemIn
     }
 }
 
+/// What the panel does with a display-profile request.
+///
+/// `requested` names the update mode asked for (`"none"` when the standard profile claims none),
+/// `effective_mode` is the mode the view reports afterwards — the ink editor holds a faster mode of
+/// its own while it is open — and `accepted` is false on every platform without a steerable panel.
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayProfileResult {
+    pub effective_mode: Option<String>,
+    pub requested: String,
+    pub accepted: bool,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn set_display_profile(app: AppHandle, eink: bool) -> CommandResult<DisplayProfileResult> {
+    #[cfg(target_os = "android")]
+    {
+        let outcome = app.mobile_system().set_display_profile(eink).map_err(err)?;
+        Ok(DisplayProfileResult {
+            effective_mode: outcome.effective_mode,
+            requested: outcome.requested,
+            accepted: outcome.accepted,
+        })
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(DisplayProfileResult {
+            effective_mode: None,
+            requested: if eink { "REGAL".into() } else { "none".into() },
+            accepted: false,
+        })
+    }
+}
+
+/// Repaints the whole panel once. Partial e-ink update modes leave the previous image behind, and
+/// nothing but a full refresh clears it.
+#[tauri::command]
+#[specta::specta]
+pub fn request_full_refresh(app: AppHandle) -> CommandResult<()> {
+    #[cfg(target_os = "android")]
+    {
+        app.mobile_system().request_full_refresh().map_err(err)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(())
+    }
+}
+
 #[tauri::command]
 #[specta::specta]
 pub fn set_system_bars_style(app: AppHandle, dark_background: bool) -> CommandResult<()> {

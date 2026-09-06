@@ -29,6 +29,12 @@ export const commands = {
 	saveHandwritingPatch: (pageUuid: string, patch: InkDraftPatch, expectedRevision: string | null) => typedError<string, CommandError>(__TAURI_INVOKE("save_handwriting_patch", { pageUuid, patch, expectedRevision })),
 	completeHandwritingNote: (pageUuid: string) => typedError<InkNoteStatus, CommandError>(__TAURI_INVOKE("complete_handwriting_note", { pageUuid })),
 	setSystemBarsStyle: (darkBackground: boolean) => typedError<null, CommandError>(__TAURI_INVOKE("set_system_bars_style", { darkBackground })),
+	setDisplayProfile: (eink: boolean) => typedError<DisplayProfileResult, CommandError>(__TAURI_INVOKE("set_display_profile", { eink })),
+	/**
+	 *  Repaints the whole panel once. Partial e-ink update modes leave the previous image behind, and
+	 *  nothing but a full refresh clears it.
+	 */
+	requestFullRefresh: () => typedError<null, CommandError>(__TAURI_INVOKE("request_full_refresh")),
 	syncStatus: () => __TAURI_INVOKE<SyncStatus>("sync_status"),
 	serverAiStatus: () => typedError<AiIndexStatus, CommandError>(__TAURI_INVOKE("server_ai_status")),
 	saveServerAiSettings: (settings: AiRuntimeSettings) => typedError<AiIndexStatus, CommandError>(__TAURI_INVOKE("save_server_ai_settings", { settings })),
@@ -391,6 +397,19 @@ export type DiagnosticSeverity = "info" | "warning" | "error";
  *  is not reported by the e-ink WebView, so the frontend display profile depends on this value.
  */
 export type DisplayKind = "eink" | "lcd" | "unknown";
+
+/**
+ *  What the panel does with a display-profile request.
+ * 
+ *  `requested` names the update mode asked for (`"none"` when the standard profile claims none),
+ *  `effective_mode` is the mode the view reports afterwards — the ink editor holds a faster mode of
+ *  its own while it is open — and `accepted` is false on every platform without a steerable panel.
+ */
+export type DisplayProfileResult = {
+	effectiveMode: string | null,
+	requested: string,
+	accepted: boolean,
+};
 
 /**
  *  Opaque revision of a complete page document projection.

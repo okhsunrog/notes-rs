@@ -46,6 +46,28 @@ pub struct DisplayInfo {
     pub color_panel: Option<bool>,
 }
 
+/// Outcome of a display-profile request.
+///
+/// `requested` names the update mode the base layer asked for (`"none"` when the standard profile
+/// claims no mode at all), `effective_mode` is what the platform reports for the view afterwards,
+/// and `accepted` says whether the request took effect. A platform without a controllable panel
+/// reports `accepted: false` and no mode.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayProfileOutcome {
+    #[serde(default)]
+    pub effective_mode: Option<String>,
+    pub requested: String,
+    pub accepted: bool,
+}
+
+#[cfg(mobile)]
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DisplayProfileArgs {
+    pub eink: bool,
+}
+
 #[cfg(mobile)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct DeviceNameResponse {

@@ -3,6 +3,7 @@ import { Menu } from "@base-ui/react/menu";
 import { ChevronDown, PenLine } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { refreshPanelAfterClose } from "@/app/eink-refresh";
 import { useWorkspaceController } from "@/features/workspace/workspace-controller";
 import { useHandwritingAvailability } from "./input-capabilities";
 
@@ -32,7 +33,7 @@ export function NewNoteButton({
         {children}
       </Button>
       {available && (
-        <Menu.Root>
+        <Menu.Root onOpenChange={refreshPanelAfterClose()}>
           <Menu.Trigger
             render={
               <Button

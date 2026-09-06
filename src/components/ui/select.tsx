@@ -3,11 +3,19 @@ import { Select as SelectPrimitive } from "@base-ui/react/select";
 import { CheckIcon, ChevronDownIcon, ChevronUpIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { refreshPanelAfterClose } from "@/app/eink-refresh";
 
-function Select<Value, Multiple extends boolean | undefined = false>(
-  props: SelectPrimitive.Root.Props<Value, Multiple>,
-) {
-  return <SelectPrimitive.Root data-slot="select" {...props} />;
+function Select<Value, Multiple extends boolean | undefined = false>({
+  onOpenChange,
+  ...props
+}: SelectPrimitive.Root.Props<Value, Multiple>) {
+  return (
+    <SelectPrimitive.Root
+      data-slot="select"
+      onOpenChange={refreshPanelAfterClose(onOpenChange)}
+      {...props}
+    />
+  );
 }
 
 function SelectGroup({ ...props }: React.ComponentProps<typeof SelectPrimitive.Group>) {

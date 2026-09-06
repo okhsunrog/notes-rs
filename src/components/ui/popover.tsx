@@ -2,9 +2,16 @@ import * as React from "react";
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 
 import { cn } from "@/lib/utils";
+import { refreshPanelAfterClose } from "@/app/eink-refresh";
 
-function Popover(props: React.ComponentProps<typeof PopoverPrimitive.Root>) {
-  return <PopoverPrimitive.Root data-slot="popover" {...props} />;
+function Popover({ onOpenChange, ...props }: React.ComponentProps<typeof PopoverPrimitive.Root>) {
+  return (
+    <PopoverPrimitive.Root
+      data-slot="popover"
+      onOpenChange={refreshPanelAfterClose(onOpenChange)}
+      {...props}
+    />
+  );
 }
 
 function PopoverTrigger(props: React.ComponentProps<typeof PopoverPrimitive.Trigger>) {

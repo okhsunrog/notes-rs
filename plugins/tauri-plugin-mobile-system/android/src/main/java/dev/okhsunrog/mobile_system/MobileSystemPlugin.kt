@@ -11,6 +11,8 @@ import android.webkit.WebView
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import com.onyx.android.sdk.api.device.epd.EpdController
+import com.onyx.android.sdk.api.device.epd.UpdateMode
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
@@ -22,6 +24,14 @@ import app.tauri.plugin.Plugin
 class SystemBarsStyleArgs {
     var darkBackground: Boolean = false
 }
+
+@InvokeArg
+class DisplayProfileArgs {
+    var eink: Boolean = false
+}
+
+/** No enum value means "the profile claims no base mode"; UpdateMode.None is a real mode. */
+private const val NO_BASE_MODE = "none"
 
 @TauriPlugin
 class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), InputManager.InputDeviceListener {
@@ -122,6 +132,67 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
             displayModeWebView = java.lang.ref.WeakReference(webView)
         }
         return checkNotNull(displayMode)
+    }
+
+    @Command
+    fun setDisplayProfile(invoke: Invoke) {
+        val args = invoke.parseArgs(DisplayProfileArgs::class.java)
+        activity.runOnUiThread {
+            val webView = inkWebView
+            if (!OnyxInk.supported() || webView == null) {
+                // Named as a literal: a device without the panel never loads the vendor enum.
+                invoke.resolve(JSObject()
+                    .put("requested", if (args.eink) "REGAL" else NO_BASE_MODE)
+                    .put("accepted", false))
+                return@runOnUiThread
+            }
+            try {
+                invoke.resolve(applyDisplayProfile(displayMode(webView), args.eink))
+            } catch (error: Throwable) {
+                invoke.reject("Could not set the panel refresh profile: ${error.message}")
+            }
+        }
+    }
+
+    /**
+     * REGAL is the vendor's ghost-suppressing mode and not every panel or firmware honours it, so
+     * the request is verified by reading the view back and downgraded to plain GU when it did not
+     * stick. A stronger layer (the ink editor) owns the readback while it is open, so the profile
+     * is left as asked for and the next call verifies it.
+     */
+    private fun applyDisplayProfile(view: ViewDisplayMode, eink: Boolean): JSObject {
+        val result = JSObject()
+        if (!eink) {
+            view.clear(DisplayModeStack.Layer.BASE)
+            return result.put("requested", NO_BASE_MODE)
+                .put("accepted", true)
+                .put("effectiveMode", view.readMode()?.name)
+        }
+        view.set(DisplayModeStack.Layer.BASE, UpdateMode.REGAL)
+        val verifiable = view.effective == UpdateMode.REGAL
+        val accepted = !verifiable || view.readMode() == UpdateMode.REGAL
+        if (!accepted) view.set(DisplayModeStack.Layer.BASE, UpdateMode.GU)
+        return result.put("requested", UpdateMode.REGAL.name)
+            .put("accepted", accepted)
+            .put("effectiveMode", view.readMode()?.name)
+    }
+
+    @Command
+    fun requestFullRefresh(invoke: Invoke) {
+        activity.runOnUiThread {
+            val webView = inkWebView
+            if (!OnyxInk.supported() || webView == null) {
+                invoke.resolve()
+                return@runOnUiThread
+            }
+            try {
+                // A full-panel flash clears the ghosting the partial modes leave behind.
+                EpdController.invalidate(webView, UpdateMode.GC)
+                invoke.resolve()
+            } catch (error: Throwable) {
+                invoke.reject("Could not refresh the panel: ${error.message}")
+            }
+        }
     }
 
     override fun onInputDeviceAdded(deviceId: Int) = inputDevicesChanged()

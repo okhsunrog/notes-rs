@@ -3,10 +3,17 @@ import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
 import { XIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { refreshPanelAfterClose } from "@/app/eink-refresh";
 import { buttonVariants } from "@/components/ui/button";
 
-function Dialog({ ...props }: React.ComponentProps<typeof DialogPrimitive.Root>) {
-  return <DialogPrimitive.Root data-slot="dialog" {...props} />;
+function Dialog({ onOpenChange, ...props }: React.ComponentProps<typeof DialogPrimitive.Root>) {
+  return (
+    <DialogPrimitive.Root
+      data-slot="dialog"
+      onOpenChange={refreshPanelAfterClose(onOpenChange)}
+      {...props}
+    />
+  );
 }
 
 function DialogTrigger({ ...props }: React.ComponentProps<typeof DialogPrimitive.Trigger>) {

@@ -7,7 +7,8 @@ use tauri::{
 use crate::{
     Result,
     models::{
-        DeviceNameResponse, DisplayInfo, DisplayInfoResponse, SafeAreaInsets, SystemBarsStyleArgs,
+        DeviceNameResponse, DisplayInfo, DisplayInfoResponse, DisplayProfileArgs,
+        DisplayProfileOutcome, SafeAreaInsets, SystemBarsStyleArgs,
     },
 };
 
@@ -40,6 +41,21 @@ impl<R: Runtime> MobileSystem<R> {
         self.0
             .run_mobile_plugin::<DisplayInfoResponse>("getDisplayInfo", ())
             .map(DisplayInfo::from)
+            .map_err(Into::into)
+    }
+
+    /// Asks the panel for the base update mode the profile implies. Layered natively: an open ink
+    /// editor keeps its own faster mode until it closes.
+    pub fn set_display_profile(&self, eink: bool) -> Result<DisplayProfileOutcome> {
+        self.0
+            .run_mobile_plugin("setDisplayProfile", DisplayProfileArgs { eink })
+            .map_err(Into::into)
+    }
+
+    /// Repaints the whole panel once, clearing what the partial update modes left behind.
+    pub fn request_full_refresh(&self) -> Result<()> {
+        self.0
+            .run_mobile_plugin("requestFullRefresh", ())
             .map_err(Into::into)
     }
 

@@ -1,6 +1,11 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { useTheme } from "next-themes";
-import { getMobileSystemInfo, setSystemBarsStyle } from "@/lib/api";
+import {
+  getMobileSystemInfo,
+  setDisplayProfile as applyNativeDisplayProfile,
+  setSystemBarsStyle,
+} from "@/lib/api";
+import { setEinkRefreshEnabled } from "./eink-refresh";
 import {
   DISPLAY_PROFILE_STORAGE_KEY,
   INK_COLOR_STORAGE_KEY,
@@ -66,6 +71,12 @@ type AppearanceContextValue = {
   display: ResolvedDisplay;
   /** The ink color actually in effect. Components read this instead of the DOM. */
   resolvedInkColor: ResolvedInkColor;
+  /**
+   * The panel update mode the platform reports for the profile in effect, or null where the panel
+   * is not steerable. Settings shows it: REGAL and its GU fallback look different enough that
+   * knowing which one the firmware accepted is worth a caption.
+   */
+  panelMode: string | null;
 };
 
 const AppearanceContext = createContext<AppearanceContextValue | null>(null);
@@ -84,6 +95,7 @@ export function AppearanceProvider({ children }: { children: React.ReactNode }) 
     parseInkColor(localStorage.getItem(INK_COLOR_STORAGE_KEY)),
   );
   const [displayInfo, setDisplayInfo] = useState<DisplayInfo>(null);
+  const [panelMode, setPanelMode] = useState<string | null>(null);
   const resolved = useMemo(
     () => resolveDisplay({ profile: displayProfile, inkColor, info: displayInfo }),
     [displayProfile, inkColor, displayInfo],
@@ -106,7 +118,23 @@ export function AppearanceProvider({ children }: { children: React.ReactNode }) 
   useEffect(() => {
     document.documentElement.dataset.display = resolved.display;
     document.documentElement.dataset.inkColor = resolved.color;
+    setEinkRefreshEnabled(resolved.display === "eink");
   }, [resolved]);
+
+  // The native panel profile follows the resolved display: once at startup, again when the
+  // reported panel arrives, and on every change the user makes. displayInfo is a dependency
+  // because a device that turns out to be e-ink must be told even though nothing else changed.
+  useEffect(() => {
+    let current = true;
+    void applyNativeDisplayProfile(resolved.display === "eink")
+      .then((result) => {
+        if (current) setPanelMode(result.effectiveMode);
+      })
+      .catch(() => undefined);
+    return () => {
+      current = false;
+    };
+  }, [resolved.display, displayInfo]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -149,8 +177,9 @@ export function AppearanceProvider({ children }: { children: React.ReactNode }) 
       setInkColor,
       display: resolved.display,
       resolvedInkColor: resolved.color,
+      panelMode,
     }),
-    [palette, displayProfile, inkColor, resolved],
+    [palette, displayProfile, inkColor, resolved, panelMode],
   );
   return <AppearanceContext.Provider value={value}>{children}</AppearanceContext.Provider>;
 }

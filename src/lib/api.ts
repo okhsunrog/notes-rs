@@ -231,6 +231,8 @@ export const resolveHandwritingConflict = checkedCommand(commands.resolveHandwri
 /** Visibility reporting returns no value, so it needs no result unwrapping. */
 export const setHandwritingBackground = commands.setHandwritingBackground;
 export const setSystemBarsStyle = checkedCommand(commands.setSystemBarsStyle);
+export const setDisplayProfile = checkedCommand(commands.setDisplayProfile);
+export const requestFullRefresh = checkedCommand(commands.requestFullRefresh);
 export const loadSettings = checkedCommand(commands.loadSettings);
 export const exportDeviceConfiguration = checkedCommand(commands.exportDeviceConfiguration);
 export const previewConfigurationImport = checkedCommand(commands.previewConfigurationImport);

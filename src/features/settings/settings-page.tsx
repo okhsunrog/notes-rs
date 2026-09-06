@@ -56,8 +56,16 @@ export function SettingsPage({
   const compact = useCompactLayout();
   const confirm = useConfirmation();
   const { theme, setTheme } = useTheme();
-  const { palette, setPalette, displayProfile, setDisplayProfile, inkColor, setInkColor, display } =
-    useAppearance();
+  const {
+    palette,
+    setPalette,
+    displayProfile,
+    setDisplayProfile,
+    inkColor,
+    setInkColor,
+    display,
+    panelMode,
+  } = useAppearance();
   const queryClient = useQueryClient();
   const [settings, setSettings] = useState<SettingsSnapshot | null>(null);
   const [secrets, setSecrets] = useState<Partial<Record<SecretKey, string>>>({});
@@ -359,6 +367,9 @@ export function SettingsPage({
               options={[...DISPLAY_PROFILE_OPTIONS]}
               onValueChange={setDisplayProfile}
             />
+            {panelMode && (
+              <p className="mt-2 text-xs text-muted-foreground">Panel mode: {panelMode}</p>
+            )}
           </Field>
           <Field
             label="E-ink color"
