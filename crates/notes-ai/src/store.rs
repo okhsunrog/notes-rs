@@ -805,6 +805,12 @@ impl AiStore {
                 let Some(source_seq) = current else {
                     return Ok(());
                 };
+                // Entity identity is the normalized name. The uuid derived from it
+                // has changed before (the application rename), so a name that
+                // already exists keeps its stored uuid and the new edges follow it;
+                // otherwise every extraction naming a known entity would violate
+                // the name's uniqueness and fail.
+                let (entities, edges) = adopt_existing_entities(&transaction, entities, edges)?;
                 let mut orphan_candidates = extraction_edge_endpoints(&transaction, source_uuid)?;
                 orphan_candidates.extend(entities.iter().map(|entity| entity.uuid));
                 transaction.execute(
@@ -1042,6 +1048,46 @@ impl AiStore {
             })
             .await
     }
+}
+
+/// Rekeys extracted entities onto the uuids already stored for their normalized
+/// names, remapping the edges that reference them, so a changed uuid derivation
+/// never collides with the `normalized_name` uniqueness constraint.
+fn adopt_existing_entities(
+    transaction: &rusqlite::Transaction<'_>,
+    entities: Vec<ExtractedEntityRecord>,
+    edges: Vec<ExtractedEdge>,
+) -> rusqlite::Result<(Vec<ExtractedEntityRecord>, Vec<ExtractedEdge>)> {
+    let mut remap = std::collections::HashMap::new();
+    let mut lookup = transaction.prepare("SELECT uuid FROM entities WHERE normalized_name = ?1")?;
+    let entities = entities
+        .into_iter()
+        .map(|mut entity| {
+            let stored = lookup
+                .query_row([&entity.normalized_name], |row| row.get::<_, uuid::Uuid>(0))
+                .optional()?;
+            if let Some(stored) = stored
+                && stored != entity.uuid
+            {
+                remap.insert(entity.uuid, stored);
+                entity.uuid = stored;
+            }
+            Ok(entity)
+        })
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let edges = edges
+        .into_iter()
+        .map(|mut edge| {
+            if let Some(&mapped) = remap.get(&edge.src_uuid) {
+                edge.src_uuid = mapped;
+            }
+            if let Some(&mapped) = remap.get(&edge.dst_uuid) {
+                edge.dst_uuid = mapped;
+            }
+            edge
+        })
+        .collect();
+    Ok((entities, edges))
 }
 
 fn extraction_edge_endpoints(
@@ -2388,5 +2434,95 @@ mod tests {
                 .expect("list entities")
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn finish_extraction_adopts_the_stored_uuid_for_a_known_name() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let notes = notes_core::db::open(directory.path().join("notes.db"))
+            .await
+            .expect("notes database");
+        let page = notes_core::db::create_page(&notes, "Rust notes".into())
+            .await
+            .expect("create page");
+        let block = notes_core::db::create_block(
+            &notes,
+            page.uuid,
+            None,
+            None,
+            BlockStyle::Paragraph,
+            "Rust is a programming language".into(),
+        )
+        .await
+        .expect("create note");
+        let store = AiStore::open(directory.path().join("ai.db"), "identity".into(), 2)
+            .await
+            .expect("AI store");
+        let legacy_uuid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, b"notes-rs:entity:rust");
+        store
+            .connection
+            .call(move |database| {
+                database.execute(
+                    "INSERT INTO entities(uuid, name, normalized_name, description, updated_at)
+                     VALUES (?1, 'rust', 'rust', 'legacy row', unixepoch())",
+                    [legacy_uuid],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("seed legacy entity");
+        store
+            .reconcile_extractions(&notes)
+            .await
+            .expect("reconcile extraction jobs");
+        let job = store
+            .take_extraction_jobs(16)
+            .await
+            .expect("extraction jobs")
+            .into_iter()
+            .find(|job| job.content_uuid == block.uuid)
+            .expect("block extraction job");
+        let derived_uuid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, b"tangleaf:entity:rust");
+        store
+            .finish_extraction(
+                &job,
+                vec![ExtractedEntityRecord {
+                    uuid: derived_uuid,
+                    name: "Rust".into(),
+                    normalized_name: "rust".into(),
+                    description: "A programming language".into(),
+                }],
+                vec![ExtractedEdge {
+                    src_uuid: block.uuid,
+                    dst_uuid: derived_uuid,
+                    kind: "mentions".into(),
+                }],
+            )
+            .await
+            .expect("a known name adopts its stored uuid instead of failing");
+        let (entities, edge_target, name) = store
+            .connection
+            .call(|database| {
+                Ok((
+                    database.query_row("SELECT COUNT(*) FROM entities", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?,
+                    database.query_row(
+                        "SELECT dst_uuid FROM extraction_edges WHERE kind = 'mentions'",
+                        [],
+                        |row| row.get::<_, uuid::Uuid>(0),
+                    )?,
+                    database.query_row(
+                        "SELECT name FROM entities WHERE normalized_name = 'rust'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )?,
+                ))
+            })
+            .await
+            .expect("inspect AI database");
+        assert_eq!(entities, 1);
+        assert_eq!(edge_target, legacy_uuid);
+        assert_eq!(name, "Rust");
     }
 }
