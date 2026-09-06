@@ -6,6 +6,7 @@ import App from "./App";
 import { AppearanceProvider } from "@/app/appearance";
 import { ConfirmationProvider } from "@/app/confirmation";
 import { ErrorBoundary } from "@/app/error-boundary";
+import { installTextFocusSuppression } from "@/app/ink-suppression";
 import { registerLifecycleFlush } from "@/app/lifecycle-flush";
 import { disableViewportZoom } from "@/app/viewport-zoom";
 import { PageSessionProvider, PageSessionRegistry } from "@/features/pages/page-session";
@@ -20,6 +21,9 @@ const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement)
 const queryClient = createAppQueryClient();
 void listenForDomainEvents(queryClient);
 disableViewportZoom();
+// The firmware pen has to be down before the soft keyboard is up, and only the page knows a DOM
+// field took the caret. Registered for the whole document, not per editor.
+installTextFocusSuppression();
 // Owned here rather than by the provider so the process-level drain can reach
 // unsaved drafts without a React tree.
 const pageSessions = new PageSessionRegistry();

@@ -3,12 +3,18 @@ import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 
 import { cn } from "@/lib/utils";
 import { refreshPanelAfterClose } from "@/app/eink-refresh";
+import { useOverlayInkSuppression } from "@/app/ink-suppression";
 
 function Popover({ onOpenChange, ...props }: React.ComponentProps<typeof PopoverPrimitive.Root>) {
+  const overlay = useOverlayInkSuppression(props.open ?? props.defaultOpen);
+  const closed = refreshPanelAfterClose(onOpenChange);
   return (
     <PopoverPrimitive.Root
       data-slot="popover"
-      onOpenChange={refreshPanelAfterClose(onOpenChange)}
+      onOpenChange={(open, ...rest) => {
+        overlay(open);
+        closed(open, ...rest);
+      }}
       {...props}
     />
   );

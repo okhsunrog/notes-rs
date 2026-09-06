@@ -4,15 +4,21 @@ import { CheckIcon, ChevronDownIcon, ChevronUpIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { refreshPanelAfterClose } from "@/app/eink-refresh";
+import { useOverlayInkSuppression } from "@/app/ink-suppression";
 
 function Select<Value, Multiple extends boolean | undefined = false>({
   onOpenChange,
   ...props
 }: SelectPrimitive.Root.Props<Value, Multiple>) {
+  const overlay = useOverlayInkSuppression(props.open ?? props.defaultOpen);
+  const closed = refreshPanelAfterClose(onOpenChange);
   return (
     <SelectPrimitive.Root
       data-slot="select"
-      onOpenChange={refreshPanelAfterClose(onOpenChange)}
+      onOpenChange={(open, ...rest) => {
+        overlay(open);
+        closed(open, ...rest);
+      }}
       {...props}
     />
   );

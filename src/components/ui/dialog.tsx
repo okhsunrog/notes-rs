@@ -4,13 +4,20 @@ import { XIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { refreshPanelAfterClose } from "@/app/eink-refresh";
+import { useOverlayInkSuppression } from "@/app/ink-suppression";
 import { buttonVariants } from "@/components/ui/button";
 
 function Dialog({ onOpenChange, ...props }: React.ComponentProps<typeof DialogPrimitive.Root>) {
+  // A dialog covers the sheet, and the firmware pen would draw straight through it.
+  const overlay = useOverlayInkSuppression(props.open ?? props.defaultOpen);
+  const closed = refreshPanelAfterClose(onOpenChange);
   return (
     <DialogPrimitive.Root
       data-slot="dialog"
-      onOpenChange={refreshPanelAfterClose(onOpenChange)}
+      onOpenChange={(open, ...rest) => {
+        overlay(open);
+        closed(open, ...rest);
+      }}
       {...props}
     />
   );

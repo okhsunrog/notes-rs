@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { addPluginListener } from "@tauri-apps/api/core";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import { setInkSuppressionSupported } from "@/app/ink-suppression";
 import { getInputCapabilities } from "@/lib/api";
 import type { InputCapabilities } from "@/lib/bindings";
 import { queryKeys } from "@/lib/query";
@@ -71,6 +72,12 @@ export function InputCapabilitiesProvider({ children }: { children: ReactNode })
       window.removeEventListener("pointerover", observe, true);
     };
   }, [client]);
+
+  // Nothing to hold down without the vendor plugin; the reasons are still tracked, so a late
+  // capability answer pushes whatever is already open.
+  useEffect(() => {
+    setInkSuppressionSupported(capabilities.nativeDeviceEvents);
+  }, [capabilities.nativeDeviceEvents]);
 
   useEffect(() => {
     if (!capabilities.nativeDeviceEvents) return;

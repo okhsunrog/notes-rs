@@ -4,6 +4,7 @@ import { ChevronDown, PenLine } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { refreshPanelAfterClose } from "@/app/eink-refresh";
+import { useOverlayInkSuppression } from "@/app/ink-suppression";
 import { useWorkspaceController } from "@/features/workspace/workspace-controller";
 import { useHandwritingAvailability } from "./input-capabilities";
 
@@ -22,6 +23,7 @@ export function NewNoteButton({
 }) {
   const { available } = useHandwritingAvailability();
   const controller = useWorkspaceController();
+  const overlay = useOverlayInkSuppression();
   return (
     <div className={cn("inline-flex min-w-0", fullWidth && "w-full")}>
       <Button
@@ -33,14 +35,14 @@ export function NewNoteButton({
         {children}
       </Button>
       {available && (
-        <Menu.Root onOpenChange={refreshPanelAfterClose()}>
+        <Menu.Root onOpenChange={refreshPanelAfterClose(overlay)}>
           <Menu.Trigger
             render={
               <Button
                 type="button"
                 disabled={disabled}
                 aria-label="More note options"
-                className="brand-button h-9 w-9 shrink-0 rounded-l-none border-l border-primary-foreground/25 px-0"
+                className="brand-button h-9 w-9 shrink-0 rounded-xl rounded-l-none border-l border-primary-foreground/25 px-0"
               />
             }
           >
