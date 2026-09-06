@@ -2,6 +2,10 @@
 @import "tw-animate-css";
 
 @custom-variant dark (&:is(.dark *));
+/* Set by AppearanceProvider from the resolved display profile, never by a media query:
+   the e-ink WebView reports no display-technology feature. */
+@custom-variant eink (&:is([data-display="eink"] *));
+@custom-variant mono (&:is([data-ink-color="mono"] *));
 
 /* Base UI portals share this stacking context with the application shell. */
 #root {

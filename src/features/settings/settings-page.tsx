@@ -20,6 +20,7 @@ import {
 import { WindowControls } from "@/app/window-controls";
 import { useCompactLayout } from "@/app/use-compact-layout";
 import { PALETTES, useAppearance } from "@/app/appearance";
+import { DISPLAY_PROFILE_OPTIONS, INK_COLOR_OPTIONS } from "@/app/display-profile";
 import { useConfirmation } from "@/app/confirmation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -64,7 +65,8 @@ export function SettingsPage({
   const compact = useCompactLayout();
   const confirm = useConfirmation();
   const { theme, setTheme } = useTheme();
-  const { palette, setPalette } = useAppearance();
+  const { palette, setPalette, displayProfile, setDisplayProfile, inkColor, setInkColor, display } =
+    useAppearance();
   const queryClient = useQueryClient();
   const [settings, setSettings] = useState<SettingsSnapshot | null>(null);
   const [secrets, setSecrets] = useState<Partial<Record<SecretKey, string>>>({});
@@ -278,7 +280,12 @@ export function SettingsPage({
         className="mx-auto max-w-4xl space-y-7 px-4 py-5 pb-[calc(6rem+var(--safe-area-inset-bottom))] sm:p-10"
       >
         <ConfigurationTransferSection
-          appearance={{ theme: theme === "light" || theme === "dark" ? theme : "system", palette }}
+          appearance={{
+            theme: theme === "light" || theme === "dark" ? theme : "system",
+            palette,
+            displayProfile,
+            inkColor,
+          }}
           disabled={busy}
           onBusyChange={setBusy}
           onImported={(result) => {
@@ -289,6 +296,8 @@ export function SettingsPage({
             if (result.appearance) {
               setTheme(result.appearance.theme);
               setPalette(result.appearance.palette);
+              setDisplayProfile(result.appearance.displayProfile ?? "auto");
+              setInkColor(result.appearance.inkColor ?? "auto");
             }
           }}
         />
@@ -349,6 +358,33 @@ export function SettingsPage({
               ))}
             </div>
           </FieldGroup>
+          <Field
+            label="Display"
+            hint="E-ink drops shadows, blur and animation and raises contrast. Auto follows the panel the device reports."
+          >
+            <SettingsSelect
+              label="Display"
+              value={displayProfile}
+              options={[...DISPLAY_PROFILE_OPTIONS]}
+              onValueChange={setDisplayProfile}
+            />
+          </Field>
+          <Field
+            label="E-ink color"
+            hint={
+              display === "eink"
+                ? "Monochrome removes the palette accent from buttons and handwriting."
+                : "Available while the e-ink display profile is in effect."
+            }
+          >
+            <SettingsSelect
+              label="E-ink color"
+              value={inkColor}
+              disabled={display !== "eink"}
+              options={[...INK_COLOR_OPTIONS]}
+              onValueChange={setInkColor}
+            />
+          </Field>
         </SettingsSection>
 
         {settings.capabilities.windowDecorations && (

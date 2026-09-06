@@ -39,6 +39,8 @@ export const commands = {
 	exportDeviceConfiguration: (includeToken: boolean, appearance: {
 	theme: ConfigurationTheme,
 	palette: ConfigurationPalette,
+	displayProfile?: ConfigurationDisplayProfile,
+	inkColor?: ConfigurationInkColor,
 } | null) => typedError<boolean, CommandError>(__TAURI_INVOKE("export_device_configuration", { includeToken, appearance })),
 	previewConfigurationImport: () => typedError<{
 	id: string,
@@ -322,7 +324,11 @@ export type CompletionProtocol = "openai" | "anthropic";
 export type ConfigurationAppearance = {
 	theme: ConfigurationTheme,
 	palette: ConfigurationPalette,
+	displayProfile?: ConfigurationDisplayProfile,
+	inkColor?: ConfigurationInkColor,
 };
+
+export type ConfigurationDisplayProfile = "auto" | "standard" | "eink";
 
 export type ConfigurationImportResult = {
 	settings: SettingsSnapshot,
@@ -330,6 +336,8 @@ export type ConfigurationImportResult = {
 	connectionVerified: boolean,
 	restartRequired: boolean,
 };
+
+export type ConfigurationInkColor = "auto" | "color" | "mono";
 
 export type ConfigurationPalette = "iris" | "tidal" | "ember" | "sakura" | "nordic" | "moss";
 

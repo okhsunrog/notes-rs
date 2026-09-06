@@ -25,11 +25,34 @@ pub enum ConfigurationPalette {
     Moss,
 }
 
+#[derive(Clone, Copy, Default, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "lowercase")]
+pub enum ConfigurationDisplayProfile {
+    #[default]
+    Auto,
+    Standard,
+    Eink,
+}
+
+#[derive(Clone, Copy, Default, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "lowercase")]
+pub enum ConfigurationInkColor {
+    #[default]
+    Auto,
+    Color,
+    Mono,
+}
+
 #[derive(Clone, Serialize, Deserialize, specta::Type)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConfigurationAppearance {
     pub theme: ConfigurationTheme,
     pub palette: ConfigurationPalette,
+    // Files written before the display profile existed stay importable.
+    #[serde(default)]
+    pub display_profile: ConfigurationDisplayProfile,
+    #[serde(default)]
+    pub ink_color: ConfigurationInkColor,
 }
 
 #[derive(Clone, Serialize, Deserialize, specta::Type)]
@@ -396,6 +419,22 @@ mod tests {
                 .secrets
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn appearance_written_before_the_display_profile_still_imports() {
+        let mut body = serde_json::to_value(export_configuration(&stored(), false, None)).unwrap();
+        body["appearance"] = serde_json::json!({"theme": "dark", "palette": "iris"});
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let appearance = parse_configuration(bytes.as_slice())
+            .unwrap()
+            .appearance
+            .expect("appearance");
+        assert!(matches!(
+            appearance.display_profile,
+            ConfigurationDisplayProfile::Auto
+        ));
+        assert!(matches!(appearance.ink_color, ConfigurationInkColor::Auto));
     }
 
     #[test]

@@ -121,7 +121,7 @@ export function ConfigurationTransferSection({
         disabled={disabled}
         onChange={setIncludeAppearance}
         label="Include appearance"
-        description="Transfer the current brightness mode and color palette."
+        description="Transfer the current brightness mode, color palette and display profile."
       />
       <div className="flex flex-wrap gap-2">
         <Button
@@ -178,7 +178,9 @@ export function ConfigurationTransferSection({
               <dt className="text-muted-foreground">Appearance</dt>
               <dd>
                 {preview.appearance
-                  ? `${preview.appearance.theme} · ${preview.appearance.palette}`
+                  ? `${preview.appearance.theme} · ${preview.appearance.palette} · ${
+                      preview.appearance.displayProfile ?? "auto"
+                    } display · ${preview.appearance.inkColor ?? "auto"} ink`
                   : "Keep this device's appearance"}
               </dd>
             </div>

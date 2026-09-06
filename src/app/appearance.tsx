@@ -1,6 +1,18 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { useTheme } from "next-themes";
 import { getMobileSystemInfo, setSystemBarsStyle } from "@/lib/api";
+import {
+  DISPLAY_PROFILE_STORAGE_KEY,
+  INK_COLOR_STORAGE_KEY,
+  parseDisplayProfile,
+  parseInkColor,
+  resolveDisplay,
+  type DisplayInfo,
+  type DisplayProfile,
+  type InkColorPreference,
+  type ResolvedDisplay,
+  type ResolvedInkColor,
+} from "./display-profile";
 
 export const PALETTES = [
   {
@@ -46,6 +58,14 @@ export type PaletteId = (typeof PALETTES)[number]["id"];
 type AppearanceContextValue = {
   palette: PaletteId;
   setPalette: (palette: PaletteId) => void;
+  displayProfile: DisplayProfile;
+  setDisplayProfile: (profile: DisplayProfile) => void;
+  inkColor: InkColorPreference;
+  setInkColor: (color: InkColorPreference) => void;
+  /** The profile actually in effect, after "auto" was resolved against the reported panel. */
+  display: ResolvedDisplay;
+  /** The ink color actually in effect. Components read this instead of the DOM. */
+  resolvedInkColor: ResolvedInkColor;
 };
 
 const AppearanceContext = createContext<AppearanceContextValue | null>(null);
@@ -57,6 +77,17 @@ export function AppearanceProvider({ children }: { children: React.ReactNode }) 
     const saved = localStorage.getItem(STORAGE_KEY);
     return PALETTES.some((item) => item.id === saved) ? (saved as PaletteId) : "iris";
   });
+  const [displayProfile, setDisplayProfile] = useState<DisplayProfile>(() =>
+    parseDisplayProfile(localStorage.getItem(DISPLAY_PROFILE_STORAGE_KEY)),
+  );
+  const [inkColor, setInkColor] = useState<InkColorPreference>(() =>
+    parseInkColor(localStorage.getItem(INK_COLOR_STORAGE_KEY)),
+  );
+  const [displayInfo, setDisplayInfo] = useState<DisplayInfo>(null);
+  const resolved = useMemo(
+    () => resolveDisplay({ profile: displayProfile, inkColor, info: displayInfo }),
+    [displayProfile, inkColor, displayInfo],
+  );
 
   useEffect(() => {
     document.documentElement.dataset.palette = palette;
@@ -64,11 +95,30 @@ export function AppearanceProvider({ children }: { children: React.ReactNode }) 
   }, [palette]);
 
   useEffect(() => {
+    localStorage.setItem(DISPLAY_PROFILE_STORAGE_KEY, displayProfile);
+  }, [displayProfile]);
+
+  useEffect(() => {
+    localStorage.setItem(INK_COLOR_STORAGE_KEY, inkColor);
+  }, [inkColor]);
+
+  // The single writer of the display dataset attributes every stylesheet variant keys off.
+  useEffect(() => {
+    document.documentElement.dataset.display = resolved.display;
+    document.documentElement.dataset.inkColor = resolved.color;
+  }, [resolved]);
+
+  useEffect(() => {
     const root = document.documentElement;
     const updateInsets = async () => {
       const info = await getMobileSystemInfo();
       if (!info) return;
       root.dataset.mobile = "true";
+      setDisplayInfo((previous) =>
+        previous?.displayKind === info.displayKind && previous.colorPanel === info.colorPanel
+          ? previous
+          : { displayKind: info.displayKind, colorPanel: info.colorPanel },
+      );
       root.style.setProperty("--safe-area-inset-top", `${info.safeArea.top}px`);
       root.style.setProperty("--safe-area-inset-right", `${info.safeArea.right}px`);
       root.style.setProperty("--safe-area-inset-bottom", `${info.safeArea.bottom}px`);
@@ -89,7 +139,19 @@ export function AppearanceProvider({ children }: { children: React.ReactNode }) 
     void setSystemBarsStyle(resolvedTheme === "dark").catch(() => undefined);
   }, [resolvedTheme]);
 
-  const value = useMemo(() => ({ palette, setPalette }), [palette]);
+  const value = useMemo(
+    () => ({
+      palette,
+      setPalette,
+      displayProfile,
+      setDisplayProfile,
+      inkColor,
+      setInkColor,
+      display: resolved.display,
+      resolvedInkColor: resolved.color,
+    }),
+    [palette, displayProfile, inkColor, resolved],
+  );
   return <AppearanceContext.Provider value={value}>{children}</AppearanceContext.Provider>;
 }
 
