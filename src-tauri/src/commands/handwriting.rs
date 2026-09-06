@@ -9,7 +9,37 @@ mod storage;
 const MAX_POINTS: usize = 150_000;
 
 #[derive(Default)]
-pub struct HandwritingStore(pub Arc<Mutex<()>>);
+pub struct HandwritingStore {
+    lock: Arc<Mutex<()>>,
+    generation: Arc<std::sync::atomic::AtomicU64>,
+    compaction_lock: Arc<tokio::sync::Mutex<()>>,
+}
+impl HandwritingStore {
+    fn schedule_compaction(&self, path: std::path::PathBuf) {
+        use std::sync::atomic::Ordering;
+        let generation = self.generation.clone();
+        let expected = generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let serial = self.compaction_lock.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            if generation.load(Ordering::SeqCst) != expected {
+                return;
+            }
+            let _guard = serial.lock().await;
+            if generation.load(Ordering::SeqCst) != expected {
+                return;
+            }
+            match tauri::async_runtime::spawn_blocking(move || storage::compact(&path)).await {
+                Ok(Ok(true)) => tracing::info!("Handwriting chunks compacted"),
+                Ok(Ok(false)) => {}
+                result => tracing::warn!(
+                    ?result,
+                    "Handwriting compaction deferred; saved history is unchanged"
+                ),
+            }
+        });
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -106,15 +136,18 @@ pub async fn handwriting_history(
         .app_data_dir()
         .map_err(err)?
         .join("handwriting/ink-v1.sqlite3");
-    let lock = store.0.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let lock = store.lock.clone();
+    let maintenance_path = path.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let _guard = lock
             .lock()
             .map_err(|e| err(anyhow::anyhow!(e.to_string())))?;
         storage::navigate(&path, redo, expected_revision)
     })
     .await
-    .map_err(err)?
+    .map_err(err)??;
+    store.schedule_compaction(maintenance_path);
+    Ok(result)
 }
 
 fn validate(draft: &InkDraft) -> CommandResult<()> {
@@ -205,15 +238,18 @@ pub async fn save_handwriting_patch(
         .app_data_dir()
         .map_err(err)?
         .join("handwriting/ink-v1.sqlite3");
-    let lock = store.0.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let lock = store.lock.clone();
+    let maintenance_path = path.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let _guard = lock
             .lock()
             .map_err(|error| err(anyhow::anyhow!(error.to_string())))?;
         write_patch(&path, patch, expected_revision)
     })
     .await
-    .map_err(err)?
+    .map_err(err)??;
+    store.schedule_compaction(maintenance_path);
+    Ok(result)
 }
 
 #[tauri::command]
@@ -227,15 +263,18 @@ pub async fn load_handwriting_draft(
         .app_data_dir()
         .map_err(err)?
         .join("handwriting/ink-v1.sqlite3");
-    let lock = store.0.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let lock = store.lock.clone();
+    let maintenance_path = path.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let _guard = lock
             .lock()
             .map_err(|error| err(anyhow::anyhow!(error.to_string())))?;
         read_draft(&path)
     })
     .await
-    .map_err(err)?
+    .map_err(err)??;
+    store.schedule_compaction(maintenance_path);
+    Ok(result)
 }
 
 #[tauri::command]
@@ -251,15 +290,18 @@ pub async fn save_handwriting_draft(
         .app_data_dir()
         .map_err(err)?
         .join("handwriting/ink-v1.sqlite3");
-    let lock = store.0.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let lock = store.lock.clone();
+    let maintenance_path = path.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let _guard = lock
             .lock()
             .map_err(|error| err(anyhow::anyhow!(error.to_string())))?;
         write_draft(&path, draft, expected_revision)
     })
     .await
-    .map_err(err)?
+    .map_err(err)??;
+    store.schedule_compaction(maintenance_path);
+    Ok(result)
 }
 
 #[cfg(test)]

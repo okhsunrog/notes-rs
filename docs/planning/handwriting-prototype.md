@@ -31,8 +31,7 @@ the original test corpus remains exported separately for compression benchmarks.
 
 The independent `ink-format` crate owns codecs, core typed bodies and graph validation.
 The app adapter currently retains normalized f64 input without quantization and stores one
-chunk per changed stroke. Larger-chunk compaction and durable history are subsequent work;
-current Undo/Redo lasts for the open editing session. Data placement and chunk-size policy
+chunk per changed stroke. Background compaction and a persistent fifty-action Undo/Redo history are implemented. Data placement and chunk-size policy
 remain outside the crate. See [ink-format-v1.md](ink-format-v1.md) for the full design.
 
 This initial sheet is 1000 × 1400 logical units, limited to 150,000 points and a 64 MiB
@@ -454,9 +453,31 @@ branch. GC pins all retained roots. The revision is now a unique transition toke
 not a physical root hash; returning to an earlier page cannot revive a stale CAS.
 Record IDs are verified against their content-derived identity during reads.
 
-The frontend queues every completed gesture, including during a slow/failed save.
+The frontend queues completed gestures during a slow/failed save, retaining every
+state in the last fifty-action history window. A stalled queue is bounded to the
+in-flight/retry state plus the latest 51 snapshots; older intermediates may expire.
 It flushes that queue before navigating history and briefly blocks input during the
 navigation. History navigation does not serialize old strokes back through IPC.
 Atomic snapshot publication, fifty-action retention, SQLite schema upgrade and
 ABA/conflict behavior are covered by storage tests. Compaction must preserve these
 roots and the current revision token.
+
+## History-aware background compaction
+
+After three seconds without another save/history request, a serialized background
+job prepares larger PCO-8 chunks outside the store mutex/write transaction. It packs
+whole segments, preserving every scalar bit and logical ID. Target is 250,000 points
+and at most 65,536 segments per chunk. All retained history roots, including redo,
+are atomically remapped before old chunks are collected. A concurrent edit/navigation
+invalidates the prepared job; physical repacking leaves the transition token unchanged.
+
+The initial implementation accepts all-valid columns from this adapter. It skips
+jobs beyond 128 MiB encoded/decoded-column budgets and outputs that are not smaller
+or would exceed a snapshot's limit. These are work budgets, not a hard RSS limit.
+SQLite free pages are reused; file shrinking/VACUUM is not part of the job. Decoding
+shared columns once per chunk avoids repeated conversion for every stroke.
+
+Tests cover delete/move/background -> Undo -> compaction/GC -> reopen -> Undo/Redo,
+bit preservation including negative zero, stable geometry records, chunk boundaries,
+stale preparation and a transaction failure during publication. Hardware acceptance
+of this history/compaction build is still pending.

@@ -9,7 +9,9 @@ use ink_format::{
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, BTreeSet};
+mod compaction;
 mod history;
+pub(super) use compaction::compact;
 pub(super) use history::navigate;
 const APP_ID: i64 = 0x494e4b31;
 const MAX_SNAPSHOT_BYTES: i64 = 64 * 1024 * 1024;
@@ -66,6 +68,10 @@ fn load(conn: &Connection) -> CommandResult<Option<(Snapshot, String)>> {
     let Some((id, revision)) = head else {
         return Ok(None);
     };
+    let pinned: Vec<u8> = conn.query_row("SELECT h.root_id FROM ink_history h JOIN ink_cursor c ON h.seq=c.seq WHERE c.singleton=1",[],|r|r.get(0)).map_err(err)?;
+    if pinned != id {
+        return Err(CommandError::invalid("History cursor/head mismatch"));
+    }
     let root = get_record(
         conn,
         id.try_into()
@@ -346,7 +352,23 @@ fn to_draft(snapshot: &Snapshot) -> CommandResult<InkDraft> {
     let decoded: BTreeMap<_, _> = snapshot
         .chunks
         .iter()
-        .map(|(id, bytes)| Ok((*id, Chunk::decode(bytes).map_err(err)?)))
+        .map(|(id, bytes)| {
+            let chunk = Chunk::decode(bytes).map_err(err)?;
+            let values: Vec<_> = [1, 2, 3, 5, 6, 11]
+                .into_iter()
+                .map(|axis| {
+                    f64_values(
+                        chunk
+                            .columns
+                            .iter()
+                            .find(|c| c.semantic == axis)
+                            .ok_or_else(|| CommandError::invalid("Missing normalized axis"))?,
+                    )
+                    .map_err(err)
+                })
+                .collect::<CommandResult<_>>()?;
+            Ok((*id, (chunk, values)))
+        })
         .collect::<CommandResult<_>>()?;
     let mut strokes = Vec::new();
     for reference in page.objects {
@@ -363,24 +385,11 @@ fn to_draft(snapshot: &Snapshot) -> CommandResult<InkDraft> {
         let mut points = Vec::new();
         for part in geometry.parts {
             let location = &doc.segments[&part.segment];
-            let chunk = &decoded[&location.chunk];
+            let (chunk, values) = &decoded[&location.chunk];
             let first = chunk.segments[..location.index as usize]
                 .iter()
                 .map(|(_, n)| *n as usize)
                 .sum::<usize>();
-            let values: Vec<_> = [1, 2, 3, 5, 6, 11]
-                .into_iter()
-                .map(|axis| {
-                    f64_values(
-                        chunk
-                            .columns
-                            .iter()
-                            .find(|c| c.semantic == axis)
-                            .ok_or_else(|| CommandError::invalid("Missing normalized axis"))?,
-                    )
-                    .map_err(err)
-                })
-                .collect::<CommandResult<_>>()?;
             for (i, x) in values[0]
                 .iter()
                 .enumerate()
