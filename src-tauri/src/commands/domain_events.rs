@@ -20,6 +20,9 @@ pub(crate) fn events_for_ops(
 
     for operation in operations {
         match operation {
+            OpKind::InkPublish(payload) => {
+                changed_pages.insert(payload.page_uuid);
+            }
             OpKind::PageCreate(payload) => {
                 changed_pages.insert(payload.uuid);
                 // A canonical page may adopt an existing unresolved wikilink stub.

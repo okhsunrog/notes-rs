@@ -4,8 +4,11 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 mod input;
 mod storage;
+pub mod transfer;
+pub(crate) mod versions;
 pub use input::*;
 use input::{MAX_POINTS, validate};
+pub use versions::{Publish, Version};
 fn err(error: impl std::fmt::Display) -> CommandError {
     CommandError::InkStorage(error.to_string())
 }

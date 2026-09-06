@@ -449,3 +449,33 @@ pub async fn get_containing_page(
     })
     .await
 }
+
+/// Create an ordinary note whose body is immutable typed handwriting, without a text block.
+pub async fn create_handwritten_note_with_ops(
+    conn: &Connection,
+    title: Option<String>,
+) -> Result<AppliedMutation<Page>> {
+    conn.call_domain(move |database| -> crate::CoreResult<_> {
+        let tx = database.transaction()?;
+        let uuid = uuid::Uuid::now_v7();
+        let operations = vec![OpKind::PageCreate(PageCreate {
+            uuid,
+            kind: PageKind::Handwriting,
+            title: title.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty()),
+            layout: PageLayout::Outline,
+            created_at: chrono::Utc::now().timestamp(),
+        })];
+        operation::apply_local_kinds_in_transaction(&tx, operations.clone())?;
+        let page = tx.query_row(
+            &format!("SELECT {PAGE_COLUMNS} FROM pages WHERE uuid=?1"),
+            [uuid],
+            row_to_page,
+        )?;
+        tx.commit()?;
+        Ok(AppliedMutation {
+            value: page,
+            operations,
+        })
+    })
+    .await
+}

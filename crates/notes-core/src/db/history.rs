@@ -140,6 +140,7 @@ fn capture_inverse(
     inverse: &mut Vec<OpKind>,
 ) -> rusqlite::Result<()> {
     match kind {
+        OpKind::InkPublish(_) => return Err(rusqlite::Error::InvalidQuery),
         OpKind::PageCreate(payload) => {
             inverse.push(OpKind::PageDelete(PageDelete { uuid: payload.uuid }))
         }
@@ -442,6 +443,7 @@ fn block_descendant_uuids(
 
 fn history_guard_fields(operation: &OpKind) -> Vec<HistoryField> {
     match operation {
+        OpKind::InkPublish(_) => vec![],
         OpKind::PageCreate(payload) => vec![
             HistoryField::PageExistence { uuid: payload.uuid },
             HistoryField::PageTitle { uuid: payload.uuid },

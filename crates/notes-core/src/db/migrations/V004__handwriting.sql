@@ -4,10 +4,12 @@ ALTER TABLE page_identities ADD COLUMN content_type TEXT NOT NULL DEFAULT 'text'
   CHECK (content_type = 'text' OR (content_type = 'ink' AND page_kind = 'note'));
 
 CREATE TABLE ink_records (
-  id BLOB PRIMARY KEY CHECK(length(id)=16), data BLOB NOT NULL
+  id BLOB PRIMARY KEY CHECK(length(id)=16), data BLOB NOT NULL,
+  hash BLOB NOT NULL UNIQUE CHECK(length(hash)=32)
 ) WITHOUT ROWID;
 CREATE TABLE ink_chunks (
-  id BLOB PRIMARY KEY CHECK(length(id)=16), data BLOB NOT NULL
+  id BLOB PRIMARY KEY CHECK(length(id)=16), data BLOB NOT NULL,
+  hash BLOB NOT NULL UNIQUE CHECK(length(hash)=32)
 ) WITHOUT ROWID;
 CREATE TABLE ink_documents (
   page_uuid BLOB PRIMARY KEY REFERENCES page_identities(page_uuid),
@@ -54,4 +56,10 @@ CREATE TABLE ink_version_parents (
   parent_uuid BLOB NOT NULL CHECK(length(parent_uuid)=16),
   PRIMARY KEY(version_uuid,parent_uuid),
   CHECK(version_uuid != parent_uuid)
+) WITHOUT ROWID;
+
+-- Validated downloads remain pinned until their operation is applied.
+CREATE TABLE ink_staged_roots (
+  root_hash BLOB PRIMARY KEY CHECK(length(root_hash)=32),
+  root_id BLOB NOT NULL REFERENCES ink_records(id)
 ) WITHOUT ROWID;

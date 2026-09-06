@@ -935,6 +935,7 @@ mod tests {
     #[test]
     fn empty_snapshot_has_no_source_records() {
         assert!(snapshot_is_empty(&SyncSnapshot {
+            ink_versions: Vec::new(),
             format_version: notes_sync::FORMAT_VERSION,
             workspace_uuid: uuid::Uuid::from_u128(1),
             seq: 0,

@@ -8,7 +8,7 @@ pub(super) fn cursor(conn: &Connection, document: uuid::Uuid) -> CommandResult<i
     )
     .map_err(err)
 }
-pub(super) fn persist(conn: &Connection, snapshot: &Snapshot) -> CommandResult<()> {
+pub(in crate::ink) fn persist(conn: &Connection, snapshot: &Snapshot) -> CommandResult<()> {
     for (id, bytes) in &snapshot.chunks {
         put(conn, "ink_chunks", *id, bytes)?;
     }
@@ -80,6 +80,7 @@ pub(super) fn collect(conn: &Connection) -> CommandResult<()> {
     conn.execute_batch("CREATE TEMP TABLE IF NOT EXISTS keep_ink_roots(id BLOB PRIMARY KEY) WITHOUT ROWID;
       DELETE FROM keep_ink_roots;
       INSERT OR IGNORE INTO keep_ink_roots SELECT root_id FROM ink_history;
+      INSERT OR IGNORE INTO keep_ink_roots SELECT root_id FROM ink_staged_roots;
       INSERT OR IGNORE INTO keep_ink_roots SELECT root_id FROM ink_versions WHERE root_id IS NOT NULL;
       INSERT OR IGNORE INTO keep_ink_roots SELECT root_id FROM ink_documents WHERE root_id IS NOT NULL;
       DELETE FROM ink_root_refs WHERE root_id NOT IN (SELECT id FROM keep_ink_roots);

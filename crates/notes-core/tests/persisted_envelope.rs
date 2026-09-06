@@ -6,7 +6,8 @@ fn operation() -> Op {
         workspace_uuid: uuid::Uuid::from_u128(1),
         device_id: uuid::Uuid::from_u128(3),
         hlc: Hlc::new(1, 0, uuid::Uuid::from_u128(3)),
-        format_version: notes_core::operation::FORMAT_VERSION,
+        // These fixtures were persisted by a version-6 client.
+        format_version: 6,
         kind: OpKind::PageDelete(PageDelete {
             uuid: uuid::Uuid::from_u128(1),
         }),

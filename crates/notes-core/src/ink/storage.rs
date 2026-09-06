@@ -12,11 +12,11 @@ use std::collections::{BTreeMap, BTreeSet};
 #[path = "storage/compaction.rs"]
 mod compaction;
 #[path = "storage/history.rs"]
-mod history;
+pub(super) mod history;
 pub(super) use compaction::compact_with_limits;
 pub(super) use history::navigate_update;
 const MAX_SNAPSHOT_BYTES: i64 = 64 * 1024 * 1024;
-fn open(store: &Store) -> CommandResult<Connection> {
+pub(super) fn open(store: &Store) -> CommandResult<Connection> {
     let conn =
         Connection::open_with_flags(&store.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(err)?;
@@ -32,7 +32,7 @@ fn open(store: &Store) -> CommandResult<Connection> {
     .map_err(err)?;
     Ok(conn)
 }
-fn ensure_document(conn: &Connection, document: uuid::Uuid) -> CommandResult<()> {
+pub(super) fn ensure_document(conn: &Connection, document: uuid::Uuid) -> CommandResult<()> {
     let kind: Option<String> = conn.query_row("SELECT i.content_type FROM pages p JOIN page_identities i ON i.page_uuid=p.uuid WHERE p.uuid=?1", [document], |r|r.get(0)).optional().map_err(err)?;
     match kind.as_deref() {
         Some("ink") => Ok(()),
@@ -56,7 +56,10 @@ fn get_record(conn: &Connection, id: Id, expected_length: Option<u64>) -> Comman
     }
     Ok(r)
 }
-fn load(conn: &Connection, document: uuid::Uuid) -> CommandResult<Option<(Snapshot, String)>> {
+pub(super) fn load(
+    conn: &Connection,
+    document: uuid::Uuid,
+) -> CommandResult<Option<(Snapshot, String)>> {
     let head: Option<(Vec<u8>, String)> = conn
         .query_row(
             "SELECT root_id,revision FROM ink_documents WHERE page_uuid=?1 AND root_id IS NOT NULL",
@@ -66,6 +69,18 @@ fn load(conn: &Connection, document: uuid::Uuid) -> CommandResult<Option<(Snapsh
         .optional()
         .map_err(err)?;
     let Some((id, revision)) = head else {
+        let pending: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM ink_versions WHERE page_uuid=?1)",
+                [document],
+                |r| r.get(0),
+            )
+            .map_err(err)?;
+        if pending {
+            return Err(CommandError::conflict(
+                "Download or resolve handwriting versions before editing",
+            ));
+        }
         return Ok(None);
     };
     let pinned: Vec<u8> = conn.query_row("SELECT h.root_id FROM ink_history h JOIN ink_documents c ON h.page_uuid=c.page_uuid AND h.seq=c.cursor WHERE c.page_uuid=?1",[document],|r|r.get(0)).map_err(err)?;
@@ -80,7 +95,7 @@ fn load(conn: &Connection, document: uuid::Uuid) -> CommandResult<Option<(Snapsh
     )?;
     Ok(Some((load_root(conn, root)?, revision)))
 }
-fn load_root(conn: &Connection, root: Record) -> CommandResult<Snapshot> {
+pub(super) fn load_root(conn: &Connection, root: Record) -> CommandResult<Snapshot> {
     let doc = model::Document::read(&root).map_err(err)?;
     let total = doc
         .records
@@ -283,7 +298,7 @@ fn page_of(snapshot: &Snapshot) -> CommandResult<model::Page> {
 }
 // This scratch-sheet editor cannot losslessly edit arbitrary portable documents yet.
 // Reject unsupported metadata instead of replacing it with our defaults on the next save.
-fn validate_adapter(snapshot: &Snapshot) -> CommandResult<()> {
+pub(super) fn validate_adapter(snapshot: &Snapshot) -> CommandResult<()> {
     let doc = model::Document::read(&snapshot.root).map_err(err)?;
     let page = page_of(snapshot)?;
     if !doc.extra.is_empty()
@@ -302,6 +317,9 @@ fn validate_adapter(snapshot: &Snapshot) -> CommandResult<()> {
         .values()
         .chain(std::iter::once(&snapshot.root))
     {
+        if identity(r.kind, &r.body)? != r.id {
+            return Err(CommandError::invalid("Ink record identity mismatch"));
+        }
         if r.extensions != cbor::map([]) || !r.resources.is_empty() {
             return Err(CommandError::invalid("Unsupported ink extensions"));
         }
@@ -566,8 +584,8 @@ fn put(conn: &Connection, table: &str, id: Id, bytes: &[u8]) -> CommandResult<()
         }
     } else {
         conn.execute(
-            &format!("INSERT INTO {table}(id,data) VALUES(?1,?2)"),
-            params![id.as_slice(), bytes],
+            &format!("INSERT INTO {table}(id,data,hash) VALUES(?1,?2,?3)"),
+            params![id.as_slice(), bytes, Sha256::digest(bytes).as_slice()],
         )
         .map_err(err)?;
     }

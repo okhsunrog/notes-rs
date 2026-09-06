@@ -13,7 +13,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-pub const FORMAT_VERSION: u32 = 6;
+pub const FORMAT_VERSION: u32 = 7;
 pub const PERSISTED_ENVELOPE_VERSION: u32 = 2;
 
 #[derive(Serialize)]
@@ -74,6 +74,7 @@ pub struct Op {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
 pub enum OpKind {
+    InkPublish(crate::ink::Publish),
     PageCreate(PageCreate),
     PageAliasSet(PageAliasSet),
     PageSetTitle(PageSetTitle),
@@ -184,6 +185,8 @@ pub struct ApplyOutcome {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SyncSnapshot {
+    #[serde(default)]
+    pub ink_versions: Vec<crate::ink::Version>,
     pub format_version: u32,
     pub workspace_uuid: uuid::Uuid,
     pub seq: u64,
@@ -640,7 +643,9 @@ pub async fn acknowledge_server_ops(
 }
 
 pub async fn export_sync_snapshot(conn: &Connection, seq: u64) -> Result<SyncSnapshot> {
-    conn.call(move |database| {
+    conn.call_domain(move |database| -> CoreResult<SyncSnapshot> {
+        let transaction = database.transaction()?;
+        let database = &transaction;
         let workspace_uuid = database.query_row(
             "SELECT uuid FROM workspace WHERE singleton = 1",
             [],
@@ -756,6 +761,7 @@ pub async fn export_sync_snapshot(conn: &Connection, seq: u64) -> Result<SyncSna
             .query_map([], snapshot_attachment_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(SyncSnapshot {
+            ink_versions: crate::ink::versions::all(database)?,
             format_version: FORMAT_VERSION,
             workspace_uuid,
             seq,
@@ -772,7 +778,14 @@ pub async fn export_sync_snapshot(conn: &Connection, seq: u64) -> Result<SyncSna
 }
 
 pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> Result<()> {
-    if snapshot.format_version != FORMAT_VERSION {
+    if !matches!(snapshot.format_version, 6 | FORMAT_VERSION)
+        || (snapshot.format_version == 6
+            && (!snapshot.ink_versions.is_empty()
+                || snapshot
+                    .page_identities
+                    .iter()
+                    .any(|p| p.kind == PageKind::Handwriting)))
+    {
         return Err(CoreError::invalid(format!(
             "unsupported snapshot format version {}",
             snapshot.format_version
@@ -839,7 +852,7 @@ pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> 
              DELETE FROM attachments;
              DELETE FROM blocks;
              DELETE FROM pages;
-             DELETE FROM page_identities;
+             DELETE FROM page_identities WHERE page_uuid NOT IN (SELECT page_uuid FROM ink_documents UNION SELECT page_uuid FROM ink_versions);
              DELETE FROM page_alias_lww;
              DELETE FROM block_structure_lww;
              DELETE FROM attachment_lww;
@@ -857,8 +870,9 @@ pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> 
             [snapshot.workspace_uuid],
         )?;
         for identity in snapshot.page_identities {
-            insert_page_identity(&transaction, identity.uuid, &identity.kind)?;
+            ensure_page_identity(&transaction, identity.uuid, &identity.kind)?;
         }
+        for version in &snapshot.ink_versions { crate::ink::versions::apply(&transaction, version)?; }
         for page in snapshot.pages {
             let normalized_title = page.title.as_deref().map(crate::model::normalize_title);
             let title_stemmed = page
@@ -1013,6 +1027,17 @@ fn validate_snapshot(snapshot: &SyncSnapshot) -> CoreResult<()> {
             return Err(CoreError::invalid(format!(
                 "snapshot contains duplicate journal date {date}"
             )));
+        }
+    }
+    let mut versions = HashSet::new();
+    for v in &snapshot.ink_versions {
+        v.publication.validate()?;
+        if !versions.insert(v.publication.version_uuid)
+            || identities.get(&v.publication.page_uuid) != Some(&&PageKind::Handwriting)
+        {
+            return Err(CoreError::invalid(
+                "Invalid handwriting version in snapshot",
+            ));
         }
     }
     let mut pages = HashMap::new();
@@ -1286,7 +1311,17 @@ fn validate(operation: &Op) -> CoreResult<()> {
     if operation.workspace_uuid.is_nil() {
         return Err(CoreError::invalid("operation workspace UUID cannot be nil"));
     }
-    if operation.format_version != FORMAT_VERSION {
+    if !matches!(operation.format_version, 6 | FORMAT_VERSION)
+        || (operation.format_version == 6
+            && matches!(
+                &operation.kind,
+                OpKind::InkPublish(_)
+                    | OpKind::PageCreate(PageCreate {
+                        kind: PageKind::Handwriting,
+                        ..
+                    })
+            ))
+    {
         return Err(CoreError::invalid(format!(
             "unsupported operation format version {}",
             operation.format_version
@@ -1297,6 +1332,7 @@ fn validate(operation: &Op) -> CoreResult<()> {
 
 pub(crate) fn validate_kind(kind: &OpKind) -> CoreResult<()> {
     match kind {
+        OpKind::InkPublish(payload) => payload.validate(),
         OpKind::PageCreate(payload) => {
             validate_title(payload.title.as_deref())?;
             if payload.kind.is_journal() && payload.title.is_some() {
@@ -1480,6 +1516,18 @@ fn apply_one_with_effects(
     }
     let timestamp = operation_timestamp(operation);
     match &operation.kind {
+        OpKind::InkPublish(payload) => {
+            ensure_object_kind(transaction, payload.page_uuid, ObjectKind::Page)?;
+            crate::ink::versions::apply(
+                transaction,
+                &crate::ink::Version {
+                    publication: payload.clone(),
+                    device_id: operation.device_id,
+                    modified_hlc: operation.hlc.clone(),
+                },
+            )?;
+            Ok(vec![payload.page_uuid])
+        }
         OpKind::PageCreate(payload) => {
             ensure_object_kind(transaction, payload.uuid, ObjectKind::Page)?;
             ensure_page_identity(transaction, payload.uuid, &payload.kind)?;
