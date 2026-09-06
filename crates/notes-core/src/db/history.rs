@@ -278,7 +278,7 @@ fn capture_page(
     database
         .query_row(
             "SELECT title, layout, created_at,
-                    (SELECT page_kind FROM page_identities WHERE page_uuid = pages.uuid),
+                    (SELECT CASE WHEN content_type = 'ink' THEN 'handwriting' ELSE page_kind END FROM page_identities WHERE page_uuid = pages.uuid),
                     (SELECT journal_date FROM page_identities WHERE page_uuid = pages.uuid)
                FROM pages WHERE uuid = ?1",
             [uuid],
@@ -287,6 +287,7 @@ fn capture_page(
                 let journal_date = row.get::<_, Option<crate::model::JournalDate>>(4)?;
                 let kind = match (page_kind.as_str(), journal_date) {
                     ("note", None) => PageKind::Note,
+        ("handwriting", None) => PageKind::Handwriting,
                     ("journal", Some(date)) => PageKind::Journal { date },
                     _ => return Err(rusqlite::Error::InvalidQuery),
                 };

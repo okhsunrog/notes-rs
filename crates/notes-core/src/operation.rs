@@ -648,7 +648,7 @@ pub async fn export_sync_snapshot(conn: &Connection, seq: u64) -> Result<SyncSna
         )?;
         let page_identities = database
             .prepare(
-                "SELECT page_uuid, page_kind, journal_date
+                "SELECT page_uuid, CASE WHEN content_type = 'ink' THEN 'handwriting' ELSE page_kind END, journal_date
                    FROM page_identities ORDER BY page_uuid",
             )?
             .query_map([], |row| {
@@ -662,7 +662,7 @@ pub async fn export_sync_snapshot(conn: &Connection, seq: u64) -> Result<SyncSna
             .prepare(
                 "SELECT uuid, title, layout, title_hlc, layout_hlc, existence_hlc,
                         created_at, updated_at,
-                        (SELECT page_kind FROM page_identities WHERE page_uuid = pages.uuid),
+                        (SELECT CASE WHEN content_type = 'ink' THEN 'handwriting' ELSE page_kind END FROM page_identities WHERE page_uuid = pages.uuid),
                         (SELECT journal_date FROM page_identities WHERE page_uuid = pages.uuid)
                    FROM pages ORDER BY uuid",
             )?
@@ -2423,6 +2423,7 @@ pub(crate) fn page_kind_from_sql(
 ) -> rusqlite::Result<PageKind> {
     match (kind.as_str(), date) {
         ("note", None) => Ok(PageKind::Note),
+        ("handwriting", None) => Ok(PageKind::Handwriting),
         ("journal", Some(date)) => Ok(PageKind::Journal { date }),
         _ => Err(rusqlite::Error::FromSqlConversionFailure(
             column,
@@ -2457,7 +2458,7 @@ fn page_identity(
 ) -> rusqlite::Result<Option<PageKind>> {
     transaction
         .query_row(
-            "SELECT page_kind, journal_date FROM page_identities WHERE page_uuid = ?1",
+            "SELECT CASE WHEN content_type = 'ink' THEN 'handwriting' ELSE page_kind END, journal_date FROM page_identities WHERE page_uuid = ?1",
             [page_uuid],
             |row| page_kind_from_sql(row.get(0)?, row.get(1)?, 0),
         )
@@ -2469,14 +2470,15 @@ fn insert_page_identity(
     page_uuid: uuid::Uuid,
     kind: &PageKind,
 ) -> CoreResult<()> {
-    let (kind_name, date) = match kind {
-        PageKind::Note => ("note", None),
-        PageKind::Journal { date } => ("journal", Some(date)),
+    let (kind_name, date, content_type) = match kind {
+        PageKind::Note => ("note", None, "text"),
+        PageKind::Handwriting => ("note", None, "ink"),
+        PageKind::Journal { date } => ("journal", Some(date), "text"),
     };
     transaction.execute(
-        "INSERT INTO page_identities(page_uuid, page_kind, journal_date)
-         VALUES (?1, ?2, ?3)",
-        rusqlite::params![page_uuid, kind_name, date],
+        "INSERT INTO page_identities(page_uuid, page_kind, journal_date, content_type)
+         VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![page_uuid, kind_name, date, content_type],
     )?;
     Ok(())
 }
@@ -2505,7 +2507,7 @@ fn materialize_page_kind(
     kind: &PageKind,
 ) -> CoreResult<()> {
     match kind {
-        PageKind::Note => {
+        PageKind::Note | PageKind::Handwriting => {
             transaction.execute(
                 "DELETE FROM journal_pages WHERE page_uuid = ?1",
                 [page_uuid],

@@ -7,6 +7,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("migrations/V001__initial.sql")),
         M::up(include_str!("migrations/V002__stem_page_titles.sql")),
         M::up(include_str!("migrations/V003__attachment_image_cache.sql")),
+        M::up(include_str!("migrations/V004__handwriting.sql")),
     ])
 }
 

@@ -28,7 +28,7 @@ pub async fn export_archive(conn: &Connection) -> Result<DataArchive> {
         )?;
         let page_identities = database
             .prepare(
-                "SELECT page_uuid, page_kind, journal_date
+                "SELECT page_uuid, CASE WHEN content_type = 'ink' THEN 'handwriting' ELSE page_kind END, journal_date
                    FROM page_identities ORDER BY page_uuid",
             )?
             .query_map([], |row| {

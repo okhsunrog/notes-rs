@@ -155,7 +155,9 @@ pub async fn graph_snapshot(
                 uuid: page.uuid,
                 kind: ObjectKind::Page,
                 label: match page.kind {
-                    PageKind::Note => page.title.unwrap_or_else(|| "Untitled".into()),
+                    PageKind::Note | PageKind::Handwriting => {
+                        page.title.unwrap_or_else(|| "Untitled".into())
+                    }
                     PageKind::Journal { date } => date.to_string(),
                 },
             },

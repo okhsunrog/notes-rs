@@ -350,6 +350,7 @@ impl rusqlite::types::FromSql for JournalDate {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PageKind {
     Note,
+    Handwriting,
     Journal { date: JournalDate },
 }
 

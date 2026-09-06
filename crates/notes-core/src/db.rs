@@ -159,7 +159,7 @@ impl Content {
 }
 
 pub(crate) const PAGE_COLUMNS: &str = "pages.uuid, pages.title, pages.layout, pages.created_at, pages.updated_at, \
-     (SELECT page_kind FROM page_identities WHERE page_uuid = pages.uuid), \
+     (SELECT CASE WHEN content_type = 'ink' THEN 'handwriting' ELSE page_kind END FROM page_identities WHERE page_uuid = pages.uuid), \
      (SELECT journal_date FROM page_identities WHERE page_uuid = pages.uuid), \
      COALESCE(pages.title_hlc, pages.existence_hlc)";
 pub(crate) const BLOCK_COLUMNS: &str = "uuid, page_uuid, parent_uuid, order_key, style, markdown, created_at, updated_at, \
@@ -173,6 +173,7 @@ pub(crate) fn row_to_page(row: &rusqlite::Row<'_>) -> rusqlite::Result<Page> {
     let journal_date = row.get::<_, Option<crate::model::JournalDate>>(6)?;
     let kind = match (page_kind.as_str(), journal_date) {
         ("note", None) => PageKind::Note,
+        ("handwriting", None) => PageKind::Handwriting,
         ("journal", Some(date)) => PageKind::Journal { date },
         _ => return Err(rusqlite::Error::InvalidQuery),
     };
