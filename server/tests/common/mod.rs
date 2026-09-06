@@ -35,6 +35,7 @@ pub async fn start_server() -> Harness {
         max_blob_bytes: 1024,
         max_user_blob_bytes: 1024,
         ai: None,
+        mcp_allowed_hosts: Vec::new(),
         users: vec![UserConfig {
             id: "owner".into(),
             admin: true,

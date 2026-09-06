@@ -21,6 +21,14 @@ pub struct ServerConfig {
     #[serde(default = "default_max_user_blob_bytes")]
     pub max_user_blob_bytes: u64,
     pub ai: Option<AiConfig>,
+    /// Hostnames the MCP endpoint accepts in the `Host` header.
+    ///
+    /// The transport only allows loopback by default, as protection against DNS
+    /// rebinding of locally running servers. A deployment reachable under its
+    /// own name has to say so: list the hostname clients use, with the port
+    /// when it is not the scheme's default.
+    #[serde(default)]
+    pub mcp_allowed_hosts: Vec<String>,
     pub users: Vec<UserConfig>,
 }
 
@@ -317,6 +325,7 @@ mod tests {
             max_blob_bytes: 1,
             max_user_blob_bytes: 1,
             ai: None,
+            mcp_allowed_hosts: Vec::new(),
             users: vec![UserConfig {
                 id: "../owner".into(),
                 admin: false,
@@ -346,6 +355,7 @@ mod tests {
                 embedding_dimensions: 0,
                 ..ai
             }),
+            mcp_allowed_hosts: Vec::new(),
             users: vec![UserConfig {
                 id: "owner".into(),
                 admin: false,
@@ -467,6 +477,7 @@ token = "a-token-with-at-least-thirty-two-characters"
             max_blob_bytes: 1,
             max_user_blob_bytes: 1,
             ai: None,
+            mcp_allowed_hosts: Vec::new(),
             users: vec![
                 UserConfig {
                     id: "hashed".into(),

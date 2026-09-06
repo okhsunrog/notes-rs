@@ -3,6 +3,7 @@ pub mod api;
 mod blob_ownership;
 pub mod config;
 pub mod eval;
+pub mod mcp;
 mod oplog;
 pub mod state;
 
@@ -31,6 +32,7 @@ pub async fn build_state(config: &ServerConfig) -> Result<AppState> {
         max_user_blob_bytes: config.max_user_blob_bytes,
         blob_ownership,
         ai,
+        mcp_allowed_hosts: config.mcp_allowed_hosts.clone(),
         shutdown,
     })
 }

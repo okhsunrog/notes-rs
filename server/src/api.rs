@@ -43,11 +43,12 @@ pub struct AppState {
     pub max_user_blob_bytes: u64,
     pub(crate) blob_ownership: crate::blob_ownership::BlobOwnership,
     pub ai: Option<Arc<crate::ai::AiRuntime>>,
+    pub mcp_allowed_hosts: Vec<String>,
     pub shutdown: CancellationToken,
 }
 
 #[derive(Clone)]
-struct AuthenticatedUser(Arc<UserState>);
+pub(crate) struct AuthenticatedUser(pub(crate) Arc<UserState>);
 
 #[derive(Debug)]
 pub struct ApiError {
@@ -215,10 +216,15 @@ pub fn router(state: AppState) -> Router {
             put(put_blob).get(get_blob).head(head_blob),
         )
         .layer(DefaultBodyLimit::disable());
+    let mcp_routes = Router::new().route_service(
+        "/mcp",
+        crate::mcp::service(state.mcp_allowed_hosts.clone(), state.ai.clone()),
+    );
     let protected = Router::new()
         .merge(json_routes)
         .merge(bootstrap_routes)
         .merge(stream_routes)
+        .merge(mcp_routes)
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
     Router::new()
         .route("/v1/health", get(health))
@@ -944,6 +950,7 @@ mod tests {
             max_blob_bytes: 1024,
             max_user_blob_bytes: 1024,
             ai: None,
+            mcp_allowed_hosts: Vec::new(),
             users: vec![
                 UserConfig {
                     id: "owner".into(),
@@ -989,6 +996,7 @@ mod tests {
             max_blob_bytes: 1024,
             max_user_blob_bytes: 1024,
             ai: Some(ai),
+            mcp_allowed_hosts: Vec::new(),
             users: vec![UserConfig {
                 id: "owner".into(),
                 admin: true,
