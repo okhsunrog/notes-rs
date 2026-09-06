@@ -458,6 +458,13 @@ state in the last fifty-action history window. A stalled queue is bounded to the
 in-flight/retry state plus the latest 51 snapshots; older intermediates may expire.
 It flushes that queue before navigating history and briefly blocks input during the
 navigation. History navigation does not serialize old strokes back through IPC.
+Opening the sheet returns a full snapshot. Undo/Redo responses carry the base and
+new revision, complete object order, background and only inserted/changed strokes.
+Immutable stroke record IDs identify unchanged objects, including across compaction.
+The frontend rejects a mismatched base and reuses unchanged stroke objects; after
+navigation the incremental saver starts from the acknowledged resulting page.
+The storage adapter still reconstructs and validates the target page internally;
+this change reduces IPC/JS allocations, not all Rust decoding work.
 Atomic snapshot publication, fifty-action retention, SQLite schema upgrade and
 ABA/conflict behavior are covered by storage tests. Compaction must preserve these
 roots and the current revision token.

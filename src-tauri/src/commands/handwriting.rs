@@ -123,6 +123,25 @@ pub struct InkHistorySnapshot {
     pub can_redo: bool,
 }
 
+#[derive(Debug, Serialize, specta::Type)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum InkHistoryUpdate {
+    Snapshot {
+        history: InkHistorySnapshot,
+    },
+    Patch {
+        patch: InkDraftPatch,
+        base_revision: Option<String>,
+        revision: Option<String>,
+        can_undo: bool,
+        can_redo: bool,
+    },
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn handwriting_history(
@@ -130,7 +149,7 @@ pub async fn handwriting_history(
     store: State<'_, HandwritingStore>,
     redo: Option<bool>,
     expected_revision: Option<String>,
-) -> CommandResult<InkHistorySnapshot> {
+) -> CommandResult<InkHistoryUpdate> {
     let path = app
         .path()
         .app_data_dir()
@@ -142,7 +161,7 @@ pub async fn handwriting_history(
         let _guard = lock
             .lock()
             .map_err(|e| err(anyhow::anyhow!(e.to_string())))?;
-        storage::navigate(&path, redo, expected_revision)
+        storage::navigate_update(&path, redo, expected_revision)
     })
     .await
     .map_err(err)??;
@@ -557,6 +576,84 @@ mod tests {
         let empty = storage::navigate(&path, Some(false), prior.snapshot.revision).unwrap();
         assert!(empty.snapshot.draft.strokes.is_empty());
         assert!(!empty.can_undo && empty.can_redo);
+    }
+
+    #[test]
+    fn history_updates_send_only_changed_strokes_and_reject_stale_bases() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ink.sqlite3");
+        let a = sample().strokes.remove(0);
+        let b = sample().strokes.remove(0);
+        let first = write_draft(
+            &path,
+            InkDraft {
+                strokes: vec![a.clone()],
+                ..InkDraft::default()
+            },
+            None,
+        )
+        .unwrap();
+        let second = storage::patch(
+            &path,
+            InkDraftPatch {
+                order: vec![a.id, b.id],
+                upserts: vec![b.clone()],
+                background: InkBackground::Plain,
+            },
+            Some(first),
+        )
+        .unwrap();
+        // Compaction changes storage locations, but must not turn unchanged strokes into upserts.
+        storage::compact(&path).unwrap();
+        let InkHistoryUpdate::Patch {
+            patch,
+            base_revision,
+            revision,
+            can_redo,
+            ..
+        } = storage::navigate_update(&path, Some(false), Some(second.clone())).unwrap()
+        else {
+            panic!("expected patch")
+        };
+        assert_eq!(base_revision, Some(second.clone()));
+        assert_eq!(patch.order, vec![a.id]);
+        assert!(patch.upserts.is_empty());
+        assert!(can_redo);
+        assert!(storage::navigate_update(&path, Some(true), Some(second)).is_err());
+        let InkHistoryUpdate::Patch {
+            patch, revision, ..
+        } = storage::navigate_update(&path, Some(true), revision).unwrap()
+        else {
+            panic!("expected patch")
+        };
+        assert_eq!(patch.order, vec![a.id, b.id]);
+        assert_eq!(patch.upserts.len(), 1);
+        assert_eq!(patch.upserts[0].id, b.id);
+        let mut edited = b.clone();
+        edited.points[0].x = 123.;
+        let changed = storage::patch(
+            &path,
+            InkDraftPatch {
+                order: vec![b.id, a.id],
+                upserts: vec![edited],
+                background: InkBackground::Grid,
+            },
+            revision,
+        )
+        .unwrap();
+        let InkHistoryUpdate::Patch { patch, .. } =
+            storage::navigate_update(&path, Some(false), Some(changed)).unwrap()
+        else {
+            panic!("expected patch")
+        };
+        assert_eq!(patch.order, vec![a.id, b.id]);
+        assert_eq!(patch.upserts.len(), 1);
+        assert_eq!(patch.upserts[0].points[0].x, b.points[0].x);
+        assert!(matches!(patch.background, InkBackground::Plain));
+        assert!(matches!(
+            storage::navigate_update(&path, None, None).unwrap(),
+            InkHistoryUpdate::Snapshot { .. }
+        ));
     }
 
     #[test]

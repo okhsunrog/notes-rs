@@ -12,7 +12,9 @@ use std::collections::{BTreeMap, BTreeSet};
 mod compaction;
 mod history;
 pub(super) use compaction::compact;
+#[cfg(test)]
 pub(super) use history::navigate;
+pub(super) use history::navigate_update;
 const APP_ID: i64 = 0x494e4b31;
 const MAX_SNAPSHOT_BYTES: i64 = 64 * 1024 * 1024;
 fn open(path: &Path) -> CommandResult<Connection> {

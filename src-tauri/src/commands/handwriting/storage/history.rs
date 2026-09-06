@@ -66,12 +66,20 @@ pub(super) fn collect(conn: &Connection) -> CommandResult<()> {
     conn.execute_batch("DELETE FROM ink_records WHERE id NOT IN (SELECT id FROM keep_records); DELETE FROM ink_chunks WHERE id NOT IN (SELECT id FROM keep_chunks);").map_err(err)?;
     Ok(())
 }
-fn result(conn: &Connection) -> CommandResult<InkHistorySnapshot> {
+fn result(conn: &Connection) -> CommandResult<(InkHistorySnapshot, BTreeMap<Id, Id>)> {
+    let mut objects = BTreeMap::new();
     let snapshot = match load(conn)? {
-        Some((s, revision)) => InkDraftSnapshot {
-            draft: to_draft(&s)?,
-            revision: Some(revision),
-        },
+        Some((s, revision)) => {
+            objects = page_of(&s)?
+                .objects
+                .into_iter()
+                .map(|r| (r.object_id, r.record_id))
+                .collect();
+            InkDraftSnapshot {
+                draft: to_draft(&s)?,
+                revision: Some(revision),
+            }
+        }
         None => InkDraftSnapshot {
             draft: InkDraft::default(),
             revision: None,
@@ -79,27 +87,59 @@ fn result(conn: &Connection) -> CommandResult<InkHistorySnapshot> {
     };
     let seq = cursor(conn)?;
     let (can_undo,can_redo)=conn.query_row("SELECT EXISTS(SELECT 1 FROM ink_history WHERE seq<?1),EXISTS(SELECT 1 FROM ink_history WHERE seq>?1)",[seq],|r| Ok((r.get(0)?,r.get(1)?))).map_err(err)?;
-    Ok(InkHistorySnapshot {
-        snapshot,
-        can_undo,
-        can_redo,
-    })
+    Ok((
+        InkHistorySnapshot {
+            snapshot,
+            can_undo,
+            can_redo,
+        },
+        objects,
+    ))
 }
+#[cfg(test)]
 pub(in super::super) fn navigate(
     path: &Path,
     redo: Option<bool>,
     expected: Option<String>,
 ) -> CommandResult<InkHistorySnapshot> {
+    match navigate_impl(path, redo, expected, false)? {
+        InkHistoryUpdate::Snapshot { history } => Ok(history),
+        _ => unreachable!(),
+    }
+}
+
+pub(in super::super) fn navigate_update(
+    path: &Path,
+    redo: Option<bool>,
+    expected: Option<String>,
+) -> CommandResult<InkHistoryUpdate> {
+    navigate_impl(path, redo, expected, true)
+}
+
+fn navigate_impl(
+    path: &Path,
+    redo: Option<bool>,
+    expected: Option<String>,
+    incremental: bool,
+) -> CommandResult<InkHistoryUpdate> {
     let mut conn = open(path)?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(err)?;
+    let mut previous = BTreeMap::new();
     if let Some(redo) = redo {
         let current = load(&tx)?;
         if current.as_ref().map(|(_, r)| r) != expected.as_ref() {
             return Err(CommandError::conflict(
                 "The handwriting draft changed. Reopen it before changing history.",
             ));
+        }
+        if incremental && let Some((snapshot, _)) = &current {
+            previous = page_of(snapshot)?
+                .objects
+                .into_iter()
+                .map(|r| (r.object_id, r.record_id))
+                .collect();
         }
         let target = cursor(&tx)? + if redo { 1 } else { -1 };
         let id: Option<Vec<u8>> = tx
@@ -118,7 +158,32 @@ pub(in super::super) fn navigate(
                 .map_err(|_| CommandError::invalid("Invalid history root"))?,
         )?;
     }
-    let result = result(&tx)?; // Validate before committing a navigation.
+    let (result, objects) = result(&tx)?; // Validate before committing a navigation.
+    let result = if incremental && redo.is_some() {
+        let unchanged: BTreeSet<_> = objects
+            .into_iter()
+            .filter(|(id, record)| previous.get(id) == Some(record))
+            .map(|(id, _)| uuid::Uuid::from_bytes(id))
+            .collect();
+        let draft = result.snapshot.draft;
+        InkHistoryUpdate::Patch {
+            patch: InkDraftPatch {
+                order: draft.strokes.iter().map(|s| s.id).collect(),
+                upserts: draft
+                    .strokes
+                    .into_iter()
+                    .filter(|s| !unchanged.contains(&s.id))
+                    .collect(),
+                background: draft.background,
+            },
+            base_revision: expected,
+            revision: result.snapshot.revision,
+            can_undo: result.can_undo,
+            can_redo: result.can_redo,
+        }
+    } else {
+        InkHistoryUpdate::Snapshot { history: result }
+    };
     tx.commit().map_err(err)?;
     Ok(result)
 }

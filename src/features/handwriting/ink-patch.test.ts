@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { incrementalDraftSaver } from "./ink-patch";
+import { applyHistoryUpdate, incrementalDraftSaver } from "./ink-patch";
 import { DraftWriter } from "./draft-writer";
 import { emptyDraft } from "./ink-model";
 import type { InkStroke } from "@/lib/bindings";
@@ -9,6 +9,36 @@ const a: InkStroke = {
   points: [{ x: 10, y: 20, pressure: 0.5, tiltX: 0, tiltY: 0, time: 0 }],
 };
 const b: InkStroke = { ...a, id: "b" };
+
+it("applies history deltas, preserves unchanged objects, and seeds the next incremental save", async () => {
+  const current = { ...emptyDraft(), strokes: [a, b] };
+  const changed = { ...b, width: 9 };
+  const update = {
+    kind: "patch" as const,
+    baseRevision: "old",
+    revision: "new",
+    canUndo: true,
+    canRedo: true,
+    patch: { order: ["b", "a"], upserts: [changed], background: "grid" as const },
+  };
+  const result = applyHistoryUpdate(current, "old", update);
+  expect(result.snapshot.draft.strokes).toEqual([changed, a]);
+  expect(result.snapshot.draft.strokes[1]).toBe(a);
+  expect(result.snapshot.draft.background).toBe("grid");
+  expect(() => applyHistoryUpdate(current, "stale", update)).toThrow("Reopen");
+  expect(() =>
+    applyHistoryUpdate(current, "old", {
+      ...update,
+      patch: { ...update.patch, order: ["missing"] },
+    }),
+  ).toThrow("Incomplete");
+  const save = vi.fn().mockResolvedValue("third");
+  await incrementalDraftSaver(result.snapshot.draft, save)(
+    { ...result.snapshot.draft, strokes: [a] },
+    "new",
+  );
+  expect(save).toHaveBeenCalledWith({ order: ["a"], upserts: [], background: "grid" }, "new");
+});
 
 it("sends no points for deletion, retains order, and resends ink restored by Undo", async () => {
   const save = vi.fn().mockResolvedValue("next");

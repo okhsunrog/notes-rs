@@ -19,7 +19,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/compone
 import { handwritingHistory, saveHandwritingPatch } from "@/lib/api";
 import type { InkDraft, InkHistorySnapshot } from "@/lib/bindings";
 import { registerBackOverlay } from "@/lib/back-overlays";
-import { incrementalDraftSaver } from "./ink-patch";
+import { applyHistoryUpdate, incrementalDraftSaver } from "./ink-patch";
 import { DraftWriter, type DraftSaveState } from "./draft-writer";
 import { InkCanvas, type InkMetrics, type InkTool } from "./ink-canvas";
 import { useHandwritingSession } from "./handwriting-session";
@@ -71,7 +71,7 @@ export function HandwritingSheet() {
     let disposed = false;
     void handwritingHistory(null, null)
       .then((history) => {
-        if (!disposed) adopt(history);
+        if (!disposed) adopt(applyHistoryUpdate(null, null, history));
       })
       .catch((error: unknown) => {
         if (!disposed) setLoadError(String(error));
@@ -116,7 +116,7 @@ export function HandwritingSheet() {
       const current = writer.current;
       if (!current || !(await current.flush())) return;
       const history = await handwritingHistory(redo, current.getRevision());
-      adopt(history);
+      adopt(applyHistoryUpdate(latestDraft.current, current.getRevision(), history));
       setSelected([]);
       setLimit(false);
     } catch (error) {
