@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { NewNoteButton } from "@/features/handwriting/new-note-button";
+import { PageIcon } from "@/features/pages/page-icon";
 import { Input } from "@/components/ui/input";
 import { useCompactLayout } from "@/app/use-compact-layout";
 import { pageDisplayTitle, todayJournalDate } from "@/features/journal/journal-date";
@@ -445,7 +446,7 @@ function DashboardSection({
               className="group flex min-w-0 items-center gap-2.5 rounded-xl px-3 py-2.5 text-left transition hover:bg-accent/70"
             >
               <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/8 text-primary">
-                <FileText className="size-3.5" />
+                <PageIcon page={page} className="size-3.5" />
               </span>
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-xs font-medium">{pageDisplayTitle(page)}</span>

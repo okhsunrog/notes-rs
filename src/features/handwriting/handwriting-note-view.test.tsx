@@ -13,6 +13,7 @@ import { useWorkspaceStore } from "@/features/workspace/workspace-store";
 import type { InkHistorySnapshot, Page } from "@/lib/bindings";
 import { HandwritingNoteView } from "./handwriting-note-view";
 import { resetHandwritingSessions } from "./handwriting-session";
+import { useHandwritingPreference } from "./input-capabilities";
 import { emptyDraft } from "./ink-model";
 
 const api = vi.hoisted(() => ({
@@ -77,6 +78,8 @@ beforeEach(() => {
   api.completeHandwritingNote.mockResolvedValue({});
   api.setHandwritingBackground.mockResolvedValue(undefined);
   useWorkspaceStore.getState().dispatch({ type: "reset" });
+  // Drawing without a detected pen is the explicit device preference.
+  useHandwritingPreference.setState({ mouseEnabled: true });
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -212,4 +215,14 @@ it("leaves after a successful flush and offers a retry when completion fails", a
   await act(async () => retry());
 
   expect(api.completeHandwritingNote).toHaveBeenCalledTimes(2);
+});
+
+it("opens read-only without a pen and without the mouse preference", async () => {
+  useHandwritingPreference.setState({ mouseEnabled: false });
+  await mount();
+
+  expect(api.loadHandwritingNote).toHaveBeenCalledWith(page.uuid, false);
+  expect(container.querySelector('[role="toolbar"]')).toBeNull();
+  expect(container.textContent).toContain("Connect a pen or enable mouse drawing in Settings");
+  expect(container.querySelector("canvas")).not.toBeNull();
 });

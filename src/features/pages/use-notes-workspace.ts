@@ -109,7 +109,10 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
   ]);
 
   useEffect(() => {
-    if (activeContent.kind === PaneContentKind.Page && activePage?.kind.kind === "note") {
+    if (
+      activeContent.kind === PaneContentKind.Page &&
+      (activePage?.kind.kind === "note" || activePage?.kind.kind === "handwriting")
+    ) {
       recordOpenedPage(activePage.uuid);
     }
   }, [activeContent.kind, activePage, recordOpenedPage]);

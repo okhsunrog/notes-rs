@@ -1,14 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueries, useQuery } from "@tanstack/react-query";
-import {
-  ArrowLeft,
-  CalendarDays,
-  FilePlus2,
-  FileText,
-  Loader2,
-  Search,
-  TextQuote,
-} from "lucide-react";
+import { ArrowLeft, CalendarDays, FilePlus2, Loader2, Search, TextQuote } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useCompactLayout } from "@/app/use-compact-layout";
@@ -32,6 +24,7 @@ import {
   type Page,
   type SearchHit,
 } from "@/lib/api";
+import { PageIcon } from "@/features/pages/page-icon";
 import { queryKeys } from "@/lib/query";
 import { notifyError } from "@/lib/notify";
 import { DebouncedAction } from "@/lib/debounced-action";
@@ -687,7 +680,7 @@ function RowIcon({ row }: { row: PaletteRow }) {
   return row.hit.content.record.kind.kind === "journal" ? (
     <CalendarDays className="size-4" />
   ) : (
-    <FileText className="size-4" />
+    <PageIcon page={row.hit.content.record} className="size-4" />
   );
 }
 

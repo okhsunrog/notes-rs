@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ArrowRight, Clock3, FilePlus2, FileText, ListFilter, Search, Star, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { NewNoteButton } from "@/features/handwriting/new-note-button";
+import { PageIcon } from "./page-icon";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { pageDisplayTitle } from "@/features/journal/journal-date";
@@ -243,7 +244,7 @@ function AllNotesRow({
         className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3 text-left sm:px-5"
       >
         <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-primary/8 text-primary">
-          <FileText className="size-4" />
+          <PageIcon page={page} className="size-4" />
         </span>
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-medium">{pageDisplayTitle(page)}</span>

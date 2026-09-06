@@ -33,6 +33,7 @@ import type { InkDraft, InkHistorySnapshot } from "@/lib/bindings";
 import { notifyRetryableError } from "@/lib/notify";
 import { cn } from "@/lib/utils";
 import type { DraftSaveState } from "./draft-writer";
+import { canDrawHandwriting, editorAccess, type EditorOwnership } from "./handwriting-access";
 import {
   acquireEditor,
   awaitCompletion,
@@ -83,7 +84,7 @@ type Props = {
  */
 export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) {
   const uuid = page.uuid;
-  const { capabilities } = useHandwritingAvailability();
+  const { available, capabilities } = useHandwritingAvailability();
   const mouseEnabled = useHandwritingPreference((state) => state.mouseEnabled);
   const dispatch = useWorkspaceStore((state) => state.dispatch);
   const historyDepth = useWorkspaceStore((state) => state.panes[paneId]?.back.length ?? 0);
@@ -106,7 +107,7 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
   const [historyBusy, setHistoryBusy] = useState(false);
-  const [ownership, setOwnership] = useState<"pending" | "owned" | "taken">("pending");
+  const [ownership, setOwnership] = useState<EditorOwnership>("pending");
   // Input stays closed between a background transition and the re-read that
   // adopts whatever completion published while the window was hidden.
   const [suspended, setSuspended] = useState(false);
@@ -119,7 +120,8 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
   const suspendedRef = useRef(false);
   suspendedRef.current = suspended;
 
-  const editing = ownership === "owned";
+  const access = editorAccess(ownership, canDrawHandwriting(available, mouseEnabled));
+  const editing = access === "editable";
   const editingRef = useRef(editing);
   editingRef.current = editing;
 
@@ -660,7 +662,9 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
         </>
       ) : (
         <p role="status" className="shrink-0 border-b px-3 py-2 text-xs text-muted-foreground">
-          This note is open for writing in another pane. Close it there to edit here.
+          {access === "other_pane"
+            ? "This note is open for writing in another pane. Close it there to edit here."
+            : "Connect a pen or enable mouse drawing in Settings to edit."}
         </p>
       )}
       <div

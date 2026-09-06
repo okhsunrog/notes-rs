@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Clock3, FileText, Files, Plus, Star } from "lucide-react";
+import { Clock3, Files, Plus, Star } from "lucide-react";
 import { NewNoteButton } from "@/features/handwriting/new-note-button";
 import { JournalNavigation } from "@/features/journal/journal-navigation";
 import { JournalQuickCapture } from "@/features/journal/journal-quick-capture";
@@ -14,6 +14,7 @@ import {
   dispositionFromShiftKey,
   type OpenDisposition,
 } from "@/features/workspace/workspace-model";
+import { PageIcon } from "./page-icon";
 import { usePageNavigationStore } from "./page-navigation-store";
 
 type Props = {
@@ -225,7 +226,8 @@ function NoteRow({
         title={pageDisplayTitle(page)}
         className="flex min-w-0 flex-1 items-center gap-1.5 px-1 py-1.5 text-left"
       >
-        <FileText
+        <PageIcon
+          page={page}
           className={cn("size-3.5 shrink-0 text-muted-foreground", selected && "text-primary")}
         />
         <span className="min-w-0 flex-1">
