@@ -69,8 +69,8 @@ export function DocumentAuthoringControls({
               onClick={() => onAction(value)}
               className={
                 returnMode
-                  ? "relative rounded-md px-2 text-[10px] text-primary"
-                  : "relative rounded-md px-2 text-[10px]"
+                  ? "relative rounded-md px-2 text-[10px] eink:text-xs text-primary"
+                  : "relative rounded-md px-2 text-[10px] eink:text-xs"
               }
             >
               <Icon className="size-3" />
@@ -89,7 +89,7 @@ export function DocumentAuthoringControls({
         <span
           id={explanationId}
           role="status"
-          className="inline-flex min-w-0 items-center gap-1 text-[10px] text-muted-foreground"
+          className="inline-flex min-w-0 items-center gap-1 text-[10px] eink:text-xs text-muted-foreground"
           title="This page is being edited in another pane"
         >
           <LockKeyhole aria-hidden="true" className="size-3 shrink-0" />

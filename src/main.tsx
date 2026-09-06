@@ -34,16 +34,18 @@ root.render(
               </PageSessionProvider>
             </ErrorBoundary>
           </ConfirmationProvider>
+          {/* Inside the appearance provider: the toaster's duration and icons follow the
+              resolved display profile. */}
+          <Toaster
+            position="bottom-right"
+            mobileOffset={{
+              right: "calc(1rem + var(--safe-area-inset-right))",
+              bottom: "calc(1rem + var(--safe-area-inset-bottom))",
+              left: "calc(1rem + var(--safe-area-inset-left))",
+            }}
+          />
         </AppearanceProvider>
       </QueryClientProvider>
-      <Toaster
-        position="bottom-right"
-        mobileOffset={{
-          right: "calc(1rem + var(--safe-area-inset-right))",
-          bottom: "calc(1rem + var(--safe-area-inset-bottom))",
-          left: "calc(1rem + var(--safe-area-inset-left))",
-        }}
-      />
     </ThemeProvider>
   </React.StrictMode>,
 );

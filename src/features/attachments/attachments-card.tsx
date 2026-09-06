@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, ExternalLink, File, Loader2, Paperclip, Trash2 } from "lucide-react";
+import { ChevronDown, ExternalLink, File, Paperclip, Trash2 } from "lucide-react";
 import { useConfirmation } from "@/app/confirmation";
 import { Button } from "@/components/ui/button";
 import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify";
@@ -13,6 +13,7 @@ import {
   type AttachmentOwner,
 } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
+import { BusyIndicator } from "@/components/ui/busy-indicator";
 
 export function AttachmentsCard({
   location,
@@ -104,7 +105,7 @@ export function AttachmentsCard({
           />
           Attachments
           {attachments.length > 0 && (
-            <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+            <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] eink:text-xs text-muted-foreground">
               {attachments.length}
             </span>
           )}
@@ -118,7 +119,7 @@ export function AttachmentsCard({
             onClick={() => void add()}
           >
             {busy ? (
-              <Loader2 className="size-3.5 animate-spin" />
+              <BusyIndicator className="size-3.5" label="Adding file" hideLabel />
             ) : (
               <Paperclip className="size-3.5" />
             )}{" "}

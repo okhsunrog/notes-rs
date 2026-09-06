@@ -1,11 +1,12 @@
 import { useEffect, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Loader2, Plus } from "lucide-react";
+import { Plus } from "lucide-react";
 import { createBlock } from "@/lib/api";
 import { listBlockChildren } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
 import { BlockNode } from "./block-node";
 import { useOutliner } from "./outliner-store";
+import { BusyIndicator } from "@/components/ui/busy-indicator";
 
 type Props = {
   pageUuid: string;
@@ -70,7 +71,7 @@ export function BlockChildren({
   if (blocks === undefined) {
     return (
       <div className="flex items-center gap-2 py-1 text-xs text-muted-foreground">
-        <Loader2 className="size-3 animate-spin" />
+        <BusyIndicator className="size-3" label="Loading" hideLabel />
         loading…
       </div>
     );

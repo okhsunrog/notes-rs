@@ -1191,6 +1191,35 @@ html::before {
   outline-offset: 2px;
 }
 
+/* Thin strokes wash out under the panel's contrast processing. */
+[data-display="eink"] body {
+  font-weight: 500;
+}
+
+/* A tinted "selected" state is a few levels of gray on this hardware, which reads as noise
+   rather than as state. Pressed, selected, highlighted and active items invert instead. */
+[data-display="eink"] [aria-pressed="true"],
+[data-display="eink"] [aria-selected="true"],
+[data-display="eink"] [aria-current="page"],
+[data-display="eink"] [data-selected],
+[data-display="eink"] [data-highlighted],
+[data-display="eink"] [data-active] {
+  border-color: oklch(0 0 0);
+  background: oklch(0 0 0);
+  color: oklch(1 0 0);
+}
+
+/* A 50% black backdrop dithers; an opaque one separates the dialog cleanly, and the content
+   needs a hard edge because it can no longer rely on a shadow. */
+[data-display="eink"] [data-slot="dialog-overlay"] {
+  background: oklch(1 0 0);
+}
+[data-display="eink"] [data-slot="dialog-content"],
+[data-display="eink"] [data-slot="select-content"],
+[data-display="eink"] [data-slot="popover-content"] {
+  border: 1px solid oklch(0 0 0);
+}
+
 /* E-ink needs a luminance difference, not a subtle tinted selection. */
 [data-ink-editor] [role="toolbar"] button {
   transition: none;

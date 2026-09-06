@@ -98,7 +98,9 @@ export function EmptyJournalView({ date, busy, onCapture, onOpenAllNotes, onOpen
           className="mt-4 min-h-32 resize-y rounded-xl surface-base"
         />
         <div className="mt-3 flex items-center justify-between gap-3">
-          <span className="text-[10px] text-muted-foreground">Ctrl/⌘ + Enter to save</span>
+          <span className="text-[10px] eink:text-xs text-muted-foreground">
+            Ctrl/⌘ + Enter to save
+          </span>
           <Button
             type="button"
             disabled={busy || markdown.trim().length === 0}

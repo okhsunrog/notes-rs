@@ -1,6 +1,6 @@
-import { Loader2 } from "lucide-react";
 import { pageDisplayTitle } from "@/features/journal/journal-date";
 import type { Block, Page } from "@/lib/api";
+import { BusyIndicator } from "@/components/ui/busy-indicator";
 
 export type AutocompleteItem = {
   /** Stable UUID used as the React key. */
@@ -45,7 +45,7 @@ export function AutocompleteMenu({
     >
       {loading && items.length === 0 && (
         <div className="flex items-center gap-2 px-3 py-2 text-muted-foreground">
-          <Loader2 className="size-3 animate-spin" />
+          <BusyIndicator className="size-3" label="Searching" hideLabel />
           searching…
         </div>
       )}

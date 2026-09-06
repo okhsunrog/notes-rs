@@ -386,7 +386,7 @@ function AssistantRail({
       >
         <Bot className="size-4" />
         {busy && (
-          <span className="absolute top-1 right-1 size-2 animate-pulse rounded-full bg-primary" />
+          <span className="absolute top-1 right-1 size-2 animate-pulse rounded-full bg-primary eink:animate-none" />
         )}
       </Button>
       <span className="[writing-mode:vertical-rl] text-[9px] font-semibold tracking-widest text-muted-foreground uppercase">

@@ -9,7 +9,7 @@ export const MAX_MERMAID_SVG_CHARS = 512_000;
 export const MERMAID_RENDER_TIMEOUT_MS = 8_000;
 export const MERMAID_CACHE_ENTRIES = 24;
 
-export type MermaidTheme = "dark" | "light";
+export type MermaidTheme = "dark" | "light" | "eink";
 
 export type MermaidSourceValidation =
   | { kind: "valid" }
@@ -66,7 +66,8 @@ export function mermaidConfig(theme: MermaidTheme, id: string): MermaidConfig {
     ],
     startOnLoad: false,
     suppressErrorRendering: true,
-    theme: theme === "dark" ? "dark" : "default",
+    // Mermaid's neutral theme is the only built-in one that stays legible without hue.
+    theme: theme === "dark" ? "dark" : theme === "eink" ? "neutral" : "default",
   };
 }
 

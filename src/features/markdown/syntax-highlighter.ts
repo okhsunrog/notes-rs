@@ -14,8 +14,55 @@ import typescript from "@shikijs/langs/typescript";
 import yaml from "@shikijs/langs/yaml";
 import githubDark from "@shikijs/themes/github-dark";
 import githubLight from "@shikijs/themes/github-light";
-import { createHighlighterCoreSync } from "shiki/core";
+import githubLightHighContrast from "@shikijs/themes/github-light-high-contrast";
+import { createHighlighterCoreSync, type ThemeRegistrationRaw } from "shiki/core";
 import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
+
+/**
+ * E-ink with a grayscale panel has no hue to spend, so the mono theme carries meaning with
+ * weight and slant only. @shikijs/themes ships no monochrome theme, hence this minimal one.
+ */
+const EINK_MONO_THEME: ThemeRegistrationRaw = {
+  name: "eink-mono",
+  type: "light",
+  colors: { "editor.background": "#ffffff", "editor.foreground": "#000000" },
+  settings: [
+    { settings: { background: "#ffffff", foreground: "#000000" } },
+    {
+      scope: ["comment", "punctuation.definition.comment"],
+      settings: { foreground: "#555555" },
+    },
+    {
+      scope: ["keyword", "storage", "storage.type", "constant.language"],
+      settings: { fontStyle: "bold" },
+    },
+    { scope: ["string", "string.quoted"], settings: { fontStyle: "italic" } },
+  ],
+};
+
+/** Which Shiki theme pair a code block is tokenized with. */
+export type CodeTheme = "standard" | "eink" | "eink-mono";
+
+/** Shiki's FontStyle bitmask; only the two flags the mono theme uses are named. */
+const FONT_STYLE_ITALIC = 1;
+const FONT_STYLE_BOLD = 2;
+
+export function resolveCodeTheme(
+  display: "standard" | "eink",
+  inkColor: "color" | "mono",
+): CodeTheme {
+  if (display !== "eink") return "standard";
+  return inkColor === "mono" ? "eink-mono" : "eink";
+}
+
+/** The e-ink profile is light-only, so both variants resolve to the same theme there. */
+function themeNames(theme: CodeTheme): { light: string; dark: string } {
+  if (theme === "eink") {
+    return { light: "github-light-high-contrast", dark: "github-light-high-contrast" };
+  }
+  if (theme === "eink-mono") return { light: "eink-mono", dark: "eink-mono" };
+  return { light: "github-light", dark: "github-dark" };
+}
 
 const MAX_HIGHLIGHT_CHARS = 32_000;
 const MAX_HIGHLIGHT_LINES = 200;
@@ -68,6 +115,9 @@ export interface MarkdownCodeToken {
   content: string;
   darkColor?: string;
   lightColor?: string;
+  /** Only carried by the monochrome theme, which has nothing but weight and slant to spend. */
+  bold?: boolean;
+  italic?: boolean;
 }
 
 export interface MarkdownCodeHighlight {
@@ -82,11 +132,12 @@ const highlightCache = new Map<string, MarkdownCodeHighlight>();
 export function highlightMarkdownCode(
   code: string,
   requestedLanguage: string | null,
+  theme: CodeTheme = "standard",
 ): MarkdownCodeHighlight {
   const cleanRequest = normalizeLanguageLabel(requestedLanguage);
   const language = cleanRequest ? (LANGUAGE_ALIASES[cleanRequest] ?? "text") : "text";
   const highlighted = language !== "text" && isHighlightableSource(code);
-  const cacheKey = `${language}\u0000${highlighted ? "highlight" : "plain"}\u0000${code}`;
+  const cacheKey = `${language}\u0000${theme}\u0000${highlighted ? "highlight" : "plain"}\u0000${code}`;
   const cached = code.length <= MAX_CACHEABLE_CHARS ? highlightCache.get(cacheKey) : undefined;
   if (cached) return cached;
 
@@ -100,9 +151,10 @@ export function highlightMarkdownCode(
     };
   } else {
     try {
+      const mono = theme === "eink-mono";
       const lines = getHighlighter().codeToTokensWithThemes(code, {
         lang: language,
-        themes: { light: "github-light", dark: "github-dark" },
+        themes: themeNames(theme),
         tokenizeMaxLineLength: MAX_HIGHLIGHT_LINE_CHARS,
         tokenizeTimeLimit: TOKENIZE_TIME_LIMIT_MS,
       });
@@ -110,11 +162,18 @@ export function highlightMarkdownCode(
         highlighted: true,
         language,
         lines: lines.map((line) =>
-          line.map((token) => ({
-            content: token.content,
-            darkColor: token.variants.dark?.color,
-            lightColor: token.variants.light?.color,
-          })),
+          line.map((token) => {
+            // Weight and slant are only read from the mono theme; the color themes keep the
+            // plain rendering they have always had.
+            const style = mono ? (token.variants.light?.fontStyle ?? 0) : 0;
+            return {
+              content: token.content,
+              darkColor: token.variants.dark?.color,
+              lightColor: token.variants.light?.color,
+              bold: (style & FONT_STYLE_BOLD) !== 0 || undefined,
+              italic: (style & FONT_STYLE_ITALIC) !== 0 || undefined,
+            };
+          }),
         ),
         requestedLanguage: cleanRequest,
       };
@@ -157,7 +216,7 @@ function getHighlighter(): MarkdownHighlighter {
       typescript,
       yaml,
     ],
-    themes: [githubLight, githubDark],
+    themes: [githubLight, githubDark, githubLightHighContrast, EINK_MONO_THEME],
   });
   return highlighter;
 }

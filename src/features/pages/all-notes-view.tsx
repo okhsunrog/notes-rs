@@ -248,7 +248,7 @@ function AllNotesRow({
         </span>
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-medium">{pageDisplayTitle(page)}</span>
-          <span className="mt-0.5 flex items-center gap-2 text-[10px] text-muted-foreground">
+          <span className="mt-0.5 flex items-center gap-2 text-[10px] eink:text-xs text-muted-foreground">
             <span className="capitalize">{page.layout}</span>
             <span aria-hidden="true">·</span>
             <span>Edited {formatDate(page.updatedAt)}</span>

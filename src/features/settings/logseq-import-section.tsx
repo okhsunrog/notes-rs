@@ -5,7 +5,6 @@ import {
   ChevronDown,
   FileInput,
   Image,
-  Loader2,
   RefreshCw,
   X,
 } from "lucide-react";
@@ -22,6 +21,7 @@ import {
 import { cn } from "@/lib/utils";
 import { type LogseqImportState } from "./logseq-import-state";
 import { useLogseqImport } from "./use-logseq-import";
+import { BusyIndicator } from "@/components/ui/busy-indicator";
 
 const capabilityQueryKey = ["backend", "logseq-import-capability"] as const;
 
@@ -81,7 +81,7 @@ function ImportProgress({ progress }: { progress: LogseqImportProgress | null })
   return (
     <div role="status" aria-live="polite" className="space-y-2 text-sm text-muted-foreground">
       <div className="flex items-center gap-2">
-        <Loader2 className="size-4 animate-spin text-primary" />
+        <BusyIndicator className="size-4 text-primary" label="Importing" hideLabel />
         <span>{progress ? stageLabels[progress.stage] : "Waiting for importer…"}</span>
         {progress?.progress === "items" && (
           <span className="ml-auto tabular-nums">
@@ -93,7 +93,7 @@ function ImportProgress({ progress }: { progress: LogseqImportProgress | null })
         <div
           className={cn(
             "h-full rounded-full bg-primary transition-[width]",
-            percentage === null && "w-1/3 animate-pulse",
+            percentage === null && "w-1/3 animate-pulse eink:animate-none",
           )}
           style={percentage === null ? undefined : { width: `${percentage}%` }}
         />
@@ -257,7 +257,7 @@ function Preview({ state, hasMoreDiagnostics, onLoadMoreDiagnostics }: ViewProps
               onClick={onLoadMoreDiagnostics}
             >
               {state.diagnosticsLoading ? (
-                <Loader2 className="size-4 animate-spin" />
+                <BusyIndicator className="size-4" label="Working" hideLabel />
               ) : (
                 <ChevronDown className="size-4" />
               )}
@@ -309,7 +309,7 @@ export function LogseqImportSectionView(props: ViewProps) {
             disabled={previewBusy}
             onClick={onClose}
           >
-            {previewBusy ? <Loader2 className="animate-spin" /> : <X />}
+            {previewBusy ? <BusyIndicator label="Closing" hideLabel /> : <X />}
           </Button>
         )}
       </div>
@@ -349,7 +349,7 @@ export function LogseqImportSectionView(props: ViewProps) {
               onClick={onCommit}
             >
               {state.phase === "committing" ? (
-                <Loader2 className="size-4 animate-spin" />
+                <BusyIndicator className="size-4" label="Working" hideLabel />
               ) : (
                 <FileInput className="size-4" />
               )}

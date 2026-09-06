@@ -72,7 +72,7 @@ export function JournalNavigation({ activeDate, busy, onOpenDate }: Props) {
             <CalendarDays className="size-3.5" />
           </span>
           <span className="text-xs font-medium">Today</span>
-          <span className="ml-auto text-[10px] text-muted-foreground">
+          <span className="ml-auto text-[10px] eink:text-xs text-muted-foreground">
             {formatJournalDate(today, { month: "short", day: "numeric" })}
           </span>
         </Button>

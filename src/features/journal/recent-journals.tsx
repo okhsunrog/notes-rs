@@ -41,7 +41,9 @@ export function RecentJournals({ pages, activeUuid, busy, onOpen }: Props) {
               </span>
             </>
           ) : (
-            <span className="max-w-full truncate text-[10px]">{pageDisplayTitle(page)}</span>
+            <span className="max-w-full truncate text-[10px] eink:text-xs">
+              {pageDisplayTitle(page)}
+            </span>
           )}
         </button>
       ))}

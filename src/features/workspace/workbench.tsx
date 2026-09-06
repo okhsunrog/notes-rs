@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, ArrowRight, Columns2, Loader2, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Columns2, X } from "lucide-react";
 import { Group, Panel, Separator, usePanelRef } from "react-resizable-panels";
 import { useCompactLayout } from "@/app/use-compact-layout";
 import { useCompactBackToHome } from "@/app/compact-navigation";
@@ -27,6 +27,7 @@ import {
 } from "./workspace-model";
 import { useWorkspaceController } from "./workspace-controller";
 import { useWorkspaceStore } from "./workspace-store";
+import { BusyIndicator } from "@/components/ui/busy-indicator";
 
 type WorkbenchProps = {
   creatingNote: boolean;
@@ -253,7 +254,7 @@ function PaneFrame({
               </Button>
             </>
           )}
-          <span className="ml-1 truncate text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
+          <span className="ml-1 truncate text-[10px] eink:text-xs font-medium tracking-wide text-muted-foreground uppercase">
             {paneLabel(pane.content, primary)}
           </span>
           {!primary && (
@@ -416,7 +417,7 @@ function GraphPane({
 function PaneLoading() {
   return (
     <div className="flex h-full min-h-64 items-center justify-center">
-      <Loader2 className="size-5 animate-spin text-muted-foreground" />
+      <BusyIndicator className="size-5 text-muted-foreground" label="Loading page…" />
     </div>
   );
 }

@@ -46,7 +46,7 @@ export function ChatCard({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="mb-1 flex items-center justify-between gap-2 px-1 text-[10px] text-muted-foreground">
+      <div className="mb-1 flex items-center justify-between gap-2 px-1 text-[10px] eink:text-xs text-muted-foreground">
         <span className="truncate">
           {page ? `Context: ${pageDisplayTitle(page)}` : "No active note context"}
         </span>
@@ -104,7 +104,7 @@ export function ChatCard({
               }
             >
               {t.role === "assistant" && (
-                <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold tracking-wide text-primary uppercase">
+                <div className="mb-2 flex items-center gap-2 text-[10px] eink:text-xs font-semibold tracking-wide text-primary uppercase">
                   <Sparkles className="size-3" /> notes assistant
                 </div>
               )}
@@ -118,7 +118,7 @@ export function ChatCard({
                       {tool.result ? (
                         <CheckCircle2 className="mt-0.5 size-3 shrink-0 text-emerald-500" />
                       ) : (
-                        <Wrench className="mt-0.5 size-3 shrink-0 animate-pulse" />
+                        <Wrench className="mt-0.5 size-3 shrink-0 animate-pulse eink:animate-none" />
                       )}
                       <span className="min-w-0 break-all font-mono">
                         {tool.name}(
@@ -140,7 +140,7 @@ export function ChatCard({
                 <p className="whitespace-pre-wrap text-[13px] leading-relaxed">{t.text}</p>
               )}
               {t.role === "assistant" && t.usage && t.usage.totalTokens > 0 && (
-                <p className="mt-2 text-[10px] text-muted-foreground">
+                <p className="mt-2 text-[10px] eink:text-xs text-muted-foreground">
                   {t.usage.inputTokens.toLocaleString()} in ·{" "}
                   {t.usage.outputTokens.toLocaleString()}
                   {" out · "}
@@ -186,9 +186,13 @@ export function ChatCard({
             className="h-8 rounded-xl px-2.5"
           >
             <PencilLine className="size-3.5" />
-            <span className="text-[10px]">{allowWrites ? "Writes allowed" : "Allow writes"}</span>
+            <span className="text-[10px] eink:text-xs">
+              {allowWrites ? "Writes allowed" : "Allow writes"}
+            </span>
           </Button>
-          <span className="text-[10px] text-muted-foreground">Shift Enter for a new line</span>
+          <span className="text-[10px] eink:text-xs text-muted-foreground">
+            Shift Enter for a new line
+          </span>
           <Button
             type={chatBusy ? "button" : "submit"}
             size="icon-sm"

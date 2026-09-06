@@ -160,3 +160,16 @@ export function useAppearance() {
   if (!context) throw new Error("useAppearance must be used inside AppearanceProvider");
   return context;
 }
+
+/**
+ * The resolved display for leaf components. Unlike useAppearance this tolerates a missing
+ * provider — a component rendered on its own in a test is simply a standard display.
+ */
+export function useResolvedDisplay(): ResolvedDisplay {
+  return useContext(AppearanceContext)?.display ?? "standard";
+}
+
+/** The resolved ink color, with the same missing-provider tolerance as useResolvedDisplay. */
+export function useResolvedInkColor(): ResolvedInkColor {
+  return useContext(AppearanceContext)?.resolvedInkColor ?? "color";
+}

@@ -9,8 +9,9 @@ import {
   Prec,
   Transaction,
 } from "@codemirror/state";
-import { EditorView, keymap } from "@codemirror/view";
+import { drawSelection, EditorView, keymap } from "@codemirror/view";
 import { useEffect, useRef } from "react";
+import { useResolvedDisplay } from "@/app/appearance";
 import type { MarkdownOpenHandler } from "@/features/markdown";
 import { documentAuthoringExtensions, type DocumentAuthoringMode } from "./document-live-preview";
 import { resolveDocumentHistoryKey } from "./document-editor-model";
@@ -91,6 +92,14 @@ function editableExtensions(readOnly: boolean) {
   return [EditorView.editable.of(!readOnly), EditorState.readOnly.of(readOnly)];
 }
 
+/**
+ * A blinking caret repaints the panel twice a second on e-ink, so the caret is drawn by
+ * CodeMirror there and never blinks. Elsewhere the native caret stays untouched.
+ */
+function cursorExtensions(display: "standard" | "eink") {
+  return display === "eink" ? [drawSelection({ cursorBlinkRate: 0 })] : [];
+}
+
 /** Always consumes local history keys; read-only panes never mutate their CM state. */
 export function applyDocumentHistoryAction(
   view: EditorView,
@@ -114,12 +123,16 @@ export function ContinuousDocumentEditor({
   onBlur,
   onOpenMarkdownLink,
 }: Props) {
+  const display = useResolvedDisplay();
   const mountRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const initialValueRef = useRef(value);
   const callbacksRef = useRef({ onChange, onCompositionEnd, onBlur, onOpenMarkdownLink, pageUuid });
   const modeCompartmentRef = useRef(new Compartment());
   const editableCompartmentRef = useRef(new Compartment());
+  const cursorCompartmentRef = useRef(new Compartment());
+  const displayRef = useRef(display);
+  displayRef.current = display;
   const pendingModeRef = useRef(mode);
   const appliedModeRef = useRef(mode);
   const applyPendingModeRef = useRef<() => void>(() => undefined);
@@ -131,6 +144,7 @@ export function ContinuousDocumentEditor({
     if (!parent) return;
     const modeCompartment = modeCompartmentRef.current;
     const editableCompartment = editableCompartmentRef.current;
+    const cursorCompartment = cursorCompartmentRef.current;
     let view: EditorView;
     let destroyed = false;
     let modeRetryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -183,6 +197,7 @@ export function ContinuousDocumentEditor({
         }),
         modeCompartment.of(documentAuthoringExtensions(mode)),
         editableCompartment.of(editableExtensions(readOnly)),
+        cursorCompartment.of(cursorExtensions(displayRef.current)),
         Prec.highest(
           EditorView.domEventHandlers({
             keydown(event, view) {
@@ -293,6 +308,12 @@ export function ContinuousDocumentEditor({
       effects: editableCompartmentRef.current.reconfigure(editableExtensions(readOnly)),
     });
   }, [readOnly]);
+
+  useEffect(() => {
+    viewRef.current?.dispatch({
+      effects: cursorCompartmentRef.current.reconfigure(cursorExtensions(display)),
+    });
+  }, [display]);
 
   useEffect(() => {
     applyPendingModeRef.current();

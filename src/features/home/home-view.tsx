@@ -281,7 +281,7 @@ function JournalOutlinePreview({ blocks, loading }: { blocks: Block[]; loading: 
         <p className="text-[11px] font-semibold tracking-[0.08em] text-muted-foreground uppercase">
           Today so far
         </p>
-        <span className="text-[10px] text-muted-foreground tabular-nums">
+        <span className="text-[10px] eink:text-xs text-muted-foreground tabular-nums">
           {expanded ? rows.length : Math.min(rows.length, limit)} of {rows.length}
         </span>
       </div>
@@ -334,7 +334,9 @@ function JournalOutlineRow({
       className="flex min-w-0 items-center gap-2 rounded-lg px-1.5 py-1 text-xs"
       style={{ marginLeft: Math.min(depth, 4) * 16 }}
     >
-      <span className="w-3 shrink-0 text-center text-[10px] text-primary/75">{marker}</span>
+      <span className="w-3 shrink-0 text-center text-[10px] eink:text-xs text-primary/75">
+        {marker}
+      </span>
       <MarkdownRenderer
         className={cn("min-w-0 flex-1 truncate", heading && "font-semibold")}
         context={{ kind: "preview", pageUuid: block.pageUuid, blockUuid: block.uuid }}
@@ -420,7 +422,7 @@ function DashboardSection({
         <span className="text-primary">{icon}</span>
         {title}
         {pages.length > 0 && (
-          <span className="ml-auto text-[10px] font-medium text-muted-foreground tabular-nums">
+          <span className="ml-auto text-[10px] eink:text-xs font-medium text-muted-foreground tabular-nums">
             {pages.length}
           </span>
         )}
@@ -451,7 +453,7 @@ function DashboardSection({
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-xs font-medium">{pageDisplayTitle(page)}</span>
                 {showDate && (
-                  <span className="mt-0.5 block text-[10px] text-muted-foreground">
+                  <span className="mt-0.5 block text-[10px] eink:text-xs text-muted-foreground">
                     {formatEditedDate(page.updatedAt)}
                   </span>
                 )}

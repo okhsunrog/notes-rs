@@ -11,7 +11,6 @@ import {
   List,
   ListOrdered,
   ListTodo,
-  Loader2,
   Minus,
   Pilcrow,
   Quote,
@@ -62,6 +61,7 @@ import { queryKeys } from "@/lib/query";
 import { cn } from "@/lib/utils";
 import { reconcileRemoteDraft } from "./editor-sync";
 import { useBlockDraftOverlay, usePageSessionRegistry } from "@/features/pages/page-session";
+import { BusyIndicator } from "@/components/ui/busy-indicator";
 import {
   BLOCK_STYLE_OPTIONS,
   TASK_STATE_OPTIONS,
@@ -867,7 +867,7 @@ function BlockStylePicker({
         )}
       >
         {busy ? (
-          <Loader2 className="size-3.5 animate-spin" />
+          <BusyIndicator className="size-3.5" label="Changing block style" hideLabel />
         ) : (
           <CurrentIcon className="size-3.5" />
         )}
@@ -928,9 +928,13 @@ function TaskStatePicker({
         size="sm"
         aria-label={`Task state: ${current.label}`}
         title={`Task state: ${current.label}`}
-        className="mt-0.5 h-7 min-w-16 shrink-0 rounded-lg border-primary/15 bg-primary/5 px-2 text-[10px] font-semibold tracking-wide text-primary uppercase shadow-none hover:bg-primary/10 focus-visible:ring-2"
+        className="mt-0.5 h-7 min-w-16 shrink-0 rounded-lg border-primary/15 bg-primary/5 px-2 text-[10px] eink:text-xs font-semibold tracking-wide text-primary uppercase shadow-none hover:bg-primary/10 focus-visible:ring-2"
       >
-        {busy ? <Loader2 className="size-3 animate-spin" /> : <span>{current.label}</span>}
+        {busy ? (
+          <BusyIndicator className="size-3" label="Changing task state" hideLabel />
+        ) : (
+          <span>{current.label}</span>
+        )}
       </SelectTrigger>
       <SelectContent
         position="popper"
@@ -956,7 +960,7 @@ function TaskStatePicker({
 function BlockBullet({ state }: { state: SaveState }) {
   const cls =
     state === "saving"
-      ? "bg-amber-500/80 animate-pulse"
+      ? "bg-amber-500/80 animate-pulse eink:animate-none"
       : state === "dirty"
         ? "bg-amber-500/60"
         : state === "error"

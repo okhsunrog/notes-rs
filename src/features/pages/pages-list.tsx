@@ -97,7 +97,7 @@ export function PagesList({
           <Plus className="size-4" />
           New note
         </span>
-        <kbd className="rounded-md bg-primary-foreground/15 px-1.5 py-0.5 text-[10px] font-medium">
+        <kbd className="rounded-md bg-primary-foreground/15 px-1.5 py-0.5 text-[10px] eink:text-xs font-medium">
           Ctrl N
         </kbd>
       </NewNoteButton>
@@ -137,7 +137,7 @@ export function PagesList({
 
         <NoteSection title="Recent" count={recentPages.length} icon={Clock3}>
           {recentPages.length === 0 ? (
-            <p className="px-2 py-2 text-[10px] leading-relaxed text-muted-foreground">
+            <p className="px-2 py-2 text-[10px] eink:text-xs leading-relaxed text-muted-foreground">
               Notes you open will appear here.
             </p>
           ) : (
@@ -191,7 +191,9 @@ function NoteSection({
       <div className="flex items-center gap-2 px-1 py-1 text-[11px] font-semibold tracking-wide text-muted-foreground">
         <Icon className="size-3.5" />
         <span id={id}>{title}</span>
-        {count > 0 && <span className="ml-auto text-[10px] font-medium tabular-nums">{count}</span>}
+        {count > 0 && (
+          <span className="ml-auto text-[10px] eink:text-xs font-medium tabular-nums">{count}</span>
+        )}
       </div>
       <div className="mt-0.5 space-y-0.5">{children}</div>
     </section>

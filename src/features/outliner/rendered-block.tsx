@@ -184,7 +184,9 @@ function TaskCheckbox({
       }}
       className="flex size-6 shrink-0 items-center justify-center rounded-md border border-primary/25 text-primary transition hover:bg-primary/10 disabled:opacity-60"
     >
-      <Icon className={`size-3.5 ${busy ? "animate-spin" : terminal ? "stroke-[2.5]" : ""}`} />
+      <Icon
+        className={`size-3.5 ${busy ? "animate-spin eink:animate-none" : terminal ? "stroke-[2.5]" : ""}`}
+      />
     </button>
   );
 }

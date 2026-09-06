@@ -6,17 +6,7 @@ import "@/brand/brand.css";
 import { SettingsSelect } from "./settings-select";
 import { dismissBackOverlay } from "@/lib/back-overlays";
 import { useTheme } from "next-themes";
-import {
-  ArrowLeft,
-  Check,
-  Laptop,
-  Loader2,
-  Moon,
-  RotateCcw,
-  Save,
-  Sun,
-  Trash2,
-} from "lucide-react";
+import { ArrowLeft, Check, Laptop, Moon, RotateCcw, Save, Sun, Trash2 } from "lucide-react";
 import { WindowControls } from "@/app/window-controls";
 import { useCompactLayout } from "@/app/use-compact-layout";
 import { PALETTES, useAppearance } from "@/app/appearance";
@@ -48,6 +38,7 @@ import { ServerAiSettingsSection } from "./server-ai-settings-section";
 import { Field, FieldGroup, ModeButton, SettingsSection, ToggleField } from "./settings-controls";
 import { toSettingsUpdate } from "./settings-update";
 import { ConfigurationTransferSection } from "./configuration-transfer-section";
+import { BusyIndicator } from "@/components/ui/busy-indicator";
 
 type Props = {
   onBack: () => void;
@@ -226,7 +217,7 @@ export function SettingsPage({
                 onClick={() => void resetInvalidSettings()}
               >
                 {busy ? (
-                  <Loader2 className="size-4 animate-spin" />
+                  <BusyIndicator className="size-4" label="Working" hideLabel />
                 ) : (
                   <RotateCcw className="size-4" />
                 )}
@@ -235,7 +226,7 @@ export function SettingsPage({
             </div>
           </div>
         ) : (
-          <Loader2 className="animate-spin" />
+          <BusyIndicator label="Loading device settings…" />
         )}
       </div>
     );
@@ -672,7 +663,11 @@ export function SettingsPage({
             <RotateCcw className="size-4" /> Restart app
           </Button>
           <Button type="submit" disabled={busy}>
-            {busy ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
+            {busy ? (
+              <BusyIndicator className="size-4" label="Working" hideLabel />
+            ) : (
+              <Save className="size-4" />
+            )}
             Save settings
           </Button>
         </div>

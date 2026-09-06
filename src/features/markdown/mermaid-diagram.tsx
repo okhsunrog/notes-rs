@@ -9,6 +9,7 @@ import {
   type MermaidTheme,
 } from "./mermaid-policy";
 import { cachedMermaidResult, renderMermaid, type MermaidRenderResult } from "./mermaid-runtime";
+import { useResolvedDisplay } from "@/app/appearance";
 
 interface MermaidDiagramProps {
   source: string;
@@ -18,7 +19,9 @@ type DiagramState = MermaidRenderResult | { kind: "loading" } | { kind: "oversiz
 
 export function MermaidDiagram({ source }: MermaidDiagramProps) {
   const { resolvedTheme } = useTheme();
-  const theme: MermaidTheme = resolvedTheme === "dark" ? "dark" : "light";
+  const display = useResolvedDisplay();
+  const theme: MermaidTheme =
+    display === "eink" ? "eink" : resolvedTheme === "dark" ? "dark" : "light";
   const reactId = useId();
   const key = mermaidCacheKey(source, theme);
   const diagramId = useMemo(() => stableMermaidId(key, reactId), [key, reactId]);

@@ -45,7 +45,9 @@ export function SyncStatusIndicator({ status, onOpenSettings }: Props) {
           toneClasses[presentation.tone],
         )}
       >
-        <Icon className={cn("size-3.5", presentation.animated && "animate-spin")} />
+        <Icon
+          className={cn("size-3.5", presentation.animated && "animate-spin eink:animate-none")}
+        />
         <span className="hidden lg:inline">{presentation.label}</span>
         {status.pendingOperations > 0 && (
           <span className="tabular-nums" aria-label={`${status.pendingOperations} pending changes`}>
@@ -65,7 +67,9 @@ export function SyncStatusIndicator({ status, onOpenSettings }: Props) {
               toneClasses[presentation.tone],
             )}
           >
-            <Icon className={cn("size-4", presentation.animated && "animate-spin")} />
+            <Icon
+              className={cn("size-4", presentation.animated && "animate-spin eink:animate-none")}
+            />
           </div>
           <div className="min-w-0">
             <h2 className="text-sm font-semibold">{presentation.label}</h2>
@@ -77,7 +81,7 @@ export function SyncStatusIndicator({ status, onOpenSettings }: Props) {
 
         {status.message && (
           <div className="mx-4 mb-3 rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2">
-            <p className="text-[10px] font-semibold tracking-wide text-destructive uppercase">
+            <p className="text-[10px] eink:text-xs font-semibold tracking-wide text-destructive uppercase">
               Last connection error
             </p>
             <p className="mt-1 text-xs leading-relaxed break-words text-foreground/80">
@@ -108,7 +112,7 @@ export function SyncStatusIndicator({ status, onOpenSettings }: Props) {
               disabled={retrying}
               onClick={() => void reconnect()}
             >
-              <RefreshCw className={cn("size-3.5", retrying && "animate-spin")} />
+              <RefreshCw className={cn("size-3.5", retrying && "animate-spin eink:animate-none")} />
               Reconnect now
             </Button>
           )}

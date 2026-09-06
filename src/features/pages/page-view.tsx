@@ -1,14 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import {
-  CalendarDays,
-  Check,
-  Clock3,
-  FileText,
-  ListTree,
-  Loader2,
-  Star,
-  Trash2,
-} from "lucide-react";
+import { CalendarDays, Check, Clock3, FileText, ListTree, Star, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { DocumentPage } from "@/features/document/document-page";
 import { DocumentAuthoringControls } from "@/features/document/document-authoring-controls";
@@ -47,6 +38,7 @@ import {
   type PaneId,
 } from "@/features/workspace/workspace-model";
 import { usePageNavigationStore } from "./page-navigation-store";
+import { BusyIndicator } from "@/components/ui/busy-indicator";
 
 type Props = {
   paneId: PaneId;
@@ -405,7 +397,7 @@ export function PageView({
       )}
 
       <div className="mt-4 mb-9 flex items-center gap-2">
-        <span className="rounded-full bg-primary/10 px-2.5 py-1 text-[10px] font-semibold tracking-wide text-primary">
+        <span className="rounded-full bg-primary/10 px-2.5 py-1 text-[10px] eink:text-xs font-semibold tracking-wide text-primary">
           {page.layout.toUpperCase()}
         </span>
         {journalDate && (
@@ -421,7 +413,7 @@ export function PageView({
                   dispositionFromShiftKey(event.shiftKey),
                 )
               }
-              className="rounded-md px-2 text-[10px]"
+              className="rounded-md px-2 text-[10px] eink:text-xs"
             >
               Previous day
             </Button>
@@ -436,7 +428,7 @@ export function PageView({
                   dispositionFromShiftKey(event.shiftKey),
                 )
               }
-              className="rounded-md px-2 text-[10px]"
+              className="rounded-md px-2 text-[10px] eink:text-xs"
             >
               Next day
             </Button>
@@ -456,7 +448,7 @@ export function PageView({
               disabled={layoutBusy || !canEdit}
               aria-pressed={page.layout === value}
               onClick={() => void changeLayout(value)}
-              className="rounded-md px-2 text-[10px]"
+              className="rounded-md px-2 text-[10px] eink:text-xs"
             >
               <Icon className="size-3" />
               <span className="hidden sm:inline">{label}</span>
@@ -528,7 +520,7 @@ function SaveIndicator({ state }: { state: SaveState }) {
   if (state === "saving")
     return (
       <span className="flex items-center gap-1 text-xs text-muted-foreground">
-        <Loader2 className="size-3 animate-spin" />
+        <BusyIndicator className="size-3" label="Saving" hideLabel />
         saving
       </span>
     );

@@ -19,10 +19,15 @@ import {
 } from "./image-policy";
 import { MermaidDiagram } from "./mermaid-diagram";
 import { isMermaidFenceLanguage } from "./mermaid-policy";
-import { extractMarkdownCodeLanguage, highlightMarkdownCode } from "./syntax-highlighter";
+import {
+  extractMarkdownCodeLanguage,
+  highlightMarkdownCode,
+  resolveCodeTheme,
+} from "./syntax-highlighter";
 import { classifyMarkdownUrl } from "./url-policy";
 import type { MarkdownOpenHandler, MarkdownRenderContext } from "./types";
 import { MarkdownImageViewer } from "./image-viewer";
+import { useResolvedDisplay, useResolvedInkColor } from "@/app/appearance";
 
 interface MarkdownLinkProps extends AnchorHTMLAttributes<HTMLAnchorElement>, ExtraProps {
   context: MarkdownRenderContext;
@@ -228,9 +233,10 @@ export function MarkdownCode({
   const requestedLanguage = extractMarkdownCodeLanguage(className);
   const isBlock = !inlineRenderer && (requestedLanguage !== null || rawCode.includes("\n"));
   const code = isBlock && rawCode.endsWith("\n") ? rawCode.slice(0, -1) : rawCode;
+  const codeTheme = resolveCodeTheme(useResolvedDisplay(), useResolvedInkColor());
   const highlighted = useMemo(
-    () => (isBlock ? highlightMarkdownCode(code, requestedLanguage) : null),
-    [code, isBlock, requestedLanguage],
+    () => (isBlock ? highlightMarkdownCode(code, requestedLanguage, codeTheme) : null),
+    [code, isBlock, requestedLanguage, codeTheme],
   );
   const [copied, setCopied] = useState(false);
 
@@ -276,6 +282,8 @@ export function MarkdownCode({
                 const style = {
                   "--shiki-dark": token.darkColor ?? token.lightColor,
                   "--shiki-light": token.lightColor,
+                  fontWeight: token.bold ? 600 : undefined,
+                  fontStyle: token.italic ? "italic" : undefined,
                 } as CSSProperties;
                 return (
                   <span

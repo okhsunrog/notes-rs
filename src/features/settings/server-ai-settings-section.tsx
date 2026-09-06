@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { BrainCircuit, Loader2, RefreshCw } from "lucide-react";
+import { BrainCircuit, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   getServerAiStatus,
@@ -11,6 +11,7 @@ import { queryKeys } from "@/lib/query";
 import { cn } from "@/lib/utils";
 import { QueueMetric, SettingsSection, ToggleField } from "./settings-controls";
 import { ServerAiProviderForm } from "./server-ai-provider-form";
+import { BusyIndicator } from "@/components/ui/busy-indicator";
 
 type Props = {
   enabled: boolean;
@@ -67,7 +68,8 @@ export function ServerAiSettingsSection({ enabled, onError, onMessage }: Props) 
         </p>
       ) : statusQuery.isPending ? (
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <Loader2 className="size-4 animate-spin" /> Reading server index state…
+          <BusyIndicator className="size-4" label="Reading server index state" hideLabel /> Reading
+          server index state…
         </div>
       ) : statusQuery.error ? (
         <p className="rounded-2xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
@@ -159,7 +161,7 @@ export function ServerAiSettingsSection({ enabled, onError, onMessage }: Props) 
             onClick={() => reindexMutation.mutate()}
           >
             {reindexMutation.isPending ? (
-              <Loader2 className="size-4 animate-spin" />
+              <BusyIndicator className="size-4" label="Rebuilding index" hideLabel />
             ) : (
               <RefreshCw className="size-4" />
             )}

@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Bot, GitFork, Loader2, Redo2, Search, Settings, Undo2 } from "lucide-react";
+import { Bot, GitFork, Redo2, Search, Settings, Undo2 } from "lucide-react";
 import { AppLayout } from "@/app/layout";
 import { useCompactLayout } from "@/app/use-compact-layout";
 import { WindowControls } from "@/app/window-controls";
@@ -21,6 +21,7 @@ import { Workbench } from "@/features/workspace/workbench";
 import { WorkspaceControllerProvider } from "@/features/workspace/workspace-controller";
 import { useWorkspaceStore } from "@/features/workspace/workspace-store";
 import { notifyError, notifySuccess } from "@/lib/notify";
+import { BusyIndicator } from "@/components/ui/busy-indicator";
 import {
   DockVisibility,
   PaneContentKind,
@@ -89,7 +90,7 @@ function App() {
       <Suspense
         fallback={
           <div className="app-shell flex h-full items-center justify-center">
-            <Loader2 className="size-5 animate-spin text-muted-foreground" />
+            <BusyIndicator className="size-5 text-muted-foreground" label="Opening settings…" />
           </div>
         }
       >
@@ -142,7 +143,7 @@ function App() {
           </div>
         ) : (
           <>
-            <Loader2 className="size-6 animate-spin text-muted-foreground" />
+            <BusyIndicator className="size-6 text-muted-foreground" label="Starting" hideLabel />
             <p className="text-sm text-muted-foreground">Starting Tangleaf…</p>
           </>
         )}

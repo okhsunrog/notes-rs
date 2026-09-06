@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vite-plus/test";
-import { extractMarkdownCodeLanguage, highlightMarkdownCode } from "./syntax-highlighter";
+import {
+  extractMarkdownCodeLanguage,
+  highlightMarkdownCode,
+  resolveCodeTheme,
+} from "./syntax-highlighter";
 
 function flattenedCode(result: ReturnType<typeof highlightMarkdownCode>): string {
   return result.lines.map((line) => line.map((token) => token.content).join("")).join("\n");
@@ -40,6 +44,36 @@ describe("Markdown syntax highlighter", () => {
       language: "text",
     });
     expect(flattenedCode(highlightMarkdownCode(veryLongLine, "rust"))).toBe(veryLongLine);
+  });
+
+  it("picks a theme from the resolved display and ink color", () => {
+    expect(resolveCodeTheme("standard", "color")).toBe("standard");
+    expect(resolveCodeTheme("standard", "mono")).toBe("standard");
+    expect(resolveCodeTheme("eink", "color")).toBe("eink");
+    expect(resolveCodeTheme("eink", "mono")).toBe("eink-mono");
+  });
+
+  it("colors e-ink code with high contrast and monochrome code with weight and slant", () => {
+    const source = 'fn main() {\n    // hi\n    println!("hello");\n}';
+    const flatten = (result: ReturnType<typeof highlightMarkdownCode>) =>
+      result.lines
+        .flat()
+        .map((token) => token.content)
+        .join("");
+
+    const color = highlightMarkdownCode(source, "rs", "eink");
+    expect(color.highlighted).toBe(true);
+    expect(color.lines.flat().some((token) => token.lightColor !== undefined)).toBe(true);
+    expect(color.lines.flat().every((token) => !token.bold && !token.italic)).toBe(true);
+
+    const mono = highlightMarkdownCode(source, "rs", "eink-mono");
+    expect(mono.highlighted).toBe(true);
+    expect(flatten(mono)).toBe(source.split("\n").join(""));
+    // Only black, the comment gray and nothing else.
+    const colors = new Set(mono.lines.flat().map((token) => token.lightColor?.toLowerCase()));
+    expect([...colors].every((value) => value === "#000000" || value === "#555555")).toBe(true);
+    expect(mono.lines.flat().some((token) => token.bold)).toBe(true);
+    expect(mono.lines.flat().some((token) => token.italic)).toBe(true);
   });
 
   it("extracts only bounded language labels", () => {

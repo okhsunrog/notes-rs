@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { SettingsSelect } from "./settings-select";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, FlaskConical, Loader2, Save, XCircle } from "lucide-react";
+import { CheckCircle2, FlaskConical, Save, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -14,6 +14,7 @@ import {
 import { queryKeys } from "@/lib/query";
 import { cn } from "@/lib/utils";
 import { Field } from "./settings-controls";
+import { BusyIndicator } from "@/components/ui/busy-indicator";
 
 type Props = {
   provider: AiProviderSettings;
@@ -230,7 +231,7 @@ export function ServerAiProviderForm({ provider, onError, onMessage }: Props) {
       <div className="flex flex-wrap gap-2">
         <Button type="button" variant="outline" disabled={busy} onClick={() => submit("probe")}>
           {probeMutation.isPending ? (
-            <Loader2 className="size-4 animate-spin" />
+            <BusyIndicator className="size-4" label="Working" hideLabel />
           ) : (
             <FlaskConical className="size-4" />
           )}
@@ -238,7 +239,7 @@ export function ServerAiProviderForm({ provider, onError, onMessage }: Props) {
         </Button>
         <Button type="button" disabled={busy} onClick={() => submit("save")}>
           {saveMutation.isPending ? (
-            <Loader2 className="size-4 animate-spin" />
+            <BusyIndicator className="size-4" label="Working" hideLabel />
           ) : (
             <Save className="size-4" />
           )}

@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Loader2 } from "lucide-react";
 import { MarkdownRenderer, type MarkdownOpenHandler } from "@/features/markdown";
 import { useAttachmentImageResolver } from "@/features/markdown";
 import {
@@ -20,6 +19,7 @@ import {
 import { DocumentCodec } from "./document-codec";
 import { ContinuousDocumentEditor, type DocumentAuthoringMode } from "./continuous-document-editor";
 import { documentUnitsForSave } from "./document-save-model";
+import { BusyIndicator } from "@/components/ui/busy-indicator";
 
 type Props = {
   pageUuid: string;
@@ -308,7 +308,7 @@ export function DocumentReadingSurface({
 function DocumentLoading() {
   return (
     <div className="flex min-h-48 items-center justify-center gap-2 text-sm text-muted-foreground">
-      <Loader2 className="size-4 animate-spin" />
+      <BusyIndicator className="size-4" label="Loading document" hideLabel />
       Loading document…
     </div>
   );
@@ -331,7 +331,7 @@ function DocumentSaveIndicator({ state }: { state: SaveState }) {
   if (state === "saving") {
     return (
       <span className="flex items-center gap-1 text-xs text-muted-foreground">
-        <Loader2 className="size-3 animate-spin" /> saving document
+        <BusyIndicator className="size-3" label="Saving document" hideLabel /> saving document
       </span>
     );
   }

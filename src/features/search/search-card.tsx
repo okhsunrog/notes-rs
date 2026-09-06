@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueries, useQuery } from "@tanstack/react-query";
-import { ArrowLeft, CalendarDays, FilePlus2, Loader2, Search, TextQuote } from "lucide-react";
+import { ArrowLeft, CalendarDays, FilePlus2, Search, TextQuote } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useCompactLayout } from "@/app/use-compact-layout";
@@ -41,6 +41,7 @@ import {
   type SearchPresentation,
   type ServerSearchState,
 } from "./search-presentation";
+import { BusyIndicator } from "@/components/ui/busy-indicator";
 
 const LOCAL_DEBOUNCE_MS = 150;
 const SERVER_DEBOUNCE_MS = 400;
@@ -479,7 +480,7 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
       />
       {serverState === "pending" && (
         <span className="absolute right-3 flex items-center gap-1 text-xs text-muted-foreground">
-          <Loader2 className="size-3 animate-spin" />
+          <BusyIndicator className="size-3" label="Searching" hideLabel />
           AI…
         </span>
       )}
@@ -616,7 +617,7 @@ function parentPageForRow(row: ContentRow, pages: Map<string, Page | null>): Pag
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <p className="px-3 pt-2 pb-1 text-[10px] font-semibold tracking-[0.12em] text-muted-foreground uppercase">
+    <p className="px-3 pt-2 pb-1 text-[10px] eink:text-xs font-semibold tracking-[0.12em] text-muted-foreground uppercase">
       {children}
     </p>
   );
@@ -659,7 +660,9 @@ function PaletteResultRow({
         <span className="flex items-center gap-2">
           <span className="truncate font-medium">{rowTitle(row)}</span>
           {row.kind === "content" && showSource && (
-            <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{row.source}</span>
+            <span className="ml-auto shrink-0 text-[10px] eink:text-xs text-muted-foreground">
+              {row.source}
+            </span>
           )}
         </span>
         {row.kind === "content" && row.hit.content.kind === "block" && parentPage && (
