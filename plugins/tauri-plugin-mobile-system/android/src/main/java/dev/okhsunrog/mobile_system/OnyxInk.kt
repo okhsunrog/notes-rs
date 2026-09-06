@@ -86,6 +86,10 @@ class OnyxInk(
     private var maxPressure = 4095f
     private var failed: String? = null
     private val refresh = Runnable { refreshFrame() }
+    private val eraserRenderGate = InkEraserRenderGate(
+        pause = { helper?.setRawDrawingRenderEnabled(false) },
+        resume = { restoreToolRendering() },
+    )
 
     private var previousViewMode: UpdateMode? = null
     private var previousViewModeRaw: Int? = null
@@ -214,6 +218,7 @@ class OnyxInk(
         put("repaintCount", repaintCount)
         put("lastRepaint", lastRepaint.toShortString())
         put("repaintModeActive", repaintMode.active)
+        put("eraserRenderPaused", eraserRenderGate.active)
         put("lastRepaintModeRaw", lastRepaintModeRaw)
         put("repaintedPixels", repaintedPixels)
         put("visibleCanvasPixels", limit.width().toLong() * limit.height())
@@ -257,7 +262,7 @@ class OnyxInk(
                 pendingObserver = null
                 try {
                     if (!canPresent() || !frames.present(submission, sequence, drawing)) return@post
-                    // Keep the raw pen layer alive. The firmware reconciles ink from the new buffer.
+                    // Submit the canonical buffer before releasing the eraser's pen-render pause.
                     val dirty = damage.take() ?: return@post
                     val region = Rect(
                         floor(sheet.left + dirty.left * sheet.width() / 1000).toInt() - 2,
@@ -269,6 +274,7 @@ class OnyxInk(
                     lastRepaint = Rect(region)
                     repaintedPixels += region.width().toLong() * region.height()
                     repaintCount++
+                    eraserRenderGate.framePresented()
                 } finally {
                     repaintMode.release()
                 }
@@ -315,8 +321,7 @@ class OnyxInk(
             Log.d("OnyxInk", "view quality mode: ${EpdController.getViewDefaultUpdateMode(webView)}, previous: $previousViewMode")
         }
         helper?.setRawDrawingEnabled(true)
-        helper?.setRawDrawingRenderEnabled(config?.eraser == false &&
-            (config?.interaction == false || (config?.fastLasso == true && config?.hasSelection == false)))
+        restoreToolRendering()
         if (acquiredQuality) config?.let { args -> commit(OnyxFrameArgs().apply {
             session = args.session
             sequence = this@OnyxInk.sequence
@@ -329,11 +334,17 @@ class OnyxInk(
         frames.request() // Invalidate visual/frame callbacks from the old geometry or lifecycle.
         cancelFrameSubmission()
         helper?.setRawDrawingEnabled(false)
+        eraserRenderGate.reset()
         resetPalm()
         if (drawing) {
             drawing = false
             send("cancel")
         }
+    }
+
+    private fun restoreToolRendering() {
+        helper?.setRawDrawingRenderEnabled(config?.eraser == false &&
+            (config?.interaction == false || (config?.fastLasso == true && config?.hasSelection == false)))
     }
 
     private fun readViewModeRaw(): Int? = runCatching {
@@ -410,6 +421,9 @@ class OnyxInk(
         val movingSelection = args.hasSelection && x >= args.selectionLeft - 12 && x <= args.selectionRight + 12 &&
             y >= args.selectionTop - 12 && y <= args.selectionBottom + 12
         fastPreview = args.fastLasso && !erasing && !args.eraser && !movingSelection
+        // Hardware erasing must pause the firmware pen layer even while Pen is selected.
+        // Keep raw input enabled so the software eraser continues receiving points.
+        eraserRenderGate.begin(erasing || args.eraser)
         if (args.interaction) helper?.setRawDrawingRenderEnabled(fastPreview)
         drawing = true
         webView.removeCallbacks(settleDisplay)

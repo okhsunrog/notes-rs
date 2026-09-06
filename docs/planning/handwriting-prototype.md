@@ -384,3 +384,25 @@ and did not count as a change to the application's density. The complete EinkWis
 and persisted draft were byte-identical before and after testing; system density and font
 scale were restored. Validation: vp check, 396 frontend tests and the arm64 debug APK build.
 This does not prevent an external force-stop or cover every other Activity recreation path.
+
+### Hardware eraser must pause firmware pen rendering
+
+The handwriting-repaint buffer flag alone did not fix the physical retest. Two new strokes
+and twelve hardware eraser strokes were recorded; the persisted draft again matched the
+pre-test draft byte for byte. Switching the toolbar from Pen to Eraser, without modifying
+the document, made the already-erased words disappear on the physical display (user confirmed).
+
+Stock Notes EraseFinishAction retains raw input, then ScribbleHandler routes EraseFinishEvent
+through InvalidateViewWithPenControlAction: pause raw rendering, invalidate, resume. The
+pause calls TouchHelper.setRawDrawingRenderEnabled(false), which leaves scribble mode and
+sets firmware pen state PEN_PAUSE. Tangleaf already did this for the toolbar eraser, but
+hardware erasing while Pen remained selected omitted the transition.
+
+An eraser render gate now pauses only firmware rendering at erase-down, retaining raw input
+for software geometry. It stays paused until an accepted canvas frame is submitted, or a
+new pen-down supersedes the pending erase frame. Tool settings determine the restored render
+mode; lifecycle shutdown clears the gate without enabling rendering. Normal pen strokes do
+not acquire this pause. Tests cover repeated erasing, frame completion, an immediate return
+to writing and lifecycle cancellation. Physical acceptance of this automatic transition is
+pending the updated APK retest. Validation: twelve Android unit tests, vp check and the
+arm64 debug APK build pass.
