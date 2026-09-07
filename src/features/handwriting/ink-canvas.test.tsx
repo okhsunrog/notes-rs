@@ -356,3 +356,64 @@ it("keeps writing with the pen while a palm rests on the sheet", () => {
   expect(changed).toHaveBeenCalledTimes(1);
   expect(changed.mock.calls[0]![0].strokes).toHaveLength(2);
 });
+
+it("floats the selection actions over the sheet and runs them on the draft", () => {
+  vi.spyOn(HTMLDivElement.prototype, "getBoundingClientRect").mockReturnValue({
+    width: 180,
+    height: 36,
+  } as DOMRect);
+  act(() =>
+    resize(
+      [{ contentRect: { width: 500, height: 700 } } as ResizeObserverEntry],
+      {} as ResizeObserver,
+    ),
+  );
+  const selection = vi.fn();
+  act(() =>
+    renderDraft(selectable, { tool: "lasso", selected: ["a"], onSelectionChange: selection }),
+  );
+  const menu = container.querySelector<HTMLElement>("[data-ink-selection-menu]")!;
+  expect([...menu.querySelectorAll("button")].map((b) => b.getAttribute("aria-label"))).toEqual([
+    "Delete selection",
+    "Copy selection",
+    "Shrink selection",
+    "Enlarge selection",
+    "Deselect",
+  ]);
+  // The selection sits against the top of the sheet, so the menu drops below it.
+  expect([menu.style.left, menu.style.top]).toEqual(["8px", "48px"]);
+  const lower = {
+    ...selectable,
+    strokes: [
+      { ...selectable.strokes[0]!, points: [{ ...selectable.strokes[0]!.points[0]!, y: 400 }] },
+    ],
+  };
+  act(() => renderDraft(lower, { tool: "lasso", selected: ["a"], onSelectionChange: selection }));
+  expect(container.querySelector<HTMLElement>("[data-ink-selection-menu]")!.style.top).toBe(
+    "156px",
+  );
+  const click = (label: string) => {
+    const button = container.querySelector<HTMLElement>(`[aria-label="${label}"]`)!;
+    act(() => {
+      button.dispatchEvent(new Event("click", { bubbles: true }));
+    });
+  };
+  click("Enlarge selection");
+  expect(changed.mock.calls[0]![0].strokes[0].width).toBeCloseTo(3.3);
+  click("Delete selection");
+  expect(changed.mock.calls[1]![0].strokes).toEqual([]);
+  expect(selection).toHaveBeenLastCalledWith([]);
+  click("Deselect");
+  expect(selection).toHaveBeenLastCalledWith([]);
+});
+
+it("hides the selection menu while the sheet is not editable", () => {
+  act(() =>
+    resize(
+      [{ contentRect: { width: 500, height: 700 } } as ResizeObserverEntry],
+      {} as ResizeObserver,
+    ),
+  );
+  act(() => renderDraft(selectable, { tool: "lasso", selected: ["a"], disabled: true }));
+  expect(container.querySelector("[data-ink-selection-menu]")).toBeNull();
+});

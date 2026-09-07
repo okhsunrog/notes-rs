@@ -20,6 +20,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 let root: ReturnType<typeof createRoot>;
 let container: HTMLDivElement;
 let latest: InkDraft;
+let resize: ResizeObserverCallback | undefined;
 function Sheet({ onInput }: { onInput?: (event: OnyxInkEvent) => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [draft, setDraft] = useState(emptyDraft);
@@ -40,9 +41,14 @@ function Sheet({ onInput }: { onInput?: (event: OnyxInkEvent) => void }) {
 }
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  resize = undefined;
   vi.stubGlobal(
     "ResizeObserver",
     class {
+      constructor(callback: ResizeObserverCallback) {
+        // The canvas observer is created last, so this ends up measuring the sheet.
+        resize = callback;
+      }
       observe() {}
       disconnect() {}
     },
@@ -358,4 +364,42 @@ it("starts hardware erasing from newly received ink before React renders the pre
   });
   expect(latest.strokes).toHaveLength(1);
   expect(latest.strokes[0]!.id).toBe("line");
+});
+
+it("punches the floating selection menu out of the firmware drawing region", async () => {
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+  vi.spyOn(HTMLDivElement.prototype, "getBoundingClientRect").mockReturnValue({
+    width: 120,
+    height: 40,
+  } as DOMRect);
+  await act(async () => root.render(<EditorSheet tool="lasso" />));
+  await act(async () =>
+    resize?.(
+      [{ contentRect: { width: 500, height: 700 } } as ResizeObserverEntry],
+      {} as ResizeObserver,
+    ),
+  );
+  const configs = () =>
+    bridge.invoke.mock.calls.filter(([command]) => command.endsWith("configure_onyx_ink"));
+  const config = configs()[0]![1];
+  expect(config.excludeRects).toEqual([]); // Nothing selected, nothing over the sheet.
+  const p = (x: number, y: number) => ({ x, y, pressure: 0.5, tiltX: 0, tiltY: 0, time: x });
+  const event: OnyxInkEvent = {
+    session: config.session,
+    sequence: 1,
+    kind: "begin",
+    width: 3,
+    erasing: false,
+    points: [p(0, 80)],
+  };
+  await act(async () => {
+    bridge.event(event);
+    bridge.event({ ...event, kind: "stroke", points: [p(0, 80), p(220, 120)] });
+    bridge.event({ ...event, kind: "end" });
+  });
+  expect(selectedResult).toEqual(["line"]);
+  // Canvas origin (12, 80) plus the menu's place on the sheet, in the plugin's own CSS pixels.
+  expect(configs().pop()![1].excludeRects).toEqual([
+    { left: 20, top: 138, width: 120, height: 40 },
+  ]);
 });

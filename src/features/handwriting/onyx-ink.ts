@@ -15,6 +15,11 @@ export type OnyxInkEvent = {
   points?: InkPoint[];
 };
 export type OnyxInkStatus = { available: boolean; active: boolean; error?: string };
+/**
+ * A page overlay the firmware must not ink over, in CSS pixels relative to the canvas box. It
+ * reaches the plugin in the canvas' own coordinate space, so scrolling needs no re-measurement.
+ */
+export type InkExcludeRect = { left: number; top: number; width: number; height: number };
 
 export function applyOnyxStroke(draft: InkDraft, event: OnyxInkEvent): InkDraft {
   const points = event.points ?? [];
@@ -52,6 +57,7 @@ export function useOnyxInk({
   decoration,
   lassoMode,
   selection,
+  excludeRects,
   damage,
 }: {
   canvasRef: RefObject<HTMLCanvasElement | null>;
@@ -67,6 +73,7 @@ export function useOnyxInk({
   decoration?: string;
   lassoMode?: LassoMode;
   selection?: Bounds | null;
+  excludeRects?: InkExcludeRect[];
   damage?: { take: () => Bounds | null; invalidate: () => void };
   onInput?: (event: OnyxInkEvent, draft: InkDraft) => void;
   onStroke?: (draft: InkDraft, event: OnyxInkEvent) => InkDraft;
@@ -86,6 +93,7 @@ export function useOnyxInk({
     onStroke,
     lassoMode,
     selection,
+    excludeRects,
     damage,
   });
   const session = useRef<string | null>(null);
@@ -105,6 +113,7 @@ export function useOnyxInk({
       onStroke,
       lassoMode,
       selection,
+      excludeRects,
       damage,
     };
   });
@@ -140,6 +149,14 @@ export function useOnyxInk({
       if (disposed || !registered || unsupported) return;
       const rect = canvas.getBoundingClientRect();
       const viewport = canvas.closest("[data-ink-viewport]")?.getBoundingClientRect();
+      const excludes = (state.current.excludeRects ?? [])
+        .filter((box) => box.width > 0 && box.height > 0)
+        .map((box) => ({
+          left: rect.left + box.left,
+          top: rect.top + box.top,
+          width: box.width,
+          height: box.height,
+        }));
       const args = {
         session: id,
         enabled: document.visibilityState !== "hidden" && rect.width > 0 && rect.height > 0,
@@ -163,6 +180,9 @@ export function useOnyxInk({
         selectionTop: state.current.selection?.top ?? 0,
         selectionRight: state.current.selection?.right ?? 0,
         selectionBottom: state.current.selection?.bottom ?? 0,
+        // Overlays inside the sheet: the firmware paints the whole limit rect otherwise,
+        // and a pen over the floating menu would ink straight through it.
+        excludeRects: excludes,
       };
       const key = JSON.stringify(args);
       if (key === lastConfig) return;
@@ -271,12 +291,14 @@ export function useOnyxInk({
     };
   }, [canvasRef, enabled]);
 
+  const excludeKey = JSON.stringify(excludeRects ?? []);
   useEffect(() => {
     update.current?.();
   }, [
     tool,
     width,
     lassoMode,
+    excludeKey,
     selection?.left,
     selection?.top,
     selection?.right,

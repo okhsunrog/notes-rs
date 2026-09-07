@@ -5,6 +5,7 @@ import {
   lassoPolygon,
   moveSelection,
   scaleSelection,
+  selectionMenuPosition,
   selectLasso,
 } from "./ink-editing";
 const point = (x: number, y: number, time = x): InkPoint => ({
@@ -66,4 +67,22 @@ it("broad-phase erasing includes pressure width and keeps distant strokes by ide
   expect(eraseGesture([thick, distant], [point(126, 100)], "stroke", 9)).toEqual([distant]);
   expect(eraseGesture([thick, distant], [point(127, 100)], "stroke", 9)).toEqual([thick, distant]);
   expect(eraseGesture([distant], [point(0, 0), point(200, 200)], "pixel", 12)[0]).toBe(distant);
+});
+
+it("anchors the selection menu above the selection, or below it when the sheet has no room", () => {
+  const sheet = { width: 500, height: 700 };
+  const menu = { width: 180, height: 36 };
+  // Room above: the menu is centred on the selection and sits over its top edge.
+  expect(
+    selectionMenuPosition({ left: 400, top: 400, right: 600, bottom: 500 }, sheet, menu),
+  ).toEqual({ left: 160, top: 156 });
+  // Against the top of the sheet it flips below, and a selection at the left edge is pulled in.
+  expect(selectionMenuPosition({ left: 0, top: 0, right: 100, bottom: 40 }, sheet, menu)).toEqual({
+    left: 8,
+    top: 28,
+  });
+  // A selection filling the sheet leaves no room either way: the menu stays on the sheet.
+  expect(
+    selectionMenuPosition({ left: 900, top: 0, right: 1000, bottom: 1400 }, sheet, menu),
+  ).toEqual({ left: 312, top: 656 });
 });

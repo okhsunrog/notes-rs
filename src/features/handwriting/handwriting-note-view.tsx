@@ -2,21 +2,17 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Menu } from "@base-ui/react/menu";
 import {
-  Copy,
   Eraser,
   Grid2X2,
   Lasso,
-  Minus,
   MoreHorizontal,
   PenLine,
   Pencil,
-  Plus,
   Redo2,
   Square,
   Star,
   Trash2,
   Undo2,
-  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent } from "@/components/ui/popover";
@@ -56,8 +52,7 @@ import {
 import { registerPaneLeaveGuard } from "@/features/workspace/pane-leave-guard";
 import { useResolvedInkColor } from "@/app/appearance";
 import { InkCanvas, type InkTool } from "./ink-canvas";
-import { moveSelection, scaleSelection, type EraserMode, type LassoMode } from "./ink-editing";
-import { MAX_INK_POINTS } from "./ink-model";
+import type { EraserMode, LassoMode } from "./ink-editing";
 import { applyHistoryUpdate } from "./ink-patch";
 import { useHandwritingAvailability, useHandwritingPreference } from "./input-capabilities";
 import type { OnyxInkStatus } from "./onyx-ink";
@@ -738,99 +733,11 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
                     {label}
                   </Button>
                 ))}
-                {selected.length > 0 ? (
-                  <div className="flex flex-wrap items-center gap-1 border-l pl-2">
-                    <span className="px-2 text-xs">{selected.length} selected · drag to move</span>
-                    <Button
-                      variant="ghost"
-                      aria-label="Copy selection"
-                      disabled={editingBusy}
-                      onClick={() => {
-                        if (!draft) return;
-                        const source = draft.strokes.filter((stroke) =>
-                          selected.includes(stroke.id),
-                        );
-                        if (
-                          [...draft.strokes, ...source].reduce(
-                            (n, stroke) => n + stroke.points.length,
-                            0,
-                          ) > MAX_INK_POINTS
-                        ) {
-                          setLimit(true);
-                          return;
-                        }
-                        const copies = source.map((stroke) => ({
-                          ...stroke,
-                          id: crypto.randomUUID(),
-                        }));
-                        const ids = copies.map((stroke) => stroke.id);
-                        change({
-                          ...draft,
-                          strokes: [...draft.strokes, ...moveSelection(copies, ids, 25, 25)],
-                        });
-                        setSelected(ids);
-                        setOptionsOpen(false);
-                      }}
-                    >
-                      <Copy className="size-4" />
-                    </Button>
-                    {(
-                      [
-                        [0.9, "Shrink selection", Minus],
-                        [1.1, "Enlarge selection", Plus],
-                      ] as const
-                    ).map(([factor, label, Icon]) => (
-                      <Button
-                        key={label}
-                        variant="ghost"
-                        aria-label={label}
-                        disabled={editingBusy}
-                        // Scaling is repeated until it looks right, so this one stays open.
-                        onClick={() => {
-                          if (draft) {
-                            const strokes = scaleSelection(draft.strokes, selected, factor);
-                            if (strokes !== draft.strokes) change({ ...draft, strokes });
-                          }
-                        }}
-                      >
-                        <Icon className="size-4" />
-                      </Button>
-                    ))}
-                    <Button
-                      variant="ghost"
-                      aria-label="Delete selection"
-                      disabled={editingBusy}
-                      onClick={() => {
-                        if (draft)
-                          change({
-                            ...draft,
-                            strokes: draft.strokes.filter(
-                              (stroke) => !selected.includes(stroke.id),
-                            ),
-                          });
-                        setSelected([]);
-                        setOptionsOpen(false);
-                      }}
-                    >
-                      <Trash2 className="size-4" />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      aria-label="Deselect"
-                      disabled={editingBusy}
-                      onClick={() => {
-                        setSelected([]);
-                        setOptionsOpen(false);
-                      }}
-                    >
-                      <X className="size-4" />
-                    </Button>
-                  </div>
-                ) : (
-                  <span className="px-2 text-xs text-muted-foreground">
-                    Draw around handwriting to select it
-                  </span>
-                )}
+                <span className="px-2 text-xs text-muted-foreground">
+                  {selected.length > 0
+                    ? `${selected.length} selected \u00b7 drag to move, or use the menu on the sheet`
+                    : "Draw around handwriting to select it"}
+                </span>
               </div>
             )}
           </PopoverContent>

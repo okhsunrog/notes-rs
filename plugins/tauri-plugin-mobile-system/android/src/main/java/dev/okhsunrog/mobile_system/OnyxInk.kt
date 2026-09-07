@@ -44,6 +44,16 @@ class OnyxInkArgs {
     var selectionTop: Double = 0.0
     var selectionRight: Double = 0.0
     var selectionBottom: Double = 0.0
+    /** Page overlays inside the sheet the firmware must not paint into, in CSS pixels. */
+    var excludeRects: List<OnyxExcludeRect> = emptyList()
+}
+
+@InvokeArg
+class OnyxExcludeRect {
+    var left: Double = 0.0
+    var top: Double = 0.0
+    var width: Double = 0.0
+    var height: Double = 0.0
 }
 
 @InvokeArg
@@ -69,6 +79,7 @@ internal class OnyxInk(
     private var config: OnyxInkArgs? = null
     private var sheet = RectF()
     private var limit = Rect()
+    private var excludes: List<Rect> = emptyList()
     private var resumed = true
     private val gesture = InkGesturePairing()
     private var sequence = 0L
@@ -91,7 +102,7 @@ internal class OnyxInk(
     private val gate = RawDrawingGate(object : RawDrawingSwitches {
         override fun render(enabled: Boolean) { helper?.setRawDrawingRenderEnabled(enabled) }
         override fun input(enabled: Boolean) { helper?.setRawInputReaderEnable(enabled) }
-        override fun pushRects() { helper?.setLimitRect(limit, emptyList()) }
+        override fun pushRects() { helper?.setLimitRect(limit, excludes) }
         override fun resetDefaults() { helper?.resetPenDefaultRawDrawing() }
     })
     // Resuming into the tail of an IME teardown leaves ghost ink; stock Notes waits too.
@@ -216,11 +227,14 @@ internal class OnyxInk(
         val scale = webView.width / args.viewportWidth
         val previousSheet = RectF(sheet)
         val previousLimit = Rect(limit)
+        val previousExcludes = excludes
         sheet = RectF((args.left * scale).toFloat(), (args.top * scale).toFloat(),
             ((args.left + args.width) * scale).toFloat(), ((args.top + args.height) * scale).toFloat())
         limit = Rect(floor(sheet.left).toInt(), ceil(maxOf(sheet.top.toDouble(), args.clipTop * scale)).toInt(),
             ceil(sheet.right).toInt(), floor(minOf(sheet.bottom.toDouble(), args.clipBottom * scale)).toInt())
         if (!limit.intersect(0, 0, webView.width, webView.height)) limit.setEmpty()
+        excludes = inkExcludeRects(args.excludeRects, scale, InkRect(limit.left, limit.top, limit.right, limit.bottom))
+            .map { Rect(it.left, it.top, it.right, it.bottom) }
         try {
             if (helper == null) {
                 ResManager.init(activity.applicationContext)
@@ -240,7 +254,7 @@ internal class OnyxInk(
                 helper!!.setPenUpRefreshEnabled(false) // Refresh only after the web canvas acknowledges its frame.
                 helper!!.setPostInputEvent(false)
                 helper!!.setHostViewScrollListenerEnabled(false)
-                helper!!.setLimitRect(limit, emptyList()).openRawDrawing()
+                helper!!.setLimitRect(limit, excludes).openRawDrawing()
                 helper!!.setEraserRawDrawingEnabled(false, 0)
                 helper!!.enableSideBtnErase(true)
             }
@@ -249,18 +263,18 @@ internal class OnyxInk(
                 // pattern is configured on the device first: a single-element gap/length array,
                 // black, at the driver's standard width (Notate's verified recipe, onyx.md §2).
                 Device.currentDevice().setStrokeParameters(TouchHelper.STROKE_STYLE_DASH, floatArrayOf(LASSO_DASH))
-                helper!!.setLimitRect(limit, emptyList())
+                helper!!.setLimitRect(limit, excludes)
                     .setStrokeWidth(LASSO_DASH)
                     .setStrokeColor(Color.BLACK)
                     .setStrokeStyle(TouchHelper.STROKE_STYLE_DASH)
             } else {
-                helper!!.setLimitRect(limit, emptyList())
+                helper!!.setLimitRect(limit, excludes)
                     .setStrokeWidth((args.strokeWidth * sheet.width() / 1000).toFloat())
                     .setStrokeColor(Color.BLACK)
                     .setStrokeStyle(TouchHelper.STROKE_STYLE_FOUNTAIN)
             }
             resume()
-            if (sheet != previousSheet || limit != previousLimit) commit(OnyxFrameArgs().apply {
+            if (sheet != previousSheet || limit != previousLimit || excludes != previousExcludes) commit(OnyxFrameArgs().apply {
                 session = args.session
                 sequence = this@OnyxInk.sequence
             })
@@ -453,6 +467,7 @@ internal class OnyxInk(
         helper?.closeRawDrawing()
         helper = null
         config = null
+        excludes = emptyList()
         damage.take()
         // Ink drawn under the partial mode leaves the sharpest ghosts; the sheet going away is
         // the moment to clean the panel once.

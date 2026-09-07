@@ -131,6 +131,30 @@ export function selectionBounds(strokes: InkStroke[], ids: string[]) {
   const selected = new Set(ids);
   return boundsOf(strokes.filter((s) => selected.has(s.id)).flatMap((s) => s.points));
 }
+/**
+ * Anchor a floating toolbar over the sheet: just above the selection, below it when the top of
+ * the sheet has no room, and never past an edge. Sizes are CSS pixels of the rendered sheet.
+ */
+export function selectionMenuPosition(
+  bounds: Bounds,
+  sheet: { width: number; height: number },
+  menu: { width: number; height: number },
+  gap = 8,
+): { left: number; top: number } {
+  const clamp = (value: number, room: number) =>
+    Math.max(gap, Math.min(value, Math.max(gap, room - gap)));
+  const above = (bounds.top / 1400) * sheet.height - gap - menu.height;
+  return {
+    left: clamp(
+      ((bounds.left + bounds.right) / 2000) * sheet.width - menu.width / 2,
+      sheet.width - menu.width,
+    ),
+    top:
+      above >= gap
+        ? above
+        : clamp((bounds.bottom / 1400) * sheet.height + gap, sheet.height - menu.height),
+  };
+}
 export function moveSelection(
   strokes: InkStroke[],
   ids: string[],

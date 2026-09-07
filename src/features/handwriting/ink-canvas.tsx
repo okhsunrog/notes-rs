@@ -6,13 +6,16 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import type { InkDraft, InkPoint, InkStroke } from "@/lib/bindings";
+import { Copy, Minus, Plus, Trash2, X } from "lucide-react";
 import { drawSegment, drawSheet, inkPoint, MAX_INK_POINTS } from "./ink-model";
 import { changedInkBounds, drawInkRegion, unionBounds, SHEET_BOUNDS } from "./ink-region";
 import {
   eraseGesture,
   lassoPolygon,
   moveSelection,
+  scaleSelection,
   selectionBounds,
+  selectionMenuPosition,
   selectLasso,
   type Bounds,
   type EraserMode,
@@ -48,6 +51,16 @@ type Gesture = {
 const NO_SELECTION: string[] = [];
 /** Grab margin around the selection, kept equal to `movingSelection` in `OnyxInk.kt`. */
 const SELECTION_GRAB = 12;
+
+/** What the popover used to offer, within reach of the selection itself. */
+const SELECTION_ACTIONS = [
+  { id: "delete", label: "Delete selection", Icon: Trash2 },
+  { id: "copy", label: "Copy selection", Icon: Copy },
+  { id: "shrink", label: "Shrink selection", Icon: Minus },
+  { id: "enlarge", label: "Enlarge selection", Icon: Plus },
+  { id: "deselect", label: "Deselect", Icon: X },
+] as const;
+type SelectionAction = (typeof SELECTION_ACTIONS)[number]["id"];
 
 function withinSelection(bounds: Bounds | null, point: InkPoint): boolean {
   return (
@@ -108,6 +121,8 @@ export function InkCanvas({
   const damageRef = useRef<Bounds | null>(SHEET_BOUNDS);
   const publishedRef = useRef<{ strokes: InkStroke[]; overlay: Bounds | null } | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [menuBox, setMenuBox] = useState({ width: 0, height: 0 });
 
   const publish = (strokes: InkStroke[]) => {
     const canvas = canvasRef.current;
@@ -370,6 +385,11 @@ export function InkCanvas({
     if (!active.current) beginGesture(event.points[0]!, event.erasing, -1, base);
     return finishGesture(base, event.points);
   };
+  const selection = selectionBounds(draft.strokes, selected);
+  // The menu is a DOM overlay over the firmware's drawing region: it needs a place inside the
+  // sheet and a hole punched in that region, and both follow the selection.
+  const menuAt =
+    selection && !disabled && size.width ? selectionMenuPosition(selection, size, menuBox) : null;
   const onyx = useOnyxInk({
     canvasRef,
     enabled: nativeInk && !disabled,
@@ -383,7 +403,8 @@ export function InkCanvas({
     onStatus: onNativeStatus,
     decoration: selected.join(","),
     lassoMode,
-    selection: selectionBounds(draft.strokes, selected),
+    selection,
+    excludeRects: menuAt ? [{ ...menuAt, ...menuBox }] : undefined,
     onInput: nativeInput,
     onStroke: nativeStroke,
     damage: {
@@ -426,6 +447,32 @@ export function InkCanvas({
     // Redraw on document/size changes only; pointer previews publish directly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft, size, selected, tool]);
+  // The menu is laid out by its own content, so its box is known only once it is on the page.
+  useLayoutEffect(() => {
+    const box = menuRef.current?.getBoundingClientRect();
+    const width = Math.round(box?.width ?? 0),
+      height = Math.round(box?.height ?? 0);
+    if (width !== menuBox.width || height !== menuBox.height) setMenuBox({ width, height });
+  });
+
+  const runSelectionAction = (action: SelectionAction) => {
+    if (action === "deselect") return onSelectionChange?.([]);
+    if (action === "delete") {
+      onChange({ ...draft, strokes: draft.strokes.filter((s) => !selected.includes(s.id)) });
+      return onSelectionChange?.([]);
+    }
+    if (action === "copy") {
+      const source = draft.strokes.filter((s) => selected.includes(s.id));
+      const points = [...draft.strokes, ...source].reduce((n, s) => n + s.points.length, 0);
+      if (points > MAX_INK_POINTS) return onLimit();
+      const copies = source.map((s) => ({ ...s, id: crypto.randomUUID() }));
+      const ids = copies.map((s) => s.id);
+      onChange({ ...draft, strokes: [...draft.strokes, ...moveSelection(copies, ids, 25, 25)] });
+      return onSelectionChange?.(ids);
+    }
+    const strokes = scaleSelection(draft.strokes, selected, action === "shrink" ? 0.9 : 1.1);
+    if (strokes !== draft.strokes) onChange({ ...draft, strokes });
+  };
 
   const sample = (event: PointerEvent, end = false) => {
     const current = active.current;
@@ -536,6 +583,29 @@ export function InkCanvas({
         onPointerCancel={(event) => finish(event, true)}
         onLostPointerCapture={(event) => finish(event, true)}
       />
+      {menuAt && (
+        <div
+          ref={menuRef}
+          data-ink-selection-menu
+          role="toolbar"
+          aria-label="Selection actions"
+          // Flat black on white, and inverted while held: an e-ink panel has no other contrast.
+          className="absolute z-10 flex touch-none items-center gap-px border border-black bg-white p-px select-none"
+          style={{ left: menuAt.left, top: menuAt.top }}
+        >
+          {SELECTION_ACTIONS.map(({ id, label, Icon }) => (
+            <button
+              key={id}
+              type="button"
+              aria-label={label}
+              className="flex size-9 items-center justify-center bg-white text-black active:bg-black active:text-white"
+              onClick={() => runSelectionAction(id)}
+            >
+              <Icon className="size-4" />
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
