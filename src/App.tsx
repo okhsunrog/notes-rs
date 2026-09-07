@@ -264,24 +264,30 @@ function App() {
                 </Button>
               </>
             )}
-            <Button
-              variant="ghost"
-              size="sm"
-              aria-label="Undo structural change"
-              disabled={workspace.history.undoCount === 0}
-              onClick={() => void workspace.moveHistory("undo")}
-            >
-              <Undo2 className="size-4" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              aria-label="Redo structural change"
-              disabled={workspace.history.redoCount === 0}
-              onClick={() => void workspace.moveHistory("redo")}
-            >
-              <Redo2 className="size-4" />
-            </Button>
+            {/* Structural history is text-note editing; a handwritten note has its own
+                undo in the sheet toolbar, and this one would navigate away from it. */}
+            {!handwritingActive && (
+              <>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  aria-label="Undo structural change"
+                  disabled={workspace.history.undoCount === 0}
+                  onClick={() => void workspace.moveHistory("undo")}
+                >
+                  <Undo2 className="size-4" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  aria-label="Redo structural change"
+                  disabled={workspace.history.redoCount === 0}
+                  onClick={() => void workspace.moveHistory("redo")}
+                >
+                  <Redo2 className="size-4" />
+                </Button>
+              </>
+            )}
             <Button
               variant="ghost"
               size="sm"

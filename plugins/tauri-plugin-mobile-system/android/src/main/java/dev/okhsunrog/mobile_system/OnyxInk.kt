@@ -230,6 +230,17 @@ internal class OnyxInk(
         if (config?.session != args.session) {
             close()
         }
+        // The overlay rects (the floating selection menu) only feed the JS-side hit test; they
+        // never reach the firmware region. Updating just them must not restart raw drawing — a
+        // pause would wipe the transient lasso trace mid-gesture, which showed up as segments
+        // missing from the selection outline exactly where the menu had been.
+        val current = config
+        if (current != null && current.session == args.session && onlyOverlaysChanged(current, args)) {
+            config = args
+            val scaleOnly = webView.width / args.viewportWidth
+            overlays = inkOverlayRects(args.overlayRects, scaleOnly, InkRect(limit.left, limit.top, limit.right, limit.bottom))
+            return status()
+        }
         pause(releaseDisplay = false)
         config = args
         // CSS pixels may differ from Android density because BOOX has per-app DPI settings.
@@ -294,6 +305,18 @@ internal class OnyxInk(
             throw error
         }
     }
+
+    /** True when two configs differ only in their overlay rects (sheet geometry unchanged). */
+    private fun onlyOverlaysChanged(a: OnyxInkArgs, b: OnyxInkArgs): Boolean =
+        a.enabled == b.enabled &&
+            a.left == b.left && a.top == b.top && a.width == b.width && a.height == b.height &&
+            a.clipTop == b.clipTop && a.clipBottom == b.clipBottom &&
+            a.viewportWidth == b.viewportWidth && a.strokeWidth == b.strokeWidth &&
+            a.eraser == b.eraser && a.interaction == b.interaction && a.fastLasso == b.fastLasso &&
+            a.hasSelection == b.hasSelection &&
+            a.selectionLeft == b.selectionLeft && a.selectionTop == b.selectionTop &&
+            a.selectionRight == b.selectionRight && a.selectionBottom == b.selectionBottom &&
+            a.overlayRects != b.overlayRects
 
     fun status(): JSObject = JSObject().apply {
         put("available", failed == null)
