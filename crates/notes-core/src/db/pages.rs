@@ -42,7 +42,8 @@ pub async fn list_pages_filtered(
 ) -> Result<Vec<Page>> {
     conn.call(move |database| {
         let predicate = match filter {
-            PageListFilter::Notes => "WHERE page_identity.page_kind = 'note'",
+            // Handwritten notes live alongside text notes in every list; only journals are apart.
+            PageListFilter::Notes => "WHERE page_identity.page_kind IN ('note', 'handwriting')",
             PageListFilter::Journals => "WHERE page_identity.page_kind = 'journal'",
             PageListFilter::All => "",
         };
