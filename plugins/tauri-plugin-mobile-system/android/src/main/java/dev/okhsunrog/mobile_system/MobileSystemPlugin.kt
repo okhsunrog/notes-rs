@@ -267,13 +267,23 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
             Log.w("OnyxInk", "app-scope refresh mode unsupported by this firmware; leaving EinkWise's profile")
             return null
         }
+        // The SDK reports NORMAL for any reflection failure, so the firmware calls are made and
+        // logged directly here as well; the raw integers are what the panel actually holds.
+        val helper = runCatching { Class.forName("android.onyx.optimization.EInkHelper") }.getOrNull()
+        val rawBefore = helper?.let { readAppScopeRaw(it) }
         return runCatching {
             EpdController.setAppScopeRefreshMode(UpdateOption.FAST)
             val applied = EpdController.getAppScopeRefreshMode()
-            Log.d("OnyxInk", "app-scope refresh mode requested=FAST applied=$applied")
+            val rawAfter = helper?.let { readAppScopeRaw(it) }
+            Log.d("OnyxInk", "app-scope refresh mode requested=FAST applied=$applied raw before=$rawBefore after=$rawAfter")
             applied?.name
         }.onFailure { Log.w("OnyxInk", "app-scope refresh mode: ${it.message}") }.getOrNull()
     }
+
+    private fun readAppScopeRaw(helper: Class<*>): String = runCatching {
+        val method = helper.getMethod("getAppScopeRefreshMode")
+        method.invoke(null).toString()
+    }.getOrElse { "error: ${it.javaClass.simpleName}: ${it.message ?: it.cause?.message}" }
 
     /**
      * Opens the vendor's per-app display panel (EinkWise) for this app. The refresh profile it
