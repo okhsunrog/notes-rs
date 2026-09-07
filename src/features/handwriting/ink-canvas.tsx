@@ -131,16 +131,25 @@ export function InkCanvas({
   // A gesture owns the sheet: the floating menu follows a drag and steps out of a new lasso, and
   // the firmware region must not be reconfigured until the pen lifts.
   const [gestureAction, setGestureAction] = useState<Gesture["action"] | null>(null);
-  const [dragBounds, setDragBounds] = useState<Bounds | null>(null);
   const followFrame = useRef<number | null>(null);
   const followTarget = useRef<Bounds | null>(null);
-  /** Stock repositions its selection popup every ~10 ms; one animation frame is close enough. */
+  /**
+   * Stock repositions its selection popup every ~10 ms. Going through React state would put the
+   * menu a render behind the ink, which on this panel reads as the menu trailing the selection —
+   * so the drag moves the element itself, in the same frame the preview is drawn, and React takes
+   * the position back when the gesture commits.
+   */
   const followSelection = (bounds: Bounds | null) => {
     followTarget.current = bounds;
     if (followFrame.current !== null) return;
     followFrame.current = requestAnimationFrame(() => {
       followFrame.current = null;
-      setDragBounds(followTarget.current);
+      const menu = menuRef.current;
+      const target = followTarget.current;
+      if (!menu || !target || !size.width) return;
+      const at = selectionMenuPosition(target, size, menuBox);
+      menu.style.left = `${at.left}px`;
+      menu.style.top = `${at.top}px`;
     });
   };
   const endInteraction = () => {
@@ -148,7 +157,12 @@ export function InkCanvas({
     followFrame.current = null;
     followTarget.current = null;
     setGestureAction(null);
-    setDragBounds(null);
+    // Hand the position back to the render, which now sees the committed selection.
+    const menu = menuRef.current;
+    if (menu) {
+      menu.style.removeProperty("left");
+      menu.style.removeProperty("top");
+    }
   };
 
   const publish = (strokes: InkStroke[]) => {
@@ -345,7 +359,6 @@ export function InkCanvas({
         action === "move" ? base.strokes.filter((s) => selected.includes(s.id)) : undefined,
     };
     setGestureAction(action);
-    if (action === "move") setDragBounds(selectionBounds(base.strokes, selected));
     sampleGesture(point);
     return active.current;
   };
@@ -433,8 +446,7 @@ export function InkCanvas({
   // The menu is a DOM overlay over the firmware's drawing region, anchored to the selection the way
   // stock Notes anchors its selection popup: it follows a drag frame by frame and steps aside while
   // a new lasso is being drawn.
-  const menuBounds =
-    gestureAction === "select" ? null : gestureAction === "move" ? dragBounds : selection;
+  const menuBounds = gestureAction === "select" ? null : selection;
   const menuAt =
     menuBounds && !disabled && size.width ? selectionMenuPosition(menuBounds, size, menuBox) : null;
   const onyx = useOnyxInk({

@@ -125,6 +125,7 @@ export function useOnyxInk({
     };
   });
 
+  const gestureRef = useRef(false);
   useEffect(() => {
     if (!enabled) return;
     const canvas = canvasRef.current;
@@ -242,6 +243,7 @@ export function useOnyxInk({
       // Completed gestures use the full SDK point list, never a pending preview frame.
       cancelPreview();
       gestureOpen = event.kind === "begin";
+      gestureRef.current = gestureOpen;
       if (event.kind !== "stroke") current.onInput?.(event, current.draft);
       if (event.kind === "begin") current.onActiveChange(true);
       else if (event.kind === "end" || event.kind === "cancel") {
@@ -328,6 +330,10 @@ export function useOnyxInk({
   ]);
   useEffect(() => {
     if (!native || !session.current) return;
+    // Asking the firmware to reconcile mid-gesture composites the web canvas over the transient
+    // trace it is still drawing, wiping whatever the pen laid down before this moment. The
+    // gesture's end bumps `frame`, which brings us back here with the trace already consumed.
+    if (gestureRef.current) return;
     const id = session.current;
     const currentSequence = sequence.current;
     // The canvas draws in a layout effect, before this compositor acknowledgement.
