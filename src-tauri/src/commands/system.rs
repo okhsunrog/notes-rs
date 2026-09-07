@@ -147,6 +147,23 @@ pub fn set_display_profile(app: AppHandle, eink: bool) -> CommandResult<DisplayP
     }
 }
 
+/// Opens the vendor's per-app display panel (EinkWise) on BOOX tablets. Its refresh profile
+/// governs the updates the firmware triggers on its own, which the app cannot configure.
+#[tauri::command]
+#[specta::specta]
+pub fn open_eink_wise(app: AppHandle) -> CommandResult<bool> {
+    #[cfg(target_os = "android")]
+    {
+        app.mobile_system().open_eink_wise().map_err(err)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(false)
+    }
+}
+
 /// Repaints the whole panel once. Partial e-ink update modes leave the previous image behind, and
 /// nothing but a full refresh clears it.
 #[tauri::command]

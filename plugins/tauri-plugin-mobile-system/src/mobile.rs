@@ -53,6 +53,17 @@ impl<R: Runtime> MobileSystem<R> {
     }
 
     /// Repaints the whole panel once, clearing what the partial update modes left behind.
+    pub fn open_eink_wise(&self) -> Result<bool> {
+        #[derive(serde::Deserialize)]
+        struct Opened {
+            opened: bool,
+        }
+        self.0
+            .run_mobile_plugin::<Opened>("openEinkWise", ())
+            .map(|response| response.opened)
+            .map_err(Into::into)
+    }
+
     pub fn request_full_refresh(&self) -> Result<()> {
         self.0
             .run_mobile_plugin("requestFullRefresh", ())

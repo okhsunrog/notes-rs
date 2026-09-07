@@ -13,6 +13,7 @@ import { PALETTES, useAppearance } from "@/app/appearance";
 import { DISPLAY_PROFILE_OPTIONS, INK_COLOR_OPTIONS } from "@/app/display-profile";
 import { useConfirmation } from "@/app/confirmation";
 import { Button } from "@/components/ui/button";
+import { notifyError, notifyInfo } from "@/lib/notify";
 import { Input } from "@/components/ui/input";
 import {
   createBackup,
@@ -28,6 +29,7 @@ import {
   type SecretKey,
   type SettingsSnapshot,
   type WindowDecorationMode,
+  openEinkWise,
 } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
 import { cn } from "@/lib/utils";
@@ -369,6 +371,30 @@ export function SettingsPage({
             />
             {panelMode && (
               <p className="mt-2 text-xs text-muted-foreground">Panel mode: {panelMode}</p>
+            )}
+            {display === "eink" && (
+              <div className="mt-3 space-y-2">
+                <p className="text-xs text-muted-foreground">
+                  The tablet's own EinkWise profile decides how the caret, touches and scrolling
+                  refresh. Choose <span className="font-medium">Speed</span> there: it keeps those
+                  updates partial, so text editing leaves no trail. Regal refreshes fully on every
+                  one of them.
+                </p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="xs"
+                  onClick={() => {
+                    void openEinkWise()
+                      .then((opened) => {
+                        if (!opened) notifyInfo("EinkWise is only available on BOOX tablets.");
+                      })
+                      .catch((error: unknown) => notifyError("EinkWise", error));
+                  }}
+                >
+                  Open EinkWise for this app
+                </Button>
+              </div>
             )}
           </Field>
           <Field

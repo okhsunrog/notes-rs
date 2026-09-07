@@ -30,6 +30,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::set_system_bars_style,
             commands::set_display_profile,
             commands::request_full_refresh,
+            commands::open_eink_wise,
             commands::sync_status,
             commands::server_ai_status,
             commands::save_server_ai_settings,
