@@ -70,6 +70,12 @@ deliberately left out of it.
 
 - **Logseq import stamps every page with the import time** (`updatedAt`/`createdAt` = 2026-07-20 for the whole corpus), so "Recently edited" ranks year-old pages by import date. _Trigger: next import touch — take the source file's mtime (and the Logseq `created-at`/`updated-at` properties when present) as the page timestamps._
 
+## Handwriting, from the Notate study (2026-09-07)
+
+- **Spatial index for eraser and lasso hit-testing.** Both scan every point of every stroke (up to 150k on a sheet); Notate uses a quadtree (`util/Quadtree.kt`) for O(log N). _Trigger: eraser or lasso feels laggy on a dense sheet; add a grid/quadtree index over stroke bounds in `ink-editing.ts`._
+- **Scribble-to-erase.** A back-and-forth scribble over ink deletes the strokes under it (Notate `ScribbleDetector`). Works on the points we already capture. _Trigger: after the core lasso/eraser UX settles; user demand._
+- **Shape recognition on dwell.** Holding at stroke end snaps a rough shape to a clean line/rect/ellipse (Notate `ShapeRecognizer`, Douglas-Peucker + scoring). _Trigger: user asks for straight lines/boxes; pairs with the dwell detector._
+
 ## Recently resolved elsewhere (for context, keep list short)
 
 - 2026-07-19 frontend review findings → fixed in `f1c7dc3`.
