@@ -7,6 +7,7 @@ import android.os.Looper
 import android.hardware.input.InputManager
 import android.view.InputDevice
 import android.view.MotionEvent
+import android.util.Log
 import android.webkit.WebView
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
@@ -65,6 +66,29 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
     override fun load(webView: WebView) {
         inkWebView = webView
         inputManager.registerInputDeviceListener(this, Handler(Looper.getMainLooper()))
+        // One insets listener per view: the keyboard pauses the pen and switches the panel to
+        // a text-friendly update mode, whether or not an ink session exists at the time.
+        ViewCompat.setOnApplyWindowInsetsListener(webView) { _, insets ->
+            imeChanged(webView, insets.getInsets(WindowInsetsCompat.Type.ime()).bottom > 0)
+            insets
+        }
+        ViewCompat.requestApplyInsets(webView)
+    }
+
+    private var imeVisible = false
+
+    private fun imeChanged(webView: WebView, visible: Boolean) {
+        if (visible == imeVisible) return
+        imeVisible = visible
+        Log.d("OnyxInk", "ime visible=$visible")
+        if (OnyxInk.supported()) {
+            runCatching {
+                val mode = displayMode(webView)
+                if (visible) mode.set(DisplayModeStack.Layer.TEXT, UpdateMode.DU)
+                else mode.clear(DisplayModeStack.Layer.TEXT)
+            }.onFailure { Log.w("OnyxInk", "text display mode: ${it.message}") }
+        }
+        onyxInk?.imeChanged(visible)
     }
 
     @Suppress("OVERRIDE_DEPRECATION") // This plugin does not depend on AppCompat types.
@@ -133,6 +157,7 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
                 require(args.reason.length in 1..128) { "a pause reason is required" }
                 val changed =
                     if (args.active) inkPauses.pause(args.reason) else inkPauses.resume(args.reason)
+                Log.d("OnyxInk", "suppress ${args.reason}=${args.active} changed=$changed paused=${inkPauses.reasons()}")
                 if (changed) onyxInk?.pauseStateChanged()
                 invoke.resolve(JSObject().put("paused", org.json.JSONArray(inkPauses.reasons())))
             } catch (error: Throwable) {
@@ -224,6 +249,7 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
                 return@runOnUiThread
             }
             try {
+                Log.d("OnyxInk", "full refresh requested")
                 // A full-panel flash clears the ghosting the partial modes leave behind.
                 EpdController.invalidate(webView, UpdateMode.GC)
                 invoke.resolve()

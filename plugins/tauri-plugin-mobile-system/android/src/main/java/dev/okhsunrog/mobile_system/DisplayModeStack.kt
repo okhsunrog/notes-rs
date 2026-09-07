@@ -25,7 +25,11 @@ internal class DisplayModeStack(
     private val restoreRaw: () -> Unit,
 ) {
     /** Ordered weakest to strongest. */
-    enum class Layer { BASE, SESSION, TRANSIENT }
+    /**
+     * TEXT sits above the ink session: while the keyboard is up the sheet is paused anyway, and the
+     * caret and typed text want the two-level DU mode, which leaves no grey trail behind them.
+     */
+    enum class Layer { BASE, SESSION, TEXT, TRANSIENT }
 
     private val modes = arrayOfNulls<UpdateMode>(Layer.values().size)
 

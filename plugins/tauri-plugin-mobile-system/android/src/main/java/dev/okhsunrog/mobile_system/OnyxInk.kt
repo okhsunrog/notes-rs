@@ -9,8 +9,6 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.ViewTreeObserver
 import android.webkit.WebView
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
 import app.tauri.annotation.InvokeArg
 import app.tauri.plugin.JSObject
 import com.onyx.android.sdk.api.device.epd.EpdController
@@ -166,29 +164,13 @@ internal class OnyxInk(
         runCatching { resetPalm() }
             .onFailure { Log.d("OnyxInk", "no palm region to clear: ${it.message}") }
         webView.viewTreeObserver.addOnWindowFocusChangeListener(this)
-        watchIme()
     }
 
-    /**
-     * The soft keyboard never takes our window focus — it is `FLAG_NOT_FOCUSABLE` — so
-     * `hasWindowFocus()` cannot see it, while the firmware happily paints ink over it: the limit
-     * rect is a screen region with no notion of window z-order. Insets are the one signal that
-     * arrives, and this window is edge-to-edge, so they do.
-     */
-    private fun watchIme() {
-        ViewCompat.setOnApplyWindowInsetsListener(webView) { _, insets ->
-            imeChanged(insets.getInsets(WindowInsetsCompat.Type.ime()).bottom > 0)
-            insets
-        }
-        ViewCompat.getRootWindowInsets(webView)?.let {
-            imeChanged(it.getInsets(WindowInsetsCompat.Type.ime()).bottom > 0)
-        }
-        ViewCompat.requestApplyInsets(webView)
-    }
-
-    private fun imeChanged(visible: Boolean) {
+    /** Reported by the plugin, which owns the one insets listener the WebView can have. */
+    fun imeChanged(visible: Boolean) {
         if (visible == imeVisible) return
         imeVisible = visible
+        Log.d("OnyxInk", "ime visible=$visible")
         if (visible) imeSource = "insets"
         if (visible) pauses.pause(IME_REASON) else pauses.resume(IME_REASON)
         pauseStateChanged()
@@ -245,7 +227,15 @@ internal class OnyxInk(
                     "BOOX firmware did not expose the digitizer coordinate range"
                 }
                 maxPressure = EpdController.getMaxTouchPressure().takeIf { it > 0 } ?: 4095f
-                helper = TouchHelper.create(webView, TouchHelper.FEATURE_SF_TOUCH_RENDER, callback(generation), false)
+                // Experiment (2026-09-07): the stock Notes app creates its helper with
+                // SF|APP touch render; with SF alone a finger touch inside the region
+                // appeared to trigger a firmware refresh. Revert if pen rendering regresses.
+                helper = TouchHelper.create(
+                    webView,
+                    TouchHelper.FEATURE_SF_TOUCH_RENDER or TouchHelper.FEATURE_APP_TOUCH_RENDER,
+                    callback(generation),
+                    false,
+                )
                 helper!!.setPenUpRefreshEnabled(false) // Refresh only after the web canvas acknowledges its frame.
                 helper!!.setPostInputEvent(false)
                 helper!!.setHostViewScrollListenerEnabled(false)
@@ -392,6 +382,7 @@ internal class OnyxInk(
             displayMode.set(DisplayModeStack.Layer.SESSION, UpdateMode.GU)
             Log.d("OnyxInk", "view quality mode: ${displayMode.readMode()}, previous: ${displayMode.previousMode}")
         }
+        Log.d("OnyxInk", "gate gate.resume(toolRendering()) paused=${pauses.reasons()}")
         gate.resume(toolRendering())
         if (acquiredQuality) config?.let { args -> commit(OnyxFrameArgs().apply {
             session = args.session
@@ -405,6 +396,7 @@ internal class OnyxInk(
         webView.removeCallbacks(resumeGate)
         frames.request() // Invalidate visual/frame callbacks from the old geometry or lifecycle.
         cancelFrameSubmission()
+        Log.d("OnyxInk", "gate gate.pause() paused=${pauses.reasons()}")
         gate.pause()
         eraserRenderGate.reset()
         if (gesture.ended()) send("cancel")
@@ -466,7 +458,6 @@ internal class OnyxInk(
         close()
         webView.removeCallbacks(resumeGate)
         webView.viewTreeObserver.removeOnWindowFocusChangeListener(this)
-        ViewCompat.setOnApplyWindowInsetsListener(webView, null)
         // The registry outlives this session; a keyboard held down here must not pause the next.
         pauses.resume(IME_REASON)
     }
