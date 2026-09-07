@@ -14,6 +14,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import com.onyx.android.sdk.api.device.epd.EpdController
 import com.onyx.android.sdk.api.device.epd.UpdateMode
+import com.onyx.android.sdk.api.device.epd.UpdateOption
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
@@ -246,6 +247,32 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
         return result.put("requested", UpdateMode.REGAL.name)
             .put("accepted", accepted)
             .put("effectiveMode", view.readMode()?.name)
+            .put("appRefreshMode", applyAppRefreshProfile())
+    }
+
+    /**
+     * The firmware refreshes the caret, touches and scrolling by the app's refresh profile — the
+     * one EinkWise shows as HD / Balanced / Regal / Speed. Regal turns each of those into a full
+     * flash; Speed keeps them partial, which is what a note app wants. The SDK exposes the
+     * profile at runtime through `setAppScopeRefreshMode`, but if the firmware lacks the app-scope
+     * method the SDK silently falls back to the *system* profile, so the method is probed first.
+     * Runtime only: EinkWise's stored profile stays whatever the user chose.
+     */
+    private fun applyAppRefreshProfile(): String? {
+        val supported = runCatching {
+            Class.forName("android.onyx.optimization.EInkHelper")
+                .getMethod("setAppScopeRefreshMode", Int::class.javaPrimitiveType)
+        }.isSuccess
+        if (!supported) {
+            Log.w("OnyxInk", "app-scope refresh mode unsupported by this firmware; leaving EinkWise's profile")
+            return null
+        }
+        return runCatching {
+            EpdController.setAppScopeRefreshMode(UpdateOption.FAST)
+            val applied = EpdController.getAppScopeRefreshMode()
+            Log.d("OnyxInk", "app-scope refresh mode requested=FAST applied=$applied")
+            applied?.name
+        }.onFailure { Log.w("OnyxInk", "app-scope refresh mode: ${it.message}") }.getOrNull()
     }
 
     /**
