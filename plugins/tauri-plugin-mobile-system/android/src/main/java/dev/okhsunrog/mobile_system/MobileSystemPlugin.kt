@@ -15,6 +15,8 @@ import androidx.core.view.WindowInsetsCompat
 import com.onyx.android.sdk.api.device.epd.EpdController
 import com.onyx.android.sdk.api.device.epd.UpdateMode
 import com.onyx.android.sdk.api.device.epd.UpdateOption
+import com.onyx.android.sdk.api.device.eac.EACReflectUtils
+import com.onyx.android.sdk.utils.ReflectUtil
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
@@ -248,6 +250,45 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
             .put("accepted", accepted)
             .put("effectiveMode", view.readMode()?.name)
             .put("appRefreshMode", applyAppRefreshProfile())
+            .also { ensureSpeedRefreshProfile() }
+    }
+
+    /**
+     * Writes the Speed refresh profile into this app's EinkWise (EAC) configuration, the same
+     * way the EinkWise panel does: fetch the app's config JSON from the optimisation service,
+     * change the refresh block, hand it back. The runtime `setAppScopeRefreshMode` had no effect
+     * on this firmware; the stored profile is what the panel actually obeys for the caret,
+     * touches and scrolling. Idempotent, off the UI thread, and a no-op when the service or the
+     * reflection hooks are missing.
+     */
+    private fun ensureSpeedRefreshProfile() {
+        val get = EACReflectUtils.sMethodGetAppConfigFromService ?: return
+        val apply = EACReflectUtils.sMethodApplyAppConfigToService ?: return
+        val pkg = activity.packageName
+        Thread {
+            runCatching {
+                val configs = ReflectUtil.invokeMethodSafely(get, null, listOf(pkg)) as? List<*>
+                val json = configs?.firstOrNull() as? String
+                if (json.isNullOrBlank()) {
+                    Log.w("OnyxInk", "eac: no app config returned for $pkg")
+                    return@runCatching
+                }
+                val root = org.json.JSONObject(json)
+                val refresh = root.getJSONObject("globalActivityConfig").getJSONObject("refreshConfig")
+                val current = refresh.optString("refreshModeIndex")
+                if (current == SPEED_MODE_INDEX && refresh.optInt("updateMode") == SPEED_UPDATE_MODE) {
+                    Log.d("OnyxInk", "eac: refresh profile already Speed")
+                    return@runCatching
+                }
+                refresh.put("refreshModeIndex", SPEED_MODE_INDEX)
+                refresh.put("updateMode", SPEED_UPDATE_MODE)
+                refresh.put("turbo", SPEED_TURBO)
+                refresh.remove("refreshModeAlias")
+                val bundle = android.os.Bundle().apply { putInt("args_operation_flag", 0) }
+                val result = ReflectUtil.invokeMethodSafely(apply, null, listOf(root.toString()), bundle)
+                Log.d("OnyxInk", "eac: refresh profile $current -> $SPEED_MODE_INDEX result=$result")
+            }.onFailure { Log.w("OnyxInk", "eac: refresh profile: ${it.message}") }
+        }.start()
     }
 
     /**
@@ -430,6 +471,10 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
 
     private companion object {
         const val FULL_REFRESH_DELAY_MS = 300L
+        /** EinkWise "Speed": partial GU updates with turbo, as the stock browser profile has it. */
+        const val SPEED_MODE_INDEX = "refresh_mode_2"
+        const val SPEED_UPDATE_MODE = 2
+        const val SPEED_TURBO = 5
         /** Verified on firmware 4.2: opens EinkWise for the foreground app. */
         const val EINK_CENTER_ACTION = "action.open.eink.center.request"
     }
