@@ -67,6 +67,7 @@ export function SettingsPage({
     setInkColor,
     display,
     panelMode,
+    nativeDisplayKind,
   } = useAppearance();
   const queryClient = useQueryClient();
   const [settings, setSettings] = useState<SettingsSnapshot | null>(null);
@@ -372,7 +373,7 @@ export function SettingsPage({
             {panelMode && (
               <p className="mt-2 text-xs text-muted-foreground">Panel mode: {panelMode}</p>
             )}
-            {display === "eink" && (
+            {nativeDisplayKind === "eink" && (
               <div className="mt-3 space-y-2">
                 <p className="text-xs text-muted-foreground">
                   The tablet's own EinkWise profile decides how the caret, touches and scrolling
