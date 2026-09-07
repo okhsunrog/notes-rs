@@ -144,6 +144,7 @@ internal class OnyxInk(
     companion object {
         /** Dash length and gap, and the line width, of the firmware selection trace. */
         private const val LASSO_DASH = 5f
+        private const val CLOSE_REFRESH_DELAY_MS = 300L
         fun supported(): Boolean = Build.MANUFACTURER.equals("ONYX", true)
 
         /** Stock Notes' `DELAY_ENABLE_RAW_DRAWING_MILLS` for a monochrome panel. */
@@ -446,12 +447,24 @@ internal class OnyxInk(
     }
 
     fun close() {
+        val hadSession = helper != null
         pause()
         generation++
         helper?.closeRawDrawing()
         helper = null
         config = null
         damage.take()
+        // Ink drawn under the partial mode leaves the sharpest ghosts; the sheet going away is
+        // the moment to clean the panel once.
+        if (hadSession) {
+            webView.removeCallbacks(closeRefresh)
+            webView.postDelayed(closeRefresh, CLOSE_REFRESH_DELAY_MS)
+        }
+    }
+
+    private val closeRefresh = Runnable {
+        runCatching { EpdController.invalidate(webView, UpdateMode.GC) }
+            .onFailure { Log.d("OnyxInk", "refresh after close: ${it.message}") }
     }
 
     fun destroy() {

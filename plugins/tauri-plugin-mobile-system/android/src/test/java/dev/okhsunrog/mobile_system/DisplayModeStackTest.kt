@@ -94,16 +94,4 @@ class DisplayModeStackTest {
             calls,
         )
     }
-
-    @Test fun theKeyboardLayerOutranksTheInkSessionButNotAGesture() {
-        stack.set(Layer.SESSION, UpdateMode.GU)
-        stack.set(Layer.TEXT, UpdateMode.DU)
-        assertEquals(UpdateMode.DU, stack.effective)
-        stack.set(Layer.TRANSIENT, UpdateMode.HAND_WRITING_REPAINT_MODE)
-        assertEquals(UpdateMode.HAND_WRITING_REPAINT_MODE, stack.effective)
-        stack.clear(Layer.TRANSIENT)
-        stack.clear(Layer.TEXT)
-        assertEquals(UpdateMode.GU, stack.effective)
-        assertEquals(listOf("GU", "DU", "HAND_WRITING_REPAINT_MODE", "DU", "GU"), calls)
-    }
 }

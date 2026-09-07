@@ -76,19 +76,27 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
     }
 
     private var imeVisible = false
+    private val fullRefresh = Runnable {
+        inkWebView?.let { view ->
+            runCatching { EpdController.invalidate(view, UpdateMode.GC) }
+                .onFailure { Log.w("OnyxInk", "full refresh: ${it.message}") }
+        }
+    }
+
+    /** One GC refresh after the screen settles; repeated requests collapse into the last one. */
+    internal fun fullRefreshSoon(webView: WebView) {
+        webView.removeCallbacks(fullRefresh)
+        webView.postDelayed(fullRefresh, FULL_REFRESH_DELAY_MS)
+    }
 
     private fun imeChanged(webView: WebView, visible: Boolean) {
         if (visible == imeVisible) return
         imeVisible = visible
         Log.d("OnyxInk", "ime visible=$visible")
-        if (OnyxInk.supported()) {
-            runCatching {
-                val mode = displayMode(webView)
-                if (visible) mode.set(DisplayModeStack.Layer.TEXT, UpdateMode.DU)
-                else mode.clear(DisplayModeStack.Layer.TEXT)
-            }.onFailure { Log.w("OnyxInk", "text display mode: ${it.message}") }
-        }
         onyxInk?.imeChanged(visible)
+        // Typing under the partial modes leaves the caret's trail behind; the keyboard going
+        // away is the natural moment to clean the panel once, not on every keystroke.
+        if (!visible && OnyxInk.supported()) fullRefreshSoon(webView)
     }
 
     @Suppress("OVERRIDE_DEPRECATION") // This plugin does not depend on AppCompat types.
@@ -360,5 +368,9 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
         val result = JSObject()
         result.put("name", name)
         invoke.resolve(result)
+    }
+
+    private companion object {
+        const val FULL_REFRESH_DELAY_MS = 300L
     }
 }
