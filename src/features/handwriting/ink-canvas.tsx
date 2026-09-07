@@ -15,8 +15,13 @@ import {
   moveSelection,
   scaleSelection,
   selectionBounds,
+  selectionFrame,
   selectionMenuPosition,
   selectLasso,
+  SELECTION_DASH,
+  SELECTION_FRAME_PADDING,
+  SELECTION_FRAME_WIDTH,
+  SELECTION_TRACE_WIDTH,
   type Bounds,
   type EraserMode,
   type LassoMode,
@@ -123,6 +128,28 @@ export function InkCanvas({
   const [size, setSize] = useState({ width: 0, height: 0 });
   const menuRef = useRef<HTMLDivElement>(null);
   const [menuBox, setMenuBox] = useState({ width: 0, height: 0 });
+  // A gesture owns the sheet: the floating menu follows a drag and steps out of a new lasso, and
+  // the firmware region must not be reconfigured until the pen lifts.
+  const [gestureAction, setGestureAction] = useState<Gesture["action"] | null>(null);
+  const [dragBounds, setDragBounds] = useState<Bounds | null>(null);
+  const followFrame = useRef<number | null>(null);
+  const followTarget = useRef<Bounds | null>(null);
+  /** Stock repositions its selection popup every ~10 ms; one animation frame is close enough. */
+  const followSelection = (bounds: Bounds | null) => {
+    followTarget.current = bounds;
+    if (followFrame.current !== null) return;
+    followFrame.current = requestAnimationFrame(() => {
+      followFrame.current = null;
+      setDragBounds(followTarget.current);
+    });
+  };
+  const endInteraction = () => {
+    if (followFrame.current !== null) cancelAnimationFrame(followFrame.current);
+    followFrame.current = null;
+    followTarget.current = null;
+    setGestureAction(null);
+    setDragBounds(null);
+  };
 
   const publish = (strokes: InkStroke[]) => {
     const canvas = canvasRef.current;
@@ -211,18 +238,21 @@ export function InkCanvas({
       const original = selectionBounds(gesture.movingInk, ids)!;
       staging.drawImage(layer, bounds.left - original.left, bounds.top - original.top, 1000, 1400);
     }
-    staging.strokeStyle = "#111111";
-    staging.lineWidth = 1.5;
-    staging.setLineDash([7, 5]);
+    // Pure black: an e-ink panel renders any grey as a dither pattern.
+    staging.strokeStyle = "#000000";
+    staging.lineWidth = SELECTION_FRAME_WIDTH;
+    staging.setLineDash(SELECTION_DASH);
     if (bounds) {
+      const frame = selectionFrame(bounds);
       staging.beginPath();
-      staging.moveTo(bounds.left - 6, bounds.top - 6);
-      staging.lineTo(bounds.right + 6, bounds.top - 6);
-      staging.lineTo(bounds.right + 6, bounds.bottom + 6);
-      staging.lineTo(bounds.left - 6, bounds.bottom + 6);
-      staging.lineTo(bounds.left - 6, bounds.top - 6);
+      staging.moveTo(frame.left, frame.top);
+      staging.lineTo(frame.right, frame.top);
+      staging.lineTo(frame.right, frame.bottom);
+      staging.lineTo(frame.left, frame.bottom);
+      staging.lineTo(frame.left, frame.top);
       staging.stroke();
     }
+    staging.lineWidth = SELECTION_TRACE_WIDTH;
     if (gesture?.action === "select" || (gesture?.action === "erase" && eraserMode === "lasso")) {
       const polygon = lassoPolygon(
         gesture.points,
@@ -237,6 +267,7 @@ export function InkCanvas({
       }
     }
     staging.setLineDash([]);
+    staging.lineWidth = SELECTION_FRAME_WIDTH;
     if (gesture?.action === "erase" && eraserMode !== "lasso" && gesture.points.length) {
       const p = gesture.points[gesture.points.length - 1]!;
       staging.beginPath();
@@ -244,13 +275,21 @@ export function InkCanvas({
       staging.stroke();
     }
     let overlay: Bounds | null = bounds
-      ? {
-          left: bounds.left - 8,
-          top: bounds.top - 8,
-          right: bounds.right + 8,
-          bottom: bounds.bottom + 8,
-        }
+      ? selectionFrame(bounds, SELECTION_FRAME_PADDING + SELECTION_FRAME_WIDTH)
       : null;
+    // The menu is a DOM overlay the panel repaints with the sheet, so a menu that moved with the
+    // selection has to be inside the damage or its old position ghosts.
+    if (bounds && !disabled && size.width && size.height && menuBox.height) {
+      const at = selectionMenuPosition(bounds, size, menuBox);
+      const x = 1000 / size.width,
+        y = 1400 / size.height;
+      overlay = unionBounds(overlay, {
+        left: at.left * x,
+        top: at.top * y,
+        right: (at.left + menuBox.width) * x,
+        bottom: (at.top + menuBox.height) * y,
+      });
+    }
     if (gesture?.action === "select" || gesture?.action === "erase") {
       const padding = gesture.action === "erase" ? eraserRadius + 2 : 2;
       for (const p of gesture.points)
@@ -305,6 +344,8 @@ export function InkCanvas({
       movingInk:
         action === "move" ? base.strokes.filter((s) => selected.includes(s.id)) : undefined,
     };
+    setGestureAction(action);
+    if (action === "move") setDragBounds(selectionBounds(base.strokes, selected));
     sampleGesture(point);
     return active.current;
   };
@@ -330,6 +371,7 @@ export function InkCanvas({
         point.x - start.x,
         point.y - start.y,
       );
+      followSelection(selectionBounds(current.preview, current.ids));
       publish(current.preview);
     } else if (current.action === "erase" && eraserMode !== "lasso") {
       current.preview = eraseGesture(
@@ -358,6 +400,7 @@ export function InkCanvas({
     } else if (current.action === "pen" && gesture.length)
       strokes = [...strokes, { id: crypto.randomUUID(), width, points: gesture }];
     active.current = null;
+    endInteraction();
     if (strokes.reduce((count, s) => count + s.points.length, 0) > MAX_INK_POINTS) {
       onLimit();
       publish(base.strokes);
@@ -375,6 +418,7 @@ export function InkCanvas({
       if (active.current) {
         if (event.kind === "cancel") onSelectionChange?.(active.current.ids);
         active.current = null;
+        endInteraction();
         publish(base.strokes);
       }
     }
@@ -386,10 +430,13 @@ export function InkCanvas({
     return finishGesture(base, event.points);
   };
   const selection = selectionBounds(draft.strokes, selected);
-  // The menu is a DOM overlay over the firmware's drawing region: it needs a place inside the
-  // sheet and a hole punched in that region, and both follow the selection.
+  // The menu is a DOM overlay over the firmware's drawing region, anchored to the selection the way
+  // stock Notes anchors its selection popup: it follows a drag frame by frame and steps aside while
+  // a new lasso is being drawn.
+  const menuBounds =
+    gestureAction === "select" ? null : gestureAction === "move" ? dragBounds : selection;
   const menuAt =
-    selection && !disabled && size.width ? selectionMenuPosition(selection, size, menuBox) : null;
+    menuBounds && !disabled && size.width ? selectionMenuPosition(menuBounds, size, menuBox) : null;
   const onyx = useOnyxInk({
     canvasRef,
     enabled: nativeInk && !disabled,
@@ -404,7 +451,8 @@ export function InkCanvas({
     decoration: selected.join(","),
     lassoMode,
     selection,
-    excludeRects: menuAt ? [{ ...menuAt, ...menuBox }] : undefined,
+    overlayRects: menuAt ? [{ ...menuAt, ...menuBox }] : undefined,
+    interacting: gestureAction !== null,
     onInput: nativeInput,
     onStroke: nativeStroke,
     damage: {
@@ -426,7 +474,10 @@ export function InkCanvas({
       if (entry) setSize({ width: entry.contentRect.width, height: entry.contentRect.height });
     });
     observer.observe(canvas);
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      if (followFrame.current !== null) cancelAnimationFrame(followFrame.current);
+    };
   }, []);
   useLayoutEffect(() => {
     const canvas = canvasRef.current;
@@ -495,6 +546,7 @@ export function InkCanvas({
     const current = active.current;
     if (!current) return;
     active.current = null;
+    endInteraction();
     onSelectionChange?.(current.ids);
     publish(draft.strokes);
     onActiveChange(false);
@@ -557,6 +609,7 @@ export function InkCanvas({
     if (!current || current.id !== event.pointerId) return;
     if (cancelled) {
       active.current = null;
+      endInteraction();
       onSelectionChange?.(current.ids);
       publish(draft.strokes);
     } else {

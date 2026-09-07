@@ -44,12 +44,12 @@ class OnyxInkArgs {
     var selectionTop: Double = 0.0
     var selectionRight: Double = 0.0
     var selectionBottom: Double = 0.0
-    /** Page overlays inside the sheet the firmware must not paint into, in CSS pixels. */
-    var excludeRects: List<OnyxExcludeRect> = emptyList()
+    /** DOM controls floating inside the sheet that a pen must tap rather than ink, in CSS pixels. */
+    var overlayRects: List<OnyxOverlayRect> = emptyList()
 }
 
 @InvokeArg
-class OnyxExcludeRect {
+class OnyxOverlayRect {
     var left: Double = 0.0
     var top: Double = 0.0
     var width: Double = 0.0
@@ -79,7 +79,9 @@ internal class OnyxInk(
     private var config: OnyxInkArgs? = null
     private var sheet = RectF()
     private var limit = Rect()
-    private var excludes: List<Rect> = emptyList()
+    private var overlays: List<InkRect> = emptyList()
+    /** The pen landed on a floating control: this gesture inks nothing and reports nothing. */
+    private var swallowed = false
     private var resumed = true
     private val gesture = InkGesturePairing()
     private var sequence = 0L
@@ -102,7 +104,7 @@ internal class OnyxInk(
     private val gate = RawDrawingGate(object : RawDrawingSwitches {
         override fun render(enabled: Boolean) { helper?.setRawDrawingRenderEnabled(enabled) }
         override fun input(enabled: Boolean) { helper?.setRawInputReaderEnable(enabled) }
-        override fun pushRects() { helper?.setLimitRect(limit, excludes) }
+        override fun pushRects() { helper?.setLimitRect(limit, NO_EXCLUDES) }
         override fun resetDefaults() { helper?.resetPenDefaultRawDrawing() }
     })
     // Resuming into the tail of an IME teardown leaves ghost ink; stock Notes waits too.
@@ -155,6 +157,13 @@ internal class OnyxInk(
     companion object {
         /** Dash length and gap, and the line width, of the firmware selection trace. */
         private const val LASSO_DASH = 5f
+
+        /**
+         * The handwriting region is never punched through. Floating controls are handled per
+         * gesture instead, so a lasso trace crossing one is still drawn whole — the stock Notes
+         * selection popup registers no exclude rect either.
+         */
+        private val NO_EXCLUDES = emptyList<Rect>()
         private const val CLOSE_REFRESH_DELAY_MS = 300L
         fun supported(): Boolean = Build.MANUFACTURER.equals("ONYX", true)
 
@@ -227,14 +236,13 @@ internal class OnyxInk(
         val scale = webView.width / args.viewportWidth
         val previousSheet = RectF(sheet)
         val previousLimit = Rect(limit)
-        val previousExcludes = excludes
+        val previousOverlays = overlays
         sheet = RectF((args.left * scale).toFloat(), (args.top * scale).toFloat(),
             ((args.left + args.width) * scale).toFloat(), ((args.top + args.height) * scale).toFloat())
         limit = Rect(floor(sheet.left).toInt(), ceil(maxOf(sheet.top.toDouble(), args.clipTop * scale)).toInt(),
             ceil(sheet.right).toInt(), floor(minOf(sheet.bottom.toDouble(), args.clipBottom * scale)).toInt())
         if (!limit.intersect(0, 0, webView.width, webView.height)) limit.setEmpty()
-        excludes = inkExcludeRects(args.excludeRects, scale, InkRect(limit.left, limit.top, limit.right, limit.bottom))
-            .map { Rect(it.left, it.top, it.right, it.bottom) }
+        overlays = inkOverlayRects(args.overlayRects, scale, InkRect(limit.left, limit.top, limit.right, limit.bottom))
         try {
             if (helper == null) {
                 ResManager.init(activity.applicationContext)
@@ -254,7 +262,7 @@ internal class OnyxInk(
                 helper!!.setPenUpRefreshEnabled(false) // Refresh only after the web canvas acknowledges its frame.
                 helper!!.setPostInputEvent(false)
                 helper!!.setHostViewScrollListenerEnabled(false)
-                helper!!.setLimitRect(limit, excludes).openRawDrawing()
+                helper!!.setLimitRect(limit, NO_EXCLUDES).openRawDrawing()
                 helper!!.setEraserRawDrawingEnabled(false, 0)
                 helper!!.enableSideBtnErase(true)
             }
@@ -263,18 +271,18 @@ internal class OnyxInk(
                 // pattern is configured on the device first: a single-element gap/length array,
                 // black, at the driver's standard width (Notate's verified recipe, onyx.md §2).
                 Device.currentDevice().setStrokeParameters(TouchHelper.STROKE_STYLE_DASH, floatArrayOf(LASSO_DASH))
-                helper!!.setLimitRect(limit, excludes)
+                helper!!.setLimitRect(limit, NO_EXCLUDES)
                     .setStrokeWidth(LASSO_DASH)
                     .setStrokeColor(Color.BLACK)
                     .setStrokeStyle(TouchHelper.STROKE_STYLE_DASH)
             } else {
-                helper!!.setLimitRect(limit, excludes)
+                helper!!.setLimitRect(limit, NO_EXCLUDES)
                     .setStrokeWidth((args.strokeWidth * sheet.width() / 1000).toFloat())
                     .setStrokeColor(Color.BLACK)
                     .setStrokeStyle(TouchHelper.STROKE_STYLE_FOUNTAIN)
             }
             resume()
-            if (sheet != previousSheet || limit != previousLimit || excludes != previousExcludes) commit(OnyxFrameArgs().apply {
+            if (sheet != previousSheet || limit != previousLimit || overlays != previousOverlays) commit(OnyxFrameArgs().apply {
                 session = args.session
                 sequence = this@OnyxInk.sequence
             })
@@ -414,6 +422,7 @@ internal class OnyxInk(
         Log.d("OnyxInk", "gate gate.pause() paused=${pauses.reasons()}")
         gate.pause()
         eraserRenderGate.reset()
+        swallowed = false
         if (gesture.ended()) send("cancel")
     }
 
@@ -467,7 +476,8 @@ internal class OnyxInk(
         helper?.closeRawDrawing()
         helper = null
         config = null
-        excludes = emptyList()
+        overlays = emptyList()
+        swallowed = false
         damage.take()
         // Ink drawn under the partial mode leaves the sharpest ghosts; the sheet going away is
         // the moment to clean the panel once.
@@ -514,6 +524,17 @@ internal class OnyxInk(
         val y = (point.y - sheet.top) / sheet.height() * 1400
         val movingSelection = args.hasSelection && x >= args.selectionLeft - 12 && x <= args.selectionRight + 12 &&
             y >= args.selectionTop - 12 && y <= args.selectionBottom + 12
+        // A pen landing on a floating control is a tap on that control, and the WebView delivers it
+        // by itself. Swallow this one gesture rather than cutting the control out of the drawing
+        // region: a hole in the region is also a hole in every trace crossing it, which is what
+        // broke the dashed lasso outline.
+        swallowed = inkOverlayHit(overlays, point.x, point.y)
+        if (swallowed) {
+            fastPreview = false
+            helper?.setRawDrawingRenderEnabled(false)
+            gesture.begun()
+            return
+        }
         fastPreview = args.fastLasso && !erasing && !args.eraser && !movingSelection
         // Hardware erasing must pause the firmware pen layer even while Pen is selected.
         // Keep raw input enabled so the software eraser continues receiving points.
@@ -531,6 +552,11 @@ internal class OnyxInk(
 
     private fun end() {
         if (!gesture.ended()) return
+        if (swallowed) {
+            swallowed = false
+            restoreToolRendering()
+            return
+        }
         displayPolicy.end(SystemClock.uptimeMillis())
         if (displayPolicy.fastRequested) {
             webView.removeCallbacks(settleDisplay)
@@ -544,7 +570,7 @@ internal class OnyxInk(
     }
 
     private fun stroke(list: TouchPointList, erasing: Boolean) {
-        if (!gesture.drawing || config == null || list.isEmpty) return
+        if (swallowed || !gesture.drawing || config == null || list.isEmpty) return
         val points = JSONArray()
         var pressure = 0.5
         // Same point budget as the portable draft. Never silently retain an unbounded native list.
@@ -570,6 +596,7 @@ internal class OnyxInk(
     }
 
     private fun preview(point: TouchPoint, erasing: Boolean) {
+        if (swallowed) return
         if (gesture.drawing) markNativePoint(point)
         if (!gesture.drawing || fastPreview || (config?.interaction != true && config?.eraser != true && !erasing)) return
         val now = android.os.SystemClock.uptimeMillis()

@@ -5,8 +5,13 @@ import {
   lassoPolygon,
   moveSelection,
   scaleSelection,
+  selectionFrame,
   selectionMenuPosition,
   selectLasso,
+  SELECTION_DASH,
+  SELECTION_FRAME_PADDING,
+  SELECTION_FRAME_WIDTH,
+  SELECTION_TRACE_WIDTH,
 } from "./ink-editing";
 const point = (x: number, y: number, time = x): InkPoint => ({
   x,
@@ -85,4 +90,27 @@ it("anchors the selection menu above the selection, or below it when the sheet h
   expect(
     selectionMenuPosition({ left: 900, top: 0, right: 1000, bottom: 1400 }, sheet, menu),
   ).toEqual({ left: 312, top: 656 });
+});
+
+it("frames a selection the way stock Notes does, scaled to our sheet units", () => {
+  // Stock: 12 px padding, 3 px frame, 4 px trace, 10/10 dashes on a ~1404 px wide page.
+  const sheetUnits = (devicePixels: number) => Math.round((devicePixels * 1000) / 1404);
+  expect(SELECTION_FRAME_PADDING).toBe(sheetUnits(12));
+  expect(SELECTION_FRAME_WIDTH).toBe(sheetUnits(3));
+  expect(SELECTION_TRACE_WIDTH).toBe(sheetUnits(4));
+  expect(SELECTION_DASH.map(sheetUnits)).toEqual([5, 5]); // Dashes read better a touch longer.
+  expect(SELECTION_DASH).toEqual([7, 7]);
+  expect(selectionFrame({ left: 100, top: 200, right: 300, bottom: 500 })).toEqual({
+    left: 91,
+    top: 191,
+    right: 309,
+    bottom: 509,
+  });
+  // The repaint region has to clear the frame's own stroke as well as its padding.
+  expect(
+    selectionFrame(
+      { left: 100, top: 200, right: 300, bottom: 500 },
+      SELECTION_FRAME_PADDING + SELECTION_FRAME_WIDTH,
+    ),
+  ).toEqual({ left: 89, top: 189, right: 311, bottom: 511 });
 });

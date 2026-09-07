@@ -132,6 +132,28 @@ export function selectionBounds(strokes: InkStroke[], ids: string[]) {
   return boundsOf(strokes.filter((s) => selected.has(s.id)).flatMap((s) => s.points));
 }
 /**
+ * Stock Notes frames a selection with a dashed black rectangle and draws its live lasso trace with
+ * the same dashes: 12 px padding, 3 px frame, 4 px trace and 10/10 dashes on its ~1404 px wide page
+ * (`SelectionRenderer`, `SelectionRect.SELECTION_RECT_PADDING`, `SelectionTrackRenderer`; see
+ * `docs/planning/handwriting-lasso-notes.md`). Our sheet is 1000 units over that same page, so the
+ * sizes scale by 1000/1404.
+ */
+export const SELECTION_FRAME_PADDING = 9;
+export const SELECTION_FRAME_WIDTH = 2;
+export const SELECTION_TRACE_WIDTH = 3;
+export const SELECTION_DASH = [7, 7];
+
+/** The dashed rectangle drawn around a selection: its bounds, padded on every side. */
+export function selectionFrame(bounds: Bounds, padding = SELECTION_FRAME_PADDING): Bounds {
+  return {
+    left: bounds.left - padding,
+    top: bounds.top - padding,
+    right: bounds.right + padding,
+    bottom: bounds.bottom + padding,
+  };
+}
+
+/**
  * Anchor a floating toolbar over the sheet: just above the selection, below it when the top of
  * the sheet has no room, and never past an edge. Sizes are CSS pixels of the rendered sheet.
  */

@@ -16,10 +16,12 @@ export type OnyxInkEvent = {
 };
 export type OnyxInkStatus = { available: boolean; active: boolean; error?: string };
 /**
- * A page overlay the firmware must not ink over, in CSS pixels relative to the canvas box. It
- * reaches the plugin in the canvas' own coordinate space, so scrolling needs no re-measurement.
+ * A DOM control floating inside the sheet, in CSS pixels relative to the canvas box. It reaches the
+ * plugin in the canvas' own coordinate space, so scrolling needs no re-measurement. The plugin
+ * swallows a pen gesture that starts on one instead of cutting the rectangle out of the handwriting
+ * region: a hole in the region is also a hole in every trace crossing it.
  */
-export type InkExcludeRect = { left: number; top: number; width: number; height: number };
+export type InkOverlayRect = { left: number; top: number; width: number; height: number };
 
 export function applyOnyxStroke(draft: InkDraft, event: OnyxInkEvent): InkDraft {
   const points = event.points ?? [];
@@ -57,7 +59,8 @@ export function useOnyxInk({
   decoration,
   lassoMode,
   selection,
-  excludeRects,
+  overlayRects,
+  interacting = false,
   damage,
 }: {
   canvasRef: RefObject<HTMLCanvasElement | null>;
@@ -73,7 +76,9 @@ export function useOnyxInk({
   decoration?: string;
   lassoMode?: LassoMode;
   selection?: Bounds | null;
-  excludeRects?: InkExcludeRect[];
+  overlayRects?: InkOverlayRect[];
+  /** A local gesture owns the sheet: reconfiguring now would pause raw drawing and cancel it. */
+  interacting?: boolean;
   damage?: { take: () => Bounds | null; invalidate: () => void };
   onInput?: (event: OnyxInkEvent, draft: InkDraft) => void;
   onStroke?: (draft: InkDraft, event: OnyxInkEvent) => InkDraft;
@@ -93,7 +98,8 @@ export function useOnyxInk({
     onStroke,
     lassoMode,
     selection,
-    excludeRects,
+    overlayRects,
+    interacting,
     damage,
   });
   const session = useRef<string | null>(null);
@@ -113,7 +119,8 @@ export function useOnyxInk({
       onStroke,
       lassoMode,
       selection,
-      excludeRects,
+      overlayRects,
+      interacting,
       damage,
     };
   });
@@ -147,9 +154,13 @@ export function useOnyxInk({
     };
     const configure = () => {
       if (disposed || !registered || unsupported) return;
+      // Reconfiguring pauses raw drawing, which cancels the stroke in flight and truncates its
+      // trace. A gesture owns the sheet until it lifts; the change waits for it.
+      // The gesture's own end re-runs this effect, so nothing is lost by waiting.
+      if (state.current.interacting) return;
       const rect = canvas.getBoundingClientRect();
       const viewport = canvas.closest("[data-ink-viewport]")?.getBoundingClientRect();
-      const excludes = (state.current.excludeRects ?? [])
+      const overlays = (state.current.overlayRects ?? [])
         .filter((box) => box.width > 0 && box.height > 0)
         .map((box) => ({
           left: rect.left + box.left,
@@ -180,9 +191,9 @@ export function useOnyxInk({
         selectionTop: state.current.selection?.top ?? 0,
         selectionRight: state.current.selection?.right ?? 0,
         selectionBottom: state.current.selection?.bottom ?? 0,
-        // Overlays inside the sheet: the firmware paints the whole limit rect otherwise,
-        // and a pen over the floating menu would ink straight through it.
-        excludeRects: excludes,
+        // Floating DOM controls inside the sheet, so a pen landing on one taps it instead of
+        // inking. The handwriting region itself stays whole, or the trace would be cut with it.
+        overlayRects: overlays,
       };
       const key = JSON.stringify(args);
       if (key === lastConfig) return;
@@ -291,14 +302,15 @@ export function useOnyxInk({
     };
   }, [canvasRef, enabled]);
 
-  const excludeKey = JSON.stringify(excludeRects ?? []);
+  const overlayKey = JSON.stringify(overlayRects ?? []);
   useEffect(() => {
     update.current?.();
   }, [
     tool,
     width,
     lassoMode,
-    excludeKey,
+    overlayKey,
+    interacting,
     selection?.left,
     selection?.top,
     selection?.right,

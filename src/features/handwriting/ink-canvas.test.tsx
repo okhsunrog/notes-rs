@@ -209,7 +209,7 @@ it("selects with a rectangle and moves selected strokes as one undoable gesture"
   const published = vi.spyOn(visible, "drawImage").mock.calls;
   const buffer = published[published.length - 1]![0] as HTMLCanvasElement;
   const staging = contexts.get(buffer)!;
-  expect(vi.spyOn(staging, "moveTo")).toHaveBeenCalledWith(64, 84); // Selection at the moved ink bounds.
+  expect(vi.spyOn(staging, "moveTo")).toHaveBeenCalledWith(61, 81); // Selection at the moved ink bounds.
   expect(vi.spyOn(visible, "lineTo")).not.toHaveBeenCalled(); // Both are published via one bitmap.
   pointer("pointerup", { clientX: 40, clientY: 50 });
   expect(changed).toHaveBeenCalledTimes(1);
@@ -405,6 +405,45 @@ it("floats the selection actions over the sheet and runs them on the draft", () 
   expect(selection).toHaveBeenLastCalledWith([]);
   click("Deselect");
   expect(selection).toHaveBeenLastCalledWith([]);
+});
+
+it("keeps the selection menu on the selection through a drag, and off a new lasso", () => {
+  vi.spyOn(HTMLDivElement.prototype, "getBoundingClientRect").mockReturnValue({
+    width: 180,
+    height: 36,
+  } as DOMRect);
+  const frames: FrameRequestCallback[] = [];
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => frames.push(callback));
+  vi.stubGlobal("cancelAnimationFrame", () => {});
+  const runFrames = () =>
+    act(() => {
+      for (const frame of frames.splice(0)) frame(0);
+    });
+  act(() =>
+    resize(
+      [{ contentRect: { width: 500, height: 700 } } as ResizeObserverEntry],
+      {} as ResizeObserver,
+    ),
+  );
+  act(() => renderDraft(selectable, { tool: "lasso", selected: ["a"] }));
+  const menu = () => container.querySelector<HTMLElement>("[data-ink-selection-menu]");
+  expect([menu()!.style.left, menu()!.style.top]).toEqual(["8px", "48px"]);
+  // Grab inside the selection and drag it down: the menu follows the preview, one frame at a time,
+  // instead of teleporting once the gesture commits.
+  pointer("pointerdown", { clientX: 30, clientY: 35 });
+  pointer("pointermove", { clientX: 40, clientY: 50 });
+  runFrames();
+  expect(menu()!.style.top).toBe("63px");
+  pointer("pointerup", { clientX: 40, clientY: 50 });
+  expect(changed).toHaveBeenCalledTimes(1);
+  // A new lasso starts outside the selection: the menu steps out of the way for the whole trace.
+  act(() => renderDraft(selectable, { tool: "lasso", selected: ["a"] }));
+  pointer("pointerdown", { clientX: 200, clientY: 300 });
+  pointer("pointermove", { clientX: 260, clientY: 360 });
+  runFrames();
+  expect(menu()).toBeNull();
+  pointer("pointerup", { clientX: 260, clientY: 360 });
+  expect(menu()).not.toBeNull();
 });
 
 it("hides the selection menu while the sheet is not editable", () => {
