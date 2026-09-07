@@ -17,7 +17,7 @@ import { NoteRowMenu } from "./note-row-menu";
 import { usePageNavigationStore } from "./page-navigation-store";
 import {
   presentAllNotes,
-  type AllNotesLayout,
+  type AllNotesType,
   type AllNotesScope,
   type AllNotesSort,
 } from "./all-notes-model";
@@ -33,7 +33,7 @@ export function AllNotesView() {
   const controller = useWorkspaceController();
   const [query, setQuery] = useState("");
   const [scope, setScope] = useState<AllNotesScope>("all");
-  const [layout, setLayout] = useState<AllNotesLayout>("all");
+  const [type, setType] = useState<AllNotesType>("all");
   const [sort, setSort] = useState<AllNotesSort>("updated");
   const favoritePageUuids = usePageNavigationStore((state) => state.favoritePageUuids);
   const recentPageUuids = usePageNavigationStore((state) => state.recentPageUuids);
@@ -48,19 +48,19 @@ export function AllNotesView() {
       presentAllNotes(pages, {
         query,
         scope,
-        layout,
+        type,
         sort,
         favoritePageUuids,
         recentPageUuids,
       }),
-    [favoritePageUuids, layout, pages, query, recentPageUuids, scope, sort],
+    [favoritePageUuids, pages, query, recentPageUuids, scope, sort, type],
   );
 
   useEffect(() => {
     if (pagesQuery.error) notifyError("all notes", pagesQuery.error);
   }, [pagesQuery.error]);
 
-  const filtersActive = scope !== "all" || layout !== "all";
+  const filtersActive = scope !== "all" || type !== "all";
 
   return (
     <div className="mx-auto min-h-full max-w-5xl px-5 pt-7 pb-[calc(1.75rem+var(--safe-area-inset-bottom))] sm:px-8 sm:py-9">
@@ -142,9 +142,13 @@ export function AllNotesView() {
             <Star className="size-3" /> Favorites
           </FilterButton>
           <span className="mx-1 h-4 w-px bg-border" />
-          {(["all", "outline", "document"] as const).map((value) => (
-            <FilterButton key={value} active={layout === value} onClick={() => setLayout(value)}>
-              {value === "all" ? "Any layout" : capitalize(value)}
+          {(["all", "outline", "document", "handwriting"] as const).map((value) => (
+            <FilterButton key={value} active={type === value} onClick={() => setType(value)}>
+              {value === "all"
+                ? "Any type"
+                : value === "handwriting"
+                  ? "Handwritten"
+                  : capitalize(value)}
             </FilterButton>
           ))}
           {filtersActive && (
@@ -154,7 +158,7 @@ export function AllNotesView() {
               size="xs"
               onClick={() => {
                 setScope("all");
-                setLayout("all");
+                setType("all");
               }}
               className="ml-auto rounded-lg text-muted-foreground"
             >
@@ -250,7 +254,9 @@ function AllNotesRow({
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-medium">{pageDisplayTitle(page)}</span>
           <span className="mt-0.5 flex items-center gap-2 text-[10px] eink:text-xs text-muted-foreground">
-            <span className="capitalize">{page.layout}</span>
+            <span className="capitalize">
+              {page.kind.kind === "handwriting" ? "Handwritten" : page.layout}
+            </span>
             <span aria-hidden="true">·</span>
             <span>Edited {formatDate(page.updatedAt)}</span>
           </span>

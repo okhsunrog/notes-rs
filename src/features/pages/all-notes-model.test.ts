@@ -21,7 +21,7 @@ function page(
 const defaults: AllNotesOptions = {
   query: "",
   scope: "all",
-  layout: "all",
+  type: "all",
   sort: "updated",
   favoritePageUuids: [],
   recentPageUuids: [],
@@ -35,7 +35,7 @@ describe("presentAllNotes", () => {
     page("journal", "Journal", { kind: { kind: "journal", date: "2026-07-20" } }),
   ];
 
-  it("searches only note titles and applies scope and layout filters", () => {
+  it("searches only note titles and applies scope and type filters", () => {
     expect(presentAllNotes(pages, { ...defaults, query: "BETA" }).map((item) => item.uuid)).toEqual(
       ["beta"],
     );
@@ -43,7 +43,7 @@ describe("presentAllNotes", () => {
       presentAllNotes(pages, {
         ...defaults,
         scope: "favorites",
-        layout: "outline",
+        type: "outline",
         favoritePageUuids: ["alpha", "beta"],
       }).map((item) => item.uuid),
     ).toEqual(["alpha"]);
@@ -71,4 +71,36 @@ describe("presentAllNotes", () => {
       ["two", "ten"],
     );
   });
+});
+
+it("lists handwritten notes among text notes and keeps journals out", () => {
+  const handwritten = page("ink", "Ink", { kind: { kind: "handwriting" } });
+  const journal = page("journal", "Journal", { kind: { kind: "journal", date: "2026-07-20" } });
+  const listed = presentAllNotes([page("text", "Text"), handwritten, journal], {
+    query: "",
+    scope: "all",
+    type: "all",
+    sort: "title",
+    favoritePageUuids: [],
+    recentPageUuids: [],
+  }).map((entry) => entry.uuid);
+  expect(listed).toContain("ink");
+  expect(listed).toContain("text");
+  expect(listed).not.toContain("journal");
+});
+
+it("filters handwritten notes as their own type", () => {
+  const pages = [page("text", "Text"), page("ink", "Ink", { kind: { kind: "handwriting" } })];
+  const options = {
+    query: "",
+    scope: "all" as const,
+    type: "handwriting" as const,
+    sort: "title" as const,
+    favoritePageUuids: [],
+    recentPageUuids: [],
+  };
+  expect(presentAllNotes(pages, options).map((entry) => entry.uuid)).toEqual(["ink"]);
+  expect(
+    presentAllNotes(pages, { ...options, type: "outline" }).map((entry) => entry.uuid),
+  ).toEqual(["text"]);
 });

@@ -1,14 +1,15 @@
 import { pageDisplayTitle } from "@/features/journal/journal-date";
-import type { Page, PageLayout } from "@/lib/api";
+import type { Page } from "@/lib/api";
 
 export type AllNotesScope = "all" | "favorites";
-export type AllNotesLayout = "all" | PageLayout;
+/** What kind of note: a text layout, or a handwritten sheet. One axis, the way a reader sees it. */
+export type AllNotesType = "all" | "outline" | "document" | "handwriting";
 export type AllNotesSort = "opened" | "updated" | "created" | "title";
 
 export type AllNotesOptions = Readonly<{
   query: string;
   scope: AllNotesScope;
-  layout: AllNotesLayout;
+  type: AllNotesType;
   sort: AllNotesSort;
   favoritePageUuids: readonly string[];
   recentPageUuids: readonly string[];
@@ -19,12 +20,15 @@ export function presentAllNotes(pages: readonly Page[], options: AllNotesOptions
   const favorites = new Set(options.favoritePageUuids);
   const recentRank = new Map(options.recentPageUuids.map((uuid, index) => [uuid, index]));
 
-  return pages
-    .filter((page) => page.kind.kind === "note")
-    .filter((page) => options.scope === "all" || favorites.has(page.uuid))
-    .filter((page) => options.layout === "all" || page.layout === options.layout)
-    .filter((page) => !query || normalizeTitle(pageDisplayTitle(page)).includes(query))
-    .sort((left, right) => comparePages(left, right, options.sort, recentRank));
+  return (
+    pages
+      // Text and handwritten notes share the library; journals have their own navigation.
+      .filter((page) => page.kind.kind !== "journal")
+      .filter((page) => options.scope === "all" || favorites.has(page.uuid))
+      .filter((page) => matchesType(page, options.type))
+      .filter((page) => !query || normalizeTitle(pageDisplayTitle(page)).includes(query))
+      .sort((left, right) => comparePages(left, right, options.sort, recentRank))
+  );
 }
 
 function comparePages(
@@ -48,6 +52,12 @@ function comparePages(
   const timestampOrder =
     sort === "created" ? right.createdAt - left.createdAt : right.updatedAt - left.updatedAt;
   return timestampOrder || left.uuid.localeCompare(right.uuid);
+}
+
+function matchesType(page: Page, type: AllNotesType): boolean {
+  if (type === "all") return true;
+  if (type === "handwriting") return page.kind.kind === "handwriting";
+  return page.kind.kind === "note" && page.layout === type;
 }
 
 function normalizeTitle(value: string): string {

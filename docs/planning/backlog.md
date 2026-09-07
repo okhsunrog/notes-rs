@@ -68,6 +68,8 @@ deliberately left out of it.
 
 - **Full-panel flash on every finger touch** on the Note Air 4C, in every screen and in both display profiles (Standard and E-ink). Verified with a DOM mutation observer: the WebView repaints nothing on a canvas tap, and the plugin receives no call; the firmware refreshes on touch by itself. Not controllable from the app; the per-app EinkWise refresh settings are the user-side knob. _Trigger: if a documented SDK call turns out to suppress it (compare with Chrome and the stock Notes app first)._
 
+- **Logseq import stamps every page with the import time** (`updatedAt`/`createdAt` = 2026-07-20 for the whole corpus), so "Recently edited" ranks year-old pages by import date. _Trigger: next import touch — take the source file's mtime (and the Logseq `created-at`/`updated-at` properties when present) as the page timestamps._
+
 ## Recently resolved elsewhere (for context, keep list short)
 
 - 2026-07-19 frontend review findings → fixed in `f1c7dc3`.
