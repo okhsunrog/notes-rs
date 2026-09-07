@@ -102,7 +102,7 @@ internal class OnyxInk(
     private var imeSource: String? = null
     private val refresh = Runnable { refreshFrame() }
     private val gate = RawDrawingGate(object : RawDrawingSwitches {
-        override fun render(enabled: Boolean) { helper?.setRawDrawingRenderEnabled(enabled) }
+        override fun render(enabled: Boolean) { setRender(enabled) }
         override fun input(enabled: Boolean) { helper?.setRawInputReaderEnable(enabled) }
         override fun pushRects() { helper?.setLimitRect(limit, NO_EXCLUDES) }
         override fun resetDefaults() { helper?.resetPenDefaultRawDrawing() }
@@ -110,7 +110,7 @@ internal class OnyxInk(
     // Resuming into the tail of an IME teardown leaves ghost ink; stock Notes waits too.
     private val resumeGate = Runnable { resume() }
     private val eraserRenderGate = InkEraserRenderGate(
-        pause = { helper?.setRawDrawingRenderEnabled(false) },
+        pause = { setRender(false) },
         resume = { restoreToolRendering() },
     )
 
@@ -371,10 +371,12 @@ internal class OnyxInk(
                 if (!frames.isCurrent(submission)) return@post
                 pendingFrame = null
                 pendingObserver = null
+                var dirty: InkBounds? = null
+                var repainted = false
                 try {
                     if (!canPresent() || !frames.present(submission, sequence, gesture.drawing)) return@post
                     // Submit the canonical buffer before releasing the eraser's pen-render pause.
-                    val dirty = damage.take() ?: return@post
+                    dirty = damage.take() ?: return@post
                     val region = Rect(
                         floor(sheet.left + dirty.left * sheet.width() / 1000).toInt() - 2,
                         floor(sheet.top + dirty.top * sheet.height() / 1400).toInt() - 2,
@@ -382,11 +384,16 @@ internal class OnyxInk(
                         ceil(sheet.top + dirty.bottom * sheet.height() / 1400).toInt() + 2)
                     if (!region.intersect(limit)) return@post
                     EpdController.handwritingRepaint(webView, region)
+                    repainted = true
                     lastRepaint = Rect(region)
                     repaintedPixels += region.width().toLong() * region.height()
                     repaintCount++
                     eraserRenderGate.framePresented()
                 } finally {
+                    // A panel keeps whatever was last pushed to it. Damage consumed by a frame that
+                    // never reached handwritingRepaint would leave that area showing an older image
+                    // for good — the rectangular holes in dense ink — so it goes back on the pile.
+                    if (!repainted) dirty?.let { damage.add(it.left, it.top, it.right, it.bottom) }
                     repaintMode.release()
                 }
             }
@@ -428,7 +435,6 @@ internal class OnyxInk(
             displayMode.set(DisplayModeStack.Layer.SESSION, UpdateMode.GU)
             Log.d("OnyxInk", "view quality mode: ${displayMode.readMode()}, previous: ${displayMode.previousMode}")
         }
-        Log.d("OnyxInk", "gate gate.resume(toolRendering()) paused=${pauses.reasons()}")
         gate.resume(toolRendering())
         if (acquiredQuality) config?.let { args -> commit(OnyxFrameArgs().apply {
             session = args.session
@@ -442,7 +448,6 @@ internal class OnyxInk(
         webView.removeCallbacks(resumeGate)
         frames.request() // Invalidate visual/frame callbacks from the old geometry or lifecycle.
         cancelFrameSubmission()
-        Log.d("OnyxInk", "gate gate.pause() paused=${pauses.reasons()}")
         gate.pause()
         eraserRenderGate.reset()
         swallowed = false
@@ -454,7 +459,11 @@ internal class OnyxInk(
         (config?.interaction == false || (config?.fastLasso == true && config?.hasSelection == false))
 
     private fun restoreToolRendering() {
-        helper?.setRawDrawingRenderEnabled(!pauses.isPaused && toolRendering())
+        setRender(!pauses.isPaused && toolRendering())
+    }
+
+    private fun setRender(enabled: Boolean) {
+        helper?.setRawDrawingRenderEnabled(enabled)
     }
 
     private fun releaseDisplayMode() {
@@ -554,7 +563,7 @@ internal class OnyxInk(
         swallowed = inkOverlayHit(overlays, point.x, point.y)
         if (swallowed) {
             fastPreview = false
-            helper?.setRawDrawingRenderEnabled(false)
+            setRender(false)
             gesture.begun()
             return
         }
@@ -562,7 +571,7 @@ internal class OnyxInk(
         // Hardware erasing must pause the firmware pen layer even while Pen is selected.
         // Keep raw input enabled so the software eraser continues receiving points.
         eraserRenderGate.begin(erasing || args.eraser)
-        if (args.interaction) helper?.setRawDrawingRenderEnabled(fastPreview)
+        if (args.interaction) setRender(fastPreview)
         gesture.begun()
         webView.removeCallbacks(settleDisplay)
         displayPolicy.begin((args.interaction || args.eraser || erasing) && !fastPreview)
