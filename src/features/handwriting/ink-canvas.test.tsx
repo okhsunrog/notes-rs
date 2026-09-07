@@ -305,3 +305,54 @@ it("moves cached selection ink without rasterizing strokes again and clamps its 
   expect(changed).toHaveBeenCalledTimes(1);
   expect(changed.mock.calls[0]![0].strokes[0].points[0]).toMatchObject({ x: 70, y: 90 });
 });
+
+const selectable = {
+  ...emptyDraft(),
+  strokes: [
+    {
+      id: "a",
+      width: 3,
+      points: [
+        { x: 50, y: 60, pressure: 0.5, tiltX: 0, tiltY: 0, time: 0 },
+        { x: 100, y: 80, pressure: 0.5, tiltX: 0, tiltY: 0, time: 1 },
+      ],
+    },
+  ],
+};
+
+it("drags an existing selection with a finger and still ignores touches outside it", () => {
+  act(() => renderDraft(selectable, { tool: "lasso", selected: ["a"] }));
+  pointer("pointerdown", { pointerType: "touch", clientX: 200, clientY: 200 });
+  pointer("pointermove", { pointerType: "touch", clientX: 210, clientY: 210 });
+  pointer("pointerup", { pointerType: "touch", clientX: 210, clientY: 210 });
+  expect(changed).not.toHaveBeenCalled(); // A palm outside the selection is still rejected.
+  pointer("pointerdown", { pointerType: "touch", clientX: 30, clientY: 35 });
+  pointer("pointermove", { pointerType: "touch", clientX: 40, clientY: 50 });
+  pointer("pointerup", { pointerType: "touch", clientX: 40, clientY: 50 });
+  expect(changed).toHaveBeenCalledTimes(1); // One undoable update for the whole drag.
+  expect(changed.mock.calls[0]![0].strokes[0].points[0]).toMatchObject({ x: 70, y: 90 });
+});
+
+it("abandons a finger drag when a second pointer joins it", () => {
+  const selection = vi.fn();
+  act(() =>
+    renderDraft(selectable, { tool: "lasso", selected: ["a"], onSelectionChange: selection }),
+  );
+  pointer("pointerdown", { pointerType: "touch", clientX: 30, clientY: 35 });
+  pointer("pointermove", { pointerType: "touch", clientX: 40, clientY: 50 });
+  pointer("pointerdown", { pointerType: "touch", pointerId: 2, clientX: 200, clientY: 200 });
+  pointer("pointerup", { pointerType: "touch", clientX: 40, clientY: 50 });
+  pointer("pointerup", { pointerType: "touch", pointerId: 2, clientX: 200, clientY: 200 });
+  expect(changed).not.toHaveBeenCalled();
+  expect(selection).toHaveBeenLastCalledWith(["a"]); // The selection outlives the pinch.
+});
+
+it("keeps writing with the pen while a palm rests on the sheet", () => {
+  act(() => renderDraft(selectable, { selected: ["a"] }));
+  pointer("pointerdown");
+  pointer("pointerdown", { pointerId: 2, pointerType: "touch", clientX: 30, clientY: 35 });
+  pointer("pointermove", { clientX: 80, pressure: 0.9 });
+  pointer("pointerup", { clientX: 90 });
+  expect(changed).toHaveBeenCalledTimes(1);
+  expect(changed.mock.calls[0]![0].strokes).toHaveLength(2);
+});

@@ -39,11 +39,25 @@ type Gesture = {
   rect?: DOMRect;
   lastMetrics: number;
   nativeFast: boolean;
+  /** A finger drag of the selection, which a second pointer abandons. */
+  finger?: boolean;
   backdrop?: InkStroke[];
   movingInk?: InkStroke[];
   movingBitmap?: HTMLCanvasElement;
 };
 const NO_SELECTION: string[] = [];
+/** Grab margin around the selection, kept equal to `movingSelection` in `OnyxInk.kt`. */
+const SELECTION_GRAB = 12;
+
+function withinSelection(bounds: Bounds | null, point: InkPoint): boolean {
+  return (
+    !!bounds &&
+    point.x >= bounds.left - SELECTION_GRAB &&
+    point.x <= bounds.right + SELECTION_GRAB &&
+    point.y >= bounds.top - SELECTION_GRAB &&
+    point.y <= bounds.bottom + SELECTION_GRAB
+  );
+}
 
 export function InkCanvas({
   draft,
@@ -251,15 +265,11 @@ export function InkCanvas({
     id: number,
     base: InkDraft,
     nativeFast = false,
+    forced?: Gesture["action"],
   ) => {
-    const bounds = selectionBounds(base.strokes, selected);
-    const hit =
-      bounds &&
-      point.x >= bounds.left - 12 &&
-      point.x <= bounds.right + 12 &&
-      point.y >= bounds.top - 12 &&
-      point.y <= bounds.bottom + 12;
-    const action = erasing ? "erase" : tool === "lasso" ? (hit ? "move" : "select") : "pen";
+    const hit = withinSelection(selectionBounds(base.strokes, selected), point);
+    const action =
+      forced ?? (erasing ? "erase" : tool === "lasso" ? (hit ? "move" : "select") : "pen");
     const count = base.strokes.reduce((sum, s) => sum + s.points.length, 0);
     if (action === "pen" && count >= MAX_INK_POINTS) {
       onLimit();
@@ -433,9 +443,43 @@ export function InkCanvas({
       });
     }
   };
+  /** Abandon a gesture no pointer-up will ever complete, leaving the handwriting untouched. */
+  const cancelGesture = () => {
+    const current = active.current;
+    if (!current) return;
+    active.current = null;
+    onSelectionChange?.(current.ids);
+    publish(draft.strokes);
+    onActiveChange(false);
+    const canvas = canvasRef.current;
+    if (canvas?.hasPointerCapture(current.id)) canvas.releasePointerCapture(current.id);
+  };
+  /**
+   * A finger reaches the WebView even while the firmware owns the pen, and it may only drag a
+   * selection that is already there. Every other touch stays a palm the sheet ignores.
+   */
+  const startFinger = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (active.current) {
+      // Two fingers are a pan or a pinch, never a move.
+      if (active.current.finger) cancelGesture();
+      return;
+    }
+    if (!selected.length) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const point = inkPoint(event.nativeEvent, rect);
+    if (!withinSelection(selectionBounds(draft.strokes, selected), point)) return;
+    event.preventDefault();
+    const started = beginGesture(point, false, event.pointerId, draft, false, "move");
+    if (!started) return;
+    started.rect = rect;
+    started.finger = true;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    onActiveChange(true);
+  };
   const start = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (disabled) return;
+    if (event.pointerType === "touch") return startFinger(event);
     if (
-      disabled ||
       active.current ||
       (onyx && event.pointerType === "pen") ||
       (event.pointerType !== "pen" && !(mouseEnabled && event.pointerType === "mouse"))
