@@ -35,11 +35,6 @@ export const commands = {
 	 *  nothing but a full refresh clears it.
 	 */
 	requestFullRefresh: () => typedError<null, CommandError>(__TAURI_INVOKE("request_full_refresh")),
-	/**
-	 *  Opens the vendor's per-app display panel (EinkWise) on BOOX tablets. Its refresh profile
-	 *  governs the updates the firmware triggers on its own, which the app cannot configure.
-	 */
-	openEinkWise: () => typedError<boolean, CommandError>(__TAURI_INVOKE("open_eink_wise")),
 	syncStatus: () => __TAURI_INVOKE<SyncStatus>("sync_status"),
 	serverAiStatus: () => typedError<AiIndexStatus, CommandError>(__TAURI_INVOKE("server_ai_status")),
 	saveServerAiSettings: (settings: AiRuntimeSettings) => typedError<AiIndexStatus, CommandError>(__TAURI_INVOKE("save_server_ai_settings", { settings })),

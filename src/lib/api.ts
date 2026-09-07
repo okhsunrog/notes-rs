@@ -233,7 +233,6 @@ export const setHandwritingBackground = commands.setHandwritingBackground;
 export const setSystemBarsStyle = checkedCommand(commands.setSystemBarsStyle);
 export const setDisplayProfile = checkedCommand(commands.setDisplayProfile);
 export const requestFullRefresh = checkedCommand(commands.requestFullRefresh);
-export const openEinkWise = checkedCommand(commands.openEinkWise);
 export const loadSettings = checkedCommand(commands.loadSettings);
 export const exportDeviceConfiguration = checkedCommand(commands.exportDeviceConfiguration);
 export const previewConfigurationImport = checkedCommand(commands.previewConfigurationImport);

@@ -326,27 +326,6 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
         method.invoke(null).toString()
     }.getOrElse { "error: ${it.javaClass.simpleName}: ${it.message ?: it.cause?.message}" }
 
-    /**
-     * Opens the vendor's per-app display panel (EinkWise) for this app. The refresh profile it
-     * stores decides how firmware-driven updates behave — the caret, touches, scrolling — and the
-     * app cannot set it itself, so the best it can do is take the user there.
-     */
-    @Command
-    fun openEinkWise(invoke: Invoke) {
-        activity.runOnUiThread {
-            if (!OnyxInk.supported()) {
-                invoke.resolve(JSObject().put("opened", false))
-                return@runOnUiThread
-            }
-            try {
-                activity.sendBroadcast(android.content.Intent(EINK_CENTER_ACTION))
-                invoke.resolve(JSObject().put("opened", true))
-            } catch (error: Throwable) {
-                invoke.reject("Could not open EinkWise: ${error.message}")
-            }
-        }
-    }
-
     @Command
     fun requestFullRefresh(invoke: Invoke) {
         activity.runOnUiThread {
@@ -475,7 +454,5 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
         const val SPEED_MODE_INDEX = "refresh_mode_2"
         const val SPEED_UPDATE_MODE = 2
         const val SPEED_TURBO = 5
-        /** Verified on firmware 4.2: opens EinkWise for the foreground app. */
-        const val EINK_CENTER_ACTION = "action.open.eink.center.request"
     }
 }

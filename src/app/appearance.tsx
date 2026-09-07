@@ -71,8 +71,6 @@ type AppearanceContextValue = {
   display: ResolvedDisplay;
   /** The ink color actually in effect. Components read this instead of the DOM. */
   resolvedInkColor: ResolvedInkColor;
-  /** What the platform reported about the panel, independent of the user's profile choice. */
-  nativeDisplayKind: "eink" | "lcd" | "unknown";
   /**
    * The panel update mode the platform reports for the profile in effect, or null where the panel
    * is not steerable. Settings shows it: REGAL and its GU fallback look different enough that
@@ -180,9 +178,8 @@ export function AppearanceProvider({ children }: { children: React.ReactNode }) 
       display: resolved.display,
       resolvedInkColor: resolved.color,
       panelMode,
-      nativeDisplayKind: displayInfo?.displayKind ?? "unknown",
     }),
-    [palette, displayProfile, inkColor, resolved, panelMode, displayInfo],
+    [palette, displayProfile, inkColor, resolved, panelMode],
   );
   return <AppearanceContext.Provider value={value}>{children}</AppearanceContext.Provider>;
 }
