@@ -64,6 +64,10 @@ deliberately left out of it.
 - **The floating Onyx keyboard is not handled** (`plugins/.../OnyxInk.kt`): the pause registry sees the ordinary IME through window insets, but a floating keyboard does not resize anything and reports no inset. The stock app subscribes to `onyx.action.kime.status.changed` and feeds its `floatingWindowRectList` to `setExcludeRect` instead of pausing. _Trigger: the first use of the floating keyboard over a sheet._
 - **`pastey` appears twice in `Cargo.lock`** (two semver-incompatible versions pulled in transitively). Cosmetic: build time and binary size only. _Trigger: next dependency sweep._
 
+## E-ink panel behaviour outside the app (2026-09-07)
+
+- **Full-panel flash on every finger touch** on the Note Air 4C, in every screen and in both display profiles (Standard and E-ink). Verified with a DOM mutation observer: the WebView repaints nothing on a canvas tap, and the plugin receives no call; the firmware refreshes on touch by itself. Not controllable from the app; the per-app EinkWise refresh settings are the user-side knob. _Trigger: if a documented SDK call turns out to suppress it (compare with Chrome and the stock Notes app first)._
+
 ## Recently resolved elsewhere (for context, keep list short)
 
 - 2026-07-19 frontend review findings → fixed in `f1c7dc3`.
