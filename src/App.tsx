@@ -16,6 +16,7 @@ import { queryKeys } from "@/lib/query";
 import { useAppShortcuts } from "@/app/use-app-shortcuts";
 import { useStartupState } from "@/app/use-startup-state";
 import { useNotesWorkspace } from "@/features/pages/use-notes-workspace";
+import { mayLeavePane } from "@/features/workspace/pane-leave-guard";
 import { useAssistantController } from "@/features/chat/use-assistant-controller";
 import { Workbench } from "@/features/workspace/workbench";
 import { WorkspaceControllerProvider } from "@/features/workspace/workspace-controller";
@@ -161,11 +162,14 @@ function App() {
         onCloseSearch={() => setSearchOpen(false)}
         workbenchIsHome={activePane.content.kind === PaneContentKind.Home}
         onNavigateBack={() => {
-          if (activePane.back.length > 0) {
-            dispatchWorkspace({ type: "go_back", paneId: activePane.id });
-          } else {
-            workspace.closePage();
-          }
+          void mayLeavePane(activePane.id).then((allowed) => {
+            if (!allowed) return;
+            if (activePane.back.length > 0) {
+              dispatchWorkspace({ type: "go_back", paneId: activePane.id });
+            } else {
+              workspace.closePage();
+            }
+          });
         }}
         onOpenHome={workspace.closePage}
         headerActions={

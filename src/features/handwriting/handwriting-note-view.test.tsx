@@ -7,10 +7,14 @@ import { PageSessionProvider } from "@/features/pages/page-session";
 import {
   PaneContentKind,
   currentDisposition,
+  homeTarget,
   pageTarget,
   type PaneId,
 } from "@/features/workspace/workspace-model";
+import { mayLeavePane, resetPaneLeaveGuards } from "@/features/workspace/pane-leave-guard";
 import { useWorkspaceStore } from "@/features/workspace/workspace-store";
+
+const paneId = () => useWorkspaceStore.getState().primaryPaneId as PaneId;
 import type { InkHistorySnapshot, Page } from "@/lib/bindings";
 import { HandwritingNoteView } from "./handwriting-note-view";
 import { getWriter, resetHandwritingSessions } from "./handwriting-session";
@@ -98,6 +102,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  resetPaneLeaveGuards();
   await act(async () => root.unmount());
   container.remove();
   resetHandwritingSessions();
@@ -218,10 +223,12 @@ it("stays on the note when the flush before Back fails", async () => {
   await act(async () => {
     button("Grid paper").click();
   });
+  let allowed = true;
   await act(async () => {
-    button("Back").click();
+    allowed = await mayLeavePane(paneId());
   });
 
+  expect(allowed).toBe(false);
   expect(paneContentKind()).toBe(PaneContentKind.Page);
   expect(api.completeHandwritingNote).not.toHaveBeenCalled();
   expect(container.textContent).toContain("Could not save your changes");
@@ -235,8 +242,18 @@ it("leaves after a successful flush and offers a retry when completion fails", a
   await act(async () => {
     button("Grid paper").click();
   });
+  let allowed = false;
   await act(async () => {
-    button("Back").click();
+    allowed = await mayLeavePane(paneId());
+  });
+  expect(allowed).toBe(true);
+  // The pane frame navigates once the guard agrees; the editor no longer does it itself.
+  await act(async () => {
+    useWorkspaceStore.getState().dispatch({
+      type: "open_target",
+      target: homeTarget,
+      disposition: currentDisposition,
+    });
   });
 
   expect(paneContentKind()).toBe(PaneContentKind.Home);

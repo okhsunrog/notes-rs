@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { EmptyJournalView } from "@/features/journal/empty-journal-view";
 import { GraphWorkspace } from "@/features/graph/knowledge-panel";
 import { HandwritingNoteView } from "@/features/handwriting/handwriting-note-view";
+import { mayLeavePane } from "@/features/workspace/pane-leave-guard";
 import { HomeView } from "@/features/home/home-view";
 import { PagePresentation } from "@/features/pages/page-presentation";
 import { AllNotesView } from "@/features/pages/all-notes-view";
@@ -222,8 +223,11 @@ function PaneFrame({
               size="xs"
               aria-label="Go back"
               onClick={() => {
-                if (pane.back.length > 0) dispatch({ type: "go_back", paneId });
-                else backToHome();
+                void mayLeavePane(paneId).then((allowed) => {
+                  if (!allowed) return;
+                  if (pane.back.length > 0) dispatch({ type: "go_back", paneId });
+                  else backToHome();
+                });
               }}
               className="gap-1 rounded-lg px-1.5"
             >
@@ -238,7 +242,11 @@ function PaneFrame({
                 size="icon-xs"
                 disabled={pane.back.length === 0}
                 aria-label="Go back in pane"
-                onClick={() => dispatch({ type: "go_back", paneId })}
+                onClick={() => {
+                  void mayLeavePane(paneId).then((allowed) => {
+                    if (allowed) dispatch({ type: "go_back", paneId });
+                  });
+                }}
               >
                 <ArrowLeft className="size-3.5" />
               </Button>

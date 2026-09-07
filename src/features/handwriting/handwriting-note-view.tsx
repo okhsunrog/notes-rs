@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Menu } from "@base-ui/react/menu";
 import {
-  ArrowLeft,
   Copy,
   Eraser,
   Grid2X2,
@@ -26,8 +25,7 @@ import { useOverlayInkSuppression } from "@/app/ink-suppression";
 import { usePageNavigationStore } from "@/features/pages/page-navigation-store";
 import { RenamePageDialog } from "@/features/pages/rename-page-dialog";
 import { usePageTitleEditor } from "@/features/pages/use-page-title-editor";
-import { currentDisposition, homeTarget, type PaneId } from "@/features/workspace/workspace-model";
-import { useWorkspaceStore } from "@/features/workspace/workspace-store";
+import type { PaneId } from "@/features/workspace/workspace-model";
 import {
   CommandFailure,
   completeHandwritingNote,
@@ -55,6 +53,7 @@ import {
   releaseEditor,
   requestCompletion,
 } from "./handwriting-session";
+import { registerPaneLeaveGuard } from "@/features/workspace/pane-leave-guard";
 import { useResolvedInkColor } from "@/app/appearance";
 import { InkCanvas, type InkTool } from "./ink-canvas";
 import { moveSelection, scaleSelection, type EraserMode, type LassoMode } from "./ink-editing";
@@ -179,8 +178,6 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
   const { available, capabilities } = useHandwritingAvailability();
   const mouseEnabled = useHandwritingPreference((state) => state.mouseEnabled);
   const queryClient = useQueryClient();
-  const dispatch = useWorkspaceStore((state) => state.dispatch);
-  const historyDepth = useWorkspaceStore((state) => state.panes[paneId]?.back.length ?? 0);
   const favorite = usePageNavigationStore((state) => state.favoritePageUuids.includes(uuid));
   const toggleFavoritePage = usePageNavigationStore((state) => state.toggleFavoritePage);
 
@@ -240,6 +237,8 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
   const titleFlush = useRef(title.flush);
   titleFlush.current = title.flush;
   const busy = active || historyBusy || leaving;
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
   const editingBusy = busy || suspended;
 
   const adopt = useCallback(
@@ -415,25 +414,28 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
     await openNote();
   }, [openNote, queryClient, uuid]);
 
-  const navigateAway = useCallback(() => {
-    if (historyDepth > 0) dispatch({ type: "go_back", paneId });
-    else dispatch({ type: "open_target", target: homeTarget, disposition: currentDisposition });
-  }, [dispatch, historyDepth, paneId]);
-
-  const leave = useCallback(async () => {
-    if (busy || leavingRef.current) return;
+  /**
+   * The pane frame's Back asks before it navigates. Leaving is allowed once the last gestures
+   * are written; a failing save keeps the note on screen with its retryable error. Completion
+   * runs detached after the answer, so navigation never waits for packing or the network.
+   */
+  const prepareLeave = useCallback(async (): Promise<boolean> => {
+    if (leavingRef.current) return false;
+    if (busyRef.current) return false;
     leavingRef.current = true;
     setLeaving(true);
     const writer = getWriter(uuid);
     if (writer && !(await writer.flush())) {
       leavingRef.current = false;
       setLeaving(false);
-      return;
+      return false;
     }
     await titleFlush.current();
-    navigateAway();
     if (writer) completeInBackground(uuid);
-  }, [busy, navigateAway, uuid]);
+    return true;
+  }, [uuid]);
+
+  useEffect(() => registerPaneLeaveGuard(paneId, prepareLeave), [paneId, prepareLeave]);
 
   const deleteNote = useCallback(async () => {
     if (busy) return;
@@ -518,18 +520,6 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
         aria-label="Handwriting tools"
         className="flex shrink-0 items-center gap-1 border-b px-2 py-1.5"
       >
-        <Button
-          type="button"
-          variant="ghost"
-          size="xs"
-          onClick={() => void leave()}
-          disabled={busy}
-          aria-busy={leaving}
-          className="shrink-0 gap-1 rounded-lg px-1.5"
-        >
-          <ArrowLeft className="size-3.5" />
-          Back
-        </Button>
         <button
           type="button"
           onClick={() => setRenaming(true)}
