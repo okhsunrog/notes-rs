@@ -152,12 +152,17 @@ export function useOnyxInk({
         state.current.onStatus?.(value);
       }
     };
+    let deferredConfigure = false;
     const configure = () => {
       if (disposed || !registered || unsupported) return;
       // Reconfiguring pauses raw drawing, which cancels the stroke in flight and truncates its
-      // trace. A gesture owns the sheet until it lifts; the change waits for it.
-      // The gesture's own end re-runs this effect, so nothing is lost by waiting.
-      if (state.current.interacting) return;
+      // trace. A gesture owns the sheet until it lifts; the change waits for it. `interacting`
+      // is the React prop and lags a render behind the pen; `gestureOpen` is set synchronously
+      // by the native begin/end events, so it is what actually protects the trace.
+      if (state.current.interacting || gestureOpen) {
+        deferredConfigure = true;
+        return;
+      }
       const rect = canvas.getBoundingClientRect();
       const viewport = canvas.closest("[data-ink-viewport]")?.getBoundingClientRect();
       const overlays = (state.current.overlayRects ?? [])
@@ -242,6 +247,11 @@ export function useOnyxInk({
       else if (event.kind === "end" || event.kind === "cancel") {
         current.onActiveChange(false);
         setFrame((n) => n + 1);
+        // A geometry/overlay change that arrived mid-gesture was held back; apply it now.
+        if (deferredConfigure) {
+          deferredConfigure = false;
+          configure();
+        }
       } else if (event.kind === "stroke" && event.sequence > sequence.current) {
         sequence.current = event.sequence;
         const next = current.onStroke
