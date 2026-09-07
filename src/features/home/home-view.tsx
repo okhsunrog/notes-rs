@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { NewNoteButton } from "@/features/handwriting/new-note-button";
+import { NoteRowMenu } from "@/features/pages/note-row-menu";
 import { PageIcon } from "@/features/pages/page-icon";
 import { Input } from "@/components/ui/input";
 import { useCompactLayout } from "@/app/use-compact-layout";
@@ -38,6 +39,7 @@ import {
   type OpenDisposition,
 } from "@/features/workspace/workspace-model";
 import { journalOutlineRows, journalPreviewLimitForHeight } from "./journal-outline-preview";
+import { recentNotes } from "./recent-notes";
 
 type Props = {
   creating: boolean;
@@ -88,11 +90,7 @@ export function HomeView({
     const page = pagesByUuid.get(uuid);
     return page ? [page] : [];
   });
-  const recent = recentPageUuids.flatMap((uuid) => {
-    const page = pagesByUuid.get(uuid);
-    return page ? [page] : [];
-  });
-  const recentlyEdited = notes.slice(0, 6);
+  const recent = useMemo(() => recentNotes(notes, recentPageUuids), [notes, recentPageUuids]);
   const firstRun =
     notesQuery.isSuccess &&
     journalsQuery.isSuccess &&
@@ -219,35 +217,22 @@ export function HomeView({
           />
         </DashboardCard>
 
-        <div
-          className="grid gap-4"
-          style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(18rem, 100%), 1fr))" }}
-        >
+        {compact && (
           <DashboardSection
-            title="Continue"
-            icon={<Clock3 className="size-4" />}
-            empty="Open a note and it will appear here."
-            pages={recent.slice(0, 4)}
+            title="Favorites"
+            icon={<Star className="size-4" />}
+            empty="Star important notes to pin them here."
+            pages={favorites.slice(0, 8)}
             compact
             onOpen={openPage}
           />
-          {compact && (
-            <DashboardSection
-              title="Favorites"
-              icon={<Star className="size-4" />}
-              empty="Star important notes to pin them here."
-              pages={favorites.slice(0, 8)}
-              compact
-              onOpen={openPage}
-            />
-          )}
-        </div>
+        )}
 
         <DashboardSection
-          title="Recently edited"
-          icon={<FileText className="size-4" />}
-          empty="Your edited notes will appear here."
-          pages={recentlyEdited}
+          title="Recent"
+          icon={<Clock3 className="size-4" />}
+          empty="Notes you open or edit will appear here."
+          pages={recent}
           showDate
           onOpen={openPage}
         />
@@ -441,25 +426,31 @@ function DashboardSection({
           }
         >
           {pages.map((page) => (
-            <button
+            <div
               key={page.uuid}
-              type="button"
-              onClick={(event) => void onOpen(page, dispositionFromShiftKey(event.shiftKey))}
-              className="group flex min-w-0 items-center gap-2.5 rounded-xl px-3 py-2.5 text-left transition hover:bg-accent/70"
+              className="flex min-w-0 items-center rounded-xl pr-1.5 transition hover:bg-accent/70"
             >
-              <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/8 text-primary">
-                <PageIcon page={page} className="size-3.5" />
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-xs font-medium">{pageDisplayTitle(page)}</span>
-                {showDate && (
-                  <span className="mt-0.5 block text-[10px] eink:text-xs text-muted-foreground">
-                    {formatEditedDate(page.updatedAt)}
+              <button
+                type="button"
+                onClick={(event) => void onOpen(page, dispositionFromShiftKey(event.shiftKey))}
+                className="flex min-w-0 flex-1 items-center gap-2.5 rounded-xl px-3 py-2.5 text-left"
+              >
+                <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/8 text-primary">
+                  <PageIcon page={page} className="size-3.5" />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-xs font-medium">
+                    {pageDisplayTitle(page)}
                   </span>
-                )}
-              </span>
-              <ArrowRight className="reveal-on-hover size-3.5 shrink-0 text-muted-foreground transition" />
-            </button>
+                  {showDate && (
+                    <span className="mt-0.5 block text-[10px] eink:text-xs text-muted-foreground">
+                      {formatEditedDate(page.updatedAt)}
+                    </span>
+                  )}
+                </span>
+              </button>
+              <NoteRowMenu page={page} />
+            </div>
           ))}
         </div>
       )}
